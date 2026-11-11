@@ -192,3 +192,14 @@ and eventually consistent by accepted risk (ADR 0031): no durable journal or
 site allocations. Stored provider objects
 are deferred pending ownership/routing records. Staffing and these spikes
 must be measured before the milestone durations are treated as commitments.
+
+## Second security review amendments (proposed ADR 0041)
+
+M0 delivery renders and negative authorization tests cover platform trust
+boundaries. M1 gates: incident denylist survival, audit backpressure with
+restrictive capacity, request feature modes, composite state/CRD publication
+freshness and expanded restrictive-right restore tests. Budget bounds remain
+conditional pending counter-handoff, aggregate exposure and failed-renewal
+validation. M2 capture gates prove dedicated pipeline destination restrictions
+and project reader synchronization within the accepted pool compromise boundary.
+See [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) for acceptance and assumptions.
