@@ -45,7 +45,7 @@ request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect
            → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
 inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
-           or a file, for development and tests (the same snapshot format)
+           or, standalone (ADR 0023), CRD YAML in a local directory compiled in-process
 state:     the site's Valkey (reservations, counters, provider quota shares; spend against site ceilings) (ADRs 0012, 0013)
 outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
            status/<pool>/<id> in object storage (applied hash, compile errors)
@@ -195,6 +195,16 @@ except OTel's API.
 - Runtime state that must survive updates (transports, ejection state,
   EWMAs, affinity tables) is keyed by deployment identity, not held in the
   snapshot.
+
+## 6a. Standalone mode
+
+`golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop
+from the same CRD YAML as the GitOps repository, compiled in-process by
+`lib/compile` and recompiled on change, with one implicit local principal
+(or a `LocalIdentity` file), the in-memory limiter, the developer's own
+provider credentials, telemetry to stdout or a local OTLP endpoint, and
+`--explain`. It binds to localhost, refuses edge, site and bucket
+settings, and changes nothing in the request path.
 
 ## 7. Performance notes
 

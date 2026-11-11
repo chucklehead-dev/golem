@@ -30,3 +30,4 @@ baseline one, marked in both.
 | [0020](0020-github-copilot.md) | Copilot by BYOK, enterprise models through the edge, usage as showback |
 | [0021](0021-design-envelope.md) | The design envelope and what it lets golem leave out |
 | [0022](0022-apis-protobuf-connect.md) | The control API in protobuf, served with Connect |
+| [0023](0023-standalone-gateway.md) | A standalone gateway for laptops from local CRD YAML; whole-system development in `make dev-up`, not an all-in-one binary |

@@ -18,7 +18,7 @@ default, `-o json|yaml` for scripts. Every mutating command takes
 | Coding agents | `agent setup claude-code|codex|cursor|copilot --scope …` writes the agent's config to point at golem; `token` prints a cached Entra access token for agents with a credential helper (Claude Code's `apiKeyHelper` and equivalents), with the scope sent as a header; agents that take only a static key get a minted personal key (12-hour default); either way no long-lived key sits on disk |
 | Manager | `scopes get`, `members add|remove`, `projects create --team …`, `services create --scope …`, `services keys …`, `caps set --member … 200/month`, `grants create --from team/… --to project/…`, `requests create` (adjustments), `capture set --scope|--service … [--retention 90d --override narrow]`, `mode set observe|warn|enforce`, `spend --scope …` |
 | Budget manager | `requests list --pending`, `requests approve|reject`, `grants create --from cc/…`, `spend --cost-center …` |
-| Admin / operator | `config get` (effective config per pool: CRDs plus overrides), `config validate dir/` (offline, the snapshot compiler; for CI, before a merge), `overrides create|list|expire` (incident levers, each with an expiry and a reason), `explain` (route, deployment, limits and rights for a sample request), `gateways list` (applied snapshot, its age, health), `gateways drain`, `audit list`, `state history|restore`, `bootstrap` (the first document, pools and scopes), `snapshot build` (render a snapshot file for local gateways), `support-bundle` |
+| Admin / operator | `config get` (effective config per pool: CRDs plus overrides), `config validate dir/` (offline, the snapshot compiler; for CI, before a merge), `overrides create|list|expire` (incident levers, each with an expiry and a reason), `explain` (route, deployment, limits and rights for a sample request), `gateways list` (applied snapshot, its age, health), `gateways drain`, `audit list`, `state history|restore`, `bootstrap` (the first document, pools and scopes), `support-bundle` |
 
 `golemctl explain --as user@corp --scope project/support-bot --model
 claude-sonnet --tokens 20000` is the first tool for "why was I limited /
@@ -59,3 +59,11 @@ Not a golem tool, but the place people look: dashboards in
 budget burn and forecast, limits hit, latency and TTFT by deployment,
 failovers and ejections, and gateway versions. Alerts on burn rate and on
 ledger drift (control-plane.md §5).
+
+## 5. Standalone gateway
+
+For a developer's own machine: `golem-gateway --standalone ./config/`
+serves the CRD YAML in `./config/` with the developer's provider
+credentials, and `--explain request.json` shows how a request would be
+routed and limited (ADR 0023). `golemctl agent setup … --local` points an
+agent at it.

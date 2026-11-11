@@ -70,6 +70,6 @@ rollouts are the GitOps tool's. No operator reaches another cluster.
 
 `operator/` uses controller-runtime and the generated control API client;
 it imports nothing else of golem (architecture.md §4.2). CRD YAML is
-generated from `operator/api/v1alpha1` and shipped in the Helm chart,
+generated from `lib/api/v1alpha1` and shipped in the Helm chart,
 which installs only the operator; the operator installs the rest from a
 `ControlPlane` and one or more `GatewayPool`s.

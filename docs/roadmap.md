@@ -36,8 +36,12 @@ The gateway end to end with nothing optional.
 - The Terraform module for the bucket, KMS keys and IAM roles, and
   `golemctl bootstrap` (control-plane.md §5).
 - Benchmarks and the stub-upstream load test as baselines.
+- Standalone mode (`--standalone`, ADR 0023) and `make dev-up` (kind,
+  MinIO, Valkey, dex, ClickHouse, Langfuse) as the integration-test
+  environment.
 
-Exit: a real SDK and Claude Code stream through it; a trace with GenAI
+Exit: a real SDK and Claude Code stream through it, standalone and in
+`make dev-up`; a trace with GenAI
 attributes and token metrics is in HyperDX; the benchmark meets the
 fast-path budget.
 

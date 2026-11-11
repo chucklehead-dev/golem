@@ -108,14 +108,16 @@ control/
   distribution/            snapshot building, signing and publication
   spend/                   ClickHouse queries
   jobs/                    the leader's jobs; call control/service, never the store directly
-api/v1alpha1/              CRD types for config and installation (kubebuilder markers)
 operator/
   controllers/             installation and day-2 reconcilers
 console/                   web UI (Go html/template + htmx), a client of the control API
 cli/                       golemctl commands, a client of the control API
 plugins/backstage/         TypeScript, generated client (M3)
-lib/                       small shared libraries: telemetry setup, Entra token validation,
-                           uuid/v7 ids, retry, the snapshot format (types only)
+lib/                       shared libraries with no control-plane or Kubernetes-client deps:
+                           telemetry setup, Entra token validation, uuid/v7 ids, retry, the
+                           snapshot format, the CRD types (lib/api/v1alpha1) and the snapshot
+                           compiler (lib/compile), used by golem-control, golemctl and the
+                           standalone gateway
 deploy/                    Helm chart (installs the operator and CRDs), ClickHouse DDL, Grafana
 docs/
 ```
@@ -144,7 +146,9 @@ layer below it.
 - anything outside `control/store/...` writes the state document;
 - `control/api` imports `control/store`;
 - `operator`, `cli` or `console` import anything of `control` but the
-  generated clients and `api/v1alpha1`;
+  generated clients and `lib/api/v1alpha1`;
+- `lib/` imports client-go, controller-runtime or anything of the control
+  plane (the standalone gateway imports `lib/compile`);
 - `control/api` imports `control/jobs` or the reverse;
 - `gen/` or `lib/` import any component.
 
@@ -185,7 +189,8 @@ Each binary also gets its own image and its own dependency list in
 
 | Topology | Store | Notes |
 |---|---|---|
-| Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
+| Laptop | none | `golem-gateway --standalone ./config/`: the gateway alone from CRD YAML, in-memory limits, the developer's own provider credentials (ADR 0023) |
+| Development of golem itself | MinIO | `make dev-up`: kind, MinIO, Valkey, dex, ClickHouse and Langfuse in containers, production code unchanged; also the integration-test environment |
 | Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
 | Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0008); Valkey and site ceilings there as at any site |
 | AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0008): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site with site ceilings (ADR 0013); no cross-cluster Kubernetes access (ADR 0008); Bedrock through the same federation |
