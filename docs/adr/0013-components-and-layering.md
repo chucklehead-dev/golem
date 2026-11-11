@@ -1,6 +1,6 @@
 # 0013: Components with one job each, and layering checked by a test
 
-Status: Proposed
+Status: Proposed. Amended by [0025](0025-smaller-surfaces.md): golem-control and the worker are one binary in two roles.
 
 ## Context
 

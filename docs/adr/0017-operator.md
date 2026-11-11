@@ -1,6 +1,6 @@
 # 0017: An operator for installation and day-2, writing config through the API
 
-Status: Proposed
+Status: Proposed. Amended by [0023](0023-config-from-crds-operational-overrides.md): installation and day-2 only, from M2; config CRDs are golem-control's.
 
 ## Context
 
@@ -13,7 +13,7 @@ sequence, observe or report.
 
 - golem-operator (controller-runtime) owns installation CRDs
   (`ControlPlane`, `GatewayPool`) and config CRDs (`Backend`,
-  `ModelRoute`, `ScopePolicy`, `LimitPolicy`, `Hook`, `PriceOverride`)
+  `ModelRoute`, `ScopePolicy`, `LimitPolicy`, `Hook`, `PriceList`)
   (operator.md §1).
 - Config CRDs are written to the control API (ADR 0012) and their status
   reports acceptance and gateway application.

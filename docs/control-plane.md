@@ -1,13 +1,15 @@
 # golem: the control plane
 
-Status: draft, third pass. golem-control (APIs) and golem-worker (jobs),
-over one store. Components and APIs at a glance: architecture.md §1–3.
+Status: draft, fifth pass. golem-control, one binary in two roles: `api`
+(the APIs and the CRD watch) and `worker` (jobs), over one store (ADR
+0025). Components and APIs at a glance: architecture.md §1–3.
 
 ## 1. Responsibilities
 
-- Hold the source of truth for **operator config** (backends, routes,
-  aliases, policies, hooks, prices, gateway selections) and
-  **entitlements** (org-model.md).
+- Hold the source of truth for **entitlements** (org-model.md) and
+  **operational overrides** (ADR 0023); read **declarative config** from
+  its cluster's CRDs (`Backend`, `ModelRoute`, `ScopePolicy`, `Hook`,
+  `PriceList`), validate it, and write its status.
 - Enforce every rule of the org model on writes: who may do what, budget
   arithmetic, approvals, key constraints within the owner's rights.
 - Compile both into **snapshots** and distribute them to gateways.
@@ -23,22 +25,25 @@ service method:
 1. authenticates the caller (Entra token validated by `lib/entra`; the
    operator and worker as service principals),
 2. loads what it needs and checks authorization against org-model §2,
-3. validates the change (cross-resource: an alias's deployments exist; a
-   key's models are within its scope's policy; an allocation's member is
-   in the scope),
+3. validates the change (cross-resource: a key's models are within its
+   scope's policy; a cap's member is in the scope; an override names a
+   deployment that exists),
 4. runs one store transaction that writes the change, its audit event and
    its change-log row, retried on optimistic-concurrency conflicts,
 5. returns the new resource with its etag.
 
-Services: `ConfigService`, `OrgService`, `KeyService`, `BudgetService`
-(grants, allocations, adjustment requests and their operations),
+Services: `ConfigService` (read, validate a candidate CRD, explain,
+overrides), `OrgService` (scopes, memberships, services, role bindings),
+`KeyService`, `BudgetService` (grants, caps, adjustment requests),
 `SpendService`, `AuditService`, `AdminService`, and the internal
-`LeaseService` and `SnapshotBuilder`. The worker calls the same services
-as a service principal; it never writes the store directly.
+`SnapshotBuilder` (CRDs from the watch, store state from the change log;
+`LeaseService` joins when there are two regions). The worker role calls
+the same services as a service principal; it never writes the store
+directly.
 
 Validation is shared with clients: `validate_only` on every mutating
-method lets the operator, `golemctl apply --dry-run` and the console show
-errors (with field paths) before anything is written.
+method, and `ConfigService.Validate` for CRDs, let CI, `golemctl` and the
+console show errors (with field paths) before anything is written.
 
 ## 3. Store
 
@@ -53,7 +58,7 @@ DSQL (ADR 0015). The SQL is written to DSQL's subset:
 | ≤ 3,000 modified rows, ≤ 10 MiB, ≤ 300 s per transaction | Bulk work (Entra sync of a large group, period rollover) is chunked by the worker into idempotent batches of ≤ 1,000 rows |
 | No triggers, no PL/pgSQL, no LISTEN/NOTIFY, no temp tables | Audit and change-log rows are written by the service, in the transaction; change detection by polling (§4) |
 | No `SERIAL`; identity columns and sequences only with large caches | Ids are UUIDv7, generated in Go; no ordering is derived from ids across writers |
-| One DDL statement per transaction, not mixed with DML; `CREATE INDEX ASYNC` | Migrations are one statement each, applied by a migration Job the operator runs before a rollout (operator.md §3); a DSQL dialect flag turns `CREATE INDEX` into `ASYNC` and waits on `sys.jobs` |
+| One DDL statement per transaction, not mixed with DML; `CREATE INDEX ASYNC` | Migrations are one statement each, applied by a migration Job (Helm hook in M1; the operator from M2) before golem-control rolls out (operator.md §3); a DSQL dialect flag turns `CREATE INDEX` into `ASYNC` and waits on `sys.jobs` |
 | JSONB not indexable | Anything queried is a column; JSONB only for opaque payloads (audit diffs, hook config) |
 | IAM auth tokens; connections ≤ 60 min | A pgx `BeforeConnect` hook mints tokens (AWS SDK); pool `MaxConnLifetime` 50 min. On Postgres, password or Entra/IAM as the platform offers |
 | UTC only, C collation | Times stored UTC; display time zones are a client concern; periods computed in Go from the configured period time zone |
@@ -63,14 +68,15 @@ against a DSQL cluster nightly.
 
 ### 3.1 Schema outline
 
-`principals` (users and services), `teams`, `team_groups` (Entra
-bindings), `projects`, `memberships`, `role_bindings`, `cost_centers`,
-`keys` (hash, prefix, owner, scope, constraints as columns, expiry,
-revoked_at), `grants`, `allocations`, `adjustment_requests`, `pools`
-(per scope per period: totals and a `version` for conflict forcing),
-`leases` (per pool per region), `config_objects` (kind, name, spec as
-JSONB, owner: `operator` | `api`, generation), `gateways` (registered
-instances, last acked version), `change_log`, `audit_events`.
+`principals` (users and services), `scopes` (kind, owner scope, Entra
+group bindings), `memberships`, `role_bindings`, `cost_centers`, `keys`
+(hash, prefix, owner, scope, constraints as columns, expiry, revoked_at),
+`grants`, `caps`, `adjustment_requests`, `pools` (per scope per period:
+totals and a `version` for conflict forcing), `overrides` (target, change,
+expiry, author), `registrations` (self-registered model server endpoints),
+`jobs` (the durable job table, ADR 0020), `gateways` (registered instances,
+last acked version), `change_log`, `audit_events`; `leases` when there are
+two regions. Declarative config is not in the store.
 
 ## 4. Distribution
 
@@ -102,8 +108,8 @@ and no LISTEN/NOTIFY to lean on.
   about a second within a region, a few seconds across regions
   (DSQL's cross-region replication included).
 - **Acks.** Gateways ack each applied hash with compile errors, if any;
-  control records them per gateway; the operator reads them into CRD
-  status.
+  control records them per gateway and writes them into the CRDs' status
+  (`Applied n/m`).
 
 The snapshot format (`lib/snapshot`, protobuf) is the same one a gateway
 reads from a file in development.
@@ -113,7 +119,7 @@ reads from a file in development.
 | Job | Schedule | Notes |
 |---|---|---|
 | Entra group sync | every 5 min; Graph change notifications in M2 | Chunked; membership diffs as service calls, audited as `system:entra-sync` |
-| Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and allocations; idempotent |
+| Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps; idempotent |
 | Lease rebalancing | every 30 s per region | ADR 0016 |
 | Key expiry and reminders | hourly | Revokes expired keys; notifies owners 7 days and 1 day ahead |
 | Approval expiry and reminders | hourly | Expires stale requests; reminds approvers |
@@ -130,7 +136,7 @@ Both channels, chosen per event and per recipient preference:
   (the worker's application permission is limited to it), or an SMTP
   relay where Graph mail is not allowed. Personal events go by email:
   approval requests to budget managers, decisions to requesters, key
-  expiry, allocation changes, threshold crossings of one's own caps.
+  expiry, cap changes, threshold crossings of one's own caps.
 - **Teams**: channel messages through a Workflows webhook URL that each
   team or project can configure (threshold crossings, pending approvals,
   grant changes for the scope). Personal Teams notifications (activity
@@ -160,8 +166,9 @@ ClickHouse, so a manager's view matches what enforcement sees.
 
 ## 7. Multi-region
 
-In each region: golem-control and golem-worker against the local endpoint
-of a multi-region DSQL cluster; gateways watch their own region's control.
+In each region: golem-control (both roles) against the local endpoint of
+a multi-region DSQL cluster, reading that region's CRDs; gateways watch
+their own region's control plane.
 A region losing its control plane keeps serving on its last snapshot and
 its current leases; a region losing DSQL's local endpoint is a region
 without changes, not without traffic.

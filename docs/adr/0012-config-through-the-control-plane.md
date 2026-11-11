@@ -1,6 +1,6 @@
 # 0012: Config reaches gateways through the control plane
 
-Status: Proposed. Supersedes 0002.
+Status: Proposed. Supersedes 0002. Write path superseded by [0023](0023-config-from-crds-operational-overrides.md): golem-control reads config CRDs itself; the operator does not push config.
 
 ## Context
 

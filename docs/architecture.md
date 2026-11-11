@@ -1,12 +1,13 @@
 # golem: architecture
 
-Status: draft, third pass. The system as components, their APIs, and the
+Status: draft, fifth pass (simplified by ADRs 0023–0025). The system as components, their APIs, and the
 rules that keep them apart. Each component's inside has its own document:
 
 | Document | Component |
 |---|---|
 | [gateway.md](gateway.md) | golem-gateway, the data plane |
-| [control-plane.md](control-plane.md) | golem-control and golem-worker: APIs, store, distribution, jobs |
+| [control-plane.md](control-plane.md) | golem-control, api and worker roles: APIs, store, distribution, jobs |
+| [roadmap.md](roadmap.md) | the phases and their exit criteria |
 | [operator.md](operator.md) | golem-operator: CRDs, deployment, day-2 operations |
 | [tools.md](tools.md) | golemctl, golem-console, the Backstage plugin |
 | [org-model.md](org-model.md) | the entitlement model all of them share |
@@ -18,42 +19,45 @@ rules that keep them apart. Each component's inside has its own document:
 | Component | Does | Does not | State |
 |---|---|---|---|
 | **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; touch the database or Kubernetes | Caches; limit counters in the RESP store |
-| **golem-control** | The control API (config, entitlements, self-service, admin, spend queries) and the distribution API that feeds gateways | Serve model traffic; run background jobs | Postgres or Aurora DSQL (owner); reads ClickHouse |
-| **golem-worker** | Background jobs: Entra group sync, period rollover, regional lease rebalancing, key expiry, notifications, ledger reconciliation, approval expiry | Serve any API but probes | The same store, through the same service layer |
-| **golem-operator** | Reconciles CRDs: deploys and upgrades the other components, pushes operator config (backends, routes, policies) to the control API, reflects status, runs migrations, rotates credentials | Hold config itself; talk to gateways directly | None (Kubernetes is its state) |
+| **golem-control**, `api` role | The control API (config read and check, overrides, entitlements, self-service, admin, spend), the distribution API, the watch on config CRDs and their status | Serve model traffic; run background jobs | Aurora DSQL or Postgres (owner); reads ClickHouse and Valkey |
+| **golem-control**, `worker` role | Background jobs: Entra sync, period rollover, expiries, notifications, ledger reconciliation, retention deletion | Serve any API but probes | The same store, through the same service layer |
+| **golem-operator** (M2) | Installs and upgrades the other components, migrations, drains, canaries, credential mounting, mesh policies, Langfuse projects | Handle config; talk to gateways | None (Kubernetes is its state) |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
 | **golem-console** | A small web UI for the same tasks (M2) | Anything the API does not offer | None |
 | **Backstage plugin** | Keys, spend and budgets inside Backstage (M3, optional) | Same | None |
 
+One image serves both golem-control roles; the gateway has its own.
+
 External: Entra ID (identity, groups), the providers, the RESP store
-(Dragonfly, Valkey or Redis), the OTel collector feeding ClickStack,
+(Valkey), the OTel collector feeding ClickStack,
 ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
 
 ## 2. How they connect
 
 ```
-            users, managers, admins                operators (GitOps)
-           golemctl · console · Backstage            CRDs in Kubernetes
-                       │                                    │
-                       │ control API (Connect, Entra auth)  │ watch
-                       ▼                                    ▼
-   ┌───────────────── golem-control ◀── control API ── golem-operator ──▶ Deployments,
-   │ config · entitlements · self-service · admin       (as a client)       HPA, PDB, waypoint,
-   │ spend (reads ClickHouse)                                                AuthorizationPolicy,
-   │ distribution API ───────────┐                                           migration Jobs
-   └──── store: Postgres | DSQL ─┼── golem-worker (jobs, same service layer)
-                                 │ stream: snapshot + deltas, acks/status
-                                 ▼
-                          golem-gateway  ×N ──▶ providers
-                                 │   └──▶ RESP store (limits, leases)
-                                 ├──▶ OTLP collector ──▶ ClickStack · ClickHouse golem.spend
-                                 └──▶ captured traces ──▶ Langfuse (a project per capturing scope)
+   users, managers, admins                       platform team (GitOps)
+   golemctl · console · Backstage                 config CRDs ──────────────┐
+            │                                     (Backend, ModelRoute,     │ watch,
+            │ control API (Connect, Entra)         ScopePolicy, Hook,       │ status
+            ▼                                      PriceList)               │
+   golem-control  api role ◀────────────────────────────────────────────────┘
+     entitlements · overrides · spend · audit · explain
+     distribution API ───────────────┐            golem-operator (M2): installs,
+   golem-control  worker role        │            upgrades, drains, mesh policies,
+     jobs, same service layer        │            Langfuse projects
+   store: Aurora DSQL | Postgres     │ stream: snapshot + deltas; acks
+                                     ▼
+                              golem-gateway ×N ──▶ providers, model servers
+                                     │   └──▶ Valkey (limits, quotas)
+                                     ├──▶ OTLP collector ──▶ ClickStack · ClickHouse golem.spend
+                                     └──▶ captured traces ──▶ Langfuse (a project per capturing scope)
 ```
 
-There is exactly one public API for changing anything: the control API.
-golemctl, the console, the Backstage plugin and the operator are all its
-clients, with no private endpoints. The gateway is a client of only the
-distribution API, which is read-only apart from acknowledgements.
+Two kinds of change, one path each: declarative config through GitOps
+(CRDs, reviewed as code); entitlements and incident levers through the
+control API. golemctl, the console and the Backstage plugin are API
+clients with no private endpoints. The gateway reads only the
+distribution stream.
 
 ## 3. APIs
 
@@ -63,24 +67,23 @@ plain HTTP/JSON (`curl` works), with generated Go and TypeScript clients
 (ADR 0014). Resource-oriented in the AIP style: standard methods
 (Get, List, Create, Update, Delete), `etag` on every resource for
 optimistic concurrency (it maps onto DSQL's), field masks, page tokens,
-`request_id` for idempotent creates, and long-running operations for
-anything that waits on someone (approvals).
+`request_id` for idempotent creates. Requests that wait on someone
+(approvals) are resources with a state, not long-running operations.
 
 | API | Package | Callers | Resources |
 |---|---|---|---|
-| Config | `golem.config.v1` | operator, admins, `golemctl apply` | Backend, Deployment, ModelAlias, Route, ScopePolicy, LimitPolicy, Hook, PriceOverride, Gateway (a deployment of gateways, its labels and selected config) |
-| Org | `golem.org.v1` | managers, admins | Team, Project, Membership, Service, CostCenter, RoleBinding |
+| Config | `golem.config.v1` | admins, CI, golemctl | Read the effective config (CRDs plus overrides) per gateway pool; `Validate` a candidate CRD; `Explain` a request; `Override` (create, list, expire) |
+| Org | `golem.org.v1` | managers, admins | Scope, Membership, Service, CostCenter, RoleBinding |
 | Keys | `golem.keys.v1` | users, service owners | Key (mint, constrain, rotate, revoke), Login (device and browser flows for `golemctl login`) |
-| Budget | `golem.budget.v1` | managers, budget managers | Grant, Allocation, AdjustmentRequest (an operation: approve, reject, withdraw), Pool (read) |
+| Budget | `golem.budget.v1` | managers, budget managers | Grant, Cap, AdjustmentRequest (`Approve`, `Reject`, `Withdraw`), Pool (read) |
 | Spend | `golem.spend.v1` | everyone, within their rights | Spend queries by scope, principal, key, cost center, model, period |
 | Audit | `golem.audit.v1` | admins, auditors | AuditEvent (list, filter) |
-| Admin | `golem.admin.v1` | admins | Gateways (versions, health), drain, snapshot inspection, explain (which route, deployment, limits a given request would get) |
-| Distribution | `golem.distribution.v1` | gateways | `Watch` (server stream: snapshot, then deltas), `Ack` (applied version, compile errors, health), `Lease` (regional budget leases, ADR 0016) |
+| Admin | `golem.admin.v1` | admins | Gateways and pools (versions, snapshot hashes, health), drain, snapshot inspection |
+| Registration | `golem.registration.v1` | model servers | `Register`, `Heartbeat` (PRD §5.2.1) |
+| Distribution | `golem.distribution.v1` | gateways | `Watch` (server stream: snapshot, then deltas), `Ack` (applied version, compile errors, health); `Lease` with the second region (ADR 0016) |
 
 Authorization is in the service layer, not the transport: every method
-checks the caller's role on the resource (org-model §2). The operator acts
-as a service principal with the `config-writer` role, scoped to the
-objects it manages (ADR 0012).
+checks the caller's role on the resource (org-model §2).
 
 ## 4. Repository and layering
 
@@ -91,8 +94,7 @@ libraries, and nothing else.
 proto/golem/...            API definitions (buf); the contract between components
 gen/                       generated Go (protobuf, connect) and TypeScript clients
 cmd/golem-gateway/         each main only wires its component
-cmd/golem-control/
-cmd/golem-worker/
+cmd/golem-control/         --role=api|worker
 cmd/golem-operator/
 cmd/golemctl/
 gateway/...                data plane (gateway.md §4)
@@ -101,12 +103,13 @@ control/
   service/                 domain logic and authorization: org, keys, budget, config, spend
   store/                   repository interfaces
   store/sql/               one SQL implementation for Postgres and Aurora DSQL (ADR 0015)
-  distribution/            snapshot building and the Watch/Ack/Lease server
+  config/                  the CRD watch, validation, status, overrides layering
+  distribution/            snapshot building and the Watch/Ack server
   spend/                   ClickHouse queries
 worker/                    job runner and jobs; calls control/service, never the store directly
+api/v1alpha1/              CRD types for config and installation (kubebuilder markers)
 operator/
-  api/v1alpha1/            CRD types (kubebuilder markers)
-  controllers/             reconcilers; talk to the control API through gen/ clients
+  controllers/             installation and day-2 reconcilers
 console/                   web UI (Go html/template + htmx), a client of the control API
 cli/                       golemctl commands, a client of the control API
 plugins/backstage/         TypeScript, generated client (M3)
@@ -140,7 +143,8 @@ layer below it.
 - anything outside `control/store/...` imports a database driver;
 - `control/api` imports `control/store`;
 - `operator`, `cli` or `console` import anything of `control` but the
-  generated clients;
+  generated clients and `api/v1alpha1`;
+- `control/api` imports `worker/` or the reverse;
 - `gen/` or `lib/` import any component.
 
 Each binary also gets its own image and its own dependency list in
@@ -148,43 +152,46 @@ Each binary also gets its own image and its own dependency list in
 
 ## 5. Data flow, by example
 
-- **An operator adds a model alias.** They commit a `ModelRoute` CRD. The
-  operator validates it (schema, plus a dry-run `Update` with
-  `validate_only`), writes it through the config API, and sets the CRD's
-  status from the response. golem-control commits it, builds the new
-  snapshot version, and streams the delta to every gateway whose `Gateway`
-  selects it. Each gateway compiles and acks; the operator reports
-  `Applied: 12/12 gateways` in the CRD status.
+- **The platform team adds a model alias.** They open a PR with a
+  `ModelRoute` CRD; CI runs `golemctl config validate` against the control
+  API. After merge, Argo or Flux applies it (the admission webhook rejects
+  it if invalid). golem-control sees it through its watch, builds the new
+  snapshot version, and streams the delta to every gateway whose pool
+  selects it. Each gateway compiles and acks; golem-control writes
+  `Applied: 12/12` in the CRD's status.
+- **An incident.** A provider deployment misbehaves; an admin runs
+  `golemctl overrides create --disable deployment/openai-east --for 2h
+  --reason INC-123`. It reaches the gateways in about a second and expires
+  on its own; the audit log has who, why and when.
 - **A user mints a key.** `golemctl keys create --scope team/platform
   --models 'claude-*' --cap 50/month`. golem-control checks the user's
   membership and rights, stores the hash, writes the audit event, and the
   key reaches the gateways in about a second (ADR 0012).
 - **A request is charged.** The gateway reserves at the key, the member
-  allocation and the regional lease of the scope's pool (ADR 0016), calls
+  cap and the scope's pool (with two regions, its regional lease: ADR 0016), calls
   the provider, reconciles, and emits the access-log record, which becomes
   the `golem.spend` row in ClickHouse.
-- **A budget manager approves a one-time adjustment.** The approval
-  completes the long-running operation; the grant takes effect; the worker
-  raises the scope pool's regional leases; gateways see the new lease on
-  their next lease renewal.
+- **A budget manager approves a one-time adjustment.** The request's state
+  becomes `approved`; the grant takes effect in the same transaction; the
+  pool's new total reaches gateways through the change log.
 
 ## 6. Deployment topologies
 
 | Topology | Store | Notes |
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
-| Single region (EKS in us-east-2, first) | Aurora DSQL single-region cluster in us-east-2 | One operator, control, worker; gateways across zones; ElastiCache for Valkey |
-| Multi-region (later: us-east-2 and us-west-2) | Aurora DSQL multi-region: peered clusters in us-east-2 and us-west-2, us-east-1 as witness | golem-control and worker in each region against the local endpoint; gateways use their region's control; Valkey per region; budgets through regional leases (ADR 0016) |
+| Single region (EKS in us-east-2, first) | Aurora DSQL single-region cluster in us-east-2 | golem-control (api, worker), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
+| Multi-region (later: us-east-2 and us-west-2) | Aurora DSQL multi-region: peered clusters in us-east-2 and us-west-2, us-east-1 as witness | golem-control in each region against the local endpoint, reading that region's CRDs; gateways use their region's control plane; Valkey per region; budgets through regional leases (ADR 0016) |
 | AKS or on-prem | Postgres (CloudNativePG or managed) | Same code, same SQL dialect (ADR 0015); Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
 
-The gateway, the worker and golem-control each scale independently; only
+The gateway and golem-control's two roles each scale independently; only
 the gateway is on the request path.
 
 **Going multi-region later.** AWS documents creating peered DSQL clusters,
 not converting a single-region one, so the move is planned as a migration:
 create the peered pair, pause control-plane writes (the API answers
 read-only; gateways keep serving from their snapshots and leases, so model
-traffic is unaffected), copy the store with `golem-worker store copy`
+traffic is unaffected), copy the store with `golem-control store copy`
 (through the store layer, in chunks), point golem-control at the new
 endpoint, resume. The store is small (entitlements and config, not
 spend), so the pause is minutes.

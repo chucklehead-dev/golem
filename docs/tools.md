@@ -16,9 +16,9 @@ default, `-o json|yaml` for scripts. Every mutating command takes
 | Everyone | `login`, `whoami` (identity, scopes, roles), `models` (what I may use, by scope), `spend` (mine, by period/model) |
 | User | `keys create --scope … [--models … --cap 50/month --rate … --expires 30d --bind-spiffe …]`, `keys list`, `keys constrain`, `keys rotate`, `keys revoke`, `capture on|off --key …` (own keys, within the scope's ceiling) |
 | Coding agents | `agent setup claude-code|codex|cursor|copilot --scope …` writes the agent's config to point at golem; `token` prints a fresh short-lived key, for use as Claude Code's `apiKeyHelper` or an equivalent hook, so no long-lived key sits on disk |
-| Team / project manager | `teams|projects get/members add/remove`, `projects create --team …`, `services create --owner …`, `services keys …`, `allocations set --member … 200/month`, `grants create --from team/… --to project/…`, `requests create` (adjustments), `capture on|off --service|--project …`, `spend --scope …` |
+| Manager | `scopes get`, `members add|remove`, `projects create --team …`, `services create --scope …`, `services keys …`, `caps set --member … 200/month`, `grants create --from team/… --to project/…`, `requests create` (adjustments), `capture set --scope|--service … [--retention 90d --override narrow]`, `mode set observe|warn|enforce`, `spend --scope …` |
 | Budget manager | `requests list --pending`, `requests approve|reject`, `grants create --from cc/…`, `spend --cost-center …` |
-| Admin / operator | `config get|apply|diff|delete` (API-owned config; CRD-owned objects are shown read-only with their CRD), `explain` (route, deployment, limits and rights for a sample request), `gateways list` (version, snapshot hash, health), `gateways drain`, `audit list`, `snapshot build` (render a snapshot file for local gateways), `support-bundle` |
+| Admin / operator | `config get` (effective config per pool: CRDs plus overrides), `config validate file.yaml` (for CI, before a merge), `overrides create|list|expire` (incident levers, each with an expiry and a reason), `explain` (route, deployment, limits and rights for a sample request), `gateways list` (version, snapshot hash, health), `gateways drain`, `audit list`, `snapshot build` (render a snapshot file for local gateways), `support-bundle` |
 
 `golemctl explain --as user@corp --scope project/support-bot --model
 claude-sonnet --tokens 20000` is the first tool for "why was I limited /
@@ -33,7 +33,7 @@ A small web UI for the tasks people do weekly, not for operating golem.
   calls the control API on their behalf with their token, so it has no
   rights of its own.
 - Pages: my keys (mint with a constraint form, revoke, copy once), my
-  spend; my teams and projects (members, services, allocations, grants);
+  spend; my teams and projects (members, services, caps, grants);
   requests (raise, my pending, approvals inbox for budget managers); cost
   center view; admin: gateways and versions, config (read-only, linking to
   the CRD or `golemctl` for edits), audit search.

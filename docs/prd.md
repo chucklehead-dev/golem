@@ -1,6 +1,6 @@
 # golem: product requirements
 
-Status: draft for discussion. Revised 2026-11-11 (fourth pass).
+Status: draft for discussion. Revised 2026-11-11 (fifth pass: simplifications of ADRs 0023–0025; the roadmap in roadmap.md).
 
 ## 1. Problem
 
@@ -21,7 +21,7 @@ enforced by invoices a month later.
    its funding cost centers; priced; visible in ClickStack, Langfuse and
    Grafana.
 3. Self-service within delegated authority: users mint their own keys,
-   team and project managers allocate their budgets, budget managers fund
+   team and project managers cap their members, budget managers fund
    and approve. Budgets are enforced at request time, not at invoice time.
 4. Model names decoupled from deployments: aliases, load balancing,
    failover and mirroring, changed by config without caller redeploys.
@@ -57,7 +57,7 @@ enforced by invoices a month later.
 |---|---|
 | Application developer | Base URL and key (or their service's Entra identity); their SDK works unchanged; clear errors when limited. |
 | Coding-agent user | Their agent's native API (Anthropic Messages, OpenAI Responses) with their Entra identity via `golemctl login`; streaming without stalls. |
-| Team / project manager | Membership, services, allocations to members, adjustment requests, spend by member. |
+| Manager (of a team or project) | Membership, services, caps for members, adjustment requests, capture settings, spend by member. |
 | Budget manager | Fund teams and projects from their cost centers; approve requests; spend against cost center. |
 | Platform operator | CRDs/GitOps for backends and routes, probes, dashboards, alerts, safe rollouts, provider key rotation. |
 | Security / compliance | Authn on every call, audit trail, data-residency routing, content capture policy, guardrails, FIPS mode. |
@@ -199,7 +199,7 @@ Models on all of them change over time.
   Messages pass-through (current vLLM serves `/v1/messages`), so coding
   agents can use local models without translation.
 - **Pricing**: the platform team sets per-token rates through
-  `PriceOverride`, as for commercial models; for cloud GPU machines a rate
+  `PriceList`, as for commercial models; for cloud GPU machines a rate
   can be derived from the instance's hourly cost and measured throughput
   (M3).
 - **Clusters later**: a Backend may be one *service* URL whose own balancer
@@ -234,33 +234,36 @@ key constraints, evaluated per request (org model §3). Deny by default.
 
 The full model is [org-model.md](org-model.md). In short:
 
-- Users (Entra), teams (optionally bound to Entra groups, synced from
-  Graph), projects (one primary team plus member teams, services, users),
-  services (owned by a team or project), cost centers (external).
-- Roles: member, team manager, project manager, budget manager (per cost
-  center), service owner, admin.
+- Users (Entra); scopes, which are teams (optionally bound to Entra
+  groups, synced from Graph) or projects (owned by a team; members may be
+  teams, services, users); services (owned by a scope); cost centers
+  (external). ADR 0024.
+- Roles: member, manager (on a scope), budget manager (on a cost center),
+  admin.
 - Users mint personal keys within their own rights; keys are further
   constrainable (models, spend cap, rates, concurrency, expiry, source
-  binding). Service owners mint service keys.
+  binding). Managers mint service keys.
 - Budgets per month: budget managers grant from cost centers to teams and
-  projects; team managers grant team money to projects; managers allocate
-  to members. Recurring ("permanent") and one-time grants and
+  projects; a team's managers grant team money to projects; managers cap
+  their members. Recurring ("permanent") and one-time grants and
   adjustments; those drawing on a cost center need a budget manager's
   approval.
-- Enforcement per request at three levels: key cap, member allocation,
+- Enforcement per request at three levels: key cap, member cap,
   scope pool.
 
 | Capability | Milestone |
 |---|---|
-| Users, teams (Entra-group bound), services, personal and service keys, scope policies, member allocations, team pools granted by admins | M1 |
+| Users, teams (Entra-group bound), services, personal and service keys, scope policies, member caps, team pools granted by admins, enforcement modes | M1 |
 | Projects, cost centers, budget managers, grants, approvals, adjustments, audit | M2 |
-| Content capture switches: users for their own keys; team and project managers for their services and projects; bounded by the scope policy's ceiling | M1 (keys), M2 (services, projects) |
+| Content capture settings and overrides (org-model §3.1) | M2 |
 | golem-console; notifications (email/Teams) on thresholds and approvals | M2 |
 | Multi-region budgets through regional leases (ADR 0016) | M2 |
 | Backstage plugin; budget downgrade to a cheaper alias; chargeback export per cost center | M3 |
 
 ### 5.5 Limits
 
+- **Enforcement modes** per scope: `observe`, `warn`, `enforce` (§9.1).
+- **Provider quota limits** per deployment, shared by all gateways (§9.2).
 - **Rate limits** in requests/min, tokens/min and $/min, at any of the
   levels of §5.4 and per model or route; **concurrency limits** on
   in-flight streams per principal *(added)*.
@@ -307,8 +310,9 @@ The full model is [org-model.md](org-model.md). In short:
 
 ### 5.7 Lifecycle hooks
 
-Six phases: `OnRequest`, `OnRoute`, `OnUpstreamRequest`, `OnResponseChunk`,
-`OnResponse`, `OnComplete` (ADR 0004). In-process (Go, M1) or remote
+Four phases: `Request` (reject, rewrite, annotate with routing hints),
+`Chunk` (streams, M2), `Response`, `Complete` (async) (ADR 0004 as amended
+by 0025). In-process (Go, M1) or remote
 (gRPC/HTTP, M2), each with a CEL condition, a timeout and a failure mode.
 Built-in hooks: deny lists, PII redaction (remote, Presidio-compatible),
 prompt-injection classifier, max prompt size, moderation (M2). A decision
@@ -354,21 +358,23 @@ routes it (ADR 0010):
 
 ### 5.9 Components, Kubernetes and the mesh
 
-The system is six deliverables (architecture.md, ADR 0013):
+The system is these deliverables (architecture.md, ADR 0013 as amended by
+0025):
 
 | Component | Role | Milestone |
 |---|---|---|
 | golem-gateway | Data plane only: model requests in, provider calls out | M0 |
-| golem-control | Control API (config, org, keys, budgets, spend, audit, admin) and the distribution API for gateways | M1 |
-| golem-worker | Jobs: Entra sync, period rollover, leases, expiries, notifications, ledger reconciliation | M1 |
-| golem-operator | CRDs for installation and config; upgrades, migrations, drains, canaries, credential mounting, mesh policies, telemetry plumbing | M1 |
+| golem-control, `api` role | Control API (config read and check, overrides, org, keys, budgets, spend, audit), the distribution API, the CRD watch | M1 |
+| golem-control, `worker` role | Jobs: Entra sync, period rollover, expiries, notifications, ledger reconciliation, retention | M1 |
+| golem-operator | Installation and day-2: upgrades, migrations, drains, canaries, credential mounting, mesh policies, Langfuse projects, telemetry plumbing (ADR 0023) | M2 (Helm in M1) |
 | golemctl | CLI for every persona, including `login` and coding-agent setup | M1 |
-| golem-console | Small web UI for keys, allocations, requests and approvals | M2 |
+| golem-console | Small web UI for keys, caps, requests and approvals | M2 |
 | Backstage plugin | Spend, budgets and keys on Backstage entities | M3 |
 
-- **One API changes state**: the control API (protobuf, Connect; ADR
-  0014). The operator, CLI, console and plugin are its clients; the gateway
-  reads only the distribution stream (ADR 0012).
+- **Two writers, one each**: declarative config is CRDs (GitOps), read by
+  golem-control; entitlements and operational overrides change only through
+  the control API (protobuf, Connect; ADR 0014, 0023). The CLI, console and
+  plugin are API clients; the gateway reads only the distribution stream.
 - **Store**: Aurora DSQL (multi-region, preferred) or PostgreSQL (AKS,
   on-prem), one implementation (ADR 0015).
 - **Gateway probes**: `/livez`, `/readyz` (a snapshot loaded, a usable
@@ -383,9 +389,11 @@ The system is six deliverables (architecture.md, ADR 0013):
   AuthorizationPolicies (only the waypoint to the data port when identity
   headers are trusted; only gateways to the distribution API; admin ports
   to the operator and control plane).
-- **Config**: CRDs reconciled by the operator into the config API, or
-  `golemctl apply`; each object has one owner. Provider secrets stay in
-  Kubernetes Secrets, mounted into the gateways that need them.
+- **Config**: five CRD kinds (`Backend`, `ModelRoute`, `ScopePolicy`,
+  `Hook`, `PriceList`; ADR 0025) watched by golem-control, with status
+  written back; incident levers as expiring overrides through the API.
+  Provider secrets stay in Kubernetes Secrets, mounted into the gateways
+  that need them.
 - **Multiple instances and regions**: `GatewayPool`s per region or zone;
   in multi-region, a control plane per region over one DSQL cluster.
 - Container-aware GOMAXPROCS (runtime default), `GOMEMLIMIT` from the
@@ -431,12 +439,11 @@ protocol-agnostic so it can be added.
 
 ## 6. Milestones
 
-| Milestone | Contents | Exit criterion |
-|---|---|---|
-| M0 | Gateway skeleton: snapshot from a file, one OpenAI-compatible backend, fast-path proxy, probes, OTLP to ClickStack; repository layout and the import test; proto skeletons | Streams a chat completion with a trace and token metrics in HyperDX |
-| M1 | §5.1/§5.2 M1 dialects and backends incl. Bedrock and the decision APIs; Chat→Anthropic and Chat→Converse translation; Entra users and services; personal and service keys; `golemctl login`; teams, scopes, member allocations; aliases, balancing, failover, ejection, cache affinity; limits (Dragonfly/Valkey if present); in-process hooks; ClickHouse ledger; Langfuse export; Grafana dashboards; golem-control and golem-worker on DSQL (and Postgres in CI); distribution API; golem-operator (ControlPlane, GatewayPool, config CRDs, upgrades, drains); golemctl; mesh identity spike | One team's apps and coding agents in production through it, on EKS |
-| M2 | Projects, cost centers, grants, approvals, adjustments, audit; golem-console and notifications; multi-region leases; Bedrock from AKS/on-prem; mesh identity via waypoint; shadowing; conditional routing; remote and built-in hooks; embeddings to Bedrock; context-window fallback; Entra OBO pass-through | Default path for the enterprise; direct provider keys revoked |
-| M3 | Temporal for approvals, key rotation and batch jobs (ADR 0020, when the platform's Temporal is ready); Backstage plugin, Batch/Files, rerank, Decisions↔System One translation, cost-based routing, priority classes, budget downgrade, chargeback export, response cache, Vertex | By demand |
+Phases, their contents and exit criteria: [roadmap.md](roadmap.md). In
+short: Phase 0 spikes; M0 walking skeleton; M1 the first team in
+production (single region, Helm, observe-then-enforce budgets); M2 the
+enterprise default (projects, approvals, capture, the operator, console,
+edge pool); M3 multi-region, Temporal and the long tail.
 
 ## 7. Success measures
 
@@ -455,14 +462,14 @@ Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
 (§5.3); Gloo Mesh ambient (§5.9); the telemetry stack (§5.8); store:
 Aurora DSQL preferred, PostgreSQL elsewhere (ADR 0015); teams as drafted;
 console then Backstage (tools.md); team-to-project grants need no
-approval; allocations may oversubscribe; EKS first, AKS and on-prem later;
+approval; member caps may oversubscribe; EKS first, AKS and on-prem later;
 backends: OpenAI, Foundry, self-hosted vLLM on standalone machines now and
 NVL boxes and cloud GPUs later (§5.2.1); content capture and retention
 per scope with override control, classes 7, 30, 90, 365 days and 3, 5, 7
 years (ADR 0018); notifications by email and Teams; limit store Valkey
 (ADR 0005); regions us-east-2, then us-west-2, us-east-1 as witness; the
 platform team owns the Entra registrations and grants consent (entra.md);
-self-hosted rates through `PriceOverride`; Temporal later, behind a seam
+self-hosted rates through `PriceList`; Temporal later, behind a seam
 (ADR 0020); Copilot by BYOK, then enterprise custom models (ADR 0021);
 testing (testing.md).
 
@@ -482,3 +489,75 @@ New:
 
 3. **SaaS consumers**: which SaaS apps first, and whether they support
    OAuth client credentials or only static keys.
+
+New this round (inputs to sizing):
+
+4. **Volume**: expected requests per second, concurrent streams and
+   tokens per day, now and at enterprise default.
+5. **Scale of the org**: number of teams, projects and keys (for the
+   snapshot and the console).
+
+## 9. Cross-cutting requirements
+
+### 9.1 Enforcement modes
+
+Per scope: `observe` (record what would be refused), `warn` (allow, add a
+warning header and notify), `enforce`. Rollouts start in `observe` so a
+mis-set budget cannot stop a team's work on day one.
+
+### 9.2 Provider quota limits
+
+Per deployment TPM/RPM limits shared by every gateway (in Valkey), so
+golem stays inside each provider account's quota instead of discovering it
+by 429s, and balancing knows the headroom.
+
+### 9.3 Key format
+
+`glm_` + 32 random bytes + a CRC32 checksum, base62, so secret scanners
+can verify candidates offline; registered as a GitHub secret-scanning
+custom pattern with push protection, and a leaked key reported by scanning
+is revoked automatically.
+
+### 9.4 SLOs and recovery
+
+Gateway availability 99.95% (it serves from snapshots through
+control-plane outages); control plane 99.9%; store RPO by DSQL PITR; the
+ledger's ClickHouse backups; RTO for a region's control plane 30 min.
+
+### 9.5 Error catalog
+
+Every refusal has a stable golem code (`limit.pool_exhausted`,
+`auth.key_revoked`, `route.no_deployment`, ...) rendered in the caller's
+dialect, documented with what to do next.
+
+### 9.6 Compatibility policy
+
+The control API and the snapshot format are versioned; gateways accept
+snapshots from n−1 control planes; `buf breaking` gates CI; CRDs move
+v1alpha1 → v1beta1 before the enterprise default.
+
+### 9.7 Price list upkeep
+
+A vendored price list refreshed by a scheduled job that opens a PR (diffs
+reviewed by the platform team), enterprise rates in `PriceList` CRDs.
+
+### 9.8 Model lifecycle
+
+Deprecation dates in the catalog; aliases pointing at a model within 30
+days of retirement warn their scopes' managers.
+
+### 9.9 Release engineering
+
+Signed images (cosign) with SBOMs, a FIPS build variant, semantic versions
+per component.
+
+### 9.10 Threat model
+
+Before M1 production: key theft and replay, SSRF through registration and
+raw routes, the edge pool, insider access to captured content, the
+operator's and control plane's RBAC.
+
+### 9.11 Onboarding
+
+A guide per SDK and agent, `golemctl agent setup`, and an `observe`-mode
+period per team before enforcement.

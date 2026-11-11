@@ -39,15 +39,15 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
 
 ```
 request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect, scan) → authn (Principal, scope)
-           → OnRequest hooks → router (alias, pool, deployment) → limits (reserve: key, member, pool)
+           → Request hooks → router (alias, pool, deployment) → limits (reserve: key, member, pool, quota)
            → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
-inputs:    distribution stream from golem-control → compile → atomic Snapshot   (ADR 0012)
+inputs:    distribution stream from golem-control → compile → atomic Snapshot   (ADR 0012, 0023)
            or a file, for development and tests (the same snapshot format)
-state:     Dragonfly | Valkey | Redis (reservations, counters, regional lease) (ADR 0005, 0016)
+state:     Valkey (reservations, counters, provider quotas; regional lease with two regions) (ADR 0005, 0016)
 outputs:   OTLP → collector (ADR 0010); captured traces → the scope's Langfuse project (ADR 0018);
            status reports → golem-control
-local:     /livez /readyz /healthz /startupz, pprof, snapshot dump, explain (read-only, admin port)
+local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
 ```
 
 ## 3. The request path
@@ -69,12 +69,14 @@ local:     /livez /readyz /healthz /startupz, pprof, snapshot dump, explain (rea
    JWTs are verified locally against cached JWKS. Effective rights are
    computed from the snapshot: scope policy ∩ membership ∩ key constraints
    (org model §3).
-4. **OnRequest hooks**, selected by precompiled CEL programs.
+4. **Request hooks**, selected by precompiled CEL programs; they may
+   reject, rewrite, or add routing hints (ADR 0025).
 5. **Route.** Alias to route; CEL conditions; authorization check; pool
    selection by strategy (affinity key first, then the strategy among
    healthy deployments).
 6. **Reserve** the estimated cost at every level that applies (key cap,
-   member allocation, scope pool, plus rate and concurrency limits) in one
+   member cap, scope pool, the deployment's provider quota, plus rate and
+   concurrency limits) in one
    script round trip to the limit store; local shares if none.
 7. **Attempt loop.** For each attempt: build the upstream request (fast
    path: same bytes, spliced model name; else translate), sign or
@@ -87,7 +89,7 @@ local:     /livez /readyz /healthz /startupz, pprof, snapshot dump, explain (rea
    frontend events.
 9. **Reconcile** the reservation with actual usage; price it from the
    catalog; record metrics and the access log record (which is also the
-   ledger's input, ADR 0010); queue `OnComplete` hooks (bounded queue,
+   ledger's input, ADR 0010); queue `Complete` hooks (bounded queue,
    dropped work counted).
 
 Shadow requests (M2) branch at step 7 onto their own goroutine with a
@@ -116,7 +118,7 @@ gateway/price/         model catalog lookups and pricing (the catalog comes in t
 gateway/hook/          phases, in-process registry, remote client, built-ins
 gateway/upstream/      per-deployment transports, provider auth (keys, SigV4, Entra, Roles Anywhere)
 gateway/telemetry/     OTel setup, semconv helpers, access log, flight recorder
-gateway/local/         probes, pprof, snapshot dump, explain
+gateway/local/         probes, pprof, snapshot hash
 ```
 
 `proxy` depends on interfaces from the others; nothing depends on `proxy`.

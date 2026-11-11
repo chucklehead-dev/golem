@@ -1,20 +1,18 @@
 # golem: organisation, keys and budgets
 
-Status: draft, third pass. The entitlement model behind PRD §5.3–§5.5;
-decided in ADR 0008 (the model), ADR 0009 (where it lives) and ADR 0016
-(multi-region enforcement).
+Status: draft, fifth pass. The entitlement model behind PRD §5.3–§5.5;
+decided in ADR 0008 (the model), 0024 (scopes and roles), 0009 (where it
+lives) and 0016 (multi-region enforcement).
 
 ## 1. Entities
 
 | Entity | Identity | Notes |
 |---|---|---|
 | **User** | Entra `oid` (+ `tid`) | Created on first sign-in. Display name and UPN from the token. |
-| **Team** | golem id; optionally bound to Entra groups | Membership from the bound groups (synced from Graph) and/or managed in golem. |
-| **Project** | golem id | Owned by exactly one **primary team**. Members: other teams (all their members), services, users. |
-| **Service** | golem id; Entra app (client id) and/or SPIFFE ID; service keys | Owned by one team or one project. A non-human principal. May be added to other projects. |
+| **Scope** | golem id; `kind: team \| project` | Where spend is charged and rights come from. A **team** may be bound to Entra groups (membership synced from Graph) and/or managed in golem. A **project** is owned by exactly one team (its primary team); its members may be other teams (all their members), services and users. |
+| **Service** | golem id; Entra app (client id) and/or SPIFFE ID; service keys | Owned by one scope. A non-human principal. May be added to other projects. |
 | **Cost center** | external code (e.g. `CC-4410`) | Not managed by golem: a funding source referenced by budgets, with its budget managers. |
 | **Key** | `glm_` + 32 random bytes, stored as SHA-256 | Belongs to a user or a service; bound to one **scope**. |
-| **Scope** | a team or a project | Where spend is charged and rights come from. |
 
 A team that is a member of a project contributes its members; it does not
 fund the project unless it also gives the project a budget.
@@ -24,14 +22,14 @@ fund the project unless it also gives the project a budget.
 Roles are assigned in golem and audited; the Entra app role
 `golem.admin` bootstraps administrators.
 
+Four roles (ADR 0024):
+
 | Role | Held on | May |
 |---|---|---|
-| Member | team, project | Use the scope's models within their allocation; mint personal keys in the scope; set capture and retention on their own keys, as far as the scope permits (§3.1). |
-| Team manager | team | Manage team membership (where not Entra-bound), create projects owned by the team, create team services, allocate the team's budget to members, services and projects; request adjustments; set the team's capture settings and override mode, and capture on team services. |
-| Project manager | project | Add/remove member teams, services, users; create project services; allocate the project's budget to members and services; request adjustments; set the project's capture settings and override mode, and capture on project services. A project's primary team's managers are its project managers by default. |
-| Budget manager | cost center (or globally) | Assign budgets to teams and projects from the cost center; approve or reject requests that draw on it (new budgets, permanent and one-time adjustments). |
-| Service owner | service | Mint, rotate and revoke the service's keys (team or project managers by default). |
-| Admin | global | Everything, plus operator config views; break-glass. |
+| Member | a scope | Use the scope's models within their cap; mint personal keys in the scope; set capture and retention on their own keys, as far as the scope permits (§3.1). |
+| Manager | a scope (a binding may be narrowed to one service) | Manage membership (where not Entra-bound); create services; set caps for members and services; grant the scope's money to projects (a team's managers: to projects it owns or belongs to); create projects (a team's managers: owned by the team); request adjustments; set capture settings and the override mode; mint, rotate and revoke service keys. A project's owning team's managers are its managers unless set otherwise. |
+| Budget manager | a cost center (or globally) | Grant from the cost center to scopes; approve or reject requests that draw on it (new grants, permanent and one-time adjustments). |
+| Admin | global | Everything, including operational overrides; break-glass. |
 
 Separation: approving a request that you raised is refused unless you are
 an admin and say so (recorded).
@@ -67,15 +65,15 @@ Decided in ADR 0018. Capture settings live at three levels:
 
 | Level | Set by | Settings |
 |---|---|---|
-| Scope policy (operator config) | platform admins | the ceiling: capture allowed or forbidden, maximum retention, maximum sample rate, required redaction hooks |
-| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `sample`; `override`: locked, narrow, open |
+| Scope policy (a `ScopePolicy` CRD) | platform admins | the ceiling: capture allowed or forbidden, maximum retention, required redaction hooks |
+| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `override`: locked, narrow, open (sampling later: ADR 0025) |
 | Key or service | the key's owner; the service's owner | `capture` and `retention`: inherit (default), or an override the scope permits |
 
 What a child (key or service) may override:
 
 - `locked`: nothing; the scope's settings apply.
 - `narrow`: only towards less: turn capture off or down to metadata,
-  lower the sample, shorten retention.
+  shorten retention.
 - `open`: also towards more: turn capture on, lengthen retention, up to
   the scope policy's ceiling.
 
@@ -117,9 +115,9 @@ by a **grant**:
 | From | To | Granted by | Approval |
 |---|---|---|---|
 | Cost center | team | budget manager | none (the budget manager is the approver) |
-| Cost center | project | budget manager, or requested by a project/team manager | budget manager |
-| Team | project (any project the team owns or is a member of) | team manager | none (confirmed) |
-| Team or project | member user or service (an **allocation**) | team / project manager | none |
+| Cost center | project | budget manager, or requested by a manager | budget manager |
+| Team | project (any project the team owns or is a member of) | the team's managers | none (confirmed) |
+| Team or project | member user or service (a **cap**) | the scope's managers | none |
 
 A grant is **recurring** (every period from a start period, until ended:
 the "permanent" amount) or **one-time** (one period only). An
@@ -135,11 +133,11 @@ pool.granted   = Σ grants out to projects            (team pools only)
 pool.available = total − granted − spent − reserved
 ```
 
-Allocations to members do not move money; they are caps within the pool.
+Caps on members do not move money; they are limits within the pool (a
+key's spend cap is the same kind of object, on a key).
 Their sum may exceed the pool (oversubscription, on, since few members
-use all of theirs). A member without an
-allocation draws from the pool up to the scope's **default member cap**
-(possibly zero).
+use all of theirs). A member without a cap draws from the pool up to the
+scope's **default member cap** (possibly zero).
 
 ### 4.2 Enforcement
 
@@ -148,9 +146,13 @@ reserves the estimated cost at each level, atomically, and fails with a
 429 naming the first level that would be exceeded:
 
 1. the key's own cap (if any);
-2. the member's allocation in the scope (or the default member cap);
-3. the scope pool's `available` (in multi-region deployments, the
-   region's lease of it: ADR 0016).
+2. the member's cap in the scope (or the default member cap);
+3. the scope pool's `available` (with two regions, the region's lease of
+   it: ADR 0016).
+
+What happens at a limit depends on the scope's enforcement mode (PRD
+§9.1): `observe` records the refusal it would have made, `warn` allows it
+with a warning header and a notification, `enforce` refuses.
 
 At completion the reservation becomes spend (corrected to actual cost).
 Team pools are not charged for a project's spend: the grant already
@@ -178,13 +180,13 @@ is in ClickHouse (ADR 0010).
 ## 5. Examples
 
 - Platform team gets $20k/month recurring from CC-4410 (budget manager).
-  Its manager grants $5k/month to project "support-bot" and allocates
-  $200/month to each engineer. An engineer mints a personal key bound to
+  Its manager grants $5k/month to project "support-bot" and caps each
+  engineer at $200/month. An engineer mints a personal key bound to
   the team for Claude Code, constrained to the `claude-*` aliases and
   $50/month.
 - Project "support-bot" (primary team: platform; member team: support)
   asks for a one-time $3k from CC-7720 for a launch. A CC-7720 budget
   manager approves; the project's pool is $8k this month.
 - Service `support-bot-api` (owned by the project) authenticates by Entra
-  workload identity; its allocation is $6k; its keys are for a vendor
+  workload identity; its cap is $6k; its keys are for a vendor
   integration that cannot do Entra.

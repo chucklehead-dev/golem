@@ -46,7 +46,7 @@ change over time.
   spans the GPU clusters; otherwise TLS with a bearer key or client
   certificate, with WAN timeouts and keepalives.
 - Usage comes from the servers' own usage fields (streamed with
-  `include_usage`); prices from `PriceOverride`.
+  `include_usage`); prices from `PriceList`.
 
 - Registration identity: workload identity where available, else PKI or
   SPIRE certificates, else bootstrap tokens exchanged for rotated machine

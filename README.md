@@ -14,14 +14,16 @@ self-service, an operator for day-2, and a CLI and console.
 
 Status: design. Nothing is built yet.
 
-- [docs/prd.md](docs/prd.md): what it does and for whom, the feature set by
-  milestone, and the open questions.
+- [docs/prd.md](docs/prd.md): what it does and for whom, the feature set,
+  cross-cutting requirements, and the open questions.
+- [docs/roadmap.md](docs/roadmap.md): the phases, from spikes to
+  multi-region, with their exit criteria.
 - [docs/architecture.md](docs/architecture.md): the components, their APIs,
   the repository layout and the layering rules.
 - [docs/gateway.md](docs/gateway.md): the data plane: the request path,
   packages, Go facilities, performance.
 - [docs/control-plane.md](docs/control-plane.md): golem-control and
-  golem-worker: services, the DSQL/Postgres store, distribution, jobs.
+  its api and worker roles: services, the DSQL/Postgres store, distribution, jobs.
 - [docs/operator.md](docs/operator.md): CRDs and day-2 operations.
 - [docs/tools.md](docs/tools.md): golemctl, the console, Backstage.
 - [docs/org-model.md](docs/org-model.md): users, teams, projects, services,

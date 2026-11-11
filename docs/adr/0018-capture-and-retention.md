@@ -1,6 +1,6 @@
 # 0018: Content capture per scope, with override control and per-record retention
 
-Status: Proposed
+Status: Proposed. Amended by [0025](0025-smaller-surfaces.md): no sampling at first.
 
 ## Context
 

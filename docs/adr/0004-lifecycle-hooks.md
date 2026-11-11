@@ -1,6 +1,6 @@
 # 0004: Fixed lifecycle phases; hooks in-process or remote
 
-Status: Proposed
+Status: Proposed. Amended by [0025](0025-smaller-surfaces.md): four phases (Request, Chunk, Response, Complete).
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 0008: Scopes, delegated roles and three-level budgets
 
-Status: Proposed
+Status: Proposed. Amended by [0024](0024-scopes-and-roles.md): teams and projects are one Scope entity; four roles; allocations are caps.
 
 ## Context
 

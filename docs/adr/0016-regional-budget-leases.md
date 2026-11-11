@@ -1,6 +1,6 @@
 # 0016: Budgets are enforced through regional leases
 
-Status: Proposed
+Status: Proposed, for the second region. Deferred by [0025](0025-smaller-surfaces.md): single-region golem enforces pools directly.
 
 ## Context
 

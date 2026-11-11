@@ -1,6 +1,6 @@
 # 0014: APIs in protobuf, served with Connect
 
-Status: Proposed
+Status: Proposed. Amended by [0025](0025-smaller-surfaces.md): no long-running operations.
 
 ## Context
 
