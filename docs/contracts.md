@@ -179,10 +179,11 @@ rules.
 
 ## 8. Policy-relevant request fields (ADR 0037)
 
-Proposed ADR 0041 §3 adds restricted feature mode by default; unapproved API
-versions, fields and betas are rejected. Compatible mode forwards unknown
-features with explicit scope/security approval and accepts exposure until
-remediation. Names are bounded/sanitized or keyed-hashed before logging;
+ADR 0041 §3 and §7.1 add feature modes. Restricted (unapproved API
+versions, fields and betas rejected) is the default for the edge pool,
+non-agent applications and sensitive or residency-bound scopes; compatible
+(unknown features forwarded, exposure accepted until remediation) is the
+default for coding-agent routes under one standing approval. Names are bounded/sanitized or keyed-hashed before logging;
 values are never logged. Nightly diffs do not bound remediation time. These are enforced
 wherever they appear, and the list grows with the nightly review:
 

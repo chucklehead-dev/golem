@@ -11,7 +11,7 @@ minutes stopped every site. Independent revocation is the per-site emergency den
 Kubernetes delivery; credential expiry applies at its encoded time (12 hours
 for default agent keys). Entra disablement and secret-scanning revocation
 require fresh snapshot publication and cannot be relied on during its outage.
-Proposed ADR 0041 §1 defines denylist survival through Argo reconciliation. golem
+ADR 0041 §1 defines denylist survival through Argo reconciliation. golem
 will run on one site for a long time, with a second site as warm or cold
 standby.
 

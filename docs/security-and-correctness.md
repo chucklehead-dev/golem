@@ -1,8 +1,8 @@
 # Security and correctness requirements
 
-Status: proposed design revision; implementation and validation are outstanding.
+Status: accepted design revision (ADRs 0029, 0041); implementation and validation are outstanding.
 Decisions: [ADR 0029](adr/0029-security-and-correctness-revision.md), amended
-by proposed [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md). ADR 0041 governs the
+by [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md). ADR 0041 governs the
 incident-control, capture, compatibility, delivery and evidence revisions below.
 These requirements amend the baseline documents where explicitly referenced.
 They describe required behavior, not controls already implemented.
@@ -67,21 +67,21 @@ denylist apply latency and active-stream termination are separate metrics.
 Emergency denylist changes remain effective until durable revocation and
 fresh publication are confirmed at that site. The ConfigMap has an incident
 lifecycle outside Argo reconciliation; delivery latency and API-server/kubelet
-availability are explicit assumptions (proposed ADR 0041 §1). Entra disablement
+availability are explicit assumptions (ADR 0041 §1). Entra disablement
 and secret-scanning revocation require fresh publication; encoded credential
 expiry and a locally applied denylist are the independent paths.
 
 Publication must prevent source regression after the authoritative publication
 record advances. An old leader may publish before its successor advances that
 record, bounded by source-read expiry; immediate rejection of all stale leaders
-is not established by the current model (proposed ADR 0041 §5). Pointer CAS
+is not established by the current model (ADR 0041 §5). Pointer CAS
 alone is insufficient. A fencing generation and source revision are checked
 against an authoritative publication record; losing leadership or CAS requires
 reloading inputs and rebuilding, never just renumbering old content. The
 mechanism is a Phase 0 spike and an M1 gate. The source manifest binds the
 state revision and complete accepted config set, including deletions, to a
 monotonic config revision. Renewal requires freshness evidence for both
-inputs; Kubernetes resourceVersion is opaque. See proposed ADR 0041 §5.
+inputs; Kubernetes resourceVersion is opaque. See ADR 0041 §5.
 
 Gateway status is diagnostic, not an authoritative rollback checkpoint.
 Bootstrap and replacement gateways obtain a trusted publication floor from
@@ -107,9 +107,11 @@ Scan the entire bounded JSON document before forwarding; reject malformed
 JSON, trailing values and duplicate object members. Extract every
 policy-relevant field regardless of order, including model, capabilities,
 output limits, storage controls, object references and tools. Amended by
-proposed ADR 0041 §3: restricted mode rejects unapproved fields/API versions
-and betas; compatible mode forwards unknown features only with explicit
-scope/security approval. Known policy fields (contracts.md §8) are enforced
+ADR 0041 §3 and §7.1: restricted mode rejects unapproved fields, API
+versions and betas and is the default for the edge pool, non-agent
+applications and sensitive or residency-bound scopes; compatible mode
+forwards unknown features and is the default for coding-agent routes under
+one standing platform and security approval. Known policy fields (contracts.md §8) are enforced
 in both modes. Logging is bounded and sanitized or keyed-hashed; nightly
 detection is not a remediation-time guarantee. Provider behavior and
 contractual data controls still require review.
@@ -163,7 +165,7 @@ Gateway pods must not hold Langfuse project credentials. Amended by ADR
 to the project the snapshot names for the scope; it accepts captured
 traces only from authenticated gateway workloads and only for projects allowed
 to that pool. A compromised shared gateway can relabel captures among those
-projects: the pool is the compromise boundary (proposed ADR 0041 §2). Narrower
+projects: the pool is the compromise boundary (ADR 0041 §2). Narrower
 isolation requires separate workloads/pools and destinations. Inherited projects
 are shared read boundaries requiring explicit reader approval. Capture uses a
 dedicated receiver/pipeline without operational-exporter fan-out.
@@ -194,7 +196,7 @@ This protects retained history, not the honesty of a compromised event producer.
 Bound outbox growth. Widening mutations fail closed before ordinary audit
 capacity is exhausted; reserve bounded audit capacity for restrictive changes.
 At emergency-capacity exhaustion use the separately audited local denylist,
-not unaudited writes or blocked revocation. See proposed ADR 0041 §1.
+not unaudited writes or blocked revocation. See ADR 0041 §1.
 
 Standalone binds only to loopback unless explicitly configured, rejects
 unexpected Host/Origin values and browser cross-site requests, and requires
@@ -228,7 +230,7 @@ and site allocations are not required. What remains required:
   worst-case cost (no cache discount, `max_tokens` or the model maximum,
   no server-side tools).
 - Numeric aggregate bounds are not established by the single-principal
-  accounting model. Proposed ADR 0041 §6 requires scope/multi-site bounds,
+  accounting model. ADR 0041 §6 (and §7.3 for failed renewal) requires scope/multi-site bounds,
   counter handoff and failed-renewal scenarios before such claims are made.
 - Reconciliation is monthly with daily previews and ADR 0038's 3–5%
   tolerance; unexplained larger differences are investigated.
@@ -280,7 +282,7 @@ accounting durability and publication fencing are measured. The first
 production slice may use one team, site and native backend; broader M1
 features cannot waive these gates.
 
-Additional M1 gates from proposed [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md): denylist survival
+Additional M1 gates from [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md): denylist survival
 through Argo sync/prune/restarts; restrictive writes during audit backpressure;
 negative Argo/Crossplane authorization tests; composite state/config freshness
 and restrictive-right restore scenarios. Capture-pipeline and human-access

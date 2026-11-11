@@ -50,4 +50,4 @@ baseline one, marked in both.
 | [0039](0039-bypass-controls.md) | Block bypass: SCPs for Bedrock, egress blocks, provider key-creation limits, managed agent settings |
 | [0040](0040-argo-cd-and-crossplane.md) | Delivery through Argo CD and Argo Rollouts; cloud resources through the platform's Crossplane (`GolemInstallation`, `GolemSite`) |
 
-| [0041](0041-security-boundaries-and-incident-controls.md) | Proposed: incident denial/audit resilience, pool capture boundary, request feature modes, delivery privileges and expanded publication/accounting evidence |
+| [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, the pool capture boundary and a golem-owned capture collector, request feature modes by route class, delivery privileges, composite publication freshness by consistent reads, narrowed budget claims |

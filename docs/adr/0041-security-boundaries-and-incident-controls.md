@@ -1,7 +1,7 @@
 # 0041: Security boundaries and incident controls after the second review
 
-Status: Proposed. Amends ADRs 0029, 0031, 0032, 0035, 0037 and 0040
-in the areas below. These are requirements and assumptions to validate,
+Status: Accepted, with the adaptations in §7. Amends ADRs 0029, 0031,
+0032, 0035, 0037 and 0040 in the areas below. These are requirements and assumptions to validate,
 not implemented controls or proofs. Four-hour internal leases, soft budgets,
 collector-held capture credentials and platform delivery remain the design.
 
@@ -194,3 +194,55 @@ or per-request journals. The platform/security owners must review the shared
 pool/project boundary and compatible-feature exceptions before activation.
 The listed negative tests and model extensions are outstanding work, to be
 tracked in the roadmap rather than described as completed validation.
+
+## 7. Adaptations on acceptance
+
+Accepted as written except where this section says otherwise; where it
+does, it governs.
+
+**7.1 Feature mode default by route class (adapts §3).** The default is
+set by the kind of traffic, not one value for everything:
+
+- **Restricted** is the default for the edge pool, for non-agent
+  applications, and for every scope whose policy names a sensitive data
+  class, a residency rule, or a storage or egress restriction.
+- **Compatible** is the default for coding-agent routes (keys and tokens
+  issued by `golemctl agent setup` and routes marked `agent`), under one
+  standing approval recorded by the platform team and security, not a
+  sign-off per scope. Coding agents ship weekly; restricted mode would break
+  every agent user on each release until a review, which is the failure
+  ADR 0037 was written to avoid. All known policy controls (contracts.md §8)
+  and the M1 stateful-object refusals apply in both modes.
+- A scope can always tighten to restricted; loosening a restricted scope to
+  compatible needs its owner's and security's approval, as §3 says.
+
+**7.2 Freshness by consistent reads (adapts §5).** golem-control
+establishes freshness of both inputs on every renewal directly, rather than
+through watch synchronization barriers: a consistent (quorum) LIST of the
+config CRDs from the API server and a GET of the state document, both cheap
+at golem's size (tens of objects, a few MB). The source manifest binds
+`state_version`, the accepted config set's digest (UIDs, generations and
+content, deletions included) and a publisher-maintained config revision;
+the lease is anchored to the earlier of the two read times. The watch
+remains the trigger for prompt publication, not the proof of freshness.
+
+**7.3 Failed slot renewal (adapts §6).** When a gateway cannot confirm
+slot renewal (Valkey unreachable):
+
+- it stops admitting new calls for the affected principals, using its own
+  local in-flight count as the limit until renewal works again;
+- in **soft** scopes, calls already streaming continue (cancelling a
+  developer's ten-minute agent turn for an infrastructure blip is the
+  worse outcome), and the exposure is recorded as a waiver of the bound
+  for that interval;
+- in **strict** scopes, it attempts cancellation as §6 requires.
+
+**7.4 A golem-owned capture collector (adapts §2).** The isolated capture
+pipeline is a separate OpenTelemetry collector Deployment owned by golem,
+not a pipeline inside the enterprise collector: it has only the Langfuse
+exporters, accepts only the gateway pools' workload identities, holds only
+capture credentials, and is the only Secret the provisioning job may write.
+Its compromise exposes the capture credentials it holds and nothing else;
+the enterprise collector keeps operational telemetry and holds no Langfuse
+credentials.
+

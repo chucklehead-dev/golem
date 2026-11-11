@@ -1,6 +1,6 @@
 # 0035: Capture: a Langfuse project per top-level team, inheritable; the collector holds the credentials
 
-Proposed amendment: [ADR 0041](0041-security-boundaries-and-incident-controls.md)
+Amended by [ADR 0041](0041-security-boundaries-and-incident-controls.md)
 updates the security boundary, requirements and acceptance evidence below.
 
 Status: Accepted. Amends [0016](0016-capture-and-retention.md) and security-and-correctness.md §6.
@@ -17,9 +17,9 @@ Status: Accepted. Amends [0016](0016-capture-and-retention.md) and security-and-
 - **Overrides**: keys and services may only turn capture down (content to
   metadata, or off); they cannot lengthen retention or turn capture on.
 - **Credentials**: gateways never hold Langfuse keys. They send captured
-  traces, tagged with the destination project, to the enterprise OTel
-  collector, which holds each project's credentials and routes to it: the
-  collector is the capture broker, and it already exists.
+  traces, tagged with the destination project, to a golem-owned capture
+  collector (ADR 0041 §7.4), which holds each project's credentials and
+  routes to it; the enterprise collector holds none.
 - **Provisioning**: a golem-control job creates a project when a scope
   first needs its own, through Langfuse's organisation API, and adds its
   credentials to the collector's Secret.

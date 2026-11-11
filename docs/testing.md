@@ -115,7 +115,7 @@ is required at its stated milestones. The models cover fenced publication
 and authorization freshness (model/publication.md) and the soft-budget
 bound, deduplication and reconciliation (model/accounting.md).
 
-## Second security review gates (proposed ADR 0041)
+## Second security review gates (ADR 0041)
 
 [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) adds negative tests for denylist persistence under Argo
 sync/self-heal/prune/upgrade/restart; both audit capacity thresholds; capture

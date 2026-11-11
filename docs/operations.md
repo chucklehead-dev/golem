@@ -16,7 +16,7 @@ Crossplane for cloud resources, and a few golem-control jobs.
 | Bucket, KMS keys, IAM roles, SCPs, Entra registrations | Crossplane claims: `GolemInstallation` once, `GolemSite` per remote site (ADR 0040) | Includes the bypass SCP of ADR 0039 and remote sites' Roles Anywhere or federation |
 | Argo CD Applications | An ApplicationSet over the site list; sync waves: CRDs, then golem-control, then gateway pools | |
 | ClickHouse DDL, Grafana dashboards and alerts | Chart hooks (a Job for DDL; ConfigMaps for Grafana's sidecar) | |
-| Collector routing | A snippet merged into the enterprise collector's config, plus the Langfuse credentials Secret it reads | ADR 0035 |
+| Capture collector | A golem-owned OpenTelemetry collector Deployment: Langfuse exporters only, accepts only gateway pool identities, holds the capture credentials Secret (ADR 0041 §7.4) | The enterprise collector keeps operational telemetry and no Langfuse credentials |
 
 ## 2. Day-2 operations
 
@@ -28,9 +28,9 @@ Crossplane for cloud resources, and a few golem-control jobs.
 | **Provider credential rotation** | Update the Secret; kubelet refreshes the mounted file; the gateway re-reads it. Workload identity needs none. |
 | **Backend maintenance** | Planned: `Backend.spec.disabled` or `weight: 0` in GitOps. Unplanned: an expiring override (`golemctl overrides create --disable deployment/... --for 2h --reason ...`). |
 | **Incident freeze** | A freeze override stops publication to a pool; gateways keep their snapshot until the lease runs out (ADR 0032). |
-| **Emergency revocation** | Site responders edit a separately bootstrapped denylist outside Argo ownership/pruning; confirm projected-volume propagation and stream termination. No seconds guarantee until measured; local Kubernetes delivery must work. Keep denials until fresh durable revocation is confirmed (proposed ADR 0041 §1). |
+| **Emergency revocation** | Site responders edit a separately bootstrapped denylist outside Argo ownership/pruning; confirm projected-volume propagation and stream termination. No seconds guarantee until measured; local Kubernetes delivery must work. Keep denials until fresh durable revocation is confirmed (ADR 0041 §1). |
 | **Authorization runway** | Internal alerts follow ADR 0032. Edge pools warn after one missed 60-second renewal and page after two, before their five-minute expiry; include bounded clock skew and name the actual expiry time. |
-| **Langfuse projects** | A golem-control job creates a project when a scope first needs its own and adds its credentials to the collector's Secret (ADR 0035). |
+| **Langfuse projects** | A golem-control job creates a project when a scope first needs its own and adds its credentials to the capture collector's Secret (ADRs 0035, 0041). |
 | **Second site** | The bucket replicated to the standby region; its gateways read the replica; a golem-control there scaled to zero; the failover runbook promotes the replica and scales up (ADR 0008). |
 | **Support** | `golemctl support-bundle`: CRD statuses, gateway status objects, recent errors, a flight-recorder trace from a chosen gateway. |
 
@@ -41,10 +41,10 @@ already knows every cluster; nothing in one cluster reaches another's API server
 (ADR 0008). Remote sites run gateway pools and a Valkey; their config CRDs
 live in the EKS cluster, selected by a `site` label.
 
-## Proposed incident and delivery requirements
+## Incident and delivery requirements (ADR 0041)
 
 [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) specifies the denylist lifecycle, reserved restrictive-action
 audit capacity, dedicated capture pipeline, inherited-project readers, and
 least-privileged Argo/Crossplane deployment. Bootstrap must establish the denylist
 before gateway readiness; charts never render, own or prune its contents.
-The control-plane provisioning job may update only named capture Secrets.
+The control-plane provisioning job may update only the capture collector's Secret (§7.4).

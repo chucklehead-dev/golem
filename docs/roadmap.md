@@ -193,7 +193,7 @@ site allocations. Stored provider objects
 are deferred pending ownership/routing records. Staffing and these spikes
 must be measured before the milestone durations are treated as commitments.
 
-## Second security review amendments (proposed ADR 0041)
+## Second security review amendments (ADR 0041)
 
 M0 delivery renders and negative authorization tests cover platform trust
 boundaries. M1 gates: incident denylist survival, audit backpressure with

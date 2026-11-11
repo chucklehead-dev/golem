@@ -197,7 +197,7 @@ is in ClickHouse (ADR 0015).
   workload identity; its cap is $6k; its keys are for a vendor
   integration that cannot do Entra.
 
-## Proposed capture-access boundary
+## Capture-access boundary (ADR 0041)
 
 Per [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md#2-capture-uses-pool-and-project-trust-boundaries-m2),
 inheriting a Langfuse project requires review of its actual readers. A child
