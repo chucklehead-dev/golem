@@ -64,7 +64,9 @@ prevent double counting.
 | Column | Type | Notes |
 |---|---|---|
 | `schema_version` | UInt16 | this table's contract version |
-| `row_kind` | Enum: `actual`, `estimated`, `adjustment` | estimated: a cut stream counted from deltas; adjustment: reconciliation |
+| `row_kind` | Enum: `estimate`, `settlement`, `adjustment` | estimate: before settlement or a cut stream counted from deltas; settlement: the attempt's actual usage; adjustment: reconciliation |
+| `supersedes_event_id` | Nullable(UUID) | the event a settlement or adjustment replaces or corrects; balances count only the latest event in each chain |
+| `certainty` | Enum: `certain`, `uncertain` | uncertain: dispatched, outcome unknown (a crash, a lost response); kept until provider evidence or a conservative estimate resolves it |
 | `request_id`, `attempt_id`, `event_id` | UUID | logical request, upstream attempt, stable accounting-event identity (ADR 0029) |
 | `provider_request_id` | String | the provider's own ID, for disputes |
 | `started_at`, `ended_at` | DateTime64(3, UTC) | |
@@ -88,6 +90,9 @@ prevent double counting.
   once, at the end.
 - Adjustment rows (from provider reconciliation, ADR 0012) carry the
   period, account and model they correct and a reason.
+- Balances and rollups are computed from a view deduplicated by
+  `event_id` that keeps only the head of each `supersedes_event_id` chain;
+  no query sums the raw table (ADR 0029).
 - Schema changes are additive within a version; a breaking change is a new
   table version with a view keeping the old shape for one release.
 

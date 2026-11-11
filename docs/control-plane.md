@@ -18,7 +18,8 @@ Components and APIs at a glance: architecture.md §1–3.
 - Enforce every rule of the org model on writes: who may do what, budget
   arithmetic, approvals, key constraints within the owner's rights.
 - Compile, sign and publish each gateway pool's **snapshot** (§4).
-- Set every site's **budget ceilings** from the ledger (ADR 0013).
+- Issue every site's **fixed budget allocations** per period from
+  unallocated funds (ADRs 0013, 0029); the ledger is for monitoring only.
 - Answer spend queries from ClickHouse.
 - Record every change as an audit event, atomically with it (§3).
 
@@ -119,10 +120,10 @@ control plane.
   alert.
 - **Revocation latency**: the write plus the one-second poll, about two
   seconds.
-- **Freshness**: the leader re-signs the pointer at least hourly; a
-  gateway refuses new requests after its signed authorization lease expires
-  (five-minute default). Authorization renewal must use fresh authoritative
-  inputs; the hourly signing schedule is not an authorization renewal.
+- **Freshness** (ADRs 0029, 0030): every snapshot carries a signed
+  authorization lease (five minutes by default). The leader renews every
+  pool's authorization every 60 seconds from current state and CRDs; a
+  gateway refuses new requests once its lease has expired.
 
 ## 5. Identity, keys and bootstrap
 
@@ -160,7 +161,7 @@ Run by the leader; each an idempotent scan.
 | Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps |
 | Allocation monitoring | every 30 s | Fixed per-period allocations, no reclamation of issued ceilings (ADR 0029) |
 | Audit shipping | every few seconds | Archive before outbox trim; ClickHouse is a query projection |
-| Pointer refresh | hourly | Re-signs every pool's pointer |
+| Authorization renewal | every 60 s | Rebuilds and republishes every pool's snapshot from current state, extending its authorization lease (ADR 0030) |
 | Key, request and registration expiry; reminders | hourly | Expires keys, adjustment requests, registrations past TTL; notifies 7 days and 1 day ahead |
 | Ledger and provider reconciliation | daily | Counters against the ledger (data older than an hour); the ledger against provider usage APIs (ADR 0012) |
 | Threshold notifications | with allocation monitoring | 50/80/100% at key, member and pool level |

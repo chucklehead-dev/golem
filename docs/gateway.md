@@ -187,7 +187,8 @@ except OTel's API.
   and that its `publish_seq` exceeds its floor (the trusted publisher checkpoint and atomically persisted local
   checkpoint; status is diagnostic and cannot set the trusted floor), then fetches the snapshot by hash and verifies its signature and
   hash (ADR 0007). Anything unsigned, wrongly signed or older is ignored and
-  alarmed; so is a pointer more than a day old.
+  alarmed. Once the signed authorization lease has expired (five minutes
+  by default, ADR 0030) the gateway refuses new model requests.
 - An **emergency denylist** (a ConfigMap mounted as a file, read with
   `os.Root`) is applied over every snapshot: a site admin's way to revoke a
   key or principal when the control plane or the bucket is unreachable.

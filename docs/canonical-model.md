@@ -105,8 +105,11 @@ cache miss, which on coding-agent traffic can double its cost.
 - Cache breakpoints placed by golem (for Chat callers on Claude) are put at
   stable positions: the end of the system content and the last stable turn.
 - A property test: for random conversations and random extensions of them,
-  the encoding of the prefix is a byte prefix of the encoding of the
-  extended conversation, for every encoder.
+  the encoded cache-relevant blocks of the prefix (system content, tools,
+  earlier turns) are byte-identical in the encoding of the extended
+  conversation, for every encoder. Whole request bodies are not prefixes of
+  each other (closing delimiters and per-request fields change); the
+  property is about the blocks providers cache.
 
 ## 5. Tests
 

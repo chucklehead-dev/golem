@@ -13,7 +13,7 @@ and the least where the compiler and a table test suffice.
 
 | Risk | Example | Main defence |
 |---|---|---|
-| Overspend or double charge | a retry reserves twice; a crashed gateway's reservation never expires; a ceiling rebalance lowers a site below its spend | Quint models of the reservation and ceiling protocols (§3), Hegel state machines against them, simulation with faults |
+| Overspend or double charge | a retry reserves twice; a crashed gateway's reservation never expires; a disconnected site's allocation is reclaimed and spent twice | Quint models of the reservation and ceiling protocols (§3), Hegel state machines against them, simulation with faults |
 | Rights wider than intended | a key outlives its owner's membership; a narrow override widens capture | Hegel properties over random org histories; table tests of the resolution rules |
 | Content in the wrong place | capture on for a scope whose policy forbids it; a trace not deleted at expiry | Properties of capture resolution; an end-to-end test that checks Langfuse and ClickStack for content |
 | Broken streams | usage missed when a stream ends early; a dialect error event malformed; a translated tool call reordered | Goldens from recorded provider streams; fuzzing the SSE parser and scanners; translation properties |
@@ -106,7 +106,7 @@ liveness), before any code is bound to it.
 
 The trial is judged as any test is: by what it catches. Each model's
 checks are proved by planted mutants (a reserve that skips one level, a
-rebalance that ignores in-flight use, a publisher that skips the pointer's version check) that the
+an allocation reclaimed from a disconnected site, a publisher that skips the pointer's version check, a stale leader that publishes after losing leadership) that the
 model must reject; a model whose mutants survive is not worth keeping.
 
 ## Review acceptance gates

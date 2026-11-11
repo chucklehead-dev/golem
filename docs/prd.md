@@ -528,8 +528,9 @@ is revoked automatically.
 
 ### 9.4 SLOs and recovery
 
-Gateway availability 99.95% (it serves from snapshots through
-control-plane outages); control plane 99.9%; store RPO by bucket versioning (every prior state kept) and, with two regions, replication; the
+Gateway availability 99.95% while golem-control, the bucket and KMS meet
+their own; golem-control 99.95% as well, since authorization is renewed
+every minute within a five-minute lease (ADR 0030); store RPO by bucket versioning (every prior state kept) and, with two regions, replication; the
 ledger's ClickHouse backups; RTO for a region's control plane 30 min.
 
 ### 9.5 Error catalog
