@@ -92,18 +92,17 @@ and no LISTEN/NOTIFY to lean on.
   commits late with an early timestamp is therefore still seen. Writes
   made by the replica itself are applied immediately, without waiting for
   the poll.
-- **Snapshot versions.** A replica holds the current snapshot in memory
-  (built at start from a full read, then updated per change by
-  re-reading the affected objects). A version is a content hash plus the
-  watermark; gateways treat versions as opaque and compare hashes.
-- **Watch.** A gateway calls `Watch(gateway_name, region, have_hash)` on any
-  replica of its region. It receives a full snapshot if its hash is
-  unknown, then deltas (upserts and deletes by object id) as they are
-  built. Deltas are idempotent, so a gateway that reconnects to another
-  replica and receives a change twice is unaffected.
-- **Selection.** A `Gateway` resource names the config a group of gateways
-  receives (by label selector on config objects, e.g. per region or per
-  security zone). Entitlements go to all.
+- **Whole snapshots** (ADR 0026). On a new change-log row or a CRD
+  change, debounced to once a second, a replica rebuilds the whole snapshot
+  from the store and its CRD cache (a few thousand rows: milliseconds). Its
+  version is its content hash; gateways compare hashes.
+- **Watch.** A gateway calls `Watch(pool, have_hash)` on any replica of its
+  region and receives the current snapshot (compressed, about 0.5 MB) if
+  its hash differs, then each new one. Reconnecting to another replica is
+  just another Watch.
+- **Selection.** Each gateway pool's snapshot includes the config CRDs
+  matching its label selector (e.g. per region, or the edge pool's
+  consumers only) and every pool gets the entitlements.
 - **Revocation latency** is the poll interval plus the stream's latency:
   about a second within a region, a few seconds across regions
   (DSQL's cross-region replication included).
@@ -180,9 +179,8 @@ without changes, not without traffic.
 - Conflict tests: concurrent grants on one pool, concurrent key minting
   against a user's cap, approval racing withdrawal: each must end in a
   state the org model allows, with retries visible in metrics.
-- The change-log detection with late commits, replica failover and
-  duplicate deltas is checked against a small model of "every committed
-  change reaches every watching gateway, in an order consistent with
-  per-object versions" (a good fit for gotogether's simulation and Quint
-  tooling).
+- The change-log detection with late commits and replica failover is
+  checked against a small model of "every committed change is in a
+  snapshot that reaches every watching gateway within the bound" (a good
+  fit for gotogether's simulation and Quint tooling).
 - API compatibility: `buf breaking` against the last release in CI.

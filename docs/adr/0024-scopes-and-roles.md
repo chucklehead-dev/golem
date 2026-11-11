@@ -1,6 +1,6 @@
 # 0024: Teams and projects are one entity; four roles
 
-Status: Proposed. Amends 0008 and org-model.md.
+Status: Proposed. Amends 0008 and org-model.md. Amended by [0026](0026-design-envelope.md): team scopes may have a parent team (sub-teams, depth two).
 
 ## Context
 

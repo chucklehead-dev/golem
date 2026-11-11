@@ -44,7 +44,8 @@ The platform team's own apps and coding agents, us-east-2, EKS.
 - **Gateway**: Chat, Responses, Messages, Embeddings, models list; backends
   OpenAI, Anthropic, Foundry (Azure OpenAI and Claude), Bedrock (Anthropic
   envelope, Chat→Converse), standalone vLLM (static endpoints, discovered
-  models, adaptive concurrency, prefix affinity, overflow); Chat→Anthropic
+  models, adaptive concurrency, prefix affinity, per-principal fair share,
+  overflow); Chat→Anthropic
   translation; aliases, weighted and least-in-flight balancing, failover,
   retries with a retry budget, ejection, prompt-cache affinity; provider
   quota limits per deployment (below); in-process hooks (`Request`,
@@ -117,8 +118,10 @@ price list upkeep, model lifecycle, release engineering, the threat model
 and onboarding: each was implicit or missing, and is now a requirement in
 PRD §9, scheduled in the phases above.
 
-## Open inputs that affect sizing
+## Sizing
 
-- Expected request volume and concurrency (now and at enterprise default),
-  to size gateways, Valkey and the ClickHouse ledger.
-- The number of teams, projects and keys, to size the snapshot.
+Settled by the design envelope (PRD §9.12, ADR 0026): three gateways per
+region, two api and one worker replicas of golem-control, one Valkey
+primary with a replica, and ClickHouse and DSQL far inside their limits.
+Per-principal fair share on local GPU pools moves into M1 with those
+pools.

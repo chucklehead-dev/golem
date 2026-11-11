@@ -45,7 +45,7 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
      distribution API ───────────────┐            golem-operator (M2): installs,
    golem-control  worker role        │            upgrades, drains, mesh policies,
      jobs, same service layer        │            Langfuse projects
-   store: Aurora DSQL | Postgres     │ stream: snapshot + deltas; acks
+   store: Aurora DSQL | Postgres     │ stream: whole snapshots; acks
                                      ▼
                               golem-gateway ×N ──▶ providers, model servers
                                      │   └──▶ Valkey (limits, quotas)
@@ -80,7 +80,7 @@ optimistic concurrency (it maps onto DSQL's), field masks, page tokens,
 | Audit | `golem.audit.v1` | admins, auditors | AuditEvent (list, filter) |
 | Admin | `golem.admin.v1` | admins | Gateways and pools (versions, snapshot hashes, health), drain, snapshot inspection |
 | Registration | `golem.registration.v1` | model servers | `Register`, `Heartbeat` (PRD §5.2.1) |
-| Distribution | `golem.distribution.v1` | gateways | `Watch` (server stream: snapshot, then deltas), `Ack` (applied version, compile errors, health); `Lease` with the second region (ADR 0016) |
+| Distribution | `golem.distribution.v1` | gateways | `Watch` (server stream of whole snapshots, ADR 0026), `Ack` (applied version, compile errors, health); `Lease` with the second region (ADR 0016) |
 
 Authorization is in the service layer, not the transport: every method
 checks the caller's role on the resource (org-model §2).
@@ -156,7 +156,7 @@ Each binary also gets its own image and its own dependency list in
   `ModelRoute` CRD; CI runs `golemctl config validate` against the control
   API. After merge, Argo or Flux applies it (the admission webhook rejects
   it if invalid). golem-control sees it through its watch, builds the new
-  snapshot version, and streams the delta to every gateway whose pool
+  snapshot, and streams it to every gateway whose pool
   selects it. Each gateway compiles and acks; golem-control writes
   `Applied: 12/12` in the CRD's status.
 - **An incident.** A provider deployment misbehaves; an admin runs

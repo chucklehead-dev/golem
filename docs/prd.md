@@ -1,6 +1,6 @@
 # golem: product requirements
 
-Status: draft for discussion. Revised 2026-11-11 (fifth pass: simplifications of ADRs 0023–0025; the roadmap in roadmap.md).
+Status: draft for discussion. Revised 2026-11-11 (sixth pass: the design envelope, ADR 0026; the roadmap in roadmap.md).
 
 ## 1. Problem
 
@@ -185,6 +185,10 @@ Models on all of them change over time.
   in-flight relative to that limit, refined by vLLM's `/metrics` (running
   and waiting requests, KV-cache use) and with **prefix affinity** within
   the limit.
+- **Fair share** (ADR 0026): on these scarce pools golem queues per
+  principal and serves round-robin across principals, and caps each
+  principal's share of a pool's capacity (default half), so the few very
+  heavy users cannot occupy every machine.
 - **Overflow**: at the limit, or on 429/503, requests go to the alias's
   fallback pool before the first byte, or wait briefly for a slot if the
   route allows (`queue: 2s`).
@@ -397,7 +401,8 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
 - **Multiple instances and regions**: `GatewayPool`s per region or zone;
   in multi-region, a control plane per region over one DSQL cluster.
 - Container-aware GOMAXPROCS (runtime default), `GOMEMLIMIT` from the
-  limit, PDBs, HPA or KEDA *(added)*.
+  limit, PDBs; fixed replicas sized for the design envelope (ADR 0026)
+  *(added)*.
 
 ### 5.10 Security and compliance
 
@@ -490,12 +495,9 @@ New:
 3. **SaaS consumers**: which SaaS apps first, and whether they support
    OAuth client credentials or only static keys.
 
-New this round (inputs to sizing):
-
-4. **Volume**: expected requests per second, concurrent streams and
-   tokens per day, now and at enterprise default.
-5. **Scale of the org**: number of teams, projects and keys (for the
-   snapshot and the console).
+Resolved in the sixth pass: SaaS consumers use static service keys for
+now (ADR 0022); the size of the enterprise and its organisation set the
+design envelope (§9.12, ADR 0026), which adds sub-teams to the org model.
 
 ## 9. Cross-cutting requirements
 
@@ -561,3 +563,14 @@ operator's and control plane's RBAC.
 
 A guide per SDK and agent, `golemctl agent setup`, and an `observe`-mode
 period per team before enforcement.
+
+### 9.12 Design envelope
+
+Under 2,000 users (bi- or tri-modal: under 100 heavy, under 10 very heavy),
+under 10 top-level teams with 3–10 sub-teams each, 4–10 projects per team.
+golem is designed for ten times that (ADR 0026: about 10,000 concurrent
+streams, 500 requests per second, 50,000 keys, a 20 MB snapshot), with
+dashboards that alert as traffic approaches it. Within it: whole-snapshot
+distribution, fixed gateway replicas, a single Valkey primary with a
+replica. The heavy tail drives cost and local GPU demand, so per-principal
+fairness on scarce pools and per-user concurrency limits are M1.

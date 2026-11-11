@@ -9,7 +9,7 @@ lives) and 0016 (multi-region enforcement).
 | Entity | Identity | Notes |
 |---|---|---|
 | **User** | Entra `oid` (+ `tid`) | Created on first sign-in. Display name and UPN from the token. |
-| **Scope** | golem id; `kind: team \| project` | Where spend is charged and rights come from. A **team** may be bound to Entra groups (membership synced from Graph) and/or managed in golem. A **project** is owned by exactly one team (its primary team); its members may be other teams (all their members), services and users. |
+| **Scope** | golem id; `kind: team \| project` | Where spend is charged and rights come from. A **team** may have a parent team (a sub-team; depth at most two, ADR 0026) and may be bound to Entra groups (membership synced from Graph) and/or managed in golem. A **project** is owned by exactly one team (its primary team); its members may be other teams (all their members), services and users. |
 | **Service** | golem id; Entra app (client id) and/or SPIFFE ID; service keys | Owned by one scope. A non-human principal. May be added to other projects. |
 | **Cost center** | external code (e.g. `CC-4410`) | Not managed by golem: a funding source referenced by budgets, with its budget managers. |
 | **Key** | `glm_` + 32 random bytes, stored as SHA-256 | Belongs to a user or a service; bound to one **scope**. |
@@ -27,7 +27,7 @@ Four roles (ADR 0024):
 | Role | Held on | May |
 |---|---|---|
 | Member | a scope | Use the scope's models within their cap; mint personal keys in the scope; set capture and retention on their own keys, as far as the scope permits (§3.1). |
-| Manager | a scope (a binding may be narrowed to one service) | Manage membership (where not Entra-bound); create services; set caps for members and services; grant the scope's money to projects (a team's managers: to projects it owns or belongs to); create projects (a team's managers: owned by the team); request adjustments; set capture settings and the override mode; mint, rotate and revoke service keys. A project's owning team's managers are its managers unless set otherwise. |
+| Manager | a scope (a binding may be narrowed to one service) | Manage membership (where not Entra-bound); create services; set caps for members and services; grant the scope's money to projects (a team's managers: to projects it owns or belongs to); create projects (a team's managers: owned by the team); request adjustments; set capture settings and the override mode; mint, rotate and revoke service keys. A project's owning team's managers, and a sub-team's parent team's managers, are its managers unless set otherwise. |
 | Budget manager | a cost center (or globally) | Grant from the cost center to scopes; approve or reject requests that draw on it (new grants, permanent and one-time adjustments). |
 | Admin | global | Everything, including operational overrides; break-glass. |
 
@@ -116,6 +116,7 @@ by a **grant**:
 |---|---|---|---|
 | Cost center | team | budget manager | none (the budget manager is the approver) |
 | Cost center | project | budget manager, or requested by a manager | budget manager |
+| Team | sub-team (a team whose parent it is) | the team's managers | none |
 | Team | project (any project the team owns or is a member of) | the team's managers | none (confirmed) |
 | Team or project | member user or service (a **cap**) | the scope's managers | none |
 
@@ -129,7 +130,7 @@ A pool's numbers for a period:
 
 ```
 pool.total     = Σ grants in
-pool.granted   = Σ grants out to projects            (team pools only)
+pool.granted   = Σ grants out to sub-teams and projects   (team pools only)
 pool.available = total − granted − spent − reserved
 ```
 
@@ -155,8 +156,8 @@ What happens at a limit depends on the scope's enforcement mode (PRD
 with a warning header and a notification, `enforce` refuses.
 
 At completion the reservation becomes spend (corrected to actual cost).
-Team pools are not charged for a project's spend: the grant already
-moved that money. Thresholds (e.g. 50/80/100%) at every level emit an
+Team pools are not charged for a sub-team's or a project's spend: the
+grant already moved that money. Thresholds (e.g. 50/80/100%) at every level emit an
 event and notify the pool's managers; 100% at level 2 or 3 rejects, or
 downgrades to a configured cheaper alias.
 

@@ -17,7 +17,7 @@ data plane should do data-plane work only.
   is another, for objects not owned by CRDs. Objects carry an owner, and
   only the owner may change them.
 - Gateways have one input: the distribution API's `Watch` stream, which
-  carries a snapshot of both and then deltas. A file with the same format
+  carries snapshots of both (whole snapshots since ADR 0026). A file with the same format
   replaces it in development and tests.
 - The snapshot, its compile step and its atomic swap stay as ADR 0002
   described.

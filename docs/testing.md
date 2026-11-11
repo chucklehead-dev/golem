@@ -13,7 +13,7 @@ and the least where the compiler and a table test suffice.
 | Rights wider than intended | a key outlives its owner's membership; a narrow override widens capture | Hegel properties over random org histories; table tests of the resolution rules |
 | Content in the wrong place | capture on for a scope whose policy forbids it; a trace not deleted at expiry | Properties of capture resolution; an end-to-end test that checks Langfuse and ClickStack for content |
 | Broken streams | usage missed when a stream ends early; a dialect error event malformed; a translated tool call reordered | Goldens from recorded provider streams; fuzzing the SSE parser and scanners; translation properties |
-| Stale or inconsistent config | a gateway misses a change (late DSQL commit); a delta applied twice | A model of the change-log feed; Hegel: deltas in any order and duplication give the full snapshot |
+| Stale or inconsistent config | a gateway misses a change (a late DSQL commit); a snapshot built from a half-read change | A model of the change-log feed; Hegel: a snapshot rebuilt after any sequence of changes equals one built from scratch |
 | Retry storms | failover from a saturated local box to a commercial model amplifies a brownout | Metastability analysis and load simulation (§3.4) |
 | API drift | a provider adds a field or changes an event | Recorded contract fixtures; a nightly live smoke test per provider with tiny prompts |
 | Performance regression | allocations creep onto the fast path | Benchmarks with allocation budgets in CI |
@@ -51,7 +51,7 @@ Its value for golem is in the protocols, not the plumbing.
 |---|---|---|
 | **Reserve and reconcile** (ADR 0005) | reservations per level, spend, gateway crash and restart, store loss and rebuild from the ledger, retries before the first byte, streams ending early | never charged twice for one request; every reservation ends as spend or expires; a hard cap exceeded by at most the in-flight estimation error; rebuild converges to the ledger |
 | **Regional leases** (ADR 0016) | leases per region, consumption, rebalance, synchronous top-up, partition from the control plane | `Σ leases + spent ≤ available` always; a partitioned region spends only what it holds; after a settle, unused lease returns (eventually, on a settled run) |
-| **Change-log distribution** (control-plane.md §4) | transactions committing out of timestamp order, polling with lookback, replica failover, duplicated and reordered deltas, gateway reconnects | every committed change reaches every watching gateway; a gateway's snapshot always equals some prefix-consistent state; revocation within the bound after a settle |
+| **Change-log distribution** (control-plane.md §4) | transactions committing out of timestamp order, polling with lookback, replica failover, gateway reconnects | every committed change is in a snapshot that reaches every watching gateway; a gateway's snapshot is always one the control plane built; revocation within the bound after a settle |
 | **Attempt loop** (ADR 0007) | attempts, first byte, failover, retry budget, ejection | no retry after the first byte; retries bounded by the budget; an ejected deployment receives nothing until probed back |
 | **Approvals and grants** (org-model §4.3) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
 

@@ -19,8 +19,9 @@ to do it.
   cannot starve internal traffic.
 - Each external caller is a **consumer**: a Service (org-model §1) marked
   external, owned by the team or project that pays for the SaaS app, with
-  - credentials: a service key, or Entra client credentials (an app
-    registration per consumer, where the SaaS supports OAuth) when it can;
+  - credentials: static service keys (decided for now), two active at a
+    time so a key can be rotated with an overlap; Entra client
+    credentials later, for SaaS apps that support OAuth;
   - allowed source ranges (the ingress enforces them; for GitHub, from
     GitHub's published meta ranges, refreshed by the worker and applied by
     the operator);
