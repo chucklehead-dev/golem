@@ -21,10 +21,10 @@ content, evaluations) without three bespoke exporters on the request path.
     request id, so at-least-once delivery does not double count). The
     collector uses a persistent queue so a ClickHouse outage delays
     records rather than losing them;
-  - GenAI spans to Langfuse's OTLP endpoint, with `langfuse.*` attributes
-    (user, session, tags, metadata) and golem's computed cost, so Langfuse
-    and the ledger agree. Prompt and completion content is attached only
-    where the scope's policy allows, and only on the Langfuse route.
+  - (amended by ADR 0018) Langfuse is not a collector route: the gateway
+    exports captured traces to the capturing scope's own Langfuse project,
+    with `langfuse.*` attributes (user, session, tags, metadata) and
+    golem's computed cost, so Langfuse and the ledger agree.
 - Grafana dashboards and alert rules live in `deploy/grafana`, over the
   ClickHouse data source (spend, budgets, errors, latency, TTFT) and
   metrics.

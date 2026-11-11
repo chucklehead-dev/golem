@@ -66,6 +66,7 @@ the operator.
 | **Pause** | `GatewayPool.spec.paused` stops config delivery to a pool (incident freeze); gateways keep their snapshot. |
 | **Scaling** | HPA on CPU by default; optional KEDA on in-flight streams read from the control plane's admin API. |
 | **Mesh** | Waypoint for the gateway Service; AuthorizationPolicies: only the waypoint may reach the gateway's data port when identity headers are trusted (ADR 0003); only gateways may call the distribution API; admin ports reachable only from the operator and the control plane. |
+| **Langfuse projects** | For each scope with capture set to metadata or content (read from the control API): ensure a Langfuse project through the organisation API, set its retention to the scope's maximum, create its API keys, add them to the `golem-langfuse` Secret mounted into gateways and the worker, and report the destination ready (ADR 0018). Archived scopes' projects are deleted after their longest retention. |
 | **Telemetry plumbing** | Applies the ClickHouse DDL (`golem.spend`, rollups, audit) as a Job; publishes Grafana dashboards as ConfigMaps for Grafana's sidecar (or Grafana operator resources); emits the collector routing snippet to merge into the enterprise collector config. |
 | **Store** | Backups and PITR belong to the store (DSQL, or CloudNativePG); the operator reports connectivity and migration state, it does not back up. |
 | **Support** | `golemctl support-bundle` collects CRDs, statuses, gateway versions and acks, recent errors and a flight-recorder trace from a chosen gateway. |

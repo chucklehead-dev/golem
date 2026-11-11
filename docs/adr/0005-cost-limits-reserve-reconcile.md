@@ -22,10 +22,17 @@ output, which dominates cost for agents.
 - Budget levels (org model §4.2): key cap, member allocation, scope pool.
   One reserve checks every applicable level and rate limit in one script
   call and reserves at all of them or none.
-- The store speaks RESP: Dragonfly, Valkey or Redis. Scripts declare every
+- The store speaks RESP. **Valkey is the reference engine**: BSD-licensed,
+  and available managed wherever golem will run (ElastiCache for Valkey
+  on AWS, node-based, one shard with a replica in a second zone to start;
+  Azure Managed Redis on AKS; the Valkey operator or Dragonfly on-prem).
+  Dragonfly (a single multi-threaded node that scales vertically, BSL-
+  licensed, fine for internal use) and Redis are tested and supported.
+  The load is small (a reserve and a reconcile per request, each one
+  script call), so the choice is about operations, not throughput. Scripts declare every
   key they touch in `KEYS` (Dragonfly requires it by default) and keep a
   scope's keys under one hash tag (`{scope:<id>}`) so they also work on
-  Redis Cluster. Tested against Valkey and Dragonfly in CI.
+  Valkey or Redis cluster mode. Tested against Valkey and Dragonfly in CI.
 - Without a store (M1 option): in-memory per instance, each replica
   enforcing a configured share. With one, on store failure: rate limits
   fall back to local shares; budget levels fail open or closed per scope

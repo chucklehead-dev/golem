@@ -45,7 +45,8 @@ response:  provider → backend dialect → usage + cost (reconcile) → fronten
 inputs:    distribution stream from golem-control → compile → atomic Snapshot   (ADR 0012)
            or a file, for development and tests (the same snapshot format)
 state:     Dragonfly | Valkey | Redis (reservations, counters, regional lease) (ADR 0005, 0016)
-outputs:   OTLP → collector (ADR 0010); status reports → golem-control
+outputs:   OTLP → collector (ADR 0010); captured traces → the scope's Langfuse project (ADR 0018);
+           status reports → golem-control
 local:     /livez /readyz /healthz /startupz, pprof, snapshot dump, explain (read-only, admin port)
 ```
 

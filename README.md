@@ -25,7 +25,8 @@ Status: design. Nothing is built yet.
 - [docs/operator.md](docs/operator.md): CRDs and day-2 operations.
 - [docs/tools.md](docs/tools.md): golemctl, the console, Backstage.
 - [docs/org-model.md](docs/org-model.md): users, teams, projects, services,
-  keys, roles, budgets, grants and approvals.
+  keys, roles, budgets, grants, approvals, capture and retention.
+- [docs/entra.md](docs/entra.md): the Entra ID app registrations.
 - [docs/adr/](docs/adr/): the decisions, one per record.
 
 Comparable products, for reference: LiteLLM, agentgateway, Langfuse AI

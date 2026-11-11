@@ -16,7 +16,7 @@ milestone (M0) confirms them.
 | [0007](0007-no-replay-after-first-byte.md) | Retries and failover stop at the first response byte | Proposed |
 | [0008](0008-org-and-budget-model.md) | Requests bound to one scope; delegated roles; grants between pools; three-level enforcement | Proposed |
 | [0009](0009-control-plane-and-entitlements.md) | golem-control owns entitlements in a SQL store; the gateway holds a snapshot fed by a stream | Proposed |
-| [0010](0010-telemetry-destinations.md) | OTLP only, routed by the collector to ClickStack, the ClickHouse ledger and Langfuse | Proposed |
+| [0010](0010-telemetry-destinations.md) | OTLP only, routed by the collector to ClickStack and the ClickHouse ledger (Langfuse amended by 0018) | Proposed |
 | [0011](0011-decision-dialects.md) | OpenAI Decisions and System One as a decision dialect family | Proposed |
 | [0012](0012-config-through-the-control-plane.md) | Config reaches gateways through the control plane; CRDs are written by the operator | Proposed |
 | [0013](0013-components-and-layering.md) | Components with one job each; layering checked by a test | Proposed |
@@ -24,3 +24,5 @@ milestone (M0) confirms them.
 | [0015](0015-sql-store-postgres-and-dsql.md) | One SQL store for Aurora DSQL and PostgreSQL | Proposed |
 | [0016](0016-regional-budget-leases.md) | Budgets enforced through regional leases | Proposed |
 | [0017](0017-operator.md) | An operator for installation and day-2, writing config through the API | Proposed |
+| [0018](0018-capture-and-retention.md) | Content capture per scope with override control; a Langfuse project per scope; retention per record | Proposed |
+| [0019](0019-self-hosted-model-servers.md) | Self-hosted vLLM/SGLang as services by default, load- and prefix-aware replica routing when golem must choose | Proposed |

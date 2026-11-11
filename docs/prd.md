@@ -1,6 +1,6 @@
 # golem: product requirements
 
-Status: draft for discussion. Revised 2026-11-11 (third pass).
+Status: draft for discussion. Revised 2026-11-11 (fourth pass).
 
 ## 1. Problem
 
@@ -126,18 +126,56 @@ the provider as is, authenticated and metered where usage can be read.
 
 | Backend | Auth to provider | Milestone |
 |---|---|---|
-| OpenAI | API key | M1 |
+| OpenAI (commercial API: Chat, Responses, Embeddings, Decisions) | project API keys; organisation and project headers per deployment | M1 |
 | Anthropic | API key | M1 |
 | AWS Bedrock (InvokeModel, Converse, embeddings) | SigV4: EKS Pod Identity (initially); on AKS or on-prem, Entra-to-AWS OIDC federation (`AssumeRoleWithWebIdentity`) or IAM Roles Anywhere with the workload's X.509 identity *(added)*; Bedrock API keys | M1 (EKS), M2 (elsewhere) |
-| Azure OpenAI / Azure AI Foundry | Entra workload identity *(added)*, API key | M1 |
+| Microsoft Foundry: Azure OpenAI models (the v1 OpenAI-compatible API: Chat, Responses, Embeddings) | Entra token (workload identity federation from the EKS service account), API key for testing | M1 |
+| Microsoft Foundry: Claude (`https://<resource>.services.ai.azure.com/anthropic/v1/messages`) | Entra bearer token (scope to confirm: Microsoft's docs say `https://ai.azure.com/.default`; some models are Entra-only), API key | M1 |
+| Microsoft Foundry: other Foundry Models (OpenAI-compatible chat) | Entra token, API key | M2 |
 | OpenAI Decisions | API key | M1 |
 | TypeSafe System One | API key | M1 |
-| Any OpenAI-compatible (vLLM, SGLang, Ollama, KServe) | none, key, mesh mTLS | M1 |
+| Self-hosted vLLM and SGLang, in other clusters or data centers (§5.2.1) | mesh mTLS (multi-cluster), bearer key, or TLS client certificate | M1 |
+| Other OpenAI-compatible servers (Ollama, KServe, TGI) | none, key, mTLS | M2 |
 | Google Vertex AI | workload identity federation | M3, if needed |
 
 Each backend has its own timeouts (connect, first byte, idle between
 chunks, total), connection pool, and egress path (direct or the mesh's
 egress gateway) *(added)*.
+
+Same-dialect envelopes rather than translations: Anthropic Messages to
+Claude on Foundry and on Bedrock; OpenAI dialects to Azure OpenAI on
+Foundry (a base path and auth change).
+
+#### 5.2.1 Self-hosted model servers (ADR 0019)
+
+vLLM and SGLang run on GPU clusters that are not the gateways' clusters.
+
+- **Endpoints**: a Backend is either a *service* (one URL fronted by the
+  serving platform's own balancer: llm-d, an Inference Gateway, KServe, a
+  plain load balancer), the default, or a list of *replicas* (static,
+  DNS, or the mesh's multi-cluster service discovery) when golem should
+  pick the replica itself.
+- **Dialects**: OpenAI Chat, Completions and Embeddings on both;
+  Anthropic Messages pass-through where the server exposes it (vLLM's
+  `/v1/messages`; to confirm per version), so coding agents can use
+  self-hosted models without translation; otherwise Messages to Chat
+  translation (M2).
+- **Load-aware routing** for replica lists: golem polls each replica's
+  load (vLLM's `/metrics`: running and waiting requests, KV-cache use;
+  SGLang's load endpoint and metrics) every second and routes to the
+  least loaded, with **prefix affinity** so requests sharing a prompt
+  prefix land on the replica holding it in KV cache.
+- **Backpressure**: a server's 429/503 or a full queue sheds to fallback
+  pools (commercial models, other regions) before the first byte; long
+  queue times count against the first-byte timeout, which is set per
+  backend.
+- **Health**: active probes (`/health`) and passive ejection; WAN-aware
+  timeouts and keepalives.
+- **Pricing**: internal per-token rates set by `PriceOverride` (e.g. from
+  GPU cost amortised over measured throughput), so self-hosted spend is
+  charged to scopes like any other.
+- **Model names**: the server's `--served-model-name` is the deployment's
+  model; aliases hide it.
 
 ### 5.3 Authentication and identity
 
@@ -259,7 +297,7 @@ routes it (ADR 0010):
 |---|---|---|
 | ClickStack (ClickHouse + HyperDX) | All traces, logs, metrics; the access log | Operational search, HyperDX for incidents |
 | ClickHouse `golem.spend` | One record per request (org model §4.4), from the access log by materialized view, deduplicated by request id | The ledger: chargeback, budget rebuilds, spend APIs |
-| Langfuse | GenAI spans (and content where the scope's policy allows), with `langfuse.user.id`, `langfuse.session.id`, tags, scope and project metadata, and golem's own cost | Sessions, prompt/completion review, evaluation, shadow comparisons |
+| Langfuse (one project per capturing scope, ADR 0018) | GenAI traces with content, or metadata only, as the scope chooses; `langfuse.user.id`, `langfuse.session.id`, tags, scope metadata and golem's own cost | Sessions, prompt/completion review, evaluation, shadow comparisons, with Langfuse access matching the scope |
 | Grafana | Dashboards and alerts over ClickHouse (spend, budgets, limits, errors, latency, TTFT) and metrics, provisioned from this repo | Operators, managers, FinOps |
 
 - **Traces**: SERVER span per inbound request, CLIENT span per upstream
@@ -271,12 +309,12 @@ routes it (ADR 0010):
   `gen_ai.client.operation.duration`, `gen_ai.server.time_to_first_token`,
   `gen_ai.server.time_per_output_token`; cost; limit decisions; retries,
   failovers, ejections; hooks; in-flight streams.
-- **Content capture** off by default. Users may turn it on for their own
-  keys; team and project managers for their services and projects; the
-  scope policy sets the ceiling (allowed or not, sample rate, redaction
-  hooks that must run). Captured content goes only to Langfuse, tagged
-  with who enabled it; retention is Langfuse's, set per project there
-  (§8 Q5).
+- **Content capture** off by default, set per team or project with
+  retention, and overridable by keys and services only as far as the
+  scope allows (org-model §3.1, ADR 0018). Captured content goes only to
+  the scope's own Langfuse project, which golem provisions; per-record
+  retention is enforced by deletion, with the Langfuse project's
+  retention as a backstop.
 - **Request metadata headers** *(added)*: `x-golem-session`,
   `x-golem-tags`, `x-golem-end-user` (or OpenAI's `user`, Anthropic's
   `metadata.user_id`); coding-agent sessions grouped automatically where
@@ -375,24 +413,30 @@ protocol-agnostic so it can be added.
 
 Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
 (§5.3); Gloo Mesh ambient (§5.9); the telemetry stack (§5.8); store:
-Aurora DSQL preferred, PostgreSQL elsewhere (ADR 0015); teams as drafted
-(golem-managed, optionally Entra-bound); console then Backstage (tools.md);
-team-to-project grants need no approval; allocations may oversubscribe;
-EKS first, AKS and on-prem later (§5.2); content capture switches (§5.4,
-§5.8).
+Aurora DSQL preferred, PostgreSQL elsewhere (ADR 0015); teams as drafted;
+console then Backstage (tools.md); team-to-project grants need no
+approval; allocations may oversubscribe; EKS first, AKS and on-prem later;
+backends: OpenAI, Foundry, remote vLLM and SGLang (§5.2); content capture
+and retention per scope with override control (ADR 0018); notifications by
+email and Teams (control-plane.md §5.1); limit store: Valkey as the
+reference engine, ElastiCache for Valkey on AWS (ADR 0005); regions:
+us-east-2 first (architecture.md §6); Entra app registrations listed in
+entra.md.
 
 1. **Waypoint identity header.** Verified in an M1 spike against your Gloo
-   Mesh version (ADR 0003): which header carries the caller's SPIFFE ID
-   and how the waypoint is configured to set it.
-2. **Limit store.** Dragonfly, Valkey or Redis per region: any
-   preference? (Scripts are written for Dragonfly's declared-keys rule and
-   Redis Cluster hash tags.)
-3. **Regions.** Which regions, and is a DSQL multi-region cluster
-   (two regions plus a witness) available, or single-region first?
-4. **Entra app registrations.** One app for golem's API audience and one
-   for the console, plus Graph `GroupMember.Read.All` for the worker:
-   who owns them?
-5. **Content retention.** Langfuse project retention for captured content,
-   and whether some scopes must never capture (the scope policy can forbid
-   it).
-6. **Notifications.** Email (which relay), Teams webhooks, or both?
+   Mesh version (ADR 0003).
+2. **Second region.** us-west-2 or us-east-1 as the second active region
+   (the third becomes the DSQL witness). Recommendation: us-west-2, for
+   geographic separation from us-east-2; it matters little to latency at
+   LLM response times.
+3. **Entra ownership.** Who owns the app registrations in entra.md, and who
+   grants admin consent for the worker's Graph permissions?
+4. **Retention classes.** Which retention durations to offer (e.g. 7, 30,
+   90, 365 days) and the global ceiling; whether any data classes forbid
+   capture outright.
+5. **Self-hosted fronting.** Do the vLLM/SGLang clusters already have a
+   balancer (llm-d, an Inference Gateway, KServe), or should golem route to
+   replicas (ADR 0019)? And how are they reached: Gloo multi-cluster, or
+   TLS over the network?
+6. **Internal prices.** Who sets the per-token rates for self-hosted
+   models, and from what (GPU cost, a flat rate)?

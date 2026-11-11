@@ -10,6 +10,7 @@ rules that keep them apart. Each component's inside has its own document:
 | [operator.md](operator.md) | golem-operator: CRDs, deployment, day-2 operations |
 | [tools.md](tools.md) | golemctl, golem-console, the Backstage plugin |
 | [org-model.md](org-model.md) | the entitlement model all of them share |
+| [entra.md](entra.md) | the Entra ID app registrations they need |
 
 ## 1. Components
 
@@ -44,7 +45,8 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
                                  ▼
                           golem-gateway  ×N ──▶ providers
                                  │   └──▶ RESP store (limits, leases)
-                                 └──▶ OTLP collector ──▶ ClickStack · ClickHouse golem.spend · Langfuse
+                                 ├──▶ OTLP collector ──▶ ClickStack · ClickHouse golem.spend
+                                 └──▶ captured traces ──▶ Langfuse (a project per capturing scope)
 ```
 
 There is exactly one public API for changing anything: the control API.
@@ -170,9 +172,18 @@ Each binary also gets its own image and its own dependency list in
 | Topology | Store | Notes |
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
-| Single region (EKS, initially) | Aurora DSQL single-region, or Postgres | One operator, control, worker; gateways per zone |
-| Multi-region | Aurora DSQL multi-region (active-active) | golem-control and worker in each region against the local endpoint; gateways use their region's control; RESP store per region; budgets enforced through regional leases (ADR 0016) |
+| Single region (EKS in us-east-2, first) | Aurora DSQL single-region cluster in us-east-2 | One operator, control, worker; gateways across zones; ElastiCache for Valkey |
+| Multi-region (later: us-east-2 plus us-west-2 or us-east-1) | Aurora DSQL multi-region: two peered clusters, the third US region as witness | golem-control and worker in each region against the local endpoint; gateways use their region's control; Valkey per region; budgets through regional leases (ADR 0016) |
 | AKS or on-prem | Postgres (CloudNativePG or managed) | Same code, same SQL dialect (ADR 0015); Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
 
 The gateway, the worker and golem-control each scale independently; only
 the gateway is on the request path.
+
+**Going multi-region later.** AWS documents creating peered DSQL clusters,
+not converting a single-region one, so the move is planned as a migration:
+create the peered pair, pause control-plane writes (the API answers
+read-only; gateways keep serving from their snapshots and leases, so model
+traffic is unaffected), copy the store with `golem-worker store copy`
+(through the store layer, in chunks), point golem-control at the new
+endpoint, resume. The store is small (entitlements and config, not
+spend), so the pause is minutes.

@@ -119,7 +119,25 @@ reads from a file in development.
 | Approval expiry and reminders | hourly | Expires stale requests; reminds approvers |
 | Ledger reconciliation | daily, and on demand | Compares regional counters and lease use with ClickHouse spend per pool; corrects drift; alerts beyond a threshold |
 | Threshold notifications | on lease reports | 50/80/100% at key, member and pool level; email or Teams webhook, plus an audit event |
-| Content capture expiry | daily | Turns off time-boxed capture grants (org-model §3.1) |
+| Content capture expiry | hourly | Turns off time-boxed capture switches (org-model §3.1) |
+| Capture retention | hourly | Finds captured traces past their expiry in the ledger and deletes them from their Langfuse projects in batches (ADR 0018); alerts when behind |
+
+### 5.1 Notifications
+
+Both channels, chosen per event and per recipient preference:
+
+- **Email** through Microsoft Graph `sendMail` from one shared mailbox
+  (the worker's application permission is limited to it), or an SMTP
+  relay where Graph mail is not allowed. Personal events go by email:
+  approval requests to budget managers, decisions to requesters, key
+  expiry, allocation changes, threshold crossings of one's own caps.
+- **Teams**: channel messages through a Workflows webhook URL that each
+  team or project can configure (threshold crossings, pending approvals,
+  grant changes for the scope). Personal Teams notifications (activity
+  feed or a bot) need a Teams app and are Later.
+- Messages link to the console (or `golemctl` commands) and to the
+  relevant Grafana panel. Delivery failures retry with backoff and are
+  visible in audit.
 
 Jobs take a lease row in the store (one runner per job per region) so the
 worker can run more than one replica.

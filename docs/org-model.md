@@ -26,9 +26,9 @@ Roles are assigned in golem and audited; the Entra app role
 
 | Role | Held on | May |
 |---|---|---|
-| Member | team, project | Use the scope's models within their allocation; mint personal keys in the scope; turn content capture on or off for their own keys. |
-| Team manager | team | Manage team membership (where not Entra-bound), create projects owned by the team, create team services, allocate the team's budget to members, services and projects; request adjustments; turn content capture on or off for team services and for the projects the team owns. |
-| Project manager | project | Add/remove member teams, services, users; create project services; allocate the project's budget to members and services; request adjustments; turn content capture on or off for the project and its services. A project's primary team's managers are its project managers by default. |
+| Member | team, project | Use the scope's models within their allocation; mint personal keys in the scope; set capture and retention on their own keys, as far as the scope permits (§3.1). |
+| Team manager | team | Manage team membership (where not Entra-bound), create projects owned by the team, create team services, allocate the team's budget to members, services and projects; request adjustments; set the team's capture settings and override mode, and capture on team services. |
+| Project manager | project | Add/remove member teams, services, users; create project services; allocate the project's budget to members and services; request adjustments; set the project's capture settings and override mode, and capture on project services. A project's primary team's managers are its project managers by default. |
 | Budget manager | cost center (or globally) | Assign budgets to teams and projects from the cost center; approve or reject requests that draw on it (new budgets, permanent and one-time adjustments). |
 | Service owner | service | Mint, rotate and revoke the service's keys (team or project managers by default). |
 | Admin | global | Everything, plus operator config views; break-glass. |
@@ -58,17 +58,32 @@ Key constraints, all optional:
 - expiry (personal keys must expire; the maximum lifetime is policy,
   e.g. 90 days); not-before;
 - source binding: allowed SPIFFE IDs (from the mesh), CIDRs;
-- `max_tokens` ceiling, allowed `reasoning` effort, no-content-capture flag;
+- `max_tokens` ceiling, allowed `reasoning` effort; capture and retention overrides (§3.1);
 - metadata: name, purpose, tags (become telemetry attributes).
 
-### 3.1 Content capture
+### 3.1 Content capture and retention
 
-Prompt and completion capture is off unless switched on for the request's
-key, service or project (whichever is most specific wins), and never beyond
-the scope policy's ceiling (forbidden, or allowed with a sample rate and
-required redaction hooks). A switch may be time-boxed; the worker turns
-it off at expiry. Every switch is an audit event, and captured records
-carry who enabled capture. Content goes to Langfuse only.
+Decided in ADR 0018. Capture settings live at three levels:
+
+| Level | Set by | Settings |
+|---|---|---|
+| Scope policy (operator config) | platform admins | the ceiling: capture allowed or forbidden, maximum retention, maximum sample rate, required redaction hooks |
+| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the offered classes, within the ceiling); `sample`; `override`: locked, narrow, open |
+| Key or service | the key's owner; the service's owner | `capture` and `retention`: inherit (default), or an override the scope permits |
+
+What a child (key or service) may override:
+
+- `locked`: nothing; the scope's settings apply.
+- `narrow`: only towards less: turn capture off or down to metadata,
+  lower the sample, shorten retention.
+- `open`: also towards more: turn capture on, lengthen retention, up to
+  the scope policy's ceiling.
+
+The effective setting is computed per request from the snapshot: the most
+specific permitted value, clipped to the ceiling. A switch may be
+time-boxed (the worker turns it off at expiry). Every change is an audit
+event; every captured record carries its effective retention, its expiry
+and who enabled capture. Content goes only to the scope's Langfuse project.
 
 ### 3.2 Minting
 
