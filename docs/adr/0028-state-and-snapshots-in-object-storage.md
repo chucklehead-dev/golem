@@ -1,6 +1,6 @@
 # 0028: Control-plane state as one document in object storage; snapshots distributed through it
 
-Status: Accepted. Supersedes [0027](0027-aurora-postgresql.md) for the
+Status: Accepted. Supersedes [0027](0027-aurora-postgresql.md) for the entitlement store (PostgreSQL remains the fallback implementation of the store interface). Amends 0009, 0012, 0016, 0026. Amended by [0029](0029-one-s3-store-for-every-site.md): one S3 store for every site at first.
 entitlement store (PostgreSQL remains the fallback implementation of the
 store interface). Amends 0009, 0012, 0016, 0026.
 
@@ -77,11 +77,16 @@ to be up for a gateway to start or to see a change.
 
 ### Where it runs
 
+In the initial phase every site shares one S3 bucket in us-east-2 (ADR
+0029): EKS through Pod Identity, AKS through Entra-to-AWS federation,
+on-prem through IAM Roles Anywhere or other credentials. Later options per
+site:
+
 | Target | State document (needs `If-Match`) | Snapshots (plain GET/PUT) |
 |---|---|---|
 | EKS | S3 in the region, via Pod Identity | the same bucket |
-| AKS | Azure Blob, via workload identity (or S3 via Entra-to-AWS federation) | the same store |
-| On-prem | Nutanix Objects if it supports conditional PutObject (to verify in Phase 0); otherwise S3 via IAM Roles Anywhere | Nutanix Objects, or S3 via Roles Anywhere or other credentials |
+| AKS | Azure Blob, via workload identity | the same store |
+| On-prem | Nutanix Objects, if it supports conditional PutObject | Nutanix Objects |
 
 The store interface (`Get`, `PutIfMatch`, `Put`, `List`) is small enough
 that each target is a thin adapter, all run against one conformance suite.

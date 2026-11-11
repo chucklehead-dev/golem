@@ -64,10 +64,11 @@ by compare-and-swap (ADR 0028).
   the newest schema it knows; rolling upgrades read n−1.
 - **History**: bucket versioning; `golemctl state restore --version …`
   (audited); lifecycle expiry of old versions.
-- **Targets**: S3 (EKS, Pod Identity), Azure Blob (AKS, workload
-  identity), on-prem Nutanix Objects if it supports conditional PutObject,
-  otherwise S3 through IAM Roles Anywhere. One small interface (`Get`,
-  `PutIfMatch`, `Put`, `List`) and one conformance suite for every adapter.
+- **Targets**: in the initial phase one S3 bucket in us-east-2 for every
+  site (ADR 0029): EKS through Pod Identity, AKS through Entra-to-AWS
+  federation, on-prem through IAM Roles Anywhere or other credentials.
+  One small interface (`Get`, `PutIfMatch`, `Put`, `List`), so Azure Blob
+  or Nutanix Objects adapters can follow, against one conformance suite.
 - **Not in the document**: audit (to ClickHouse as OTel logs, optionally
   Object Lock archives), registration heartbeats and live counters (Valkey),
   spend (ClickHouse).
@@ -166,7 +167,15 @@ scope's, a budget manager their cost centers'. Live pool usage (this
 period, to the minute) comes from the leases' reports rather than
 ClickHouse, so a manager's view matches what enforcement sees.
 
-## 7. Multi-region
+## 7. Sites and regions
+
+**Sites** (ADR 0029): one control plane in us-east-2 serves every site. AKS
+and on-prem clusters run gateway pools that read their snapshots from the
+us-east-2 bucket; their config CRDs live in the EKS cluster, selected by a
+`site` label. Their budget counters are the central Valkey when the round
+trip allows, otherwise a site Valkey with site leases (ADR 0016).
+
+**Regions**:
 
 With the second region (M3): the writer bucket in us-east-2, replicated to
 us-west-2 by S3 Cross-Region Replication with Replication Time Control.
@@ -179,8 +188,8 @@ traffic continues throughout.
 ## 8. Testing
 
 - Service-layer tests against the in-memory store, and the blob store's
-  conformance suite against S3 (or MinIO in CI), Azure Blob (Azurite) and
-  a fake; Nutanix Objects in the Phase 0 spike.
+  conformance suite against S3 (MinIO in CI) and a fake; other adapters
+  join the suite when they are added.
 - Conflict tests: concurrent grants on one pool, concurrent key minting
   against a user's cap, approval racing withdrawal: each must end in a
   state the org model allows, with retries visible in metrics.

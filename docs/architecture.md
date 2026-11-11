@@ -189,7 +189,7 @@ Each binary also gets its own image and its own dependency list in
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
 | Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (api, worker), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
 | Multi-region (later: us-east-2 and us-west-2) | Writer bucket in us-east-2, Cross-Region Replication to us-west-2 | golem-control in each region reading its local bucket and that region's CRDs, writing to the writer bucket; gateways read their region's bucket; Valkey per region; budgets through regional leases (ADR 0016) |
-| AKS or on-prem | Azure Blob; on-prem Nutanix Objects, or S3 through IAM Roles Anywhere (ADR 0028) | Same code, a different blob adapter; Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
+| AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0029): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; budget counters on the central Valkey if the round trip allows, else a site Valkey with site leases; Bedrock through the same federation |
 
 The gateway and golem-control's two roles each scale independently; only
 the gateway is on the request path.

@@ -381,9 +381,10 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
   plugin are API clients; the gateway reads only its snapshots from object
   storage and never calls the control plane.
 - **Store**: one state document in object storage, updated by
-  compare-and-swap (S3 on EKS, Azure Blob on AKS, Nutanix Objects or S3
-  through Roles Anywhere on-prem); snapshots are published to the same
-  store and polled by gateways (ADR 0028).
+  compare-and-swap; snapshots are published to the same store and polled by
+  gateways (ADR 0028). In the initial phase one S3 bucket in us-east-2
+  serves every site, with AKS and on-prem gateways reaching it through
+  Entra-to-AWS federation and IAM Roles Anywhere (ADR 0029).
 - **Gateway probes**: `/livez`, `/readyz` (a snapshot loaded, a usable
   deployment per required pool, limit store reachable when required),
   `/healthz`, `/startupz`; snapshot dump and `explain` on the admin port,
@@ -504,6 +505,16 @@ New:
 Resolved in the sixth pass: SaaS consumers use static service keys for
 now (ADR 0022); the size of the enterprise and its organisation set the
 design envelope (§9.12, ADR 0026), which adds sub-teams to the org model.
+
+Resolved in the eighth pass: Azure and on-prem sites share the us-east-2 S3
+store and control plane in the initial phase (ADR 0029).
+
+New:
+
+6. **Site connectivity**: the round trip from each AKS and on-prem site to
+   us-east-2 (decides central budget counters or site leases), and whether
+   they reach AWS privately (Direct Connect, a VPN, an S3 interface
+   endpoint).
 
 ## 9. Cross-cutting requirements
 
