@@ -3,7 +3,9 @@
 Status: draft, third pass. The system's components and how they fit are in
 [architecture.md](architecture.md); this document is the gateway's inside.
 The gateway does data-plane work only: it serves model requests. It has no
-API for changing anything, no database, and no Kubernetes client.
+API for changing anything, no database, no Kubernetes client, and it never
+calls the control plane: its input is its pool's snapshots in object
+storage (ADR 0028).
 
 ## 1. Principles
 
@@ -22,8 +24,8 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
   flushed through `http.ResponseController`; usage is read from the stream
   by a tee'd scanner, not by buffering it.
 - **Immutable config.** One validated snapshot (routes and entitlements)
-  behind an `atomic.Pointer`, delivered by the control plane's
-  distribution API (ADR 0012); a request takes the pointer once and uses
+  behind an `atomic.Pointer`, polled from object storage where the
+  control plane publishes it (ADR 0028); a request takes the pointer once and uses
   it to the end. No locks on the request path for config.
 - **Standard library first.** Dependencies only where the standard library
   has no answer (OTel, CEL, JWT/JOSE, the RESP client, provider signers),
@@ -42,11 +44,11 @@ request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect
            → Request hooks → router (alias, pool, deployment) → limits (reserve: key, member, pool, quota)
            → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
-inputs:    distribution stream from golem-control → compile → atomic Snapshot   (ADR 0012, 0023)
+inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0028)
            or a file, for development and tests (the same snapshot format)
 state:     Valkey (reservations, counters, provider quotas; regional lease with two regions) (ADR 0005, 0016)
 outputs:   OTLP → collector (ADR 0010); captured traces → the scope's Langfuse project (ADR 0018);
-           status reports → golem-control
+           status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
 ```
 
@@ -110,8 +112,8 @@ gateway/dialect/       one subpackage per dialect: openai/{chat,responses,embedd
                        each: scan, errors, SSE events, usage extraction
 gateway/dialect/ir     the intermediate representation, used only for translation
 gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT), meshid
-gateway/snapshot/      the compiled Snapshot (routes + entitlements), its distribution client,
-                       the file source, the on-disk last-good copy
+gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object-storage poller,
+                       the file source, the on-disk last-good copy, status writes
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
 gateway/limit/         Limiter; local GCRA/windows; RESP implementation; regional lease use
 gateway/price/         model catalog lookups and pricing (the catalog comes in the snapshot)
@@ -157,8 +159,8 @@ Third-party, each confined to one package: OpenTelemetry Go SDK and
 `otelslog` bridge (telemetry), `cel-go` (route, hook), `go-jose/v4`
 (auth/entra), `valkey-go` (limit; RESP3, works against Dragonfly and
 Valkey), `aws-sdk-go-v2`'s SigV4 signer and credential providers only
-(upstream/bedrock), `azidentity` (upstream/azure), the generated
-distribution client (connect-go, protobuf). No `pgx`, ClickHouse, Graph or
+(upstream/bedrock), `azidentity` (upstream/azure), the blob adapters'
+read path (snapshot), protobuf for the snapshot format. No `pgx`, ClickHouse, Graph or
 Kubernetes client: the import test (architecture.md §4.2) fails if one
 appears. The core (proxy, dialect, route, price) imports none of these
 except OTel's API.
@@ -166,16 +168,19 @@ except OTel's API.
 ## 6. Snapshot lifecycle
 
 - At start the gateway loads its last-good snapshot from disk (an
-  `emptyDir` or a small PVC) if present, then opens the distribution
-  stream. It is ready once it holds a snapshot no older than a configured
-  bound (or any snapshot, if the control plane is unreachable and the
-  operator allows stale starts).
-- Each update is compiled (CEL, lookup maps) off the request path and
-  swapped in; a failure to compile keeps the previous snapshot and is
-  reported back on the stream (and so reaches the CRD's status through the
-  operator).
-- The gateway acknowledges every version it applies; golem-control knows
-  which gateways run which version (`golemctl gateways`).
+  `emptyDir` or a small PVC) if present, then polls its pool's pointer in
+  object storage. It is ready once it holds a snapshot no older than a
+  configured bound (or any snapshot, if object storage is unreachable and
+  the pool allows stale starts).
+- Every second: a conditional GET of `snapshots/<pool>/current`. On a
+  change, it fetches the snapshot by hash, verifies the hash, and ignores
+  it if its `state_version` and `crd_generation` are older than what it
+  holds (so a stale pointer can never roll it back).
+- Each new snapshot is compiled (CEL, lookup maps) off the request path and
+  swapped in; a failure to compile keeps the previous snapshot.
+- After each apply (or failure) the gateway writes
+  `status/<pool>/<gateway-id>`: hash, versions, compile errors, time.
+  golem-control reads these for `Applied n/m` and `golemctl gateways`.
 - Runtime state that must survive updates (transports, ejection state,
   EWMAs, affinity tables) is keyed by deployment identity, not held in the
   snapshot.

@@ -1,6 +1,6 @@
 # 0009: A control plane owns entitlements; the data plane holds a snapshot
 
-Status: Proposed
+Status: Proposed. Amended by [0028](0028-state-and-snapshots-in-object-storage.md): the state is one document in object storage, and gateways poll their snapshots there.
 
 ## Context
 
@@ -15,12 +15,13 @@ is not a transactional store.
 ## Decision
 
 - A control plane, **golem-control** (APIs) with **golem-worker** (jobs),
-  owns entitlements in **PostgreSQL** (Aurora PostgreSQL on AWS; ADR
-  0027, which superseded 0015), and serves the self-service and admin API (Entra-authenticated,
-  roles per org model §2) and the distribution API.
+  owns entitlements (since ADR 0028, as one document in object storage)
+  and serves the self-service and admin API (Entra-authenticated, roles
+  per org model §2).
 - The gateway holds an immutable snapshot (entitlements and, since ADR
-  0012, operator config) behind an atomic pointer, kept current by the
-  distribution stream (control-plane.md §4). No store access from the gateway.
+  0012, operator config) behind an atomic pointer, kept current by polling
+  the snapshots golem-control publishes (control-plane.md §4). The gateway
+  never writes the state and never calls the control plane.
 - Behind an interface (`entitle.Source`) so that an external key or
   identity system can be a source instead (PRD §8 Q1).
 - golem-control being down stops changes, not traffic: the data plane
@@ -28,8 +29,7 @@ is not a transactional store.
 
 ## Consequences
 
-- Two more deployments and a store to run (Aurora PostgreSQL, or Postgres via
-  CloudNativePG or a managed service).
+- More deployments to run, and a bucket (ADR 0028).
 - Revocation latency is the feed's (about a second), not a cache TTL.
 - The snapshot's size grows with keys and members; at tens of thousands
   of keys it is still a few MB per instance.

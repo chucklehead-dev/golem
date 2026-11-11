@@ -368,7 +368,7 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
 | Component | Role | Milestone |
 |---|---|---|
 | golem-gateway | Data plane only: model requests in, provider calls out | M0 |
-| golem-control, `api` role | Control API (config read and check, overrides, org, keys, budgets, spend, audit), the distribution API, the CRD watch | M1 |
+| golem-control, `api` role | Control API (config read and check, overrides, org, keys, budgets, spend, audit), the CRD watch, snapshot publication to object storage | M1 |
 | golem-control, `worker` role | Jobs: Entra sync, period rollover, expiries, notifications, ledger reconciliation, retention | M1 |
 | golem-operator | Installation and day-2: upgrades, migrations, drains, canaries, credential mounting, mesh policies, Langfuse projects, telemetry plumbing (ADR 0023) | M2 (Helm in M1) |
 | golemctl | CLI for every persona, including `login` and coding-agent setup | M1 |
@@ -378,9 +378,12 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
 - **Two writers, one each**: declarative config is CRDs (GitOps), read by
   golem-control; entitlements and operational overrides change only through
   the control API (protobuf, Connect; ADR 0014, 0023). The CLI, console and
-  plugin are API clients; the gateway reads only the distribution stream.
-- **Store**: PostgreSQL everywhere: Aurora PostgreSQL on AWS, Azure
-  Database for PostgreSQL on AKS, CloudNativePG on-prem (ADR 0027).
+  plugin are API clients; the gateway reads only its snapshots from object
+  storage and never calls the control plane.
+- **Store**: one state document in object storage, updated by
+  compare-and-swap (S3 on EKS, Azure Blob on AKS, Nutanix Objects or S3
+  through Roles Anywhere on-prem); snapshots are published to the same
+  store and polled by gateways (ADR 0028).
 - **Gateway probes**: `/livez`, `/readyz` (a snapshot loaded, a usable
   deployment per required pool, limit store reachable when required),
   `/healthz`, `/startupz`; snapshot dump and `explain` on the admin port,
@@ -391,16 +394,16 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
 - **Mesh**: ambient mode; the gateway serves plain HTTP behind ztunnel;
   the operator installs the gateway's waypoint (optional) and the
   AuthorizationPolicies (only the waypoint to the data port when identity
-  headers are trusted; only gateways to the distribution API; admin ports
-  to the operator and control plane).
+  headers are trusted; admin ports to the operator and control plane);
+  bucket policies let each gateway pool read its snapshots and write only
+  its own status objects.
 - **Config**: five CRD kinds (`Backend`, `ModelRoute`, `ScopePolicy`,
   `Hook`, `PriceList`; ADR 0025) watched by golem-control, with status
   written back; incident levers as expiring overrides through the API.
   Provider secrets stay in Kubernetes Secrets, mounted into the gateways
   that need them.
 - **Multiple instances and regions**: `GatewayPool`s per region or zone;
-  in multi-region, a control plane per region over an Aurora Global
-  Database.
+  in multi-region, a control plane per region over a replicated bucket.
 - Container-aware GOMAXPROCS (runtime default), `GOMEMLIMIT` from the
   limit, PDBs; fixed replicas sized for the design envelope (ADR 0026)
   *(added)*.
@@ -466,7 +469,9 @@ edge pool); M3 multi-region, Temporal and the long tail.
 
 Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
 (§5.3); Gloo Mesh ambient (§5.9); the telemetry stack (§5.8); store:
-PostgreSQL everywhere, Aurora PostgreSQL on AWS (ADR 0027); teams as drafted;
+control-plane state as one document in object storage, snapshots
+distributed through it (ADR 0028, after 0027's Aurora PostgreSQL);
+teams as drafted;
 console then Backstage (tools.md); team-to-project grants need no
 approval; member caps may oversubscribe; EKS first, AKS and on-prem later;
 backends: OpenAI, Foundry, self-hosted vLLM on standalone machines now and
@@ -524,7 +529,7 @@ is revoked automatically.
 ### 9.4 SLOs and recovery
 
 Gateway availability 99.95% (it serves from snapshots through
-control-plane outages); control plane 99.9%; store RPO by Aurora's continuous backups and point-in-time restore; the
+control-plane outages); control plane 99.9%; store RPO by bucket versioning (every prior state kept) and, with two regions, replication; the
 ledger's ClickHouse backups; RTO for a region's control plane 30 min.
 
 ### 9.5 Error catalog

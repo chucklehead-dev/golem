@@ -13,7 +13,7 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 | Spike | Question | Depends on it |
 |---|---|---|
 | Waypoint identity | Which header carries the caller's SPIFFE ID through a Gloo Mesh ambient waypoint, and can the gateway's port be limited to the waypoint? | ADR 0003 mesh identity (M2) |
-| Aurora PostgreSQL from Go | pgx with IAM database authentication on Serverless v2, `InTx` at serializable with retries, goose migrations as a Job; a list-append workload through `qhistory` to confirm serializable histories | ADR 0027, the store |
+| Object storage CAS | S3 `If-Match` PutObject behaviour (412, retries, lost responses); Nutanix Objects: conditional PutObject or not, and plain GET/PUT for snapshots; IAM Roles Anywhere from on-prem; Azure Blob `If-Match` | ADR 0028, the store |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
 | Provider envelopes | Claude on Foundry (Entra scope, `/anthropic/v1/messages`), Anthropic on Bedrock (event-stream framing), Chat→Converse fidelity on tool calls | §5.1.2 translation scope |
 | vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; adaptive concurrency against one box | ADR 0019 |
@@ -57,8 +57,9 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   constraints, caps, team pools granted by admins; enforcement modes
   (below), starting in `observe`.
 - **Limits**: Valkey, reserve and reconcile, rate and concurrency limits.
-- **Control plane**: golem-control (api and worker roles) on Aurora PostgreSQL, CRD
-  config source, operational overrides, distribution, explain, audit.
+- **Control plane**: golem-control (api and worker roles) on the S3 state document, CRD
+  config source, operational overrides, snapshot publication to S3,
+  explain, audit.
 - **Ledger and dashboards**: ClickHouse `golem.spend` by materialized view;
   Grafana dashboards for spend, limits, latency, TTFT.
 - **Install**: Helm (no operator yet).
@@ -90,7 +91,7 @@ outage drill fails over without caller changes; budgets switched from
 - **Edge pool** for Copilot enterprise custom models and the first SaaS
   consumers.
 - **Registration** of model server endpoints (for cloud GPUs and NVL boxes).
-- **Testing**: distribution model; the store's isolation in simulation;
+- **Testing**: the state and distribution model; the state document under races in simulation;
   metastability analysis of overflow and retries (gotogether trials 2–4, 6).
 
 Exit: onboarding open to every team; direct provider keys revoked for teams
@@ -98,9 +99,9 @@ onboarded; budgets enforced for all of them.
 
 ## Phase 4 (M3): resilience and reach
 
-- Multi-region: us-west-2 as an Aurora Global Database secondary (a spike
-  first: the global writer endpoint or write forwarding, and a failover
-  drill), regional leases.
+- Multi-region: us-west-2 by Cross-Region Replication of the bucket (with
+  Replication Time Control), the replica-promotion runbook and a failover
+  drill, regional leases.
 - Temporal for approvals, key rotation and batch jobs, when the platform's
   Temporal is ready (ADR 0020).
 - Batch and Files, rerank, Decisions↔System One translation, cost-based
@@ -123,6 +124,6 @@ PRD §9, scheduled in the phases above.
 
 Settled by the design envelope (PRD §9.12, ADR 0026): three gateways per
 region, two api and one worker replicas of golem-control, one Valkey
-primary with a replica, and ClickHouse and Aurora far inside their limits.
+primary with a replica, the state document at about 1–2 MB, and ClickHouse far inside its limits.
 Per-principal fair share on local GPU pools moves into M1 with those
 pools.

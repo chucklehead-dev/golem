@@ -1,6 +1,6 @@
 # 0026: Designed for the enterprise's size, with the envelope stated
 
-Status: Proposed. Amends 0009, 0012, 0024, 0025. Amended by [0027](0027-aurora-postgresql.md): change detection by a version row, not a change log.
+Status: Proposed. Amends 0009, 0012, 0024, 0025. Amended by [0027](0027-aurora-postgresql.md) and [0028](0028-state-and-snapshots-in-object-storage.md): change detection and delivery through object storage.
 
 ## Context
 

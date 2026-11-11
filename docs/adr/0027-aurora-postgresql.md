@@ -1,6 +1,6 @@
 # 0027: PostgreSQL everywhere: Aurora PostgreSQL on AWS, Global Database for the second region
 
-Status: Accepted. Supersedes [0015](0015-sql-store-postgres-and-dsql.md).
+Status: Superseded by [0028](0028-state-and-snapshots-in-object-storage.md) for the entitlement store; kept as the fallback implementation of the store interface if the state outgrows the design envelope.
 Amends 0009, 0016, 0026.
 
 ## Context

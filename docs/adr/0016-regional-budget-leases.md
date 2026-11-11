@@ -14,8 +14,7 @@ request.
 - A pool's available amount for the period is divided into **leases**,
   one per region, held in the store by golem-control. Each region's RESP
   store enforces its lease as the pool level of ADR 0005.
-- Gateways report lease consumption (through the distribution API's
-  `Lease` method) every few seconds; the worker rebalances every 30 s,
+- Gateways report lease consumption (through the control API's `Lease` method) every few seconds; the worker rebalances every 30 s,
   moving unused lease to regions that consume it, in store transactions
   that keep `Σ leases + spent ≤ available`.
 - A region near exhaustion asks for more synchronously (one control API

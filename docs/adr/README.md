@@ -18,7 +18,7 @@ milestone (M0) confirms them.
 | [0009](0009-control-plane-and-entitlements.md) | golem-control owns entitlements in a SQL store; the gateway holds a snapshot fed by a stream | Proposed |
 | [0010](0010-telemetry-destinations.md) | OTLP only, routed by the collector to ClickStack and the ClickHouse ledger (Langfuse amended by 0018) | Proposed |
 | [0011](0011-decision-dialects.md) | OpenAI Decisions and System One as a decision dialect family | Proposed |
-| [0012](0012-config-through-the-control-plane.md) | Config reaches gateways through the control plane; CRDs are written by the operator | Write path superseded by 0023 |
+| [0012](0012-config-through-the-control-plane.md) | Config reaches gateways through the control plane; CRDs are written by the operator | Superseded by 0023 (write path) and 0028 (delivery) |
 | [0013](0013-components-and-layering.md) | Components with one job each; layering checked by a test | Amended by 0025 |
 | [0014](0014-connect-protobuf-apis.md) | APIs in protobuf, served with Connect | Amended by 0025 |
 | [0015](0015-sql-store-postgres-and-dsql.md) | One SQL store for Aurora DSQL and PostgreSQL | Superseded by 0027 |
@@ -33,4 +33,5 @@ milestone (M0) confirms them.
 | [0024](0024-scopes-and-roles.md) | Teams and projects are one Scope entity; four roles; caps unify allocations and key caps | Amended by 0026 |
 | [0025](0025-smaller-surfaces.md) | Smaller surfaces: one control binary in two roles, five config kinds, four hook phases, no LROs, leases deferred, explain in the control plane, no sampling at first | Proposed |
 | [0026](0026-design-envelope.md) | Designed for the enterprise's size: whole snapshots, fixed replicas, small stores, sub-teams, fair share, capture cost | Amended by 0027 |
-| [0027](0027-aurora-postgresql.md) | PostgreSQL everywhere: Aurora PostgreSQL on AWS, Global Database for the second region | Accepted |
+| [0027](0027-aurora-postgresql.md) | PostgreSQL everywhere: Aurora PostgreSQL on AWS, Global Database for the second region | Superseded by 0028 (kept as the fallback store) |
+| [0028](0028-state-and-snapshots-in-object-storage.md) | Control-plane state as one CAS-updated document in object storage; gateways poll their snapshots there | Accepted |

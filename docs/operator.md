@@ -14,8 +14,8 @@ Group `golem.dev`, version `v1alpha1`.
 
 | Kind | Describes | The operator creates |
 |---|---|---|
-| `ControlPlane` | golem-control's two roles for one region: image version, replicas, store connection (Aurora cluster endpoint and IAM role, or a Postgres DSN Secret), Entra app registration, ClickHouse and Valkey references, region name | Deployments (api, worker), Services, PDBs, ServiceAccounts (with workload identity annotations), RBAC to read config CRDs and write their status, the migration Job, AuthorizationPolicies |
-| `GatewayPool` | A set of gateways (internal, or `edge` for internet-facing consumers with its ingress, WAF and source ranges; ADR 0022): version, replicas, region, the label selector for the config it receives, Valkey reference, drain grace, waypoint on/off, provider Secrets to mount | Deployment, Service, PDB, ServiceAccount, waypoint and its AuthorizationPolicies, egress ServiceEntries for the providers its backends use; registers the pool with the control plane |
+| `ControlPlane` | golem-control's two roles for one region: image version, replicas, store (bucket, KMS key, and the identity to reach it: Pod Identity, workload identity, Roles Anywhere, or a credentials Secret), Entra app registration, ClickHouse and Valkey references, region name | Deployments (api, worker), Services, PDBs, ServiceAccounts (with workload identity annotations), RBAC to read config CRDs and write their status, AuthorizationPolicies |
+| `GatewayPool` | A set of gateways (internal, or `edge` for internet-facing consumers with its ingress, WAF and source ranges; ADR 0022): version, replicas, region, the label selector for the config it receives, Valkey reference, the bucket and the identity to read its snapshots (and write its status), drain grace, waypoint on/off, provider Secrets to mount | Deployment, Service, PDB, ServiceAccount, waypoint and its AuthorizationPolicies, egress ServiceEntries for the providers its backends use; registers the pool with the control plane |
 
 **Config** (golem-control's; ADR 0023, 0025): `Backend`, `ModelRoute`,
 `ScopePolicy`, `Hook`, `PriceList`. golem-control validates them, writes
@@ -43,7 +43,7 @@ they change through the control API (ADR 0009, 0023).
 
 | Operation | How |
 |---|---|
-| **Upgrade** | Order: migration Job (one DDL per step, ADR 0015) → control and worker (rolling) → gateways (rolling, `maxUnavailable: 0`). Version skew: the distribution API supports n−1 gateways, the control API n−1 clients. A failed migration stops the rollout and sets `ControlPlane` `Degraded`. |
+| **Upgrade** | Order: golem-control (rolling; it reads the state document's n−1 schema and upgrades it on its first write) → gateways (rolling, `maxUnavailable: 0`). Version skew: gateways read snapshots from n−1 control planes; the control API serves n−1 clients. A failed rollout stops itself and sets `ControlPlane` `Degraded`. |
 | **Gateway rollout** | New pods become ready only with a snapshot (gateway.md §6). Old pods drain: readiness off, `preStop` waits for in-flight streams up to `drainGrace` (default 10 min for agent streams), then end them with a dialect error event. `terminationGracePeriodSeconds` derived from it. |
 | **Canary** | `GatewayPool.spec.canary`: a second Deployment at the new version with a share of the Service's endpoints (or a waypoint weighted route), promoted when error and latency SLOs hold for a period. |
 | **Provider credential rotation** | Secrets are mounted into gateway pods (the operator knows which Backends a pool uses); kubelet refreshes the files and the gateway re-reads them (os.Root, poll). No restart, no secret in the control plane's store. Workload identity needs no rotation. |
@@ -53,7 +53,7 @@ they change through the control API (ADR 0009, 0023).
 | **Mesh** | Waypoint for the gateway Service; AuthorizationPolicies: only the waypoint may reach the gateway's data port when identity headers are trusted (ADR 0003); only gateways may call the distribution API; admin ports reachable only from the operator and the control plane. |
 | **Langfuse projects** | For each scope with capture set to metadata or content (read from the control API): ensure a Langfuse project through the organisation API, set its retention to the scope's maximum, create its API keys, add them to the `golem-langfuse` Secret mounted into gateways and the worker, and report the destination ready (ADR 0018). Archived scopes' projects are deleted after their longest retention. |
 | **Telemetry plumbing** | Applies the ClickHouse DDL (`golem.spend`, rollups, audit) as a Job; publishes Grafana dashboards as ConfigMaps for Grafana's sidecar (or Grafana operator resources); emits the collector routing snippet to merge into the enterprise collector config. |
-| **Store** | Backups and point-in-time restore belong to the store (Aurora, Azure, or CloudNativePG); the operator reports connectivity and migration state, it does not back up. |
+| **Store** | Bucket versioning and lifecycle rules (set when the `ControlPlane` is created), replication for the second region and the failover runbook (promote the replica bucket); the operator reports the document's size and CAS retry rate. |
 | **Support** | `golemctl support-bundle` collects CRDs, statuses, gateway versions and acks, recent errors and a flight-recorder trace from a chosen gateway. |
 
 ## 4. Build

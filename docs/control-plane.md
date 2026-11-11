@@ -28,16 +28,17 @@ service method:
 3. validates the change (cross-resource: a key's models are within its
    scope's policy; a cap's member is in the scope; an override names a
    deployment that exists),
-4. runs one serializable store transaction that writes the change, its
-   audit event and the `store_version` increment, retried on
-   serialization failures (ADR 0027),
+4. applies the change to a copy of the state, checks the org model's
+   invariants, and writes the document with `If-Match`, retrying the
+   whole function when another write won (ADR 0028); the audit event is
+   emitted after the write succeeds,
 5. returns the new resource with its etag.
 
 Services: `ConfigService` (read, validate a candidate CRD, explain,
 overrides), `OrgService` (scopes, memberships, services, role bindings),
 `KeyService`, `BudgetService` (grants, caps, adjustment requests),
 `SpendService`, `AuditService`, `AdminService`, and the internal
-`SnapshotBuilder` (CRDs from the watch, store state when `store_version` moves;
+`SnapshotBuilder` (CRDs from the watch, the state document when its ETag changes;
 `LeaseService` joins when there are two regions). The worker role calls
 the same services as a service principal; it never writes the store
 directly.
@@ -48,68 +49,69 @@ console show errors (with field paths) before anything is written.
 
 ## 3. Store
 
-PostgreSQL everywhere (ADR 0027): Aurora PostgreSQL Serverless v2 on AWS,
-Azure Database for PostgreSQL on AKS, CloudNativePG on-prem. Repository
-interfaces in `control/store`; one implementation, `control/store/sql`
-(pgx).
+The control plane's state is **one document in object storage**, updated
+by compare-and-swap (ADR 0028).
 
-- **Transactions**: `SERIALIZABLE`, through `store.InTx(ctx, fn)`, which
-  retries the whole function on SQLSTATE 40001 with jittered backoff;
-  functions are pure apart from the transaction. Invariants (pool
-  arithmetic, a key's cap within its owner's) are plain read-check-write.
-- **Migrations**: goose, embedded in the binary, transactional DDL, run by
-  a migration Job (a Helm hook in M1, the operator from M2) before
-  golem-control rolls out (operator.md §3).
-- **Ids**: UUIDv7, generated in Go.
-- **Audit**: written by the service in the same transaction as the change.
-- **Columns over JSONB** for anything queried; JSONB for opaque payloads
-  (audit diffs, hook config).
-- **Auth**: IAM database authentication on Aurora (a pgx `BeforeConnect`
-  hook mints tokens; `MaxConnLifetime` 10 min), Entra on Azure, a
-  Secret-held password on-prem.
-- **Times** in UTC; periods computed in Go from the configured period time
-  zone.
+- **The document**: protobuf, zstd, SSE-KMS, in a versioned bucket; a
+  schema version and a monotonic `state_version`. About 1–2 MB within the
+  design envelope.
+- **Writes**: `store.Update(ctx, fn)`: copy the in-memory state, apply
+  `fn`, check invariants, increment `state_version`, `PutObject` with
+  `If-Match: <etag>`; on 412 re-read and retry. Every write is serialized.
+- **Reads**: from the in-memory state, refreshed by a conditional GET every
+  500 ms (and S3 event notifications where configured).
+- **Schema evolution**: upgrade functions on load; a replica writes only
+  the newest schema it knows; rolling upgrades read n−1.
+- **History**: bucket versioning; `golemctl state restore --version …`
+  (audited); lifecycle expiry of old versions.
+- **Targets**: S3 (EKS, Pod Identity), Azure Blob (AKS, workload
+  identity), on-prem Nutanix Objects if it supports conditional PutObject,
+  otherwise S3 through IAM Roles Anywhere. One small interface (`Get`,
+  `PutIfMatch`, `Put`, `List`) and one conformance suite for every adapter.
+- **Not in the document**: audit (to ClickHouse as OTel logs, optionally
+  Object Lock archives), registration heartbeats and live counters (Valkey),
+  spend (ClickHouse).
+- **Fallback**: a PostgreSQL implementation of the same interface (ADR
+  0027) if the state outgrows the envelope.
 
-CI runs the store suite against Postgres containers on every change.
+### 3.1 State outline
 
-### 3.1 Schema outline
-
-`principals` (users and services), `scopes` (kind, owner scope, Entra
-group bindings), `memberships`, `role_bindings`, `cost_centers`, `keys`
-(hash, prefix, owner, scope, constraints as columns, expiry, revoked_at),
+`principals` (users and services), `scopes` (kind, parent or owner scope,
+Entra group bindings), `memberships`, `role_bindings`, `cost_centers`,
+`keys` (hash, prefix, owner, scope, constraints, expiry, revoked_at),
 `grants`, `caps`, `adjustment_requests`, `pools` (per scope per period:
-totals), `overrides` (target, change,
-expiry, author), `registrations` (self-registered model server endpoints),
-`jobs` (the durable job table, ADR 0020), `gateways` (registered instances,
-last acked version), `audit_events`, `store_version` (one row); `leases` when there are
-two regions. Declarative config is not in the store.
+totals), `overrides` (target, change, expiry, author), `registrations`
+(model server endpoints; their heartbeats are in Valkey), `jobs` (the
+durable job table, ADR 0020), `gateway_pools`; `leases` when there are two
+regions. Declarative config is not in the document (it is CRDs).
 
 ## 4. Distribution
 
-The gateway needs a consistent snapshot, quickly, with no database access.
+Through object storage (ADR 0028); the gateway needs neither the database
+nor the control plane to start or to see a change.
 
-- **Detection** (ADR 0027). Every write transaction increments the single
-  `store_version` row. Each golem-control replica polls it every 500 ms,
-  and in the writer's region also `LISTEN`s for the `NOTIFY` each write
-  sends on commit, so changes there are seen at once. Every 60 seconds a
-  replica rebuilds regardless and compares hashes, as a backstop.
-- **Whole snapshots** (ADR 0026). When `store_version` moves or a CRD
-  changes, debounced to once a second, a replica rebuilds the whole snapshot
-  from the store and its CRD cache (a few thousand rows: milliseconds). Its
-  version is its content hash; gateways compare hashes.
-- **Watch.** A gateway calls `Watch(pool, have_hash)` on any replica of its
-  region and receives the current snapshot (compressed, about 0.5 MB) if
-  its hash differs, then each new one. Reconnecting to another replica is
-  just another Watch.
-- **Selection.** Each gateway pool's snapshot includes the config CRDs
-  matching its label selector (e.g. per region, or the edge pool's
-  consumers only) and every pool gets the entitlements.
-- **Revocation latency** is detection plus the stream: well under a
-  second in the writer's region, about a second elsewhere (Aurora Global
-  Database's replication lag included).
-- **Acks.** Gateways ack each applied hash with compile errors, if any;
-  control records them per gateway and writes them into the CRDs' status
-  (`Applied n/m`).
+- **Publishing**: after a successful write, or a CRD change (debounced to
+  once a second), the replica that saw it compiles each gateway pool's
+  whole snapshot (ADR 0026) and writes `snapshots/<pool>/<hash>.pb`
+  (immutable, content-addressed), then the pointer
+  `snapshots/<pool>/current` = `{state_version, crd_generation, hash}`.
+- **Ordering without CAS**: gateways ignore a pointer older than the
+  snapshot they hold, so a slow replica's stale pointer cannot roll them
+  back; the next publication corrects it. Distribution therefore works on
+  stores without conditional writes.
+- **Polling**: each gateway does a conditional GET on its pointer every
+  second; on a change it fetches the snapshot by hash, verifies it,
+  compiles, swaps, and stores a last-good copy locally.
+- **Selection**: each pool's snapshot holds the config CRDs matching its
+  label selector (per region, or the edge pool's consumers only) and every
+  pool's holds the entitlements.
+- **Status**: each gateway writes `status/<pool>/<gateway-id>` (applied
+  hash, compile errors, time); golem-control reads them for the CRDs'
+  `Applied n/m` and `golemctl gateways`.
+- **Revocation latency**: the write plus at most a one-second poll, about
+  two seconds; across regions, plus replication.
+- **Access**: gateways may read `snapshots/<pool>/` and write
+  `status/<pool>/<own id>` only; golem-control reads and writes all.
 
 The snapshot format (`lib/snapshot`, protobuf) is the same one a gateway
 reads from a file in development.
@@ -166,24 +168,25 @@ ClickHouse, so a manager's view matches what enforcement sees.
 
 ## 7. Multi-region
 
-With the second region (M3): Aurora Global Database, writer in us-east-2,
-a secondary cluster in us-west-2. Each region runs golem-control (both
-roles) reading its own cluster and its own CRDs; us-west-2's writes go to
-the writer through the global writer endpoint (or write forwarding; the
-M3 spike decides). Gateways watch their own region's control plane. A
-region losing its control plane keeps serving on its last snapshot and
-its leases; losing the writer region means a managed failover of minutes,
-during which control-plane writes wait and model traffic continues.
+With the second region (M3): the writer bucket in us-east-2, replicated to
+us-west-2 by S3 Cross-Region Replication with Replication Time Control.
+us-west-2's golem-control reads the replica and writes to the writer
+bucket; its gateways read snapshots from the replica. Losing us-east-2
+means promoting the replica to writer (an operator-automated runbook);
+writes within the replication lag before the loss may be lost. Model
+traffic continues throughout.
 
 ## 8. Testing
 
-- Service-layer tests against an in-memory store (fast) and the SQL
-  store (Postgres containers), with the same suite.
+- Service-layer tests against the in-memory store, and the blob store's
+  conformance suite against S3 (or MinIO in CI), Azure Blob (Azurite) and
+  a fake; Nutanix Objects in the Phase 0 spike.
 - Conflict tests: concurrent grants on one pool, concurrent key minting
   against a user's cap, approval racing withdrawal: each must end in a
   state the org model allows, with retries visible in metrics.
-- Change detection with replica failover, missed notifications and
-  replication lag is checked against a small model of "every committed
-  change is in a snapshot that reaches every watching gateway within the
-  bound" (a good fit for gotogether's simulation and Quint tooling).
+- Writers racing on the document (412 and retry), slow replicas
+  publishing stale pointers, and replication lag are checked against a
+  small model of "every committed write is in a snapshot every gateway
+  applies within the bound, and no gateway ever moves to an older
+  snapshot" (a good fit for gotogether's simulation and Quint tooling).
 - API compatibility: `buf breaking` against the last release in CI.

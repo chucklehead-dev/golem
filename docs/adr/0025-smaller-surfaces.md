@@ -31,7 +31,7 @@ several surfaces are larger than what they must do.
    client waits by polling or by notification.
 5. **Leases only when there are two regions** (amends 0016). Single-region
    golem enforces pools directly in Valkey; the `Lease` method is not in the
-   M1 distribution API. The limiter interface keeps the seam.
+   M1 API. The limiter interface keeps the seam.
 6. **Explain lives in the control plane only.** It holds every snapshot; the
    gateway's local port serves probes, pprof and the snapshot hash it runs.
 7. **Capture without sampling at first** (amends 0018). Off, metadata or

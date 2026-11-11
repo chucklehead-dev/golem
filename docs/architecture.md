@@ -18,8 +18,8 @@ rules that keep them apart. Each component's inside has its own document:
 
 | Component | Does | Does not | State |
 |---|---|---|---|
-| **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; touch the database or Kubernetes | Caches; limit counters in the RESP store |
-| **golem-control**, `api` role | The control API (config read and check, overrides, entitlements, self-service, admin, spend), the distribution API, the watch on config CRDs and their status | Serve model traffic; run background jobs | PostgreSQL (owner: Aurora PostgreSQL on AWS); reads ClickHouse and Valkey |
+| **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; call the control plane or Kubernetes | Caches; limit counters in Valkey; reads its snapshots from object storage |
+| **golem-control**, `api` role | The control API (config read and check, overrides, entitlements, self-service, admin, spend), the watch on config CRDs and their status, snapshot publication to object storage | Serve model traffic; run background jobs | The state document in object storage (owner, ADR 0028); reads ClickHouse and Valkey |
 | **golem-control**, `worker` role | Background jobs: Entra sync, period rollover, expiries, notifications, ledger reconciliation, retention deletion | Serve any API but probes | The same store, through the same service layer |
 | **golem-operator** (M2) | Installs and upgrades the other components, migrations, drains, canaries, credential mounting, mesh policies, Langfuse projects | Handle config; talk to gateways | None (Kubernetes is its state) |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
@@ -42,22 +42,24 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
             ▼                                      PriceList)               │
    golem-control  api role ◀────────────────────────────────────────────────┘
      entitlements · overrides · spend · audit · explain
-     distribution API ───────────────┐            golem-operator (M2): installs,
-   golem-control  worker role        │            upgrades, drains, mesh policies,
-     jobs, same service layer        │            Langfuse projects
-   store: PostgreSQL (Aurora)        │ stream: whole snapshots; acks
-                                     ▼
-                              golem-gateway ×N ──▶ providers, model servers
-                                     │   └──▶ Valkey (limits, quotas)
-                                     ├──▶ OTLP collector ──▶ ClickStack · ClickHouse golem.spend
-                                     └──▶ captured traces ──▶ Langfuse (a project per capturing scope)
+   golem-control  worker role (jobs, same service layer)
+            │  state document: CAS (If-Match)        golem-operator (M2): installs,
+            │  snapshots: snapshots/<pool>/<hash>    upgrades, drains, mesh policies,
+            ▼                                        Langfuse projects
+   object storage (S3 · Azure Blob · Nutanix Objects)
+            ▲  poll pointer, fetch by hash; write status/<pool>/<id>
+            │
+   golem-gateway ×N ──▶ providers, model servers
+            │   └──▶ Valkey (limits, quotas)
+            ├──▶ OTLP collector ──▶ ClickStack · ClickHouse golem.spend, audit
+            └──▶ captured traces ──▶ Langfuse (a project per capturing scope)
 ```
 
 Two kinds of change, one path each: declarative config through GitOps
 (CRDs, reviewed as code); entitlements and incident levers through the
 control API. golemctl, the console and the Backstage plugin are API
-clients with no private endpoints. The gateway reads only the
-distribution stream.
+clients with no private endpoints. The gateway's only input is its pool's
+snapshots in object storage: it never calls the control plane.
 
 ## 3. APIs
 
@@ -78,9 +80,8 @@ optimistic concurrency, field masks, page tokens,
 | Budget | `golem.budget.v1` | managers, budget managers | Grant, Cap, AdjustmentRequest (`Approve`, `Reject`, `Withdraw`), Pool (read) |
 | Spend | `golem.spend.v1` | everyone, within their rights | Spend queries by scope, principal, key, cost center, model, period |
 | Audit | `golem.audit.v1` | admins, auditors | AuditEvent (list, filter) |
-| Admin | `golem.admin.v1` | admins | Gateways and pools (versions, snapshot hashes, health), drain, snapshot inspection |
+| Admin | `golem.admin.v1` | admins | Gateways and pools (applied snapshot hashes from their status objects, health), drain, snapshot inspection, state history and restore; `Lease` for gateways with the second region (ADR 0016) |
 | Registration | `golem.registration.v1` | model servers | `Register`, `Heartbeat` (PRD §5.2.1) |
-| Distribution | `golem.distribution.v1` | gateways | `Watch` (server stream of whole snapshots, ADR 0026), `Ack` (applied version, compile errors, health); `Lease` with the second region (ADR 0016) |
 
 Authorization is in the service layer, not the transport: every method
 checks the caller's role on the resource (org-model §2).
@@ -102,9 +103,10 @@ control/
   api/                     Connect handlers: decode, call service, encode; no logic
   service/                 domain logic and authorization: org, keys, budget, config, spend
   store/                   repository interfaces
-  store/sql/               the PostgreSQL implementation (ADR 0027)
+  store/doc/               the state document over a blob CAS interface (ADR 0028)
+  store/blob/              adapters: S3, Azure Blob, Nutanix Objects, in-memory
   config/                  the CRD watch, validation, status, overrides layering
-  distribution/            snapshot building and the Watch/Ack server
+  distribution/            snapshot building and publication to object storage
   spend/                   ClickHouse queries
 worker/                    job runner and jobs; calls control/service, never the store directly
 api/v1alpha1/              CRD types for config and installation (kubebuilder markers)
@@ -122,11 +124,11 @@ docs/
 ### 4.1 Layers
 
 ```
- transport (api/, distribution server, console handlers, CLI commands)
+ transport (api/, console handlers, CLI commands)
      ↓
  service (control/service) — the only place rules live: authz, invariants, transactions
      ↓
- store (control/store interfaces) → store/sql (PostgreSQL)
+ store (control/store interfaces) → store/doc (state document, blob CAS)
 ```
 
 The worker and the console sit beside the transport layer: the worker
@@ -140,7 +142,7 @@ layer below it.
 - `cmd/golem-gateway` depends on `control/...`, `worker/...`,
   `operator/...`, `pgx`, `clickhouse-go`, `client-go` or
   `controller-runtime`;
-- anything outside `control/store/...` imports a database driver;
+- anything outside `control/store/...` writes the state document;
 - `control/api` imports `control/store`;
 - `operator`, `cli` or `console` import anything of `control` but the
   generated clients and `api/v1alpha1`;
@@ -156,8 +158,9 @@ Each binary also gets its own image and its own dependency list in
   `ModelRoute` CRD; CI runs `golemctl config validate` against the control
   API. After merge, Argo or Flux applies it (the admission webhook rejects
   it if invalid). golem-control sees it through its watch, builds the new
-  snapshot, and streams it to every gateway whose pool
-  selects it. Each gateway compiles and acks; golem-control writes
+  snapshot, and publishes it for every gateway pool that
+  selects it; the pools' gateways pick it up within a second, compile it and
+  write their status; golem-control writes
   `Applied: 12/12` in the CRD's status.
 - **An incident.** A provider deployment misbehaves; an admin runs
   `golemctl overrides create --disable deployment/openai-east --for 2h
@@ -174,20 +177,24 @@ Each binary also gets its own image and its own dependency list in
 - **A budget manager approves a one-time adjustment.** The request's state
   becomes `approved`; the grant takes effect in the same transaction; the
   pool's new total reaches gateways in the next snapshot.
+- **The control plane is down.** Gateways keep polling object storage;
+  they start, serve and stay current with whatever was last published.
+  Nothing can change until golem-control is back, except that keys and
+  overrides expire on their own.
 
 ## 6. Deployment topologies
 
 | Topology | Store | Notes |
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
-| Single region (EKS in us-east-2, first) | Aurora PostgreSQL Serverless v2 in us-east-2 | golem-control (api, worker), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
-| Multi-region (later: us-east-2 and us-west-2) | Aurora Global Database: writer in us-east-2, secondary in us-west-2 | golem-control in each region reading its local cluster and that region's CRDs, writing through the global writer endpoint; gateways use their region's control plane; Valkey per region; budgets through regional leases (ADR 0016) |
-| AKS or on-prem | Azure Database for PostgreSQL, or CloudNativePG | Same code, same engine (ADR 0027); Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
+| Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (api, worker), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
+| Multi-region (later: us-east-2 and us-west-2) | Writer bucket in us-east-2, Cross-Region Replication to us-west-2 | golem-control in each region reading its local bucket and that region's CRDs, writing to the writer bucket; gateways read their region's bucket; Valkey per region; budgets through regional leases (ADR 0016) |
+| AKS or on-prem | Azure Blob; on-prem Nutanix Objects, or S3 through IAM Roles Anywhere (ADR 0028) | Same code, a different blob adapter; Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
 
 The gateway and golem-control's two roles each scale independently; only
 the gateway is on the request path.
 
-**Going multi-region later.** Adding us-west-2 is adding a secondary
-cluster to an Aurora Global Database and deploying golem-control and
-gateways there: no store migration, no pause. Writes from us-west-2 cross
-to the writer region, which is fine at golem's write rate.
+**Going multi-region later.** Adding us-west-2 is enabling Cross-Region
+Replication to a bucket there and deploying golem-control and gateways:
+no migration, no pause. Writes from us-west-2 cross to the writer bucket,
+which is fine at golem's write rate; failover promotes the replica.
