@@ -1,15 +1,15 @@
 # golem: organisation, keys and budgets
 
 Status: draft, fifth pass. The entitlement model behind PRD §5.3–§5.5;
-decided in ADR 0008 (the model), 0024 (scopes and roles), 0009 (where it
-lives) and 0016 (multi-region enforcement).
+decided in ADR 0010 (the model), 0010 (scopes and roles), 0006 (where it
+lives) and 0013 (multi-region enforcement).
 
 ## 1. Entities
 
 | Entity | Identity | Notes |
 |---|---|---|
 | **User** | Entra `oid` (+ `tid`) | Created on first sign-in. Display name and UPN from the token. |
-| **Scope** | golem id; `kind: team \| project` | Where spend is charged and rights come from. A **team** may have a parent team (a sub-team; depth at most two, ADR 0026) and may be bound to Entra groups (membership synced from Graph) and/or managed in golem. A **project** is owned by exactly one team (its primary team); its members may be other teams (all their members), services and users. |
+| **Scope** | golem id; `kind: team \| project` | Where spend is charged and rights come from. A **team** may have a parent team (a sub-team; depth at most two, ADR 0021) and may be bound to Entra groups (membership synced from Graph) and/or managed in golem. A **project** is owned by exactly one team (its primary team); its members may be other teams (all their members), services and users. |
 | **Service** | golem id; Entra app (client id) and/or SPIFFE ID; service keys | Owned by one scope. A non-human principal. May be added to other projects. |
 | **Cost center** | external code (e.g. `CC-4410`) | Not managed by golem: a funding source referenced by budgets, with its budget managers. |
 | **Key** | `glm_` + 32 random bytes, stored as SHA-256 | Belongs to a user or a service; bound to one **scope**. |
@@ -22,7 +22,7 @@ fund the project unless it also gives the project a budget.
 Roles are assigned in golem and audited; the Entra app role
 `golem.admin` bootstraps administrators.
 
-Four roles (ADR 0024):
+Four roles (ADR 0010):
 
 | Role | Held on | May |
 |---|---|---|
@@ -61,12 +61,12 @@ Key constraints, all optional:
 
 ### 3.1 Content capture and retention
 
-Decided in ADR 0018. Capture settings live at three levels:
+Decided in ADR 0016. Capture settings live at three levels:
 
 | Level | Set by | Settings |
 |---|---|---|
 | Scope policy (a `ScopePolicy` CRD) | platform admins | the ceiling: capture allowed or forbidden, maximum retention, required redaction hooks |
-| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `override`: locked, narrow, open (sampling later: ADR 0025) |
+| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `override`: locked, narrow, open (sampling later: ADR 0003) |
 | Key or service | the key's owner; the service's owner | `capture` and `retention`: inherit (default), or an override the scope permits |
 
 What a child (key or service) may override:
@@ -149,7 +149,7 @@ reserves the estimated cost at each level, atomically, and fails with a
 1. the key's own cap (if any);
 2. the member's cap in the scope (or the default member cap);
 3. the scope pool's `available` (with two regions, the region's lease of
-   it: ADR 0016).
+   it: ADR 0013).
 
 What happens at a limit depends on the scope's enforcement mode (PRD
 §9.1): `observe` records the refusal it would have made, `warn` allows it
@@ -176,7 +176,7 @@ key id, scope (team/project), the scope's funding sources at that time,
 model, deployment, tokens by kind, cost, and the price version. For
 chargeback, a project's spend is apportioned to its funding sources pro
 rata by their grants in that period (configurable: in order). The ledger
-is in ClickHouse (ADR 0010).
+is in ClickHouse (ADR 0015).
 
 ## 5. Examples
 

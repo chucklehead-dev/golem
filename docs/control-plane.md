@@ -2,19 +2,19 @@
 
 Status: draft, ninth pass. golem-control: one Deployment, every replica
 serving the API, one leader running jobs and publishing snapshots (ADR
-0032), over one state document in object storage (ADR 0028, 0033).
+0003), over one state document in object storage (ADRs 0006, 0007).
 Components and APIs at a glance: architecture.md §1–3.
 
 ## 1. Responsibilities
 
 - Hold the source of truth for **entitlements** (org-model.md) and
-  **operational overrides** (ADR 0023) in the state document; read
+  **operational overrides** (ADR 0005) in the state document; read
   **declarative config** from the EKS cluster's CRDs (`Backend`,
   `ModelRoute`, `ScopePolicy`, `Hook`, `PriceList`) and write their status.
 - Enforce every rule of the org model on writes: who may do what, budget
   arithmetic, approvals, key constraints within the owner's rights.
 - Compile, sign and publish each gateway pool's **snapshot** (§4).
-- Set every site's **budget ceilings** from the ledger (ADR 0031).
+- Set every site's **budget ceilings** from the ledger (ADR 0013).
 - Answer spend queries from ClickHouse.
 - Record every change as an audit event, atomically with it (§3).
 
@@ -46,19 +46,19 @@ writes the document except through them.
 show errors with field paths before anything is written. Config CRDs are
 validated by their schemas' CEL rules and offline by `golemctl config
 validate` (the snapshot compiler as a library), not by a live API call
-(ADR 0032).
+(ADR 0003).
 
 ## 3. Store: the state document
 
-- **The document** (ADR 0028): protobuf, zstd, SSE-KMS with Bucket Keys, in
-  a versioned bucket in us-east-2 shared by every site (ADR 0029); a
+- **The document** (ADR 0006): protobuf, zstd, SSE-KMS with Bucket Keys, in
+  a versioned bucket in us-east-2 shared by every site (ADR 0008); a
   schema version and a monotonic `state_version`. About 1–2 MB within the
   design envelope.
 - **Writes**: `store.Update(ctx, fn)`: copy the in-memory state, apply
   `fn`, check invariants, increment `state_version`, `PutObject` with
   `If-Match: <etag>`; on 412 re-read and retry. Every write is serialized.
 - **Reads**: from memory, refreshed by a conditional GET every 500 ms.
-- **Audit outbox** (ADR 0032): a write's audit events go into the document
+- **Audit outbox** (ADR 0003): a write's audit events go into the document
   with it; the leader ships them to ClickHouse as OTel log records and
   trims them once accepted. Optionally also archived under Object Lock.
 - **Schema evolution**: additive protobuf changes need nothing. A breaking
@@ -66,16 +66,16 @@ validate` (the snapshot compiler as a library), not by a live API call
   writing the old; release N+1 writes the new. Mixed replicas during a
   rolling upgrade therefore always read what the others write.
 - **History**: bucket versioning in place, replication to a backup
-  account under Object Lock (ADR 0033). `golemctl state restore` writes an
+  account under Object Lock (ADR 0007). `golemctl state restore` writes an
   old content as a new version and re-applies revocations and removals
   made since.
 - **Write access**: golem-control's role only, by bucket policy; a
-  break-glass role exists, audited, MFA, two-person (ADR 0033).
+  break-glass role exists, audited, MFA, two-person (ADR 0007).
 - **Not in the document**: shipped audit (ClickHouse), counters and
   reservations (each site's Valkey), spend (ClickHouse).
 - **Interface**: `Get`, `PutIfMatch`, `Put`, `List` over S3, with one
   conformance suite (MinIO in CI and a fake). Other adapters (Azure Blob,
-  Nutanix Objects) when a site needs its own store; PostgreSQL (ADR 0027)
+  Nutanix Objects) when a site needs its own store; PostgreSQL (ADR 0006)
   if the state outgrows the envelope.
 
 ### 3.1 State outline
@@ -92,11 +92,11 @@ expiry, author), `registrations` (model server endpoints, with TTL),
 
 ## 4. Distribution
 
-Through the bucket, signed (ADR 0028, 0033); the gateway never calls the
+Through the bucket, signed (ADRs 0006, 0007); the gateway never calls the
 control plane.
 
 - **Publisher**: the leader. After a write or a CRD change (debounced to
-  once a second) it compiles each pool's whole snapshot (ADR 0026), signs
+  once a second) it compiles each pool's whole snapshot (ADR 0021), signs
   it with the KMS publishing key, writes `snapshots/<pool>/<hash>.pb`, then
   the signed pointer `snapshots/<pool>/current` = `{publish_seq, issued_at,
   hash}` by CAS on the pointer.
@@ -123,7 +123,7 @@ control plane.
   groups) or on their first control-API call; a user unknown to the
   snapshot cannot use the gateway yet (seconds after their first sign-in).
 - **Coding agents**: `golemctl token` prints a cached Entra access token for
-  agents with a credential helper (ADR 0032); others get a minted personal
+  agents with a credential helper (ADR 0003); others get a minted personal
   key, 12-hour TTL by default for `golemctl login`, pruned at expiry.
 - **Disabled users**: Entra sync (every 5 minutes; change notifications in
   M2) revokes the keys and memberships of disabled or deleted users.
@@ -151,14 +151,14 @@ Run by the leader; each an idempotent scan.
 |---|---|---|
 | Entra group sync | every 5 min; change notifications in M2 | Membership diffs as service calls in batches; revokes disabled users' keys |
 | Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps |
-| Ceiling rebalance | every 30 s | ADR 0031: per-site spend from ClickHouse, ceilings moved within each pool |
+| Ceiling rebalance | every 30 s | ADR 0013: per-site spend from ClickHouse, ceilings moved within each pool |
 | Audit shipping | every few seconds | Outbox to ClickHouse, trimmed when accepted |
 | Pointer refresh | hourly | Re-signs every pool's pointer |
 | Key, request and registration expiry; reminders | hourly | Expires keys, adjustment requests, registrations past TTL; notifies 7 days and 1 day ahead |
-| Ledger and provider reconciliation | daily | Counters against the ledger (data older than an hour); the ledger against provider usage APIs (ADR 0034) |
+| Ledger and provider reconciliation | daily | Counters against the ledger (data older than an hour); the ledger against provider usage APIs (ADR 0012) |
 | Threshold notifications | with the ceiling rebalance | 50/80/100% at key, member and pool level |
-| Capture expiry and retention (M2) | hourly | Switch expiry; deletion of expired traces in Langfuse (ADR 0018) |
-| Copilot usage ingestion (M2) | daily | GitHub usage metrics into ClickHouse (ADR 0021) |
+| Capture expiry and retention (M2) | hourly | Switch expiry; deletion of expired traces in Langfuse (ADR 0016) |
+| Copilot usage ingestion (M2) | daily | GitHub usage metrics into ClickHouse (ADR 0020) |
 
 ### 6.1 Notifications
 
@@ -180,14 +180,14 @@ ledger's too (seconds behind); golem-control reads no site's Valkey.
 
 ## 8. Sites and regions
 
-- **Sites** (ADR 0029, 0030): one control plane on EKS in us-east-2 serves
+- **Sites** (ADR 0008): one control plane on EKS in us-east-2 serves
   every site. AKS and on-prem clusters run gateway pools and a Valkey;
   their gateways read the us-east-2 bucket (Entra-to-AWS federation, IAM
   Roles Anywhere). Their config CRDs live in the EKS cluster, selected by a
-  `site` label. Budgets reach them as ceilings (ADR 0031); provider quotas
-  are split statically per site (ADR 0032). No cluster reaches another's
+  `site` label. Budgets reach them as ceilings (ADR 0013); provider quotas
+  are split statically per site (ADR 0003). No cluster reaches another's
   API server.
-- **Second region** (M3, ADR 0032): the bucket replicated to us-west-2;
+- **Second region** (M3, ADR 0003): the bucket replicated to us-west-2;
   us-west-2's gateways read the replica; a golem-control Deployment there
   scaled to zero, started by the failover runbook (promote the replica,
   scale up) within the 30-minute RTO. One active control plane at a time.

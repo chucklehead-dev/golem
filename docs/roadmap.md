@@ -12,16 +12,16 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 
 | Spike | Question | Depends on it |
 |---|---|---|
-| Waypoint identity | Which header carries the caller's SPIFFE ID through a Gloo Mesh ambient waypoint, and can the gateway's port be limited to the waypoint? | ADR 0003 mesh identity (M2) |
-| Bucket as the root of trust | S3 `If-Match` behaviour (412, retries, lost responses); KMS asymmetric signing and verification of snapshots and pointers; the bucket policy that denies all other writers; replication to the backup account under Object Lock | ADR 0028, 0033 |
-| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and ceilings assumed) | ADR 0029, before the first remote site |
+| Waypoint identity | Which header carries the caller's SPIFFE ID through a Gloo Mesh ambient waypoint, and can the gateway's port be limited to the waypoint? | ADR 0009 mesh identity (M2) |
+| Bucket as the root of trust | S3 `If-Match` behaviour (412, retries, lost responses); KMS asymmetric signing and verification of snapshots and pointers; the bucket policy that denies all other writers; replication to the backup account under Object Lock | ADRs 0006, 0007 |
+| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and ceilings assumed) | ADR 0008, before the first remote site |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
-| Bedrock envelope | Claude Code against Claude on Bedrock through a stub envelope: event-stream framing to SSE, `anthropic_beta` in the body, prompt caching, token counting, inference-profile IDs as alias targets | ADR 0035 |
-| vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADR 0019, 0032 |
-| Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0018 |
-| Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0021 |
-| Valkey scripts | reserve, renew and reconcile scripts on ElastiCache for Valkey: latency, behaviour across a failover | ADR 0005, 0034 |
-| Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0032 |
+| Bedrock envelope | Claude Code against Claude on Bedrock through a stub envelope: event-stream framing to SSE, `anthropic_beta` in the body, prompt caching, token counting, inference-profile IDs as alias targets | ADR 0001 |
+| vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADRs 0017, 0003 |
+| Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0016 |
+| Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0020 |
+| Valkey scripts | reserve, renew and reconcile scripts on ElastiCache for Valkey: latency, behaviour across a failover | ADR 0012 |
+| Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0003 |
 
 ## Phase 1 (M0): walking skeleton (3–4 weeks)
 
@@ -46,7 +46,7 @@ fast-path budget.
 The platform team's own apps and coding agents, us-east-2, EKS.
 
 - **Gateway**: Chat, Responses, Messages, Embeddings, models list; three
-  backends with no translation (ADR 0035): Claude on Bedrock (the Messages
+  backends with no translation (ADR 0001): Claude on Bedrock (the Messages
   envelope), OpenAI (pass-through), standalone vLLM (pass-through for
   Chat, Completions, Embeddings and Messages; static endpoints, discovered
   models, static concurrency ceilings, per-principal limits, overflow);
@@ -82,6 +82,24 @@ drills fail over without caller changes (a Bedrock region to another
 region or inference profile; a local box to its fallback pool); budgets switched from
 `observe` to `enforce` for the team.
 
+## Phase 2b (M1.5): translation through the canonical model (4–6 weeks)
+
+- `gateway/canon` and the Chat and Messages adapter pairs (requests,
+  responses, streams) (ADR 0001).
+- OpenAI-SDK callers reach Claude on Bedrock (Chat decoder, Messages
+  encoder, the M1 `bedrock` envelope); Anthropic-SDK callers and agents
+  reach Chat-only models on OpenAI and vLLM.
+- Cross-dialect failover (a Claude pool falling back to an OpenAI pool, and
+  the reverse) and golem-placed prompt-cache breakpoints for Chat callers on
+  Claude.
+- Testing: adapter round-trip properties, stream-chunking properties,
+  decoder fuzzing, goldens from recorded traffic, and a nightly differential
+  run against Bedrock and OpenAI with real SDKs.
+
+Exit: the platform team's OpenAI-SDK applications run against Claude on
+Bedrock, and Claude Code against a vLLM Chat model, with tool use and
+streaming, for a week without a translation defect.
+
 ## Phase 3 (M2): enterprise default (10–12 weeks)
 
 - **Org**: projects, cost centers, budget managers, grants, adjustment
@@ -94,8 +112,8 @@ region or inference profile; a local box to its fallback pool); budgets switched
 - **Console**; spend APIs; Copilot usage ingestion as showback.
 - **Local GPU routing**: adaptive concurrency, metrics polling, prefix
   affinity, round-robin queueing across principals.
-- **Gateway**: translation (Chat → Anthropic, Chat → Converse); the direct
-  Anthropic API; Microsoft Foundry (Azure OpenAI and Claude); Decisions and
+- **Gateway**: more envelopes (the direct Anthropic API, Microsoft Foundry for
+  Azure OpenAI and Claude) and the Converse adapter pair; Decisions and
   System One; legacy Completions; embeddings to Bedrock; context-window fallback; latency EWMA and quota-headroom
   balancing; shadowing; conditional routing; remote hooks and built-in
   guardrails (`Chunk` phase if a guardrail needs it); credential
@@ -105,7 +123,7 @@ region or inference profile; a local box to its fallback pool); budgets switched
   consumers.
 - **Registration** of model server endpoints (for cloud GPUs and NVL boxes).
 - **Remote sites** (AKS, on-prem) as gateway pools on the shared S3 store
-  (ADR 0029): a Valkey per site, site ceilings (ADR 0031; its model and
+  (ADR 0008): a Valkey per site, site ceilings (ADR 0013; its model and
   mutants first), static provider quota shares, Bedrock through federation,
   a per-cluster operator; after the residency review (PRD §8).
 - **Testing**: the state and distribution model; the state document under races in simulation;
@@ -118,9 +136,9 @@ onboarded; budgets enforced for all of them.
 
 - Second region: us-west-2 by replication of the bucket, gateways reading
   the replica, a golem-control there scaled to zero, the failover runbook
-  and a drill (ADR 0032).
+  and a drill (ADR 0003).
 - Temporal for approvals, key rotation and batch jobs, when the platform's
-  Temporal is ready (ADR 0020).
+  Temporal is ready (ADR 0019).
 - Batch and Files, rerank, Decisions↔System One translation, cost-based
   routing, priority classes, budget downgrade, chargeback export, response
   cache, Backstage plugin, Entra OBO pass-through.
@@ -139,7 +157,7 @@ PRD §9, scheduled in the phases above.
 
 ## Sizing
 
-Settled by the design envelope (PRD §9.12, ADR 0026): three gateways per
+Settled by the design envelope (PRD §9.12, ADR 0021): three gateways per
 site, two replicas of golem-control (one leader), one Valkey primary with
 a replica per site, the state document at about 1–2 MB, and ClickHouse far
 inside its limits. Per-principal limits on local GPU pools are M1, with

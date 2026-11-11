@@ -1,6 +1,6 @@
 # golem: architecture
 
-Status: draft, fifth pass (simplified by ADRs 0023–0025). The system as components, their APIs, and the
+Status: draft, fifth pass (simplified by ADRs 0005, 0003). The system as components, their APIs, and the
 rules that keep them apart. Each component's inside has its own document:
 
 | Document | Component |
@@ -19,7 +19,7 @@ rules that keep them apart. Each component's inside has its own document:
 | Component | Does | Does not | State |
 |---|---|---|---|
 | **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; call the control plane or Kubernetes | Caches; limit counters in Valkey; reads its snapshots from object storage |
-| **golem-control** | The control API (config read, explain, overrides, entitlements, self-service, admin, spend) and the watch on config CRDs and their status; its leader (a Kubernetes Lease) runs the jobs and signs and publishes snapshots | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADR 0028, 0033); reads ClickHouse |
+| **golem-control** | The control API (config read, explain, overrides, entitlements, self-service, admin, spend) and the watch on config CRDs and their status; its leader (a Kubernetes Lease) runs the jobs and signs and publishes snapshots | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADRs 0006, 0007); reads ClickHouse |
 | **golem-operator** (M2) | Installs and upgrades golem in its own cluster: drains, canaries, credential mounting, mesh policies, Langfuse projects | Handle config; talk to gateways | None (Kubernetes is its state) |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
 | **golem-console** | A small web UI for the same tasks (M2) | Anything the API does not offer | None |
@@ -65,7 +65,7 @@ snapshots in object storage: it never calls the control plane.
 All defined in protobuf under `proto/golem/`, served with Connect
 (connect-go on `net/http`), so every API is callable as gRPC, gRPC-Web, or
 plain HTTP/JSON (`curl` works), with generated Go and TypeScript clients
-(ADR 0014). Resource-oriented in the AIP style: standard methods
+(ADR 0022). Resource-oriented in the AIP style: standard methods
 (Get, List, Create, Update, Delete), `etag` on every resource for
 optimistic concurrency, field masks, page tokens,
 `request_id` for idempotent creates. Requests that wait on someone
@@ -102,7 +102,7 @@ control/
   api/                     Connect handlers: decode, call service, encode; no logic
   service/                 domain logic and authorization: org, keys, budget, config, spend
   store/                   repository interfaces
-  store/doc/               the state document over a blob CAS interface (ADR 0028)
+  store/doc/               the state document over a blob CAS interface (ADR 0006)
   store/blob/              adapters: S3 and in-memory (others when a site needs them)
   config/                  the CRD watch, validation, status, overrides layering
   distribution/            snapshot building, signing and publication
@@ -168,9 +168,9 @@ Each binary also gets its own image and its own dependency list in
 - **A user mints a key.** `golemctl keys create --scope team/platform
   --models 'claude-*' --cap 50/month`. golem-control checks the user's
   membership and rights, stores the hash with its audit event in one write, and the
-  key reaches the gateways in about a second (ADR 0012).
+  key reaches the gateways in about a second (ADR 0005).
 - **A request is charged.** The gateway reserves at the key, the member
-  cap and its site's ceiling of the scope's pool (ADR 0031), calls
+  cap and its site's ceiling of the scope's pool (ADR 0013), calls
   the provider, reconciles, and emits the access-log record, which becomes
   the `golem.spend` row in ClickHouse.
 - **A budget manager approves a one-time adjustment.** The request's state
@@ -187,10 +187,10 @@ Each binary also gets its own image and its own dependency list in
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
 | Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
-| Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0032); Valkey and site ceilings there as at any site |
-| AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0029): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site with site ceilings (ADR 0031); no cross-cluster Kubernetes access (ADR 0030); Bedrock through the same federation |
+| Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0003); Valkey and site ceilings there as at any site |
+| AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0008): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site with site ceilings (ADR 0013); no cross-cluster Kubernetes access (ADR 0008); Bedrock through the same federation |
 
-Replicas are fixed, sized for the design envelope (ADR 0026); only the
+Replicas are fixed, sized for the design envelope (ADR 0021); only the
 gateway is on the request path.
 
 **Going multi-region later.** Adding us-west-2 is enabling replication of

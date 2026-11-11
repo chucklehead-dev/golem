@@ -1,6 +1,6 @@
 # golem: product requirements
 
-Status: draft for discussion. Revised 2026-11-11 (sixth pass: the design envelope, ADR 0026; the roadmap in roadmap.md).
+Status: draft for discussion. Revised 2026-11-11 (sixth pass: the design envelope, ADR 0021; the roadmap in roadmap.md).
 
 ## 1. Problem
 
@@ -29,13 +29,13 @@ enforced by invoices a month later.
    memory and the like are built, in-process or out-of-process.
 6. Operates like any well-behaved Kubernetes service in the enterprise's
    Istio (Gloo Mesh, ambient mode): probes, graceful drain, declarative
-   config, fixed replicas sized for the design envelope (ADR 0026).
+   config, fixed replicas sized for the design envelope (ADR 0021).
 7. Simple, fast Go: the proxy adds well under a millisecond at p50 to a
    non-translated request, and its code stays readable end to end.
 8. Well layered: the gateway does data-plane work only; configuration,
    self-service and administration are a separate control plane behind one
    API; an operator runs day-2; CLI and UI tools are clients of that API
-   (architecture.md, ADR 0013).
+   (architecture.md, ADR 0003).
 
 ## 3. Non-goals
 
@@ -45,7 +45,7 @@ enforced by invoices a month later.
   golemctl, a small console (M2) and optionally a Backstage plugin (M3)
   are where they act (tools.md).
 - Being a Kubernetes Gateway API implementation. golem runs behind the
-  mesh's ingress and in the ambient mesh (ADR 0006).
+  mesh's ingress and in the ambient mesh (ADR 0004).
 - Prompt management, evaluation, datasets: Langfuse does these; golem
   feeds it.
 - Every provider and every endpoint. The supported set is chosen (§5.1);
@@ -94,23 +94,34 @@ flushed as they arrive, keepalive comments on idle, usage extracted from the
 stream without buffering it, and `stream_options.include_usage` set on
 OpenAI requests so usage is always reported *(added)*.
 
-5.1.2 **Translation** is scoped to what the backends need (ADR 0001). M1
-needs none: its paths are Anthropic Messages to Claude on Bedrock (an
-envelope), and pass-through to OpenAI and vLLM (ADR 0035).
+5.1.2 **Translation and hosting** (ADR 0001). Two axes: the *dialect* (the
+API's shape) and the *envelope* (how a host carries it: URL, model
+placement, auth, stream framing). Same-dialect requests pass through as
+bytes and only the envelope wraps them; different dialects go through one
+**canonical model**, with one adapter pair (decode, encode) per dialect for
+requests, responses and streams. N adapters and M envelopes, not N×M
+converters: Chat to Claude on Bedrock is the Chat decoder, the Messages
+encoder and the same `bedrock` envelope M1 already uses.
 
-| Frontend → backend | Kind | Milestone |
+| Path | How | Milestone |
 |---|---|---|
-| Anthropic Messages → Bedrock (Anthropic models) | envelope only: model in path, `anthropic_version` and `anthropic_beta` in body, event-stream framing to SSE (ADR 0035) | M1 |
-| OpenAI Chat → Anthropic Messages | translation | M2 |
-| OpenAI Chat → Bedrock Converse / ConverseStream | translation | M2 |
-| OpenAI Embeddings → Bedrock (Titan, Cohere embed) | per-model body adapter | M2 |
-| OpenAI Chat → Gemini (Vertex), if Vertex is used | translation | M3 |
-| OpenAI Decisions ↔ System One | translation of the shared decision shape (predicate/yes-no, choice, score), so one decision alias can fail over between them *(added)* | M3 |
+| Anthropic Messages → Claude on Bedrock | pass-through + `bedrock` envelope (model in path, `anthropic_version` and `anthropic_beta` in body, event-stream to SSE, SigV4) | M1 |
+| OpenAI Chat, Responses, Embeddings → OpenAI | pass-through | M1 |
+| OpenAI Chat, Completions, Embeddings, Anthropic Messages → vLLM | pass-through | M1 |
+| OpenAI Chat → Claude (on Bedrock; and any Messages envelope) | Chat decoder → canonical → Messages encoder → envelope | M1.5 |
+| Anthropic Messages → Chat-only models (OpenAI, vLLM) | Messages decoder → canonical → Chat encoder | M1.5 |
+| Claude through the direct Anthropic API, Foundry, Vertex | further Messages envelopes | M2 / M3 |
+| Bedrock Converse (non-Anthropic Bedrock models) | a Converse adapter pair | M2 |
+| OpenAI Embeddings → Bedrock (Titan, Cohere) | per-model body adapter | M2 |
+| OpenAI Decisions ↔ System One | a small canonical decision shape | M3 |
 
-Translation covers text, tool calls, images, system prompts, stop reasons
-and usage. Features with no equivalent fail the request with an error naming
-the feature, rather than being silently dropped. Other pairs are refused at
-config validation.
+The canonical model covers system content, typed content blocks (text,
+images, documents, tool use and results, thinking with signatures), tools,
+tool choice, sampling, response format, cache hints, usage (including cache
+read and write and reasoning) and stream events. A feature one side cannot
+express fails the request with an error naming it; semantically inert
+fields are dropped and reported in a header. For Chat callers routed to
+Claude, golem can place prompt-cache breakpoints itself by route policy.
 
 5.1.3 **Decision dialects** *(added)*: both are billed on input tokens
 only and do not stream, so their cost is known before the call: the
@@ -148,7 +159,7 @@ Same-dialect envelopes rather than translations: Anthropic Messages to
 Claude on Foundry and on Bedrock; OpenAI dialects to Azure OpenAI on
 Foundry (a base path and auth change).
 
-#### 5.2.1 Self-hosted model servers (ADR 0019)
+#### 5.2.1 Self-hosted model servers (ADR 0017)
 
 Today: standalone machines (DGX Spark, Mac mini and Mac Studio) running a
 current vLLM behind a TLS proxy, outside Kubernetes and the mesh. Coming:
@@ -183,7 +194,7 @@ Models on all of them change over time.
   model moves it between pools without config changes.
 - **Capacity** (M1): a static concurrency ceiling per endpoint and a
   per-principal in-flight limit on each pool (default half its capacity),
-  so the few very heavy users cannot occupy every machine (ADR 0026, 0032).
+  so the few very heavy users cannot occupy every machine (ADRs 0021, 0003).
   **M2**: an adaptive concurrency limit per endpoint (grows while latency
   holds, shrinks when it rises), vLLM `/metrics` polling, **prefix
   affinity** within the limit, and round-robin queueing across principals.
@@ -210,7 +221,7 @@ Models on all of them change over time.
 ### 5.3 Authentication and identity
 
 Every request resolves to a **Principal**: a user or a service, the
-**scope** (team or project) it is acting in, and the key if any (ADR 0003,
+**scope** (team or project) it is acting in, and the key if any (ADR 0009,
 org model §1–3). Authenticators are tried in configured order; the first
 that recognises its credential decides.
 
@@ -220,7 +231,7 @@ that recognises its credential decides.
 | Entra ID JWT (users) | v2 access tokens for golem's app registration; JWKS cached; `tid`, `aud`, `iss` checked; `oid` is the user; scope from a header (`x-golem-scope`) or the user's default | M1 |
 | Entra ID JWT (services) | client credentials or workload identity federation; `azp`/`appid` maps to a Service | M1 |
 | `golemctl login` for coding agents *(added)* | Entra device-code or browser flow; mints a short-lived personal key in the chosen scope, written where the agent reads it | M1 |
-| Mesh identity | In ambient mode the app does not see the peer certificate (ztunnel terminates mTLS). A waypoint in front of the gateway passes the caller's SPIFFE ID in a header, trusted only when the operator has restricted the data port to the waypoint (ADR 0003); binds keys to workloads, identifies in-mesh services without keys | Spike in M1, feature in M2 |
+| Mesh identity | In ambient mode the app does not see the peer certificate (ztunnel terminates mTLS). A waypoint in front of the gateway passes the caller's SPIFFE ID in a header, trusted only when the operator has restricted the data port to the waypoint (ADR 0009); binds keys to workloads, identifies in-mesh services without keys | Spike in M1, feature in M2 |
 | OAuth introspection (non-Entra IdPs) | RFC 7662 | Later, if ever |
 
 **Credential pass-through** (optional, per route): `none` (golem's provider
@@ -239,7 +250,7 @@ The full model is [org-model.md](org-model.md). In short:
 - Users (Entra); scopes, which are teams (optionally bound to Entra
   groups, synced from Graph) or projects (owned by a team; members may be
   teams, services, users); services (owned by a scope); cost centers
-  (external). ADR 0024.
+  (external). ADR 0010.
 - Roles: member, manager (on a scope), budget manager (on a cost center),
   admin.
 - Users mint personal keys within their own rights; keys are further
@@ -260,24 +271,24 @@ The full model is [org-model.md](org-model.md). In short:
 | Projects, cost centers, budget managers, grants, approvals, adjustments | M2 |
 | Content capture settings and overrides (org-model §3.1) | M2 |
 | golem-console; notifications (email/Teams) on thresholds and approvals | M2 |
-| Budgets across sites through site ceilings (ADR 0031) | M2 (with the first remote site) |
+| Budgets across sites through site ceilings (ADR 0013) | M2 (with the first remote site) |
 | Backstage plugin; budget downgrade to a cheaper alias; chargeback export per cost center | M3 |
 
 ### 5.5 Limits
 
 - **Enforcement modes** per scope: `observe`, `warn`, `enforce` (§9.1).
 - **Provider quota limits** per deployment, shared by a site's gateways,
-  split statically between sites (§9.2, ADR 0032).
+  split statically between sites (§9.2, ADR 0003).
 - **Rate limits** in requests/min, tokens/min and $/min, at any of the
   levels of §5.4 and per model or route; **concurrency limits** on
   in-flight streams per principal *(added)*.
-- **Estimate then reconcile** (ADR 0005, 0034): reserve the expected cost
+- **Estimate then reconcile** (ADR 0012): reserve the expected cost
   (recent cache-hit ratio and output size, not worst case) at every level
   before the call, renew it on long streams, correct with actual usage at
   the end; cut streams are charged what was produced, flagged as
   estimated; a daily job reconciles the ledger with providers' usage APIs.
-- **Valkey at every site**, required from M1 (ADR 0032); budgets across
-  sites through site ceilings published in snapshots (ADR 0031).
+- **Valkey at every site**, required from M1 (ADR 0003); budgets across
+  sites through site ceilings published in snapshots (ADR 0013).
 - Counters are rebuilt from the ClickHouse ledger (data older than the
   collector's maximum delay) after a Valkey loss.
 - On Valkey outage: budget levels fail open or closed per scope policy;
@@ -301,7 +312,7 @@ The full model is [org-model.md](org-model.md). In short:
   prompt caches hit. Largest cost lever for coding agents after model
   choice.
 - **Failover**: ordered fallback pools before the first response byte;
-  never after (ADR 0007). **Context-window fallback** *(added, M2)*.
+  never after (ADR 0002). **Context-window fallback** *(added, M2)*.
 - **Retries** with jittered backoff, `Retry-After`, a retry budget
   *(added)*. **Outlier ejection / cooldown** *(added, M1)*.
 - **Shadowing/mirroring** (M2): a percentage of a route's requests also sent
@@ -315,8 +326,7 @@ The full model is [org-model.md](org-model.md). In short:
 ### 5.7 Lifecycle hooks
 
 Four phases: `Request` (reject, rewrite, annotate with routing hints),
-`Chunk` (streams, M2), `Response`, `Complete` (async) (ADR 0004 as amended
-by 0025). In-process (Go, M1) or remote
+`Chunk` (streams, M2), `Response`, `Complete` (async) (ADR 0014). In-process (Go, M1) or remote
 (gRPC/HTTP, M2), each with a CEL condition, a timeout and a failure mode.
 Built-in hooks: deny lists, PII redaction (remote, Presidio-compatible),
 prompt-injection classifier, max prompt size, moderation (M2). A decision
@@ -327,13 +337,13 @@ on the answer *(added, M2)*.
 ### 5.8 Observability *(revised for ClickStack, Langfuse, Grafana)*
 
 All telemetry leaves golem as OTLP to the enterprise OTel collector, which
-routes it (ADR 0010):
+routes it (ADR 0015):
 
 | Destination | What | Why |
 |---|---|---|
 | ClickStack (ClickHouse + HyperDX) | All traces, logs, metrics; the access log | Operational search, HyperDX for incidents |
 | ClickHouse `golem.spend` | One record per request (org model §4.4), from the access log by materialized view, deduplicated by request id | The ledger: chargeback, budget rebuilds, spend APIs |
-| Langfuse (one project per capturing scope, ADR 0018) | GenAI traces with content, or metadata only, as the scope chooses; `langfuse.user.id`, `langfuse.session.id`, tags, scope metadata and golem's own cost | Sessions, prompt/completion review, evaluation, shadow comparisons, with Langfuse access matching the scope |
+| Langfuse (one project per capturing scope, ADR 0016) | GenAI traces with content, or metadata only, as the scope chooses; `langfuse.user.id`, `langfuse.session.id`, tags, scope metadata and golem's own cost | Sessions, prompt/completion review, evaluation, shadow comparisons, with Langfuse access matching the scope |
 | Grafana | Dashboards and alerts over ClickHouse (spend, budgets, limits, errors, latency, TTFT) and metrics, provisioned from this repo | Operators, managers, FinOps |
 
 - **Traces**: SERVER span per inbound request, CLIENT span per upstream
@@ -347,7 +357,7 @@ routes it (ADR 0010):
   failovers, ejections; hooks; in-flight streams.
 - **Content capture** off by default, set per team or project with
   retention, and overridable by keys and services only as far as the
-  scope allows (org-model §3.1, ADR 0018). Captured content goes only to
+  scope allows (org-model §3.1, ADR 0016). Captured content goes only to
   the scope's own Langfuse project, which golem provisions; per-record
   retention is enforced by deletion, with the Langfuse project's
   retention as a backstop.
@@ -362,28 +372,27 @@ routes it (ADR 0010):
 
 ### 5.9 Components, Kubernetes and the mesh
 
-The system is these deliverables (architecture.md, ADR 0013 as amended by
-0025 and 0032):
+The system is these deliverables (architecture.md, ADR 0003):
 
 | Component | Role | Milestone |
 |---|---|---|
 | golem-gateway | Data plane only: model requests in, provider calls out | M0 |
-| golem-control | Control API (config read, explain, overrides, org, keys, budgets, spend, audit), the CRD watch; its leader runs the jobs and signs and publishes snapshots (ADR 0032, 0033) | M1 |
-| golem-operator | Installation and day-2 in each cluster: upgrades, drains, canaries, credential mounting, mesh policies, Langfuse projects, telemetry plumbing (ADR 0023) | M2 (Helm in M1) |
+| golem-control | Control API (config read, explain, overrides, org, keys, budgets, spend, audit), the CRD watch; its leader runs the jobs and signs and publishes snapshots (ADRs 0003, 0007) | M1 |
+| golem-operator | Installation and day-2 in each cluster: upgrades, drains, canaries, credential mounting, mesh policies, Langfuse projects, telemetry plumbing (ADR 0005) | M2 (Helm in M1) |
 | golemctl | CLI for every persona, including `login` and coding-agent setup | M1 |
 | golem-console | Small web UI for keys, caps, requests and approvals | M2 |
 | Backstage plugin | Spend, budgets and keys on Backstage entities | M3 |
 
 - **Two writers, one each**: declarative config is CRDs (GitOps), read by
   golem-control; entitlements and operational overrides change only through
-  the control API (protobuf, Connect; ADR 0014, 0023). The CLI, console and
+  the control API (protobuf, Connect; ADRs 0022, 0005). The CLI, console and
   plugin are API clients; the gateway reads only its snapshots from object
   storage and never calls the control plane.
 - **Store**: one state document in object storage, updated by
   compare-and-swap; snapshots are published to the same store and polled by
-  gateways (ADR 0028). In the initial phase one S3 bucket in us-east-2
+  gateways (ADR 0006). In the initial phase one S3 bucket in us-east-2
   serves every site, with AKS and on-prem gateways reaching it through
-  Entra-to-AWS federation and IAM Roles Anywhere (ADR 0029).
+  Entra-to-AWS federation and IAM Roles Anywhere (ADR 0008).
 - **Gateway probes**: `/livez`, `/readyz` (a snapshot loaded, a usable
   deployment per required pool, limit store reachable when required),
   `/healthz`, `/startupz`; pprof and the applied snapshot hash on the
@@ -398,14 +407,14 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
   bucket policies let each gateway pool read its snapshots and write only
   its own status objects.
 - **Config**: five CRD kinds (`Backend`, `ModelRoute`, `ScopePolicy`,
-  `Hook`, `PriceList`; ADR 0025) watched by golem-control, with status
+  `Hook`, `PriceList`; ADR 0003) watched by golem-control, with status
   written back; incident levers as expiring overrides through the API.
   Provider secrets stay in Kubernetes Secrets, mounted into the gateways
   that need them.
 - **Multiple instances and regions**: `GatewayPool`s per region or zone;
   in multi-region, a control plane per region over a replicated bucket.
 - Container-aware GOMAXPROCS (runtime default), `GOMEMLIMIT` from the
-  limit, PDBs; fixed replicas sized for the design envelope (ADR 0026)
+  limit, PDBs; fixed replicas sized for the design envelope (ADR 0021)
   *(added)*.
 
 ### 5.10 Security and compliance
@@ -430,7 +439,7 @@ repeated). Semantic caching: Later, if at all.
 
 ### 5.12 GitHub Copilot *(added)*
 
-ADR 0021. Users' Copilot clients (VS Code, JetBrains, Copilot CLI, the
+ADR 0020. Users' Copilot clients (VS Code, JetBrains, Copilot CLI, the
 Copilot app) can use golem as a BYOK "OpenAI-compatible" provider with
 their personal golem key (M1): golem's models, budgets and capture apply,
 attributed per user; code completions stay on GitHub. Enterprise custom
@@ -438,7 +447,7 @@ models pointing at golem, called from GitHub's side, follow a spike (M2).
 Copilot's own usage is ingested from GitHub's usage metrics API into
 ClickHouse as showback beside golem spend (M2). External callers
 (Copilot's enterprise custom models, SaaS apps with configurable model
-endpoints) use the internet-facing edge gateway pool (ADR 0022).
+endpoints) use the internet-facing edge gateway pool (ADR 0018).
 
 ### 5.13 Agent protocols *(added, Later)*
 
@@ -450,7 +459,9 @@ protocol-agnostic so it can be added.
 
 Phases, their contents and exit criteria: [roadmap.md](roadmap.md). In
 short: Phase 0 spikes; M0 walking skeleton; M1 the first team in
-production (single region, Helm, observe-then-enforce budgets); M2 the
+production (single region, Helm, observe-then-enforce budgets, no
+translation); M1.5 translation through the canonical model (Chat ↔
+Messages, so Claude on Bedrock serves OpenAI callers); M2 the
 enterprise default (projects, approvals, capture, the operator, console,
 edge pool); M3 multi-region, Temporal and the long tail.
 
@@ -470,19 +481,19 @@ edge pool); M3 multi-region, Temporal and the long tail.
 Decisions are recorded in the ADRs (index: adr/README.md); this list holds
 only what is still open.
 
-1. **Waypoint identity header** (ADR 0003): which header carries the
+1. **Waypoint identity header** (ADR 0009): which header carries the
    caller's SPIFFE ID through a Gloo Mesh ambient waypoint; the M1 spike.
 2. **Never-capture data**: which data classes or scopes must forbid
    capture outright, and who may enable the multi-year retention classes
    (drafted: platform admins, by scope policy).
 3. **Site connectivity**: the round trip from each AKS and on-prem site to
    us-east-2, and whether they reach AWS privately. Working assumption: a
-   Valkey per site and site ceilings (ADR 0029, 0031).
+   Valkey per site and site ceilings (ADRs 0008, 0013).
 4. **Data residency**: whether central telemetry, the ledger, captured
    content and the us-east-2 state document (identity and entitlement
    metadata, no prompts) satisfy every site's residency rules; a compliance
    review before the first remote site.
-5. **Provider usage APIs**: access for the daily reconciliation (ADR 0034)
+5. **Provider usage APIs**: access for the daily reconciliation (ADR 0012)
    to OpenAI's and Anthropic's organisation usage APIs, AWS cost data and
    Azure cost exports.
 
@@ -556,7 +567,7 @@ period per team before enforcement.
 
 Under 2,000 users (bi- or tri-modal: under 100 heavy, under 10 very heavy),
 under 10 top-level teams with 3–10 sub-teams each, 4–10 projects per team.
-golem is designed for ten times that (ADR 0026: about 10,000 concurrent
+golem is designed for ten times that (ADR 0021: about 10,000 concurrent
 streams, 500 requests per second, 50,000 keys, a 20 MB snapshot), with
 dashboards that alert as traffic approaches it. Within it: whole-snapshot
 distribution, fixed gateway replicas, a single Valkey primary with a
@@ -570,7 +581,7 @@ metric), alarmed past a minute; a synthetic request per site and pool every
 minute (a canary key against a cheap model or a stub) checks the whole path
 from outside; an alert on the absence of golem's own metrics catches a
 silent collector; the leader's pointer refresh and CAS retry rate are
-watched (ADR 0033, 0028).
+watched (ADRs 0007, 0006).
 
 ### 9.14 Upgrades and compatibility of stored formats
 

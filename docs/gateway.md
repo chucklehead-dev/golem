@@ -5,7 +5,7 @@ Status: draft, third pass. The system's components and how they fit are in
 The gateway does data-plane work only: it serves model requests. It has no
 API for changing anything, no database, no Kubernetes client, and it never
 calls the control plane: its input is its pool's snapshots in object
-storage (ADR 0028).
+storage (ADR 0006).
 
 ## 1. Principles
 
@@ -25,7 +25,7 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
   by a tee'd scanner, not by buffering it.
 - **Immutable config.** One validated snapshot (routes and entitlements)
   behind an `atomic.Pointer`, polled from object storage where the
-  control plane publishes it (ADR 0028); a request takes the pointer once and uses
+  control plane publishes it (ADR 0006); a request takes the pointer once and uses
   it to the end. No locks on the request path for config.
 - **Standard library first.** Dependencies only where the standard library
   has no answer (OTel, CEL, JWT/JOSE, the RESP client, provider signers),
@@ -44,10 +44,10 @@ request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect
            → Request hooks → router (alias, pool, deployment) → limits (reserve: key, member, pool, quota)
            → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
-inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0028)
+inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
            or a file, for development and tests (the same snapshot format)
-state:     the site's Valkey (reservations, counters, provider quota shares; spend against site ceilings) (ADR 0005, 0031)
-outputs:   OTLP → collector (ADR 0010); captured traces → the scope's Langfuse project (ADR 0018);
+state:     the site's Valkey (reservations, counters, provider quota shares; spend against site ceilings) (ADRs 0012, 0013)
+outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
            status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
 ```
@@ -64,7 +64,7 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    into a pooled buffer with a size cap (`http.MaxBytesReader`). A
    `jsontext.Decoder` scan extracts the routing fields; it stops early once
    it has them unless a hook or translation needs the whole tree.
-3. **Authenticate** (ADR 0003). The chain yields a `Principal` (user or
+3. **Authenticate** (ADR 0009). The chain yields a `Principal` (user or
    service, scope, key, mesh identity if present) or an error in the
    caller's dialect. Keys are
    looked up by hash in the entitlements snapshot (no network call); Entra
@@ -72,7 +72,7 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    computed from the snapshot: scope policy ∩ membership ∩ key constraints
    (org model §3).
 4. **Request hooks**, selected by precompiled CEL programs; they may
-   reject, rewrite, or add routing hints (ADR 0025).
+   reject, rewrite, or add routing hints (ADR 0003).
 5. **Route.** Alias to route; CEL conditions; authorization check; pool
    selection by strategy (affinity key first, then the strategy among
    healthy deployments).
@@ -81,8 +81,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    concurrency limits) in one
    script round trip to the limit store; local shares if none.
 7. **Attempt loop.** For each attempt: build the upstream request (fast
-   path: same bytes, spliced model name; else translate), sign or
-   authenticate it for the provider, send it on the deployment's
+   path: same bytes, spliced model name; else the frontend's decoder and the
+   backend's encoder through `canon`), wrap it in the deployment's envelope
+   (URL, model placement, auth, stream framing), send it on the deployment's
    `http.Transport`. Retry or fail over on a retryable outcome *before the
    first response byte*; after it, the attempt is committed.
 8. **Respond.** Fast path: copy headers through an allowlist, copy the
@@ -91,7 +92,7 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    frontend events.
 9. **Reconcile** the reservation with actual usage; price it from the
    catalog; record metrics and the access log record (which is also the
-   ledger's input, ADR 0010); queue `Complete` hooks (bounded queue,
+   ledger's input, ADR 0015); queue `Complete` hooks (bounded queue,
    dropped work counted).
 
 Shadow requests (M2) branch at step 7 onto their own goroutine with a
@@ -108,9 +109,12 @@ import rules that keep the gateway free of control-plane code):
 cmd/golem-gateway/     main: flags, signals, wiring; nothing else
 gateway/proxy/         the request path (§3): the only package that knows the order of steps
 gateway/dialect/       one subpackage per dialect: openai/{chat,responses,embeddings,decisions},
-                       anthropic/messages, typesafe/systemone, bedrock/{invoke,converse};
-                       each: scan, errors, SSE events, usage extraction
-gateway/dialect/ir     the intermediate representation, used only for translation
+                       anthropic/messages, typesafe/systemone, bedrock/converse; each: the
+                       pass-through scan and splice, errors, stream events, usage extraction,
+                       and its adapter pair (decode to, encode from the canonical model)
+gateway/canon/         the canonical model (requests, responses, stream events); internal, never an API
+gateway/envelope/      how hosts carry a dialect: anthropic, bedrock (InvokeModel, event-stream
+                       framing, SigV4), vertex, foundry, openai, vllm
 gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT), meshid
 gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object-storage poller,
                        the file source, the on-disk last-good copy, status writes
@@ -124,8 +128,10 @@ gateway/local/         probes, pprof, snapshot hash
 ```
 
 `proxy` depends on interfaces from the others; nothing depends on `proxy`.
-Each dialect package is independent of the others and of `ir` except for its
-translation file.
+Each dialect package depends only on `canon` (for its adapters), never on
+another dialect; envelopes depend on neither. A translated request is
+`encode(backend, decode(frontend, req))` wrapped by the backend's
+envelope, assembled by `proxy`.
 
 ## 5. Go 1.27 facilities used
 
@@ -176,7 +182,7 @@ except OTel's API.
   and that its `publish_seq` exceeds its floor (the larger of its local
   last-good copy and its own status object, so an empty disk does not reset
   it), then fetches the snapshot by hash and verifies its signature and
-  hash (ADR 0033). Anything unsigned, wrongly signed or older is ignored and
+  hash (ADR 0007). Anything unsigned, wrongly signed or older is ignored and
   alarmed; so is a pointer more than a day old.
 - An **emergency denylist** (a ConfigMap mounted as a file, read with
   `os.Root`) is applied over every snapshot: a site admin's way to revoke a
