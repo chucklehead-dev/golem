@@ -24,5 +24,5 @@ Status: design. Nothing is built yet.
 Comparable products, for reference: LiteLLM, agentgateway, Langfuse AI
 Gateway, Envoy AI Gateway, Portkey, Bifrost, Kong AI Gateway, Cloudflare AI
 Gateway. golem is not a general-purpose product like them: it serves one
-organisation, so it leaves out multi-tenancy, billing, a UI and most plugin
+organisation, so it leaves out multi-tenancy, billing, a large UI and most plugin
 generality, and keeps the code small enough to read in an afternoon.
