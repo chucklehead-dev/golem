@@ -1,5 +1,9 @@
 # golem: product requirements
 
+Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
+and [security-and-correctness.md](security-and-correctness.md) govern the
+affected guarantees and release gates. Implementation remains outstanding.
+
 Status: draft for discussion. Revised 2026-11-11 (sixth pass: the design envelope, ADR 0021; the roadmap in roadmap.md).
 
 ## 1. Problem
@@ -78,7 +82,7 @@ it translates.
 | Dialect | Endpoints | Milestone |
 |---|---|---|
 | OpenAI Chat Completions | `POST /v1/chat/completions` (stream and not) | M1 |
-| OpenAI Responses | `POST /v1/responses`, `GET/DELETE /v1/responses/{id}`, streaming events | M1 |
+| OpenAI Responses | Stateless `POST /v1/responses`, streaming events; stored operations deferred (ADR 0029) | M1 |
 | Anthropic Messages | `POST /v1/messages`, `POST /v1/messages/count_tokens` | M1 |
 | OpenAI Embeddings | `POST /v1/embeddings` | M1 |
 | OpenAI Decisions | `POST /v1/decisions` (non-streaming; predicate, choice, score) | M2 (pass-through) |
@@ -289,8 +293,8 @@ The full model is [org-model.md](org-model.md). In short:
   estimated; a daily job reconciles the ledger with providers' usage APIs.
 - **Valkey at every site**, required from M1 (ADR 0012); budgets across
   sites through site ceilings published in snapshots (ADR 0013).
-- Counters are rebuilt from the ClickHouse ledger (data older than the
-  collector's maximum delay) after a Valkey loss.
+- Counter recovery uses durable accounting watermarks, the ledger and
+  unresolved attempts/reservations; Valkey loss cannot erase recent liability.
 - On Valkey outage: budget levels fail open or closed per scope policy;
   rate limits fail open with a warning.
 - Refusals, in the caller's dialect, say which limit, at which level, and
@@ -475,7 +479,8 @@ edge pool); M3 multi-region, Temporal and the long tail.
 - 100% of requests attributed to a principal, a scope and its funding.
 - Ledger within 1% of provider invoices; no budget exceeded by more than
   its in-flight reservations' estimation error.
-- Key revocation effective on every instance within 5 s.
+- Key revocation within 5 s on healthy connected gateways; partitioned
+  authorization expires at its signed lease bound (five-minute default).
 - A provider outage moves traffic to fallbacks within one ejection window.
 
 ## 8. Open questions

@@ -1,5 +1,9 @@
 # 0028: Capability-aware routing; deterministic encoders
 
+Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
+and its normative security and correctness requirements. Baseline text below
+must be read with those amendments.
+
 Status: Accepted. Detailed in canonical-model.md.
 
 ## Decision

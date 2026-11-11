@@ -1,5 +1,9 @@
 # golem: the control plane
 
+Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
+and [security-and-correctness.md](security-and-correctness.md) govern the
+affected guarantees and release gates. Implementation remains outstanding.
+
 Status: draft, ninth pass. golem-control: one Deployment, every replica
 serving the API, one leader running jobs and publishing snapshots (ADRs
 0003, 0019), over one state document in object storage (ADRs 0006, 0007).
@@ -60,15 +64,16 @@ validate` (the snapshot compiler as a library), not by a live API call
 - **Reads**: from memory, refreshed by a conditional GET every 500 ms.
 - **Audit outbox** (ADR 0006): a write's audit events go into the document
   with it; the leader ships them to ClickHouse as OTel log records and
-  trims them once accepted. Optionally also archived under Object Lock.
+  trims them only after durable separate-account Object Lock archival.
+  Collector acceptance is not the durability boundary.
 - **Schema evolution**: additive protobuf changes need nothing. A breaking
   change takes two releases: release N reads the new schema and keeps
   writing the old; release N+1 writes the new. Mixed replicas during a
   rolling upgrade therefore always read what the others write.
 - **History**: bucket versioning in place, replication to a backup
   account under Object Lock (ADR 0007). `golemctl state restore` writes an
-  old content as a new version and re-applies revocations and removals
-  made since.
+  old content as a new version after preserving all subsequent restrictive
+  security changes; missing history requires quarantined recovery and review.
 - **Write access**: golem-control's role only, by bucket policy; a
   break-glass role exists, audited, MFA, two-person (ADR 0007).
 - **Not in the document**: shipped audit (ClickHouse), counters and
@@ -106,8 +111,8 @@ control plane.
   external consumers' service keys only. Each site's snapshot carries that
   site's budget ceilings.
 - **Gateways** poll the pointer every second (conditional GET), verify its
-  signature and that `publish_seq` exceeds their floor (the larger of the
-  local last-good copy and their own status object), fetch and verify the
+  signature and that `publish_seq` exceeds their floor (the trusted publisher checkpoint and atomically persisted local
+  checkpoint; gateway status is diagnostic), fetch and verify the
   snapshot, compile, swap, and write `status/<pool>/<gateway-id>`.
 - **Status**: golem-control reads the status objects for the CRDs'
   `Applied n/m`, `golemctl gateways`, and the per-gateway snapshot age
@@ -115,7 +120,9 @@ control plane.
 - **Revocation latency**: the write plus the one-second poll, about two
   seconds.
 - **Freshness**: the leader re-signs the pointer at least hourly; a
-  gateway alarms when its pointer is more than a day old.
+  gateway refuses new requests after its signed authorization lease expires
+  (five-minute default). Authorization renewal must use fresh authoritative
+  inputs; the hourly signing schedule is not an authorization renewal.
 
 ## 5. Identity, keys and bootstrap
 
@@ -151,12 +158,12 @@ Run by the leader; each an idempotent scan.
 |---|---|---|
 | Entra group sync | every 5 min; change notifications in M2 | Membership diffs as service calls in batches; revokes disabled users' keys |
 | Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps |
-| Ceiling rebalance | every 30 s | ADR 0013: per-site spend from ClickHouse, ceilings moved within each pool |
-| Audit shipping | every few seconds | Outbox to ClickHouse, trimmed when accepted |
+| Allocation monitoring | every 30 s | Fixed per-period allocations, no reclamation of issued ceilings (ADR 0029) |
+| Audit shipping | every few seconds | Archive before outbox trim; ClickHouse is a query projection |
 | Pointer refresh | hourly | Re-signs every pool's pointer |
 | Key, request and registration expiry; reminders | hourly | Expires keys, adjustment requests, registrations past TTL; notifies 7 days and 1 day ahead |
 | Ledger and provider reconciliation | daily | Counters against the ledger (data older than an hour); the ledger against provider usage APIs (ADR 0012) |
-| Threshold notifications | with the ceiling rebalance | 50/80/100% at key, member and pool level |
+| Threshold notifications | with allocation monitoring | 50/80/100% at key, member and pool level |
 | Capture expiry and retention (M2) | hourly | Switch expiry; deletion of expired traces in Langfuse (ADR 0016) |
 | Copilot usage ingestion (M2) | daily | GitHub usage metrics into ClickHouse (ADR 0020) |
 
@@ -203,5 +210,5 @@ ledger's too (seconds behind); golem-control reads no site's Valkey.
 - Models (testing.md §3): the state document and publication ("every
   acknowledged write is in a snapshot every gateway applies; no gateway
   applies a lower `publish_seq` or an unsigned object"), and the site
-  ceilings ("Σ ceilings ≤ total; a ceiling never below its site's spend").
+  allocations ("issued allocations fit funding; disconnected allocations cannot be reclaimed").
 - API compatibility: `buf breaking` against the last release in CI.

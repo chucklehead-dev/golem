@@ -1,5 +1,9 @@
 # 0005: Declarative config is CRDs read by golem-control; incidents use expiring overrides
 
+Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
+and its normative security and correctness requirements. Baseline text below
+must be read with those amendments.
+
 Status: Accepted (v1 baseline). From archive 0002, 0012, 0017, 0023, 0025, 0032.
 
 ## Decision

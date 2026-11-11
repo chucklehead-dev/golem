@@ -1,27 +1,25 @@
-# 0013: Budgets across sites as monotonic site ceilings
+# 0013: Fixed site allocations per period
 
-Status: Accepted (v1 baseline). From archive 0016, 0031.
+Status: Amended by [ADR 0029](0029-security-and-correctness-revision.md).
 
 ## Decision
 
-- Every site, EKS included, enforces each pool against a **site ceiling**
-  published in its snapshots; its Valkey counts the site's spend per pool
-  per period.
-- golem-control keeps `Σ site ceilings ≤ pool total` and never lowers a
-  ceiling below its site's spend. Every 30 s it reads each site's spend
-  from the ClickHouse ledger and moves headroom towards the sites using it.
-  Ledger lag affects how tight the rebalance is, not the invariant.
-- One site: its ceiling is the pool. Caps are split the same way (a small
-  default share per site, the rest where the member is usually active).
-- A site cut off from the bucket spends at most its last ceilings.
+Each site enforces a fixed allocation per pool, cap and period. Issued
+allocations cannot be lowered or reclaimed in that period. The sum of issued
+allocations cannot exceed available funding. Additional allocations use only
+unallocated funds; funding reductions and grants out cannot consume already
+allocated funds. A disconnected site's last allocation remains allocated.
+Key/member caps follow the same rule. One site may receive the full pool.
 
-## Consequences
+Ledger spend supports monitoring, never reclamation. Dynamic transfers need
+acknowledged reductions or expiring fenced leases, modeled against actual
+applied snapshots and outstanding liability before activation. No dynamic
+rebalance job ships initially. Period rollover isolates old-period liability
+until settlement. Unused allocations can remain stranded.
 
-No lease protocol and no reports from gateways; one invariant, checked in
-one place and modelled in Quint with its mutants (testing.md).
+## Rationale
 
-## Alternatives
-
-Leases with consumption reports (a second channel from gateways); a
-central Valkey for all sites (a cross-site round trip per request); static
-shares (wasted budget).
+The original baseline asserted that ledger lag affected utilization only.
+A disconnected site can keep its old ceiling after a controller reduces it
+and reallocates the difference. Controller-side ceiling sums therefore do
+not establish safety. Fixed allocations avoid this double allocation.

@@ -36,3 +36,5 @@ baseline one, marked in both.
 | [0026](0026-identifiers-and-headers.md) | Keys carry their environment; request IDs; one session concept; golem's headers |
 | [0027](0027-provider-side-retention.md) | Provider-side storage forbidden unless a scope allows it |
 | [0028](0028-capabilities-and-determinism.md) | Capability-aware routing; deterministic encoders |
+
+| [0029](0029-security-and-correctness-revision.md) | Proposed security and correctness review amendments and production gates |
