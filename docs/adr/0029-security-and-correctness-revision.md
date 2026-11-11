@@ -1,6 +1,6 @@
 # 0029: Security and correctness requirements after design review
 
-Status: Accepted. Amends ADRs 0002, 0005, 0006, 0007, 0009, 0012,
+Status: Accepted; §9's accounting requirements amended by [0031](0031-soft-budgets.md). Amends ADRs 0002, 0005, 0006, 0007, 0009, 0012,
 0013, 0014, 0015, 0016, 0017, 0023, 0025, 0027 and 0028 in the areas
 specified below. Unaffected decisions remain in force.
 

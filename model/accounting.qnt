@@ -1,280 +1,199 @@
 // Generated from accounting.md by lmt. Edit the markdown, not this file.
 module accounting {
-  const ATTEMPTS: Set[str]
-  const AMOUNTS: Set[int]
-  const ESTIMATE: int
+  const REQUESTS: Set[str]
+  const COSTS: Set[int]
+  const WORST: int
+  const BUDGET: int
+  const LIMIT: int
 
-  const INTENT_FIRST: bool
-  const KEEP_UNCERTAIN: bool
-  const TRIM_AFTER_ACK: bool
+  const LIMIT_ON: bool
+  const STRICT: bool
   const DEDUP: bool
-  const DURABLE_MEDIUM: bool
-  var billed: str -> int
+  const RECONCILE: bool
   var phase: str -> str
-  var responseLost: str -> bool
-  var reservations: str -> int
-  type Event = { id: (str, str), attempt: str, kind: str, amount: int, durability: str }
-
-  var journal: Set[Event]
-  var ledger: List[Event]
-  var acked: Set[(str, str)]
-  var lostLiability: bool
+  var billed: str -> int
+  var known: int
+  var buffer: Set[(str, int)]
+  var ledger: List[(str, int)]
+  var adjustment: int
+  var uncounted: int
+  var closed: bool
   action init = all {
-    billed' = ATTEMPTS.mapBy(a => 0),
-    phase' = ATTEMPTS.mapBy(a => "idle"),
-    responseLost' = ATTEMPTS.mapBy(a => false),
-    reservations' = ATTEMPTS.mapBy(a => 0),
-    journal' = Set(),
+    phase' = REQUESTS.mapBy(r => "idle"),
+    billed' = REQUESTS.mapBy(r => 0),
+    known' = 0,
+    buffer' = Set(),
     ledger' = [],
-    acked' = Set(),
-    lostLiability' = false,
-  }
-  def eventIds(es: Set[Event]): Set[(str, str)] = es.map(e => e.id)
-  def ledgerSet: Set[Event] = ledger.foldl(Set(), (s, e) => s.union(Set(e)))
-  def recorded(a: str, j: Set[Event]): bool =
-    j.exists(e => e.attempt == a) or ledgerSet.exists(e => e.attempt == a)
-  def losesLiability(j: Set[Event]): bool =
-    ATTEMPTS.exists(a => billed.get(a) > 0 and not(recorded(a, j)))
-  action reserve(attempt: str): bool = all {
-    phase.get(attempt) == "idle",
-    phase' = phase.put(attempt, "reserved"),
-    reservations' = reservations.put(attempt, ESTIMATE),
-    billed' = billed, responseLost' = responseLost,
-    journal' = journal, ledger' = ledger, acked' = acked, lostLiability' = lostLiability,
-  }
-  action writeIntent(attempt: str): bool = all {
-    phase.get(attempt) == "reserved",
-    not(journal.exists(e => e.attempt == attempt)),
-    journal' = journal.union(Set({ id: (attempt, "intent"), attempt: attempt, kind: "intent",
-                                   amount: ESTIMATE, durability: "buffered" })),
-    billed' = billed, phase' = phase, responseLost' = responseLost,
-    reservations' = reservations, ledger' = ledger, acked' = acked, lostLiability' = lostLiability,
+    adjustment' = 0,
+    uncounted' = 0,
+    closed' = false,
   }
 
-  action flush: bool = all {
-    journal.exists(e => e.durability == "buffered"),
-    journal' = journal.map(e => { ...e, durability: "durable" }),
-    billed' = billed, phase' = phase, responseLost' = responseLost,
-    reservations' = reservations, ledger' = ledger, acked' = acked, lostLiability' = lostLiability,
+  def inflight: int = REQUESTS.filter(r => phase.get(r) == "inflight").size()
+  def totalBilled: int = REQUESTS.fold(0, (acc, r) => acc + billed.get(r))
+  def ledgerSet: Set[(str, int)] = ledger.foldl(Set(), (s, e) => s.union(Set(e)))
+  def ledgerSpend: int =
+    if (DEDUP) ledgerSet.fold(0, (acc, e) => acc + e._2)
+    else ledger.foldl(0, (acc, e) => acc + e._2)
+  action admit(request: str): bool = all {
+    phase.get(request) == "idle",
+    if (LIMIT_ON) inflight < LIMIT else true,
+    if (STRICT) known + WORST <= BUDGET else known < BUDGET,
+    phase' = phase.put(request, "inflight"),
+    billed' = billed, known' = known, buffer' = buffer, ledger' = ledger,
+    adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
   }
-  def intentDurable(a: str): bool =
-    journal.exists(e => e.attempt == a and e.kind == "intent" and e.durability == "durable")
+  action complete(request: str, cost: int): bool = all {
+    phase.get(request) == "inflight",
+    phase' = phase.put(request, "done"),
+    billed' = billed.put(request, cost),
+    known' = known + cost,
+    buffer' = buffer.union(Set((request, cost))),
+    ledger' = ledger, adjustment' = adjustment, uncounted' = uncounted,
+    closed' = false,
+  }
+  action crash(cost: int): bool = all {
+    val lostNow = REQUESTS.filter(r => phase.get(r) == "inflight")
+    all {
+      phase' = REQUESTS.mapBy(r => if (lostNow.contains(r)) "lost" else phase.get(r)),
+      billed' = REQUESTS.mapBy(r => if (lostNow.contains(r)) cost else billed.get(r)),
+      uncounted' = uncounted + lostNow.size() * cost,
+    },
+    buffer' = Set(),
+    known' = known, ledger' = ledger, adjustment' = adjustment,
+    closed' = false,
+  }
+  action loseCounter: bool = all {
+    val fallback = ledgerSpend + adjustment
+    all {
+      known > fallback,
+      known' = fallback,
+      uncounted' = uncounted + (known - fallback),
+    },
+    phase' = phase, billed' = billed, buffer' = buffer, ledger' = ledger,
+    adjustment' = adjustment, closed' = closed,
+  }
+  action deliver(request: str, cost: int): bool = all {
+    buffer.contains((request, cost)),
+    buffer' = buffer.exclude(Set((request, cost))),
+    ledger' = ledger.append((request, cost)),
+    phase' = phase, billed' = billed, known' = known, adjustment' = adjustment,
+    uncounted' = uncounted, closed' = closed,
+  }
 
-  action dispatch(attempt: str, amount: int, lost: bool): bool = all {
-    phase.get(attempt) == "reserved",
-    if (INTENT_FIRST) intentDurable(attempt) else true,
-    phase' = phase.put(attempt, "inflight"),
-    billed' = billed.put(attempt, amount),
-    responseLost' = responseLost.put(attempt, lost),
-    reservations' = reservations, journal' = journal, ledger' = ledger, acked' = acked,
-    lostLiability' = lostLiability,
+  action duplicate(request: str, cost: int): bool = all {
+    ledgerSet.contains((request, cost)),
+    ledger' = ledger.append((request, cost)),
+    phase' = phase, billed' = billed, known' = known, buffer' = buffer,
+    adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
   }
-  action settle(attempt: str): bool = all {
-    phase.get(attempt) == "inflight",
-    not(responseLost.get(attempt)),
-    journal' = journal.union(Set({ id: (attempt, "settlement"), attempt: attempt, kind: "settlement",
-                                   amount: billed.get(attempt), durability: "buffered" })),
-    phase' = phase.put(attempt, "done"),
-    reservations' = reservations.put(attempt, 0),
-    billed' = billed, responseLost' = responseLost, ledger' = ledger, acked' = acked,
-    lostLiability' = lostLiability,
-  }
-  action giveUp(attempt: str): bool = all {
-    phase.get(attempt) == "inflight",
-    responseLost.get(attempt),
-    val j = if (KEEP_UNCERTAIN) journal else journal.filter(e => e.attempt != attempt)
+  action closeBooks: bool = all {
+    inflight == 0,
+    buffer.size() == 0,
+    not(closed),
+    val adj = if (RECONCILE) totalBilled - ledgerSpend else adjustment
     all {
-      journal' = j,
-      lostLiability' = (lostLiability or losesLiability(j)),
+      adjustment' = adj,
+      known' = if (known < ledgerSpend + adj) ledgerSpend + adj else known,
     },
-    phase' = phase.put(attempt, "done"),
-    reservations' = reservations.put(attempt, 0),
-    billed' = billed, responseLost' = responseLost, ledger' = ledger, acked' = acked,
-  }
-  action crash: bool = all {
-    val survived = journal.filter(e => e.durability == "durable")
-    val settledAttempts = survived.filter(e => e.kind != "intent").map(e => e.attempt)
-    val j = if (KEEP_UNCERTAIN) survived
-            else survived.filter(e => e.kind != "intent" or settledAttempts.contains(e.attempt))
-    all {
-      journal' = j,
-      lostLiability' = (lostLiability or losesLiability(j)),
-    },
-    phase' = ATTEMPTS.mapBy(a => if (phase.get(a) == "inflight") "done" else phase.get(a)),
-    reservations' = reservations,
-    billed' = billed, responseLost' = responseLost, ledger' = ledger, acked' = acked,
-  }
-  action loseMedium: bool = all {
-    not(DURABLE_MEDIUM),
-    journal.size() > 0,
-    journal' = Set(),
-    lostLiability' = (lostLiability or losesLiability(Set())),
-    billed' = billed, phase' = phase, responseLost' = responseLost,
-    reservations' = reservations, ledger' = ledger, acked' = acked,
-  }
-  action loseReservations: bool = all {
-    reservations' = ATTEMPTS.mapBy(a => 0),
-    billed' = billed, phase' = phase, responseLost' = responseLost,
-    journal' = journal, ledger' = ledger, acked' = acked, lostLiability' = lostLiability,
-  }
-  action ship(id: (str, str), delivered: bool): bool = all {
-    journal.exists(e => e.id == id and e.durability == "durable"),
-    val ev = journal.filter(e => e.id == id).fold({ id: ("", ""), attempt: "", kind: "", amount: 0, durability: "" },
-                                                  (acc, e) => e)
-    val j = if (delivered and TRIM_AFTER_ACK) journal.filter(e => e.id != id)
-            else if (TRIM_AFTER_ACK) journal
-            else journal.filter(e => e.id != id)
-    all {
-      ledger' = if (delivered) ledger.append(ev) else ledger,
-      acked' = if (delivered) acked.union(Set(id)) else acked,
-      journal' = j,
-      lostLiability' = (lostLiability or (not(delivered) and losesLiability(j))),
-    },
-    billed' = billed, phase' = phase, responseLost' = responseLost, reservations' = reservations,
-  }
-  action duplicate(id: (str, str)): bool = all {
-    ledgerSet.exists(e => e.id == id),
-    val ev = ledgerSet.filter(e => e.id == id).fold({ id: ("", ""), attempt: "", kind: "", amount: 0, durability: "" },
-                                                    (acc, e) => e)
-    ledger' = ledger.append(ev),
-    billed' = billed, phase' = phase, responseLost' = responseLost, reservations' = reservations,
-    journal' = journal, acked' = acked, lostLiability' = lostLiability,
-  }
-  def chain(a: str): Set[Event] = journal.union(ledgerSet).filter(e => e.attempt == a)
-
-  action reconcile(attempt: str): bool = all {
-    chain(attempt).exists(e => e.kind == "intent"),
-    not(chain(attempt).exists(e => e.kind != "intent")),
-    phase.get(attempt) == "done",
-    journal' = journal.union(Set({ id: (attempt, "resolution"), attempt: attempt, kind: "resolution",
-                                   amount: billed.get(attempt), durability: "durable" })),
-    billed' = billed, phase' = phase, responseLost' = responseLost, reservations' = reservations,
-    ledger' = ledger, acked' = acked, lostLiability' = lostLiability,
+    closed' = true,
+    phase' = phase, billed' = billed, buffer' = buffer, ledger' = ledger,
+    uncounted' = uncounted,
   }
   action step = {
-    nondet attempt = ATTEMPTS.oneOf()
-    nondet amount = AMOUNTS.oneOf()
-    nondet lost = Set(true, false).oneOf()
-    nondet delivered = Set(true, false).oneOf()
-    nondet id = Set((attempt, "intent"), (attempt, "settlement"), (attempt, "resolution")).oneOf()
+    nondet request = REQUESTS.oneOf()
+    nondet cost = COSTS.oneOf()
     any {
-      reserve(attempt),
-      writeIntent(attempt),
-      flush,
-      dispatch(attempt, amount, lost),
-      settle(attempt),
-      giveUp(attempt),
-      crash,
-      loseMedium,
-      loseReservations,
-      ship(id, delivered),
-      duplicate(id),
-      reconcile(attempt),
+      admit(request),
+      complete(request, cost),
+      crash(cost),
+      loseCounter,
+      deliver(request, cost),
+      duplicate(request, cost),
+      closeBooks,
     }
   }
-  def headSpend(a: str): int =
-    val es = ledgerSet.filter(e => e.attempt == a and e.kind != "intent")
-    es.fold(0, (acc, e) => if (e.amount > acc) e.amount else acc)
+  val slack = if (STRICT) (LIMIT - 1) * WORST else LIMIT * WORST
+  val withinBound = totalBilled <= BUDGET + slack + uncounted
+  val noDoubleCount = ledgerSpend <= totalBilled
 
-  def spentDedup: int = ATTEMPTS.fold(0, (acc, a) => acc + headSpend(a))
-  def spentRaw: int = ledger.foldl(0, (acc, e) => if (e.kind != "intent") acc + e.amount else acc)
-  def spent: int = if (DEDUP) spentDedup else spentRaw
+  val booksMatch = closed implies ledgerSpend + adjustment == totalBilled
 
-  def totalBilled: int = ATTEMPTS.fold(0, (acc, a) => acc + billed.get(a))
-  val noLostLiability = not(lostLiability)
-  val noDoubleCount = spent <= totalBilled
-  val quiet = and {
-    ATTEMPTS.forall(a => phase.get(a) != "inflight"),
-    journal.size() == 0,
-    ATTEMPTS.forall(a => billed.get(a) == 0 or ledgerSet.exists(e => e.attempt == a and e.kind != "intent")),
-  }
-
-  val exactWhenQuiet = quiet implies spent == totalBilled
-  val safe = noLostLiability and noDoubleCount and exactWhenQuiet
-  val settledInLedger = ledgerSet.exists(e => e.kind == "settlement")
-  val resolvedAfterLostResponse = ledgerSet.exists(e => e.kind == "resolution")
-  val uncertainAfterCrash = ATTEMPTS.exists(a =>
-    billed.get(a) > 0 and phase.get(a) == "done"
-      and chain(a).exists(e => e.kind == "intent") and not(chain(a).exists(e => e.kind != "intent")))
-  val duplicateAbsorbed = ledger.length() > ledgerSet.size() and quiet and spent == totalBilled
-  run crashAfterDispatchTest =
+  val safe = withinBound and noDoubleCount and booksMatch
+  val overshoots = totalBilled > BUDGET
+  val refusesWhenSpent = known >= BUDGET and REQUESTS.exists(r => phase.get(r) == "idle")
+  val crashThenBalanced = uncounted > 0 and closed and ledgerSpend + adjustment == totalBilled
+  val duplicateAbsorbed = ledger.length() > ledgerSet.size() and closed and booksMatch
+  run siblingsOvershootTest =
     init
-      .then(reserve("a1"))
-      .then(dispatch("a1", 2, false))
-      .then(crash)
-      .expect(not(noLostLiability))
-  run timeoutErasesTest =
+      .then(admit("r1"))
+      .then(complete("r1", 2))
+      .then(admit("r2"))
+      .then(complete("r2", 2))
+      .then(admit("r3"))
+      .then(admit("r4"))
+      .then(complete("r3", 3))
+      .then(complete("r4", 3))
+      .expect(overshoots and withinBound)
+  run unlimitedTest =
     init
-      .then(reserve("a1"))
-      .then(writeIntent("a1"))
-      .then(flush)
-      .then(dispatch("a1", 2, true))
-      .then(giveUp("a1"))
-      .expect(not(noLostLiability))
-  run failedExportTest =
+      .then(admit("r1"))
+      .then(admit("r2"))
+      .then(admit("r3"))
+      .then(admit("r4"))
+      .then(admit("r5"))
+      .then(complete("r1", 3))
+      .then(complete("r2", 3))
+      .then(complete("r3", 3))
+      .then(complete("r4", 3))
+      .then(complete("r5", 3))
+      .expect(not(withinBound))
+  run crashReconciledTest =
     init
-      .then(reserve("a1"))
-      .then(writeIntent("a1"))
-      .then(flush)
-      .then(dispatch("a1", 2, false))
-      .then(settle("a1"))
-      .then(flush)
-      .then(ship(("a1", "intent"), false))
-      .then(ship(("a1", "settlement"), false))
-      .expect(not(noLostLiability))
+      .then(admit("r1"))
+      .then(complete("r1", 2))
+      .then(deliver("r1", 2))
+      .then(admit("r2"))
+      .then(crash(3))
+      .then(closeBooks)
+      .expect(uncounted == 3 and booksMatch)
   run duplicateCountedTest =
     init
-      .then(reserve("a1"))
-      .then(writeIntent("a1"))
-      .then(flush)
-      .then(dispatch("a1", 2, false))
-      .then(settle("a1"))
-      .then(flush)
-      .then(ship(("a1", "settlement"), true))
-      .then(duplicate(("a1", "settlement")))
+      .then(admit("r1"))
+      .then(complete("r1", 2))
+      .then(deliver("r1", 2))
+      .then(duplicate("r1", 2))
       .expect(not(noDoubleCount))
-  run lostVolumeTest =
-    init
-      .then(reserve("a1"))
-      .then(writeIntent("a1"))
-      .then(flush)
-      .then(dispatch("a1", 2, false))
-      .then(loseMedium)
-      .expect(not(noLostLiability))
 }
 
-module accountingDesign {
-  import accounting(ATTEMPTS = Set("a1", "a2"), AMOUNTS = Set(1, 2), ESTIMATE = 2,
-    INTENT_FIRST = true, KEEP_UNCERTAIN = true, TRIM_AFTER_ACK = true, DEDUP = true,
-    DURABLE_MEDIUM = true).*
+module softDesign {
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
-module noIntentFirst {
-  import accounting(ATTEMPTS = Set("a1", "a2"), AMOUNTS = Set(1, 2), ESTIMATE = 2,
-    INTENT_FIRST = false, KEEP_UNCERTAIN = true, TRIM_AFTER_ACK = true, DEDUP = true,
-    DURABLE_MEDIUM = true).*
+module strictDesign {
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = true, DEDUP = true, RECONCILE = true).*
 }
 
-module dropUncertain {
-  import accounting(ATTEMPTS = Set("a1", "a2"), AMOUNTS = Set(1, 2), ESTIMATE = 2,
-    INTENT_FIRST = true, KEEP_UNCERTAIN = false, TRIM_AFTER_ACK = true, DEDUP = true,
-    DURABLE_MEDIUM = true).*
+module strictSingle {
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+
+  val hardCeiling = totalBilled <= BUDGET + uncounted
 }
 
-module trimOnSend {
-  import accounting(ATTEMPTS = Set("a1", "a2"), AMOUNTS = Set(1, 2), ESTIMATE = 2,
-    INTENT_FIRST = true, KEEP_UNCERTAIN = true, TRIM_AFTER_ACK = false, DEDUP = true,
-    DURABLE_MEDIUM = true).*
+module noLimit {
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
 module rawSum {
-  import accounting(ATTEMPTS = Set("a1", "a2"), AMOUNTS = Set(1, 2), ESTIMATE = 2,
-    INTENT_FIRST = true, KEEP_UNCERTAIN = true, TRIM_AFTER_ACK = true, DEDUP = false,
-    DURABLE_MEDIUM = true).*
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = false, RECONCILE = true).*
 }
 
-module fragileMedium {
-  import accounting(ATTEMPTS = Set("a1", "a2"), AMOUNTS = Set(1, 2), ESTIMATE = 2,
-    INTENT_FIRST = true, KEEP_UNCERTAIN = true, TRIM_AFTER_ACK = true, DEDUP = true,
-    DURABLE_MEDIUM = false).*
+module noReconcile {
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = true, RECONCILE = false).*
 }

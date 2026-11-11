@@ -179,9 +179,10 @@ Each binary also gets its own image and its own dependency list in
   --models 'claude-*' --cap 50/month`. golem-control checks the user's
   membership and rights, stores the hash with its audit event in one write, and the
   key reaches the gateways in about a second (ADR 0006).
-- **A request is charged.** The gateway reserves at the key, the member
-  cap and its site's ceiling of the scope's pool (ADR 0013), calls
-  the provider, reconciles, and emits the access-log record, which becomes
+- **A request is charged.** The gateway checks known spend against the
+  key cap, the member cap and the scope's pool, takes a concurrency slot
+  (ADR 0031), calls the provider, adds the actual cost to the site's
+  counter, and emits the access-log record, which becomes
   the `golem.spend` row in ClickHouse.
 - **A budget manager approves a one-time adjustment.** The request's state
   becomes `approved`; the grant takes effect in the same transaction; the
@@ -198,8 +199,8 @@ Each binary also gets its own image and its own dependency list in
 | Laptop | none | `golem-gateway --standalone ./config/`: the gateway alone from CRD YAML, in-memory limits, the developer's own provider credentials (ADR 0023) |
 | Development of golem itself | MinIO | `make dev-up`: kind, MinIO, Valkey, dex, ClickHouse and Langfuse in containers, production code unchanged; also the integration-test environment |
 | Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
-| Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0008); Valkey and site ceilings there as at any site |
-| AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0008): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site with site ceilings (ADR 0013); no cross-cluster Kubernetes access (ADR 0008); Bedrock through the same federation |
+| Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0008); Valkey there as at any site |
+| AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0008): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site; budgets by known spend in snapshots (ADR 0031); no cross-cluster Kubernetes access (ADR 0008); Bedrock through the same federation |
 
 Replicas are fixed, sized for the design envelope (ADR 0021); only the
 gateway is on the request path.

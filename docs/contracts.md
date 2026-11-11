@@ -19,7 +19,7 @@ retry pointlessly and users wait through backoff before seeing why.
 | Situation | Status | Golem code (examples) | Retryable |
 |---|---|---|---|
 | Rate or concurrency limit; provider quota share full | 429 + `Retry-After` | `limit.rate`, `limit.concurrency`, `limit.provider_quota` | yes, after the delay |
-| Budget, cap or site ceiling exhausted (in `enforce` mode) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
+| Budget or cap reached by known spend (in `enforce` mode) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
 | Not authenticated (missing, unknown, expired, revoked key or token) | 401 | `auth.missing`, `auth.key_revoked`, `auth.token_expired` | no |
 | Authenticated, not allowed (model, scope, dialect, capture policy) | 403 | `authz.model_not_allowed`, `authz.scope_not_member` | no |
 | Request golem cannot route (no deployment with the capabilities used, unknown alias, frontend that cannot reach the model) | 400 or 404 | `route.unknown_model`, `route.no_capable_deployment`, `route.wrong_frontend` | no |
@@ -64,9 +64,7 @@ prevent double counting.
 | Column | Type | Notes |
 |---|---|---|
 | `schema_version` | UInt16 | this table's contract version |
-| `row_kind` | Enum: `estimate`, `settlement`, `adjustment` | estimate: before settlement or a cut stream counted from deltas; settlement: the attempt's actual usage; adjustment: reconciliation |
-| `supersedes_event_id` | Nullable(UUID) | the event a settlement or adjustment replaces or corrects; balances count only the latest event in each chain |
-| `certainty` | Enum: `certain`, `uncertain` | uncertain: dispatched, outcome unknown (a crash, a lost response); kept until provider evidence or a conservative estimate resolves it |
+| `row_kind` | Enum: `attempt`, `adjustment` | attempt: one per upstream attempt, at its end (`estimated_fraction` > 0 when a cut stream was counted from deltas); adjustment: from provider reconciliation (ADR 0031) |
 | `request_id`, `attempt_id`, `event_id` | UUID | logical request, upstream attempt, stable accounting-event identity (ADR 0029) |
 | `provider_request_id` | String | the provider's own ID, for disputes |
 | `started_at`, `ended_at` | DateTime64(3, UTC) | |
@@ -90,9 +88,12 @@ prevent double counting.
   once, at the end.
 - Adjustment rows (from provider reconciliation, ADR 0012) carry the
   period, account and model they correct and a reason.
+- Adjustments are attributed where the provider's usage data allows, else
+  booked to an `unattributed` principal under the provider account, so
+  totals match invoices even when a crash lost a few attempts' rows
+  (ADR 0031).
 - Balances and rollups are computed from a view deduplicated by
-  `event_id` that keeps only the head of each `supersedes_event_id` chain;
-  no query sums the raw table (ADR 0029).
+  `event_id`; no query sums the raw table (ADR 0029).
 - Schema changes are additive within a version; a breaking change is a new
   table version with a view keeping the old shape for one release.
 

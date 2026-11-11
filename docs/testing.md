@@ -13,7 +13,7 @@ and the least where the compiler and a table test suffice.
 
 | Risk | Example | Main defence |
 |---|---|---|
-| Overspend or double charge | a retry reserves twice; a crashed gateway's reservation never expires; a disconnected site's allocation is reclaimed and spent twice | Quint models of the reservation and ceiling protocols (§3), Hegel state machines against them, simulation with faults |
+| Overspend or double charge | concurrent calls past a budget beyond ADR 0031's bound; a duplicate delivery counted twice; crash-lost spend never booked | The accounting model (§3), Hegel state machines against it, simulation with faults |
 | Rights wider than intended | a key outlives its owner's membership; a narrow override widens capture | Hegel properties over random org histories; table tests of the resolution rules |
 | Content in the wrong place | capture on for a scope whose policy forbids it; a trace not deleted at expiry | Properties of capture resolution; an end-to-end test that checks Langfuse and ClickStack for content |
 | Broken streams | usage missed when a stream ends early; a dialect error event malformed; a translated tool call reordered | Goldens from recorded provider streams; fuzzing the SSE parser and scanners; translation properties |
@@ -30,7 +30,7 @@ and the least where the compiler and a table test suffice.
 | Goldens (`-update` to regenerate, reviewed in diffs) | dialect requests and responses, SSE streams in and out, translations, error bodies, compiled snapshots, CLI output, generated CRDs and API descriptors | Fixtures recorded from real providers, scrubbed; one directory per dialect |
 | Fuzzing (`go test -fuzz`) | JSON body scanner and splicer, SSE parser, each dialect's decoders, request and stream (no panic, output parses, content preserved), key and token parsers, snapshot decoder | Corpora checked in; short runs in CI, long runs nightly; every crash becomes a corpus entry and a table case |
 | Property-based and stateful (Hegel, `hegel.dev/go/hegel`) | adapters (for each dialect, `encode(decode(x))` equals `x` on the supported subset; `decode(encode(c))` equals `c` for canonical values the dialect can express; a feature outside the subset is refused, never dropped), stream adapters (any chunking of the same stream gives the same canonical events), limiter (reserve, reconcile, expire against a simple reference), snapshot apply, router (never an ejected or capped deployment; affinity stable under membership changes), org service (random sequences of org operations keep the org model's invariants), capture resolution (narrow never widens), translation round trips | Hegel's shrinking turns a failure into a minimal sequence |
-| Time | retries, backoff, ejection windows, limiter windows, drain, idle-chunk timeouts, reservation renewal and expiry | `testing/synctest`, no sleeps |
+| Time | retries, backoff, ejection windows, limiter windows, drain, idle-chunk timeouts, concurrency-slot expiry | `testing/synctest`, no sleeps |
 | Store suite | every state operation, lost CAS races included; the blob adapter's conformance (MinIO and a fake); signature verification and the publish-sequence floor | Per change (control-plane.md §8) |
 | Contract tests | each provider backend against its recorded fixtures; Valkey with the real scripts | Containers in CI |
 | End-to-end | kind with Istio ambient, the operator installing everything, a stub provider, ClickHouse, Langfuse; clients: the OpenAI and Anthropic SDKs, Claude Code, Codex, Copilot CLI with BYOK | Per merge for a smoke set, nightly in full |
@@ -53,8 +53,7 @@ Its value for golem is in the protocols, not the plumbing.
 
 | Model | State and actions | Properties |
 |---|---|---|
-| **Reserve and reconcile** (ADRs 0012, 0029; the journal written: [model/accounting.md](../model/accounting.md)) | reservations, durable attempts, crash/recovery, store loss, ambiguous retries and cut streams | each event affects balance once; dispatched attempts settle or retain uncertain liability; expiry cannot erase billed usage; recovery preserves unresolved attempts; expected-cost overshoot is reported |
-| **Site allocations** (ADRs 0013, 0029) | issued allocations, applied stale snapshots, grant reductions, partitions, period rollover | allocations fit funding; issued allocations cannot be reclaimed in-period; disconnected allocations remain reserved; old-period liability stays isolated |
+| **Accounting** (ADR 0031; written: [model/accounting.md](../model/accounting.md)) | admissions under soft and strict checks, concurrency limits, completions, crashes, Valkey loss, duplicate delivery, reconciliation | overshoot within the stated bound; never counted twice; books match after reconciliation; strict with one in flight is a hard ceiling apart from crash losses |
 | **State and distribution** (control-plane.md §3–4; publication and freshness written: [model/publication.md](../model/publication.md)) | writers racing with `If-Match` (lost responses included), leader changes, signed publication with a publish sequence, gateway polls and restarts with empty disks, restore | every acknowledged write is in a snapshot every gateway applies; no gateway applies a lower publish sequence or an unsigned snapshot; no write is lost to a race; a restore never revives a revoked key; revocation within the bound after a settle |
 | **Attempt loop** (ADR 0002) | attempts, first byte, failover, retry budget, ejection | no retry after the first byte; retries bounded by the budget; an ejected deployment receives nothing until probed back |
 | **Approvals and grants** (org-model §4.3) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
@@ -65,11 +64,11 @@ liveness), before any code is bound to it.
 
 ### 3.2 Where gotogether can be trialled during development
 
-1. **Limiter and ceilings in simulation (M1).** Run the limiter, the
-   ceiling enforcement and a reconcile loop on `qenv` with a `qenv.Store`-backed double
-   of the RESP store (scripts as atomic transactions), gateways crashing
-   and partitions injected; `qtest.System.Explore` judged by the reserve
-   and ceiling models. This is where a bug costs the most and is hardest to
+1. **The limiter in simulation (M1).** Run the limiter (known-spend
+   checks, concurrency slots, the strict worst-case check) on `qenv` with a
+   `qenv.Store`-backed double of Valkey (scripts as atomic transactions),
+   gateways crashing and Valkey failing over; `qtest.System.Explore` judged
+   by the accounting model. This is where a bug costs the most and is hardest to
    find otherwise.
 2. **The state document under races (M1).** golem-control replicas on
    `qenv` against a blob double with `If-Match` semantics (lost races,
@@ -85,9 +84,9 @@ liveness), before any code is bound to it.
    one simulation, leader changes, replayed old pointers and slow storage as
    faults; a settle checks revocation latency.
 5. **Production traces (M2).** golem already emits OTel spans for each
-   reservation, attempt and reconcile; `convert` rules turn them into
-   model steps, so staging and production runs can be validated against
-   the reserve model offline, without new instrumentation.
+   check, attempt and completion; `convert` rules turn them into model
+   steps, so staging and production runs can be validated against the
+   accounting model offline, without new instrumentation.
 6. **Metastability (M2).** `qmeta` and `qload` on the failover policy:
    capped local boxes overflowing to a commercial pool, retries under a
    provider brownout, `qhegel.FindTrigger` for the smallest spike that
@@ -105,13 +104,13 @@ liveness), before any code is bound to it.
    it proves itself.
 
 The trial is judged as any test is: by what it catches. Each model's
-checks are proved by planted mutants (a reserve that skips one level, a
-an allocation reclaimed from a disconnected site, a publisher that skips the pointer's version check, a stale leader that publishes after losing leadership) that the
+checks are proved by planted mutants (a check that skips the concurrency
+limit, a balance that sums duplicates, a publisher that skips the pointer's version check, a stale leader that publishes after losing leadership) that the
 model must reject; a model whose mutants survive is not worth keeping.
 
 ## Review acceptance gates
 
 The evidence matrix in [security-and-correctness.md](security-and-correctness.md#10-required-evidence-and-review-traceability)
-is required at its stated milestones. Models include actual stale allocations,
-fenced publication, uncertain attempts and accounting recovery watermarks;
-a correct controller-side ceiling sum alone does not establish safety.
+is required at its stated milestones. The models cover fenced publication
+and authorization freshness (model/publication.md) and the soft-budget
+bound, deduplication and reconciliation (model/accounting.md).

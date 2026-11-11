@@ -18,13 +18,13 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 |---|---|---|
 | Waypoint identity | Which header carries the caller's SPIFFE ID through a Gloo Mesh ambient waypoint, and can the gateway's port be limited to the waypoint? | ADR 0009 mesh identity (M2) |
 | Bucket as the root of trust | S3 `If-Match` behaviour (412, retries, lost responses); KMS asymmetric signing and verification of snapshots and pointers; the bucket policy that denies all other writers; replication to the backup account under Object Lock | ADRs 0006, 0007 |
-| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and ceilings assumed) | ADR 0008, before the first remote site |
+| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; a Valkey per site assumed) | ADR 0008, before the first remote site |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
 | Bedrock envelope | Claude Code against Claude on Bedrock through a stub envelope: event-stream framing to SSE, `anthropic_beta` in the body, prompt caching, token counting, inference-profile IDs as alias targets | ADR 0001 |
 | vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADR 0017 |
 | Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0016 |
 | Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0020 |
-| Valkey scripts | reserve, renew and reconcile scripts on ElastiCache for Valkey: latency, behaviour across a failover | ADR 0012 |
+| Valkey scripts | the check script (known spend, concurrency slot, rate, quota) on ElastiCache for Valkey: latency, behaviour across a failover | ADRs 0012, 0031 |
 | SDK retry rules | Which status codes each OpenAI and Anthropic SDK, Claude Code and Codex retry, and their session headers; confirms 402 for budgets | ADRs 0024, 0026 |
 | Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0009 |
 
@@ -75,9 +75,9 @@ The platform team's own apps and coding agents, us-east-2, EKS.
 - **Org**: scopes (teams), members, managers, services, keys with
   constraints, caps, team pools granted by admins; enforcement modes
   (below), starting in `observe`.
-- **Limits**: Valkey, expected-cost reservations renewed on long streams,
-  reconcile, cut-stream estimates, rate and concurrency limits; one site, so
-  its ceiling is each pool's total.
+- **Limits**: Valkey; soft budgets on known spend with the optional strict
+  worst-case check, concurrency slots, rate limits, cut-stream estimates
+  (ADR 0031).
 - **Control plane**: golem-control (one Deployment, a leader) on the S3
   state document; CRD config with schema rules and offline validation;
   operational overrides; signed snapshot publication; explain; audit
@@ -88,7 +88,7 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   a synthetic request per pool, provider usage reconciliation.
 - **Install**: Helm (no operator yet).
 - **Testing**: the regime of testing.md for these parts; Quint models of
-  reserve/reconcile and the attempt loop with their mutants; the limiter in
+  accounting (overshoot bound, dedup, reconciliation) and the attempt loop with their mutants; the limiter in
   simulation (gotogether trial 1, testing.md §3.2).
 
 Exit: the platform team uses golem for all its model traffic for two
@@ -139,10 +139,9 @@ streaming, for a week without a translation defect.
   consumers.
 - **Registration** of model server endpoints (for cloud GPUs and NVL boxes).
 - **Remote sites** (AKS, on-prem) as gateway pools on the shared S3 store
-  (ADR 0008): a Valkey per site, site ceilings (ADR 0013; its model and
-  mutants first), static provider quota shares, Bedrock through federation,
-  a per-cluster operator; fixed site allocations replace dynamic rebalance
-  (ADR 0029); after the residency review (PRD §8).
+  (ADR 0008): a Valkey per site, budgets by known spend in snapshots
+  (ADR 0031), static provider quota shares, Bedrock through federation,
+  a per-cluster operator; after the residency review (PRD §8).
 - **Testing**: the state and distribution model; the state document under races in simulation;
   metastability analysis of overflow and retries (gotogether trials 2–4, 6).
 
@@ -182,12 +181,13 @@ those pools.
 
 ## Review amendments (ADR 0029)
 
-Phase 0 must validate publication fencing/trusted checkpoints, durable
-accounting and recovery, duplicate-safe ledger queries, mesh header overwrite,
+Phase 0 must validate publication fencing/trusted checkpoints,
+duplicate-safe ledger queries, mesh header overwrite,
 and Langfuse ingestion permissions. M0 produces the contracts and DDL. M1
 requires the M1 acceptance matrix in security-and-correctness.md, including
 CRD RBAC, immutable audit archival and authenticated standalone mode. M2
-features require their respective gates before activation. Site allocations
-are fixed per period; dynamic reclamation is deferred. Stored provider objects
+features require their respective gates before activation. Budgets are soft
+and eventually consistent by accepted risk (ADR 0031): no durable journal or
+site allocations. Stored provider objects
 are deferred pending ownership/routing records. Staffing and these spikes
 must be measured before the milestone durations are treated as commitments.

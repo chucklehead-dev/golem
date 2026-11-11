@@ -135,7 +135,7 @@ A pool's numbers for a period:
 ```
 pool.total     = Σ grants in
 pool.granted   = Σ grants out to sub-teams and projects   (team pools only)
-pool.available = total − granted − spent − reserved
+pool.available = total − granted − spent            (spent: known spend, ADR 0031)
 ```
 
 Caps on members do not move money; they are limits within the pool (a
@@ -147,21 +147,26 @@ scope's **default member cap** (possibly zero).
 ### 4.2 Enforcement
 
 A request is charged to its key's scope. Before going upstream golem
-reserves the estimated cost at each level, atomically, and fails with a
-402 (not 429, which SDKs retry: ADR 0024) naming the first level that
-would be exceeded:
+checks **known spend** (the ledger's balance published in the snapshot,
+plus the site's counter since) at each level, and fails with a 402 (not
+429, which SDKs retry: ADR 0024) naming the first level already reached:
 
 1. the key's own cap (if any);
 2. the member's cap in the scope (or the default member cap);
-3. the scope pool's `available` (with two regions, the region's lease of
-   it: ADR 0013).
+3. the scope pool's `available`.
+
+Budgets are soft and eventually consistent (ADR 0031): calls already in
+flight can take spend past a limit, by at most the principal's in-flight
+limit times the largest call, plus what it spends within one refresh lag.
+A scope may choose **strict**: the request's worst-case cost must also fit,
+which tightens the bound by one call (and makes it a hard ceiling on one
+site with an in-flight limit of one).
 
 What happens at a limit depends on the scope's enforcement mode (PRD
 §9.1): `observe` records the refusal it would have made, `warn` allows it
 with a warning header and a notification, `enforce` refuses.
 
-At completion the reservation becomes spend (corrected to actual cost).
-Team pools are not charged for a sub-team's or a project's spend: the
+At completion the call's actual cost is added to known spend. Team pools are not charged for a sub-team's or a project's spend: the
 grant already moved that money. Thresholds (e.g. 50/80/100%) at every level emit an
 event and notify the pool's managers; 100% at level 2 or 3 rejects, or
 downgrades to a configured cheaper alias.

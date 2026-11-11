@@ -198,47 +198,39 @@ and expanded sizes, collection counts and CEL compilation work before swap.
 Test slow bodies, endless streams, malformed events and invalid-token floods.
 Ingress protection is an additional layer; the gateway enforces its own bounds.
 
-## 9. Accounting, budgets and retries (M1; sites before M2)
+## 9. Accounting, budgets and retries (M1)
 
-Initially allocate fixed, non-expiring ceilings per site and period.
-Never reclaim or lower an issued ceiling in that period. New allocation
-comes only from unallocated funds. Pool funding reductions and outgoing grants
-cannot consume already allocated funds. A partitioned site's old ceiling
-remains allocated. Key/member caps follow the same rule. Ledger lag cannot
-justify reclaiming headroom. Dynamic transfers require acknowledged reduction
-or expiring fenced leases and a model covering actual applied allocations.
+Amended by [ADR 0031](adr/0031-soft-budgets.md): budgets are soft and
+eventually consistent, with the overshoot bounded and stated, by accepted
+risk. The durable journal, money reservations, uncertain-liability recovery
+and site allocations are not required. What remains required:
 
-Expected-cost reservations allow estimation overshoot and fail-open budgets
-allow additional spend; neither is a hard monetary ceiling. Worst-case mode
-requires a proven upper bound for input, output, tools and every attempt.
-Reservation expiry after a crash cannot simply erase uncertain billed usage.
-
-Accounting must durably record attempt intent before dispatch and completion
-or uncertainty before releasing accounting liability. A journal/spool and
-recovery protocol is an M1 gate; OTLP collector queues alone do not cover a
-gateway crash before export. Recovery uses a durable watermark plus unresolved
-attempts/reservations; never rebuild only from ledger data older than a delay.
-If accounting cannot accept durable records, enforced scopes fail closed.
-Crash outcomes remain uncertain until provider evidence or a conservative
-estimate resolves them; track unreconciled exposure explicitly.
+- Known spend (the deduplicated ledger balance published in snapshots,
+  plus the site's counter since then) is the only input to budget checks;
+  once it reaches a budget, every further call is refused on every site.
+- Per-principal concurrency limits are enforced; strict scopes check the
+  worst-case cost (no cache discount, `max_tokens` or the model maximum,
+  no server-side tools).
+- The overshoot bound of ADR 0031 is documented to budget owners and checked
+  by the accounting model.
+- Daily provider reconciliation books every difference as an adjustment
+  (unattributed where needed), so totals match invoices.
 
 Separate logical request_id, attempt_id and accounting event_id. An attempt
 records deployment/account, provider ID, pinned price version, usage, cost and
-certainty. Reassess money and quota reservations before each fallback;
+certainty. Re-check known spend and quota before each fallback;
 multiple attempts may be billed. No bytes delivered to a caller does not
 prove that upstream execution never happened. Replay only operations whose
 retry policy explicitly accepts that ambiguity or has verified provider
 idempotency; disable automatic replay of side-effecting/stateful operations.
 After the first caller byte, never transparently retry.
 
-The ledger is an immutable event projection. Estimate, actual settlement and
-each adjustment have distinct stable event IDs and an explicit supersedes or
-delta relationship. Query the effective balance without counting an estimate
-and its replacement twice. ReplacingMergeTree merges are asynchronous:
+The ledger is an immutable event projection. Each attempt row and each
+adjustment has a distinct stable event ID. ReplacingMergeTree merges are asynchronous:
 deduplicate by event identity before sums and before rollups; ordinary
 materialized sums over raw deliveries are not duplicate-safe. Duplicate
 delivery, multiple adjustments and pre-merge queries must produce the same
-balance. Exact DDL and durable-journal selection are Phase 0/M0 deliverables.
+balance. Exact DDL is an M0 deliverable.
 
 ## 10. Required evidence and review traceability
 
@@ -257,9 +249,9 @@ add later. Record spike results and approval of exceptions in docs/spikes/.
 | SSRF and raw routes | Redirects, rebinding, IPv6, metadata and encoded paths cannot escape approved destinations |
 | GitOps bypass and audit | Unauthorized spec writes denied; audit archive survives collector outage and query-store deletion |
 | DoS and standalone | Bounded memory under slow/flooded traffic; hostile web origin and Host requests refused locally |
-| Site allocations | Partitioned old snapshots cannot spend funds reallocated to another site |
-| Durable accounting | Crash at every dispatch/settlement/export boundary; Valkey loss preserves unresolved liability |
-| Replay and ledger dedup | Ambiguous billed attempts retained; duplicate events and multiple corrections keep balances stable |
+| Budget overshoot | Concurrent, multi-site and crash scenarios stay within ADR 0031's stated bound; spend over budget is refused on every site within the lag |
+| Reconciliation | Crash-lost spend events are booked as adjustments; totals match provider usage after reconciliation |
+| Replay and ledger dedup | Duplicate events and multiple adjustments keep balances stable |
 
 The canonical encoder's prefix property applies to provider cache-relevant
 conversation blocks, not complete JSON request bytes (whose closing delimiters

@@ -1,6 +1,6 @@
 # 0030: Authorization renewal puts the control plane within five minutes of every request
 
-Status: Accepted. Follows from [0029](0029-security-and-correctness-revision.md); amends the SLOs of PRD §9.4.
+Status: Accepted. Follows from [0029](0029-security-and-correctness-revision.md); amends the SLOs of PRD §9.4. Its accounting-spool part is superseded by [0031](0031-soft-budgets.md).
 
 ## Context
 
@@ -38,7 +38,7 @@ every gateway refuses new requests.
 - **Gateway SLO** is stated as conditional: 99.95% while golem-control,
   the bucket and KMS are within their own SLOs; outages beyond the lease
   are counted as golem's (`error.origin = gateway`), not hidden.
-- **Durable accounting spool** (ADR 0029 gate): the Phase 0 spike compares
+- **Durable accounting spool** (superseded by ADR 0031: budgets are soft, and no journal is kept; kept here as the record of what was considered) (ADR 0029 gate): the Phase 0 spike compares
   a local write-ahead spool per gateway pod on a small persistent volume,
   shipped to ClickHouse and acknowledged by event ID; synchronous attempt
   records in the site's Valkey with append-only persistence and a replica;

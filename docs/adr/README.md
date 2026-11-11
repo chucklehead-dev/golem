@@ -20,7 +20,7 @@ baseline one, marked in both.
 | [0010](0010-organisation-scopes-and-roles.md) | Scopes (teams with sub-teams, projects), four roles, rights by intersection |
 | [0011](0011-budgets.md) | Pools funded by grants, approvals, three enforcement levels, observe/warn/enforce |
 | [0012](0012-limits-and-accounting.md) | Valkey at every site; expected-cost reservations, renewal, cut streams, quotas, reconciliation |
-| [0013](0013-site-ceilings.md) | Fixed site allocations per period; no in-period reclamation (as amended by 0029) |
+| [0013](0013-site-ceilings.md) | Site allocations (superseded by 0031) |
 | [0014](0014-lifecycle-hooks.md) | Four hook phases, in-process or remote, selected by CEL |
 | [0015](0015-telemetry-and-ledger.md) | OTLP routed by the collector; the ledger and audit in ClickHouse |
 | [0016](0016-capture-and-retention.md) | Capture per scope with override control, a Langfuse project per scope, per-record retention (M2) |
@@ -39,3 +39,4 @@ baseline one, marked in both.
 
 | [0029](0029-security-and-correctness-revision.md) | Proposed security and correctness review amendments and production gates |
 | [0030](0030-authorization-renewal-and-availability.md) | Authorization renewed every minute within a five-minute lease; the control plane, bucket and KMS on the availability path; the accounting spool spike |
+| [0031](0031-soft-budgets.md) | Budgets are soft and eventually consistent; overshoot bounded by concurrency limits and an optional strict worst-case check; no journal, reservations or site allocations |

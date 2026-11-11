@@ -1,6 +1,6 @@
 # 0013: Fixed site allocations per period
 
-Status: Amended by [ADR 0029](0029-security-and-correctness-revision.md).
+Status: Superseded by [ADR 0031](0031-soft-budgets.md): no site allocations; every site checks the same known spend.
 
 ## Decision
 

@@ -18,8 +18,9 @@ Components and APIs at a glance: architecture.md §1–3.
 - Enforce every rule of the org model on writes: who may do what, budget
   arithmetic, approvals, key constraints within the owner's rights.
 - Compile, sign and publish each gateway pool's **snapshot** (§4).
-- Issue every site's **fixed budget allocations** per period from
-  unallocated funds (ADRs 0013, 0029); the ledger is for monitoring only.
+- Publish **known spend** per key, member and scope for the period (the
+  deduplicated ledger balance) in every snapshot renewal, so every site
+  checks budgets against the same numbers (ADR 0031).
 - Answer spend queries from ClickHouse.
 - Record every change as an audit event, atomically with it (§3).
 
@@ -44,7 +45,7 @@ Services: `ConfigService` (effective config, explain, overrides),
 `BudgetService` (grants, caps, adjustment requests), `SpendService`,
 `AuditService`, `AdminService` (gateways, state history and restore),
 `RegistrationService` (model server endpoints), and the internal
-`SnapshotBuilder` and `CeilingService`. Jobs call the same services; nothing
+`SnapshotBuilder` (which also publishes known spend). Jobs call the same services; nothing
 writes the document except through them.
 
 `validate_only` on every mutating method lets `golemctl` and the console
@@ -78,7 +79,7 @@ validate` (the snapshot compiler as a library), not by a live API call
 - **Write access**: golem-control's role only, by bucket policy; a
   break-glass role exists, audited, MFA, two-person (ADR 0007).
 - **Not in the document**: shipped audit (ClickHouse), counters and
-  reservations (each site's Valkey), spend (ClickHouse).
+  concurrency slots (each site's Valkey), spend (ClickHouse).
 - **Interface**: `Get`, `PutIfMatch`, `Put`, `List` over S3, with one
   conformance suite (MinIO in CI and a fake). Other adapters (Azure Blob,
   Nutanix Objects) when a site needs its own store; PostgreSQL (ADR 0006)
@@ -90,7 +91,7 @@ validate` (the snapshot compiler as a library), not by a live API call
 Entra group bindings), `memberships`, `role_bindings`, `cost_centers`,
 `keys` (hash, prefix, owner, scope, constraints, expiry, revoked_at),
 `grants`, `caps`, `adjustment_requests`, `pools` (per scope per period:
-totals), `ceilings` (per pool per site), `overrides` (target, change,
+totals), `overrides` (target, change,
 expiry, author), `registrations` (model server endpoints, with TTL),
 `gateway_pools` (site, audience, selector), `notifications_sent`
 (idempotency keys), `revocations` (append-only, for safe restore),
@@ -109,8 +110,8 @@ control plane.
 - **Selection**: a pool's snapshot holds the config CRDs matching its
   selector (site, audience) and the entitlements its audience allows:
   internal pools get internal principals and keys; the edge pool gets its
-  external consumers' service keys only. Each site's snapshot carries that
-  site's budget ceilings.
+  external consumers' service keys only. Every snapshot carries known
+  spend for the period (ADR 0031).
 - **Gateways** poll the pointer every second (conditional GET), verify its
   signature and that `publish_seq` exceeds their floor (the trusted publisher checkpoint and atomically persisted local
   checkpoint; gateway status is diagnostic), fetch and verify the
@@ -159,12 +160,12 @@ Run by the leader; each an idempotent scan.
 |---|---|---|
 | Entra group sync | every 5 min; change notifications in M2 | Membership diffs as service calls in batches; revokes disabled users' keys |
 | Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps |
-| Allocation monitoring | every 30 s | Fixed per-period allocations, no reclamation of issued ceilings (ADR 0029) |
+| Known spend | with every authorization renewal | Reads per-key, member and scope spend for the period from ClickHouse into the snapshot (ADR 0031) |
 | Audit shipping | every few seconds | Archive before outbox trim; ClickHouse is a query projection |
 | Authorization renewal | every 60 s | Rebuilds and republishes every pool's snapshot from current state, extending its authorization lease (ADR 0030) |
 | Key, request and registration expiry; reminders | hourly | Expires keys, adjustment requests, registrations past TTL; notifies 7 days and 1 day ahead |
-| Ledger and provider reconciliation | daily | Counters against the ledger (data older than an hour); the ledger against provider usage APIs (ADR 0012) |
-| Threshold notifications | with allocation monitoring | 50/80/100% at key, member and pool level |
+| Provider reconciliation | daily | The ledger against provider usage APIs; differences booked as adjustments, unattributed where needed (ADR 0031) |
+| Threshold notifications | with known spend | 50/80/100% at key, member and pool level |
 | Capture expiry and retention (M2) | hourly | Switch expiry; deletion of expired traces in Langfuse (ADR 0016) |
 | Copilot usage ingestion (M2) | daily | GitHub usage metrics into ClickHouse (ADR 0020) |
 
@@ -192,7 +193,7 @@ ledger's too (seconds behind); golem-control reads no site's Valkey.
   every site. AKS and on-prem clusters run gateway pools and a Valkey;
   their gateways read the us-east-2 bucket (Entra-to-AWS federation, IAM
   Roles Anywhere). Their config CRDs live in the EKS cluster, selected by a
-  `site` label. Budgets reach them as ceilings (ADR 0013); provider quotas
+  `site` label. Budgets reach them as known spend in snapshots (ADR 0031); provider quotas
   are split statically per site (ADR 0012). No cluster reaches another's
   API server.
 - **Second region** (M3, ADR 0008): the bucket replicated to us-west-2;
@@ -210,6 +211,7 @@ ledger's too (seconds behind); golem-control reads no site's Valkey.
   state the org model allows.
 - Models (testing.md §3): the state document and publication ("every
   acknowledged write is in a snapshot every gateway applies; no gateway
-  applies a lower `publish_seq` or an unsigned object"), and the site
-  allocations ("issued allocations fit funding; disconnected allocations cannot be reclaimed").
+  applies a lower `publish_seq` or an unsigned object"), and accounting
+  (`model/accounting.md`: no double count, books match after
+  reconciliation, overshoot within ADR 0031's bound).
 - API compatibility: `buf breaking` against the last release in CI.

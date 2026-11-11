@@ -129,7 +129,7 @@ Claude, golem can place prompt-cache breakpoints itself by route policy.
 
 5.1.3 **Decision dialects** *(added)*: both are billed on input tokens
 only and do not stream, so their cost is known before the call: the
-reservation (§5.5) is exact, and a `stream: true` request is refused by
+worst-case check (§5.5) is exact, and a `stream: true` request is refused by
 golem with the provider's own error shape.
 
 5.1.4 **Provider headers and betas pass through** *(added)*:
@@ -275,7 +275,7 @@ The full model is [org-model.md](org-model.md). In short:
 | Projects, cost centers, budget managers, grants, approvals, adjustments | M2 |
 | Content capture settings and overrides (org-model §3.1) | M2 |
 | golem-console; notifications (email/Teams) on thresholds and approvals | M2 |
-| Budgets across sites through site ceilings (ADR 0013) | M2 (with the first remote site) |
+| Budgets across sites through known spend in snapshots (ADR 0031) | M2 (with the first remote site) |
 | Backstage plugin; budget downgrade to a cheaper alias; chargeback export per cost center | M3 |
 
 ### 5.5 Limits
@@ -286,15 +286,17 @@ The full model is [org-model.md](org-model.md). In short:
 - **Rate limits** in requests/min, tokens/min and $/min, at any of the
   levels of §5.4 and per model or route; **concurrency limits** on
   in-flight streams per principal *(added)*.
-- **Estimate then reconcile** (ADR 0012): reserve the expected cost
-  (recent cache-hit ratio and output size, not worst case) at every level
-  before the call, renew it on long streams, correct with actual usage at
-  the end; cut streams are charged what was produced, flagged as
-  estimated; a daily job reconciles the ledger with providers' usage APIs.
-- **Valkey at every site**, required from M1 (ADR 0012); budgets across
-  sites through site ceilings published in snapshots (ADR 0013).
-- Counter recovery uses durable accounting watermarks, the ledger and
-  unresolved attempts/reservations; Valkey loss cannot erase recent liability.
+- **Soft budgets** (ADR 0031): each call is checked against known spend
+  (the ledger's deduplicated balance in the snapshot, plus the site's
+  counter since), and its actual cost is added when it ends; once known
+  spend reaches a limit, every further call is refused on every site within
+  about a minute. In-flight calls can overshoot by at most the principal's
+  in-flight limit times the largest call, plus one refresh lag's spend.
+  **Strict scopes** also require the worst-case cost to fit. Cut streams
+  are charged what was produced; a daily job reconciles the ledger with
+  providers' usage and books differences as adjustments.
+- **Valkey at every site**, required from M1 (ADR 0012), for spend counters
+  since the snapshot, rate windows, concurrency slots and provider quotas.
 - On Valkey outage: budget levels fail open or closed per scope policy;
   rate limits fail open with a warning.
 - Refusals, in the caller's dialect, say which limit, at which level, and
@@ -477,8 +479,8 @@ edge pool); M3 multi-region, Temporal and the long tail.
   core; TTFT overhead < 2 ms; limit check ≤ 1 store round trip.
 - Memory per in-flight stream < 64 KiB on the fast path.
 - 100% of requests attributed to a principal, a scope and its funding.
-- Ledger within 1% of provider invoices; no budget exceeded by more than
-  its in-flight reservations' estimation error.
+- Ledger, with reconciliation adjustments, within 1% of provider
+  invoices; no budget exceeded by more than ADR 0031's stated bound.
 - Key revocation within 5 s on healthy connected gateways; partitioned
   authorization expires at its signed lease bound (five-minute default).
 - A provider outage moves traffic to fallbacks within one ejection window.
@@ -495,7 +497,7 @@ only what is still open.
    (drafted: platform admins, by scope policy).
 3. **Site connectivity**: the round trip from each AKS and on-prem site to
    us-east-2, and whether they reach AWS privately. Working assumption: a
-   Valkey per site and site ceilings (ADRs 0008, 0013).
+   Valkey per site, budgets by known spend in snapshots (ADRs 0008, 0031).
 4. **Data residency**: whether central telemetry, the ledger, captured
    content and the us-east-2 state document (identity and entitlement
    metadata, no prompts) satisfy every site's residency rules; a compliance

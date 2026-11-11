@@ -45,12 +45,12 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
 
 ```
 request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect, scan) → authn (Principal, scope)
-           → Request hooks → router (alias, pool, deployment) → limits (reserve: key, member, pool, quota)
+           → Request hooks → router (alias, pool, deployment) → limits (check: known spend, concurrency, rate, quota)
            → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
 inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
            or, standalone (ADR 0023), CRD YAML in a local directory compiled in-process
-state:     the site's Valkey (reservations, counters, provider quota shares; spend against site ceilings) (ADRs 0012, 0013)
+state:     the site's Valkey (spend since the snapshot, rate windows, concurrency slots, provider quota shares) (ADR 0031)
 outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
            status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
@@ -81,10 +81,12 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
 5. **Route.** Alias to route; CEL conditions; authorization check; pool
    selection by strategy (affinity key first, then the strategy among
    healthy deployments).
-6. **Reserve** the estimated cost at every level that applies (key cap,
-   member cap, scope pool, the deployment's provider quota, plus rate and
-   concurrency limits) in one
-   script round trip to the limit store; local shares if none.
+6. **Check** (ADR 0031), in one Valkey round trip: known spend (the
+   snapshot's, plus the site's counter since) against the key cap, member
+   cap and scope pool, with the request's worst-case cost added in strict
+   scopes; a concurrency slot for the principal; rate limits and the
+   deployment's provider quota share. Refusals are 402 (budgets) or 429
+   (limits).
 7. **Attempt loop.** For each attempt: build the upstream request (fast
    path: same bytes, spliced model name; else the frontend's decoder and the
    backend's encoder through `canon`), wrap it in the deployment's envelope
@@ -95,8 +97,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    body through a tee whose other side is an SSE scanner feeding the usage
    extractor; flush per event. Translated: decode upstream events, encode
    frontend events.
-9. **Reconcile** the reservation with actual usage; price it from the
-   catalog; record metrics and the access log record (which is also the
+9. **Record**: price the actual usage from the catalog; add it to the
+   site's spend counters; release the concurrency slot; record metrics and
+   the access log record (which is also the
    ledger's input, ADR 0015); queue `Complete` hooks (bounded queue,
    dropped work counted).
 
@@ -124,7 +127,7 @@ gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT), meshi
 gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object-storage poller,
                        the file source, the on-disk last-good copy, status writes
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
-gateway/limit/         Limiter; GCRA/windows; the Valkey implementation; site ceilings; an in-memory one for development
+gateway/limit/         Limiter: known-spend checks, worst-case cost, concurrency slots, GCRA rate windows; Valkey and in-memory implementations
 gateway/price/         model catalog lookups and pricing (the catalog comes in the snapshot)
 gateway/hook/          phases, in-process registry, remote client, built-ins
 gateway/upstream/      per-deployment transports, provider auth (keys, SigV4, Entra, Roles Anywhere)
@@ -221,7 +224,7 @@ settings, and changes nothing in the request path.
 - Upstream TLS sessions resumed; DNS cached by the resolver, not golem.
 - SSE scanning reads lines from the tee without copying the payload when
   it is not a usage-bearing event (look for the event type first).
-- Token estimation for reservations uses a cheap byte-count heuristic per
+- Token estimation for strict scopes' worst-case check uses a cheap byte-count heuristic per
   model family by default; exact counting (provider `count_tokens` or a
   local tokenizer) is opt-in per limit where precision matters.
 - Benchmarks against a stub upstream, with `pprof` and the flight recorder,
@@ -241,12 +244,9 @@ settings, and changes nothing in the request path.
   simulation with fault injection (lost responses, 429 storms, slow first
   byte, a provider recovering): gotogether's qenv doubles can drive them,
   with a small Quint model of "never double-charge, never replay a started
-  stream, never exceed a hard budget by more than one in-flight
-  reservation" as the judge. Worth doing once M1's routing settles.
-- Budget enforcement (no double charge, reservation renewal and expiry
-  after a crash, site ceilings moving) is the other candidate for a
-  model-checked simulation; the control plane's side is in
-  control-plane.md §8.
+  stream" as the judge. Worth doing once M1's routing settles.
+- Budget enforcement is judged by `model/accounting.md`: no double count,
+  books matching after reconciliation, overshoot within ADR 0031's bound.
 - Limit scripts tested against Valkey containers in CI.
 - End-to-end: kind cluster with Istio ambient, the chart, a stub provider,
   ClickHouse, and the real OpenAI and Anthropic SDKs (and a coding agent)
