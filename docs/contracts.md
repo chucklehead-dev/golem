@@ -179,8 +179,11 @@ rules.
 
 ## 8. Policy-relevant request fields (ADR 0037)
 
-Unknown fields and beta headers are forwarded, logged by name (never by
-value), and diffed nightly against the known set. These are enforced
+Proposed ADR 0041 §3 adds restricted feature mode by default; unapproved API
+versions, fields and betas are rejected. Compatible mode forwards unknown
+features with explicit scope/security approval and accepts exposure until
+remediation. Names are bounded/sanitized or keyed-hashed before logging;
+values are never logged. Nightly diffs do not bound remediation time. These are enforced
 wherever they appear, and the list grows with the nightly review:
 
 | Field or family | Policy |

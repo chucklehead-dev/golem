@@ -51,3 +51,5 @@ generality, and keeps the code small enough to read in an afternoon.
 
 Design review amendments and production gates:
 [docs/security-and-correctness.md](docs/security-and-correctness.md).
+
+Latest proposed security amendments: [ADR 0041](docs/adr/0041-security-boundaries-and-incident-controls.md).

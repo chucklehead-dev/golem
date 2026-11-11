@@ -7,9 +7,11 @@ Status: Accepted. Amends [0030](0030-authorization-renewal-and-availability.md) 
 ADR 0030's five-minute lease put us-east-2's bucket, KMS, golem-control and
 each remote site's federation trust (Entra-to-AWS, IAM Roles Anywhere) on
 the availability path of every request: any of them failing for five
-minutes stopped every site. The fast revocation paths do not depend on the
-lease: the per-site emergency denylist, Entra disabling users, short key
-lifetimes (12 hours for agent keys) and secret-scanning revocation. golem
+minutes stopped every site. Independent revocation is the per-site emergency denylist, subject to local
+Kubernetes delivery; credential expiry applies at its encoded time (12 hours
+for default agent keys). Entra disablement and secret-scanning revocation
+require fresh snapshot publication and cannot be relied on during its outage.
+Proposed ADR 0041 §1 defines denylist survival through Argo reconciliation. golem
 will run on one site for a long time, with a second site as warm or cold
 standby.
 

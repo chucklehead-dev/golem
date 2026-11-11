@@ -114,3 +114,15 @@ The evidence matrix in [security-and-correctness.md](security-and-correctness.md
 is required at its stated milestones. The models cover fenced publication
 and authorization freshness (model/publication.md) and the soft-budget
 bound, deduplication and reconciliation (model/accounting.md).
+
+## Second security review gates (proposed ADR 0041)
+
+[ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) adds negative tests for denylist persistence under Argo
+sync/self-heal/prune/upgrade/restart; both audit capacity thresholds; capture
+sender impersonation, pool-boundary routing and operational-exporter fan-out;
+inherited-project readers; restricted/compatible request features and hostile
+field-name logging; and Argo/Crossplane privilege escalation. Extend publication
+models for CRD freshness/deletion and restrictive role/service/policy changes.
+Extend accounting scenarios for counter handoff, multi-principal scope exposure,
+failed renewal and continued billing after cancellation before asserting bounds.
+These tests and model extensions are required evidence, not completed work.

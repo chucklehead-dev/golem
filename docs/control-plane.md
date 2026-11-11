@@ -217,3 +217,12 @@ ledger's too (seconds behind); golem-control reads no site's Valkey.
   (`model/accounting.md`: no double count, books match after
   reconciliation, overshoot within ADR 0031's bound).
 - API compatibility: `buf breaking` against the last release in CI.
+
+## Proposed security protocol amendments
+
+[ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) requires source freshness for both CAS state and the complete
+accepted CRD set before lease renewal. It also reserves bounded audit capacity
+for restrictive mutations and moves emergency denial outside Argo ownership.
+The publication spike and tests must cover CRD deletion/rollback, stale caches
+and multiple restrictive rights; the current key-only model does not establish
+those guarantees. Capture provisioning is limited to named destination Secrets.

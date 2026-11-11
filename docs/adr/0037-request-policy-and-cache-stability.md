@@ -1,13 +1,17 @@
 # 0037: Forward unknown fields, enforce the policy-relevant ones; cache stability is semantic
 
+Proposed amendment: [ADR 0041](0041-security-boundaries-and-incident-controls.md)
+updates the security boundary, requirements and acceptance evidence below.
+
 Status: Accepted. Amends security-and-correctness.md §4 and [0028](0028-capabilities-and-determinism.md).
 
 ## Decision
 
-- **Unknown request fields and beta headers are forwarded**, logged by
-  name (never by value), and diffed nightly against the known set; new
-  names are reviewed by the platform team. Rejecting them would break
-  coding agents on the day they update.
+- **Feature mode** (proposed ADR 0041): restricted mode is the default and
+  rejects unapproved request fields, beta headers and API versions. Compatible
+  mode forwards unknown features with explicit scope/security approval; logging
+  uses bounded sanitized names or keyed hashes, never values. Nightly diffs
+  support review but do not establish a maximum exposure window.
 - **Policy-relevant fields are enforced** wherever they appear: `store`,
   `previous_response_id`, `background`, file, container and conversation
   identifiers, `mcp_servers`, server-side tools with network access, `n`,
@@ -21,5 +25,7 @@ Status: Accepted. Amends security-and-correctness.md §4 and [0028](0028-capabil
 
 ## Consequences
 
-Agents keep working through provider releases; a new data-moving feature
-can pass for up to a day before review catches it, the accepted risk.
+Compatible-mode agents can keep working through provider releases, accepting
+new data-moving semantics until detection and remediation. Restricted scopes
+may require a reviewed compatibility update before an agent upgrade works.
+Neither mode eliminates provider behavior or contractual data-handling risk.

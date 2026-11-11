@@ -1,7 +1,9 @@
 # Security and correctness requirements
 
 Status: proposed design revision; implementation and validation are outstanding.
-Decision: [ADR 0029](adr/0029-security-and-correctness-revision.md).
+Decisions: [ADR 0029](adr/0029-security-and-correctness-revision.md), amended
+by proposed [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md). ADR 0041 governs the
+incident-control, capture, compatibility, delivery and evidence revisions below.
 These requirements amend the baseline documents where explicitly referenced.
 They describe required behavior, not controls already implemented.
 
@@ -23,7 +25,7 @@ staleness, the incident revocation procedure, allowed destinations and data
 classes, and recovery permissions. Availability choices that preserve stale
 rights are explicit exceptions, never an implicit result of an outage.
 
-## 2. Authentication and identity provenance (M1; mesh in M2)
+## 2. Authentication and identity provenance (M1)
 
 - Verify JWT signature, algorithm allowlist, issuer, tenant, audience,
   expiry and not-before; distinguish delegated user tokens from application
@@ -63,13 +65,23 @@ The five-second revocation target applies to healthy connected gateways,
 not partitions within the lease. Publish lag, lease expiry, clock skew,
 denylist apply latency and active-stream termination are separate metrics.
 Emergency denylist changes remain effective until durable revocation and
-fresh publication are confirmed at that site.
+fresh publication are confirmed at that site. The ConfigMap has an incident
+lifecycle outside Argo reconciliation; delivery latency and API-server/kubelet
+availability are explicit assumptions (proposed ADR 0041 §1). Entra disablement
+and secret-scanning revocation require fresh publication; encoded credential
+expiry and a locally applied denylist are the independent paths.
 
-Publication must reject a stale leader and stale source state. Pointer CAS
+Publication must prevent source regression after the authoritative publication
+record advances. An old leader may publish before its successor advances that
+record, bounded by source-read expiry; immediate rejection of all stale leaders
+is not established by the current model (proposed ADR 0041 §5). Pointer CAS
 alone is insufficient. A fencing generation and source revision are checked
 against an authoritative publication record; losing leadership or CAS requires
 reloading inputs and rebuilding, never just renumbering old content. The
-mechanism is a Phase 0 spike and an M1 gate.
+mechanism is a Phase 0 spike and an M1 gate. The source manifest binds the
+state revision and complete accepted config set, including deletions, to a
+monotonic config revision. Renewal requires freshness evidence for both
+inputs; Kubernetes resourceVersion is opaque. See proposed ADR 0041 §5.
 
 Gateway status is diagnostic, not an authoritative rollback checkpoint.
 Bootstrap and replacement gateways obtain a trusted publication floor from
@@ -95,9 +107,12 @@ Scan the entire bounded JSON document before forwarding; reject malformed
 JSON, trailing values and duplicate object members. Extract every
 policy-relevant field regardless of order, including model, capabilities,
 output limits, storage controls, object references and tools. Amended by
-ADR 0037: unknown fields are forwarded, logged by name and reviewed from a
-nightly diff; the policy-relevant fields (contracts.md §8) are enforced
-wherever they appear. Provider feature compatibility is tested.
+proposed ADR 0041 §3: restricted mode rejects unapproved fields/API versions
+and betas; compatible mode forwards unknown features only with explicit
+scope/security approval. Known policy fields (contracts.md §8) are enforced
+in both modes. Logging is bounded and sanitized or keyed-hashed; nightly
+detection is not a remediation-time guarantee. Provider behavior and
+contractual data controls still require review.
 
 Hooks may rewrite content or add hints, but cannot grant rights. After each
 rewrite, recompute capability, residency, storage and size checks before
@@ -146,8 +161,12 @@ Shadows obey the original scope's data restrictions even when platform-funded.
 Gateway pods must not hold Langfuse project credentials. Amended by ADR
 0035: the enterprise OTel collector holds them and routes captured traces
 to the project the snapshot names for the scope; it accepts captured
-traces only from gateway workloads and only for projects the pool's scopes
-map to, so a gateway cannot select an arbitrary project.
+traces only from authenticated gateway workloads and only for projects allowed
+to that pool. A compromised shared gateway can relabel captures among those
+projects: the pool is the compromise boundary (proposed ADR 0041 §2). Narrower
+isolation requires separate workloads/pools and destinations. Inherited projects
+are shared read boundaries requiring explicit reader approval. Capture uses a
+dedicated receiver/pipeline without operational-exporter fan-out.
 
 Required redaction occurs before every authorized content export. Capture
 off forbids content in operational telemetry, error bodies, flight-recording
@@ -172,8 +191,10 @@ trimming the state outbox; collector acceptance alone is insufficient.
 ClickHouse is a query projection. Verify sequence gaps and duplicate
 delivery; archive access, retention and break-glass actions are audited.
 This protects retained history, not the honesty of a compromised event producer.
-Bound outbox growth; security mutations fail closed if the archive backlog
-reaches its configured capacity.
+Bound outbox growth. Widening mutations fail closed before ordinary audit
+capacity is exhausted; reserve bounded audit capacity for restrictive changes.
+At emergency-capacity exhaustion use the separately audited local denylist,
+not unaudited writes or blocked revocation. See proposed ADR 0041 §1.
 
 Standalone binds only to loopback unless explicitly configured, rejects
 unexpected Host/Origin values and browser cross-site requests, and requires
@@ -206,10 +227,11 @@ and site allocations are not required. What remains required:
 - Per-principal concurrency limits are enforced; strict scopes check the
   worst-case cost (no cache discount, `max_tokens` or the model maximum,
   no server-side tools).
-- The overshoot bound of ADR 0031 is documented to budget owners and checked
-  by the accounting model.
-- Daily provider reconciliation books every difference as an adjustment
-  (unattributed where needed), so totals match invoices.
+- Numeric aggregate bounds are not established by the single-principal
+  accounting model. Proposed ADR 0041 §6 requires scope/multi-site bounds,
+  counter handoff and failed-renewal scenarios before such claims are made.
+- Reconciliation is monthly with daily previews and ADR 0038's 3–5%
+  tolerance; unexplained larger differences are investigated.
 
 Separate logical request_id, attempt_id and accounting event_id. An attempt
 records deployment/account, provider ID, pinned price version, usage, cost and
@@ -239,13 +261,13 @@ add later. Record spike results and approval of exceptions in docs/spikes/.
 | Stale publisher | Paused old leader resumes after revocation; publication cannot restore the revoked right |
 | Restore widening rights | Random restrictive changes followed by restore cannot widen rights without separate approval |
 | Stored response authorization | M1 rejects every stored-object path; later cross-principal/scope/account tests deny access |
-| Capture credentials | No gateway holds Langfuse credentials; a compromised gateway cannot route captures to another scope's project (ADR 0035) |
+| Capture boundaries | No gateway holds Langfuse credentials; pool allowlists and dedicated pipelines prevent outside-pool exports; within-pool relabeling is an explicit compromise assumption (ADR 0041) |
 | Scanner and hook bypass | Duplicate/late/nested fields, unknown features and rewrites cannot evade policy |
 | SSRF and raw routes | Redirects, rebinding, IPv6, metadata and encoded paths cannot escape approved destinations |
 | GitOps bypass and audit | Unauthorized spec writes denied; audit archive survives collector outage and query-store deletion |
 | DoS and standalone | Bounded memory under slow/flooded traffic; hostile web origin and Host requests refused locally |
-| Budget overshoot | Concurrent, multi-site and crash scenarios stay within ADR 0031's stated bound; spend over budget is refused on every site within the lag |
-| Reconciliation | Crash-lost spend events are booked as adjustments; totals match provider usage after reconciliation |
+| Budget exposure | Establish aggregate bounds, snapshot/counter handoff and failed slot-renewal behavior before claiming bounded exposure (ADR 0041) |
+| Reconciliation | Monthly account/model reconciliation with daily previews, explained adjustments and ADR 0038's tolerance |
 | Replay and ledger dedup | Duplicate events and multiple adjustments keep balances stable |
 
 The canonical encoder's prefix property applies to provider cache-relevant
@@ -257,3 +279,9 @@ Roadmap estimates are planning placeholders until staffing, required spikes,
 accounting durability and publication fencing are measured. The first
 production slice may use one team, site and native backend; broader M1
 features cannot waive these gates.
+
+Additional M1 gates from proposed [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md): denylist survival
+through Argo sync/prune/restarts; restrictive writes during audit backpressure;
+negative Argo/Crossplane authorization tests; composite state/config freshness
+and restrictive-right restore scenarios. Capture-pipeline and human-access
+checks are M2 gates. Model extensions remain outstanding.

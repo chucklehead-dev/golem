@@ -1,5 +1,8 @@
 # 0035: Capture: a Langfuse project per top-level team, inheritable; the collector holds the credentials
 
+Proposed amendment: [ADR 0041](0041-security-boundaries-and-incident-controls.md)
+updates the security boundary, requirements and acceptance evidence below.
+
 Status: Accepted. Amends [0016](0016-capture-and-retention.md) and security-and-correctness.md §6.
 
 ## Decision
