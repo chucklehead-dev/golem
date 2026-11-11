@@ -1,5 +1,9 @@
 # 0023: A standalone gateway for laptops; no all-in-one control plane
 
+Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
+and its normative security and correctness requirements. Baseline text below
+must be read with those amendments.
+
 Status: Accepted.
 
 ## Context

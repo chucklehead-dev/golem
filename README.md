@@ -44,3 +44,6 @@ Gateway, Envoy AI Gateway, Portkey, Bifrost, Kong AI Gateway, Cloudflare AI
 Gateway. golem is not a general-purpose product like them: it serves one
 organisation, so it leaves out multi-tenancy, billing, a large UI and most plugin
 generality, and keeps the code small enough to read in an afternoon.
+
+Design review amendments and production gates:
+[docs/security-and-correctness.md](docs/security-and-correctness.md).

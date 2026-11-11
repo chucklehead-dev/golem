@@ -1,5 +1,9 @@
 # 0002: Retries and failover stop at the first response byte
 
+Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
+and its normative security and correctness requirements. Baseline text below
+must be read with those amendments.
+
 Status: Accepted (v1 baseline). From archive 0007.
 
 ## Decision

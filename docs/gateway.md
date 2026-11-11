@@ -1,5 +1,9 @@
 # golem: the gateway (data plane)
 
+Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
+and [security-and-correctness.md](security-and-correctness.md) govern the
+affected guarantees and release gates. Implementation remains outstanding.
+
 Status: draft, third pass. The system's components and how they fit are in
 [architecture.md](architecture.md); this document is the gateway's inside.
 The gateway does data-plane work only: it serves model requests. It has no
@@ -62,8 +66,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
 2. **Frontend.** `ServeMux` method-and-path patterns select the dialect
    (`POST /v1/chat/completions`, `POST /v1/messages`, ...). The body is read
    into a pooled buffer with a size cap (`http.MaxBytesReader`). A
-   `jsontext.Decoder` scan extracts the routing fields; it stops early once
-   it has them unless a hook or translation needs the whole tree.
+   `jsontext.Decoder` scan extracts the routing fields; it scans the complete
+   document and rejects duplicate members before forwarding. Hook rewrites
+   trigger policy and capability revalidation.
 3. **Authenticate** (ADR 0009). The chain yields a `Principal` (user or
    service, scope, key, mesh identity if present) or an error in the
    caller's dialect. Keys are
@@ -175,13 +180,12 @@ except OTel's API.
 - At start the gateway loads its last-good snapshot from disk (an
   `emptyDir` or a small PVC) if present, then polls its pool's pointer in
   object storage. It is ready once it holds a snapshot no older than a
-  configured bound (or any snapshot, if object storage is unreachable and
-  the pool allows stale starts).
+  configured bound (only while its signed authorization lease is valid;
+  internal exceptions require an explicit approved maximum).
 - Every second: a conditional GET of `snapshots/<pool>/current`. On a
   change it verifies the pointer's signature against the pinned public key
-  and that its `publish_seq` exceeds its floor (the larger of its local
-  last-good copy and its own status object, so an empty disk does not reset
-  it), then fetches the snapshot by hash and verifies its signature and
+  and that its `publish_seq` exceeds its floor (the trusted publisher checkpoint and atomically persisted local
+  checkpoint; status is diagnostic and cannot set the trusted floor), then fetches the snapshot by hash and verifies its signature and
   hash (ADR 0007). Anything unsigned, wrongly signed or older is ignored and
   alarmed; so is a pointer more than a day old.
 - An **emergency denylist** (a ConfigMap mounted as a file, read with

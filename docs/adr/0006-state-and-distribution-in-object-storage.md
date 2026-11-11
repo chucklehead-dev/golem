@@ -1,5 +1,9 @@
 # 0006: Control-plane state as one document in object storage; snapshots distributed through it
 
+Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
+and its normative security and correctness requirements. Baseline text below
+must be read with those amendments.
+
 Status: Accepted (v1 baseline). From archive 0009, 0015, 0026, 0027, 0028, 0032.
 
 ## Decision

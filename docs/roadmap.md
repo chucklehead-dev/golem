@@ -1,5 +1,9 @@
 # golem: roadmap
 
+Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
+and [security-and-correctness.md](security-and-correctness.md) govern the
+affected guarantees and release gates. Implementation remains outstanding.
+
 Status: draft. Replaces the milestone table in the PRD. Phases are ordered
 by dependency and by risk: what could invalidate the design is tried first,
 what only adds features comes last. Each phase has an exit criterion that is
@@ -137,7 +141,8 @@ streaming, for a week without a translation defect.
 - **Remote sites** (AKS, on-prem) as gateway pools on the shared S3 store
   (ADR 0008): a Valkey per site, site ceilings (ADR 0013; its model and
   mutants first), static provider quota shares, Bedrock through federation,
-  a per-cluster operator; after the residency review (PRD §8).
+  a per-cluster operator; fixed site allocations replace dynamic rebalance
+  (ADR 0029); after the residency review (PRD §8).
 - **Testing**: the state and distribution model; the state document under races in simulation;
   metastability analysis of overflow and retries (gotogether trials 2–4, 6).
 
@@ -174,3 +179,15 @@ site, two replicas of golem-control (one leader), one Valkey primary with
 a replica per site, the state document at about 1–2 MB, and ClickHouse far
 inside its limits. Per-principal limits on local GPU pools are M1, with
 those pools.
+
+## Review amendments (ADR 0029)
+
+Phase 0 must validate publication fencing/trusted checkpoints, durable
+accounting and recovery, duplicate-safe ledger queries, mesh header overwrite,
+and Langfuse ingestion permissions. M0 produces the contracts and DDL. M1
+requires the M1 acceptance matrix in security-and-correctness.md, including
+CRD RBAC, immutable audit archival and authenticated standalone mode. M2
+features require their respective gates before activation. Site allocations
+are fixed per period; dynamic reclamation is deferred. Stored provider objects
+are deferred pending ownership/routing records. Staffing and these spikes
+must be measured before the milestone durations are treated as commitments.

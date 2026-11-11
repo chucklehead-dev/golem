@@ -1,5 +1,9 @@
 # golem: contracts
 
+Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
+and [security-and-correctness.md](security-and-correctness.md) govern the
+affected guarantees and release gates. Implementation remains outstanding.
+
 Status: v1 baseline. The interfaces other people and systems will depend
 on, written down before the first caller does: refusals and their status
 codes, error origin, the ledger, the price model, identifiers and headers,
@@ -52,15 +56,16 @@ act only on `provider`; dashboards and support start from it.
 
 ## 3. The ledger (ADR 0025)
 
-`golem.spend` in ClickHouse is the chargeback contract. One row per
-billable request, plus estimated and adjustment rows; rows are never
-edited.
+`golem.spend` in ClickHouse is the chargeback contract. Immutable events per upstream attempt, with distinct estimate, settlement
+and adjustment identities (ADR 0029); rows are never edited. Deduplicate
+by event identity before sums and rollups; background merges alone do not
+prevent double counting.
 
 | Column | Type | Notes |
 |---|---|---|
 | `schema_version` | UInt16 | this table's contract version |
 | `row_kind` | Enum: `actual`, `estimated`, `adjustment` | estimated: a cut stream counted from deltas; adjustment: reconciliation |
-| `request_id` | UUID | golem's; the ReplacingMergeTree key with `row_kind` |
+| `request_id`, `attempt_id`, `event_id` | UUID | logical request, upstream attempt, stable accounting-event identity (ADR 0029) |
 | `provider_request_id` | String | the provider's own ID, for disputes |
 | `started_at`, `ended_at` | DateTime64(3, UTC) | |
 | `period` | Date | the **start** time's period in the period time zone: a stream crossing a period boundary is charged to the period it started in |
@@ -148,8 +153,10 @@ rules.
   equivalents) and refuses file and batch uploads with
   `authz.provider_storage_forbidden`; stateful continuations
   (`previous_response_id`) are therefore unavailable in such scopes.
-- When allowed, the ledger row records that the provider holds data, and
-  the scope's managers see it in the console.
+- M1 remains stateless even when allowed is configured: stored operations,
+  continuations, background work and managed-object references are refused
+  pending an ownership registry. Later, each object operation checks sharing
+  rights and records provider storage (ADR 0029).
 
 ## 7. SDK and API-version compatibility
 
@@ -160,6 +167,6 @@ rules.
   live providers.
 - The tests pin each SDK's retry behaviour (§1) and each agent's session
   and header behaviour (§5).
-- When a provider ships a breaking change, the pass-through path is
-  unaffected by design; the adapters and envelopes get a fix and a matrix
+- When a provider ships a breaking change, the pass-through path requires
+  policy compatibility review before enabling new provider features; the adapters and envelopes get a fix and a matrix
   row, and the release notes name it.

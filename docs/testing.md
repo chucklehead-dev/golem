@@ -1,5 +1,9 @@
 # golem: testing
 
+Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
+and [security-and-correctness.md](security-and-correctness.md) govern the
+affected guarantees and release gates. Implementation remains outstanding.
+
 Status: draft. How golem is tested, chosen by value: the most effort where
 a bug costs money, leaks data, or breaks every caller at once (budgets,
 authorization, content capture, streaming, the distribution of config),
@@ -49,8 +53,8 @@ Its value for golem is in the protocols, not the plumbing.
 
 | Model | State and actions | Properties |
 |---|---|---|
-| **Reserve and reconcile** (ADR 0012) | reservations per level, spend, gateway crash and restart, store loss and rebuild from the ledger, retries before the first byte, streams ending early | never charged twice for one request; every reservation ends as spend or expires; a hard cap exceeded by at most the in-flight estimation error; rebuild converges to the ledger |
-| **Site ceilings** (ADR 0013) | ceilings per site, spend, rebalance from a lagging ledger, grant reductions, a site cut off from the bucket | `Σ ceilings ≤ pool total` always; a ceiling never below its site's spend; a cut-off site spends at most its ceiling; after a settle, headroom moves to the busy site |
+| **Reserve and reconcile** (ADRs 0012, 0029) | reservations, durable attempts, crash/recovery, store loss, ambiguous retries and cut streams | each event affects balance once; dispatched attempts settle or retain uncertain liability; expiry cannot erase billed usage; recovery preserves unresolved attempts; expected-cost overshoot is reported |
+| **Site allocations** (ADRs 0013, 0029) | issued allocations, applied stale snapshots, grant reductions, partitions, period rollover | allocations fit funding; issued allocations cannot be reclaimed in-period; disconnected allocations remain reserved; old-period liability stays isolated |
 | **State and distribution** (control-plane.md §3–4) | writers racing with `If-Match` (lost responses included), leader changes, signed publication with a publish sequence, gateway polls and restarts with empty disks, restore | every acknowledged write is in a snapshot every gateway applies; no gateway applies a lower publish sequence or an unsigned snapshot; no write is lost to a race; a restore never revives a revoked key; revocation within the bound after a settle |
 | **Attempt loop** (ADR 0002) | attempts, first byte, failover, retry budget, ejection | no retry after the first byte; retries bounded by the budget; an ejected deployment receives nothing until probed back |
 | **Approvals and grants** (org-model §4.3) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
@@ -104,3 +108,10 @@ The trial is judged as any test is: by what it catches. Each model's
 checks are proved by planted mutants (a reserve that skips one level, a
 rebalance that ignores in-flight use, a publisher that skips the pointer's version check) that the
 model must reject; a model whose mutants survive is not worth keeping.
+
+## Review acceptance gates
+
+The evidence matrix in [security-and-correctness.md](security-and-correctness.md#10-required-evidence-and-review-traceability)
+is required at its stated milestones. Models include actual stale allocations,
+fenced publication, uncertain attempts and accounting recovery watermarks;
+a correct controller-side ceiling sum alone does not establish safety.

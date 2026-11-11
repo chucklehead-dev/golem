@@ -1,5 +1,9 @@
 # 0017: Self-hosted model servers: each instance a deployment
 
+Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
+and its normative security and correctness requirements. Baseline text below
+must be read with those amendments.
+
 Status: Accepted (v1 baseline). From archive 0019, 0032.
 
 ## Decision

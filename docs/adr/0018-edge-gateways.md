@@ -1,5 +1,9 @@
 # 0018: An edge gateway pool for internet-facing consumers
 
+Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
+and its normative security and correctness requirements. Baseline text below
+must be read with those amendments.
+
 Status: Accepted (v1 baseline), M2. From archive 0022.
 
 ## Decision

@@ -1,5 +1,9 @@
 # golem: the operator
 
+Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
+and [security-and-correctness.md](security-and-correctness.md) govern the
+affected guarantees and release gates. Implementation remains outstanding.
+
 Status: draft, ninth pass. golem-operator installs and operates golem in
 Kubernetes (ADR 0003). It does not handle config:
 config CRDs are read by golem-control directly. M1 installs with Helm; the
@@ -53,7 +57,7 @@ they change through the control API (ADRs 0006, 0005).
 | **Pause** | A freeze override (control API) stops publication to a pool (incident freeze); gateways keep their snapshot. |
 | **Scaling** | Fixed replicas: three gateways per pool per region, one per zone, sized for the design envelope (ADR 0021); the dashboards alert when traffic nears the envelope. |
 | **Mesh** | Waypoint for the gateway Service; AuthorizationPolicies: only the waypoint may reach the gateway's data port when identity headers are trusted (ADR 0009); admin ports only from the operator and golem-control. Bucket policies and IAM roles come from the Terraform module (control-plane.md §5). |
-| **Langfuse projects** | For each scope with capture set to metadata or content (read from the control API): ensure a Langfuse project through the organisation API, set its retention to the scope's maximum, create its API keys, add them to the `golem-langfuse` Secret mounted into gateways and the worker, and report the destination ready (ADR 0016). Archived scopes' projects are deleted after their longest retention. |
+| **Langfuse projects** | For each scope with capture set to metadata or content (read from the control API): ensure a Langfuse project through the organisation API, set its retention to the scope's maximum, provide verified write-only ingestion credentials or a capture broker holding read-capable credentials, and report the destination ready (ADRs 0016, 0029). Gateways never mount read-capable project keys. Archived scopes' projects are deleted after their longest retention. |
 | **Telemetry plumbing** | Applies the ClickHouse DDL (`golem.spend`, rollups, audit) as a Job; publishes Grafana dashboards as ConfigMaps for Grafana's sidecar (or Grafana operator resources); emits the collector routing snippet to merge into the enterprise collector config. |
 | **Store** | Bucket versioning and lifecycle rules (set when the `ControlPlane` is created), replication for the second region and the failover runbook (promote the replica bucket); the operator reports the document's size and CAS retry rate. |
 | **Support** | `golemctl support-bundle` collects CRDs, statuses, gateway versions and acks, recent errors and a flight-recorder trace from a chosen gateway. |
