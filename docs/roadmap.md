@@ -21,6 +21,7 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 | Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0016 |
 | Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0020 |
 | Valkey scripts | reserve, renew and reconcile scripts on ElastiCache for Valkey: latency, behaviour across a failover | ADR 0012 |
+| SDK retry rules | Which status codes each OpenAI and Anthropic SDK, Claude Code and Codex retry, and their session headers; confirms 402 for budgets | ADRs 0024, 0026 |
 | Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0009 |
 
 ## Phase 1 (M0): walking skeleton (3–4 weeks)
@@ -32,7 +33,8 @@ The gateway end to end with nothing optional.
 - Gateway: snapshot from a file; OpenAI Chat and Anthropic Messages
   frontends; one OpenAI-compatible backend and Anthropic; fast path,
   streaming, usage extraction; probes; drain; OTLP to ClickStack.
-- Proto skeletons for the control API and the snapshot format.
+- Proto skeletons for the control API and the snapshot format; the error
+  codes, headers and ledger schema of contracts.md as code and DDL.
 - The Terraform module for the bucket, KMS keys and IAM roles, and
   `golemctl bootstrap` (control-plane.md §5).
 - Benchmarks and the stub-upstream load test as baselines.
@@ -54,11 +56,15 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   envelope), OpenAI (pass-through), standalone vLLM (pass-through for
   Chat, Completions, Embeddings and Messages; static endpoints, discovered
   models, static concurrency ceilings, per-principal limits, overflow);
-  aliases, weighted and least-in-flight balancing, failover,
+  aliases, capability-aware routing (ADR 0028), weighted and least-in-flight
+  balancing, failover,
   retries with a retry budget, ejection, prompt-cache affinity; provider
   quota limits per deployment (below); in-process hooks (`Request`,
   `Response`, `Complete`).
-- **Identity**: virtual keys (checksummed, secret-scanning webhook
+- **Policy**: provider-side storage forbidden by default (ADR 0027); the
+  threat model reviewed; the model onboarding checklist; CODEOWNERS on
+  config.
+- **Identity**: virtual keys (`glm_live_`, checksummed, secret-scanning webhook
   revocation), Entra users and services, `golemctl token` for agents with
   a credential helper, minted keys for the rest, `golemctl agent setup` for
   Claude Code, Codex and Copilot BYOK, the emergency denylist.
@@ -72,7 +78,8 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   state document; CRD config with schema rules and offline validation;
   operational overrides; signed snapshot publication; explain; audit
   through the document's outbox.
-- **Ledger and dashboards**: ClickHouse `golem.spend` by materialized view;
+- **Ledger and dashboards**: ClickHouse `golem.spend` by materialized view,
+  with the contract's schema, TTLs and the full price model;
   Grafana dashboards for spend, limits, latency, TTFT; snapshot-age alerts,
   a synthetic request per pool, provider usage reconciliation.
 - **Install**: Helm (no operator yet).
@@ -89,7 +96,8 @@ region or inference profile; a local box to its fallback pool); budgets switched
 ## Phase 2b (M1.5): translation through the canonical model (4–6 weeks)
 
 - `gateway/canon` and the Chat and Messages adapter pairs (requests,
-  responses, streams) (ADR 0001).
+  responses, streams) (ADR 0001, canonical-model.md), deterministic
+  encoders (ADR 0028).
 - OpenAI-SDK callers reach Claude on Bedrock (Chat decoder, Messages
   encoder, the M1 `bedrock` envelope); Anthropic-SDK callers and agents
   reach Chat-only models on OpenAI and vLLM.

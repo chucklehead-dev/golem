@@ -31,3 +31,8 @@ baseline one, marked in both.
 | [0021](0021-design-envelope.md) | The design envelope and what it lets golem leave out |
 | [0022](0022-apis-protobuf-connect.md) | The control API in protobuf, served with Connect |
 | [0023](0023-standalone-gateway.md) | A standalone gateway for laptops from local CRD YAML; whole-system development in `make dev-up`, not an all-in-one binary |
+| [0024](0024-refusals-and-error-origin.md) | Non-retryable refusals are not 429 (budgets are 402); every error has an origin |
+| [0025](0025-ledger-and-price-model.md) | The ledger schema and the price model are contracts |
+| [0026](0026-identifiers-and-headers.md) | Keys carry their environment; request IDs; one session concept; golem's headers |
+| [0027](0027-provider-side-retention.md) | Provider-side storage forbidden unless a scope allows it |
+| [0028](0028-capabilities-and-determinism.md) | Capability-aware routing; deterministic encoders |

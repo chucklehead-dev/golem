@@ -10,8 +10,9 @@ Status: Accepted (v1 baseline). From archive 0005, 0032, 0034.
 - **Reserve, then reconcile**: before the upstream call, one script call
   reserves the expected cost at every applicable level (key cap, member
   cap, site ceiling of the pool, the deployment's provider quota share,
-  rate and concurrency limits), all or nothing; a 429 in the caller's
-  dialect names the level. At the end the reservation becomes spend.
+  rate and concurrency limits), all or nothing; a refusal in the caller's
+  dialect names the level (429 for rate and concurrency, 402 for budget
+  levels: ADR 0024). At the end the reservation becomes spend.
 - **Expected, not worst case**: input priced at the principal's recent
   cache-hit ratio, output at the smaller of `max_tokens` and the principal's
   recent p95 for the model; a scope may choose worst case. Decision models

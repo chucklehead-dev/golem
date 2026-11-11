@@ -293,8 +293,10 @@ The full model is [org-model.md](org-model.md). In short:
   collector's maximum delay) after a Valkey loss.
 - On Valkey outage: budget levels fail open or closed per scope policy;
   rate limits fail open with a warning.
-- 429 bodies, in the caller's dialect, say which limit, at which level,
-  and when it resets; `x-ratelimit-*` headers in the provider's style.
+- Refusals, in the caller's dialect, say which limit, at which level, and
+  when it resets: 429 with `Retry-After` for rate and concurrency limits,
+  402 for budgets and caps (ADR 0024); `x-ratelimit-*` headers in the
+  provider's style.
 
 ### 5.6 Models, aliases and routing
 
@@ -513,7 +515,8 @@ by 429s, and balancing knows the headroom.
 
 ### 9.3 Key format
 
-`glm_` + 32 random bytes + a CRC32 checksum, base62, so secret scanners
+`glm_live_` or `glm_dev_` (ADR 0026) + 32 random bytes + a CRC32
+checksum, base62, so secret scanners
 can verify candidates offline; registered as a GitHub secret-scanning
 custom pattern with push protection, and a leaked key reported by scanning
 is revoked automatically.
@@ -526,9 +529,11 @@ ledger's ClickHouse backups; RTO for a region's control plane 30 min.
 
 ### 9.5 Error catalog
 
-Every refusal has a stable golem code (`limit.pool_exhausted`,
-`auth.key_revoked`, `route.no_deployment`, ...) rendered in the caller's
-dialect, documented with what to do next.
+Every refusal has a stable golem code rendered in the caller's dialect,
+with what to do next and who can change it; refusals that retrying cannot
+fix are never 429 (budgets are 402), and every error carries its origin
+(client, policy, provider, gateway). The table: contracts.md §1–2; ADR
+0024.
 
 ### 9.6 Compatibility policy
 
@@ -554,9 +559,14 @@ per component.
 
 ### 9.10 Threat model
 
-Before M1 production: key theft and replay, SSRF through registration and
-raw routes, the edge pool, insider access to captured content, the
-operator's and control plane's RBAC.
+Written before M1 production, reviewed by security: key theft and replay
+(including `glm_dev_` keys on laptops, refused by production gateways);
+SSRF and abuse through registration and raw pass-through routes; the edge
+pool, including floods of failed authentication (throttled per source at
+the ingress and the gateway); the bucket and its signing key (ADR 0007);
+insider access to captured content in Langfuse and to metadata in
+ClickHouse (who used which model when, even without prompts); the
+operator's and golem-control's RBAC.
 
 ### 9.11 Onboarding
 
@@ -590,3 +600,36 @@ can (protobuf ignores unknown fields). A breaking change takes two
 releases: the first teaches every reader the new form while writers keep
 the old; the second switches the writers. Rollouts may therefore go in any
 order within one release step: control plane first, gateways next.
+
+### 9.15 Retention of golem's own data
+
+ClickHouse TTLs per table: the ledger seven years (chargeback and audit),
+audit events seven years, operational traces and logs 30 days, metrics a
+year (downsampled after 30 days); all configurable. Deletion requests: a
+departing or erased user's identifiers in the ledger and audit are
+pseudonymised by a job (the rows and amounts stay, for chargeback); legal
+holds suspend TTL deletion and pseudonymisation for named principals or
+scopes.
+
+### 9.16 Model onboarding and config ownership
+
+A new provider or model reaches a `ScopePolicy` only after the platform
+team's checklist: security and data-handling review (training use,
+retention, region), pricing in a `PriceList`, capabilities in the catalog,
+an alias, and a smoke test. In v1 config CRDs are platform-owned: the
+GitOps repository's CODEOWNERS require the platform team for every kind;
+teams ask for routes and policies rather than edit them.
+
+### 9.17 Live tests and fixtures
+
+Nightly live tests and recorded fixtures use dedicated provider sandbox
+accounts with their own spend limits and keys, separate from production.
+Fixtures pass a scrubbing step (secrets, keys, prompts replaced by
+synthetic content) before they are committed, checked by a test that
+fails on anything resembling a key or a real prompt.
+
+### 9.18 SDK and API-version compatibility
+
+A tested matrix of `anthropic-version` values, beta features, OpenAI API
+features, and SDK and agent versions, run nightly; it pins the SDKs' retry
+rules and the agents' session headers (contracts.md §7).

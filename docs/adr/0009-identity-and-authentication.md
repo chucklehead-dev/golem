@@ -16,7 +16,7 @@ Status: Accepted (v1 baseline). From archive 0003, 0032; PRD §9.3.
 - **Entra** for users (v2 access tokens for golem's API app) and services
   (client credentials or workload identity federation; `azp`/`appid` maps
   to a service holding the `golem.service` app role).
-- **Keys**: `glm_` + 32 random bytes + a CRC32 checksum, base62; stored as
+- **Keys**: `glm_live_` or `glm_dev_` (ADR 0026) + 32 random bytes + a CRC32 checksum, base62; stored as
   SHA-256; bound to one scope; constrained (org-model §3). Registered as a
   GitHub secret-scanning custom pattern; golem-control's webhook receiver
   revokes reported keys. Entra sync revokes disabled users' keys.

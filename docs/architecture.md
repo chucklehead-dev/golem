@@ -10,6 +10,8 @@ rules that keep them apart. Each component's inside has its own document:
 | [roadmap.md](roadmap.md) | the phases and their exit criteria |
 | [operator.md](operator.md) | golem-operator: CRDs, deployment, day-2 operations |
 | [tools.md](tools.md) | golemctl, golem-console, the Backstage plugin |
+| [contracts.md](contracts.md) | the interfaces others depend on: errors, the ledger, prices, headers |
+| [canonical-model.md](canonical-model.md) | translation through the canonical model; capabilities; determinism |
 | [org-model.md](org-model.md) | the entitlement model all of them share |
 | [entra.md](entra.md) | the Entra ID app registrations they need |
 | [testing.md](testing.md) | the testing regime, and where gotogether is trialled |

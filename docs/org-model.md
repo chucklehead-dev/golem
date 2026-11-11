@@ -144,7 +144,8 @@ scope's **default member cap** (possibly zero).
 
 A request is charged to its key's scope. Before going upstream golem
 reserves the estimated cost at each level, atomically, and fails with a
-429 naming the first level that would be exceeded:
+402 (not 429, which SDKs retry: ADR 0024) naming the first level that
+would be exceeded:
 
 1. the key's own cap (if any);
 2. the member's cap in the scope (or the default member cap);

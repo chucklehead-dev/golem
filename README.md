@@ -26,6 +26,11 @@ Status: design. Nothing is built yet.
   services, the state document in object storage, signed snapshot distribution, jobs, bootstrap.
 - [docs/operator.md](docs/operator.md): CRDs and day-2 operations.
 - [docs/tools.md](docs/tools.md): golemctl, the console, Backstage.
+- [docs/contracts.md](docs/contracts.md): refusals and status codes, error
+  origin, the ledger schema, the price model, identifiers and headers,
+  provider-side retention, compatibility.
+- [docs/canonical-model.md](docs/canonical-model.md): the translation
+  model, its adapters, capability-aware routing, deterministic encoding.
 - [docs/org-model.md](docs/org-model.md): users, teams, projects, services,
   keys, roles, budgets, grants, approvals, capture and retention.
 - [docs/entra.md](docs/entra.md): the Entra ID app registrations.
