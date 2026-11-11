@@ -14,8 +14,8 @@ not instant) and an organisation API for creating projects.
 ## Decision
 
 - **Settings** at scope policy (ceiling), team or project (capture: off,
-  metadata, content; retention class; sample; override: locked, narrow,
-  open) and key or service (inherit or override), as in org-model §3.1.
+  metadata, content; retention class: 7, 30, 90 or 365 days, 3, 5 or 7
+  years; sample; override: locked, narrow, open) and key or service (inherit or override), as in org-model §3.1.
   The gateway computes the effective setting per request from its snapshot.
 - **One Langfuse project per capturing scope** (team or project), created
   when a scope first sets capture to metadata or content. Langfuse's own
@@ -39,6 +39,9 @@ not instant) and an organisation API for creating projects.
 - Redaction hooks the scope policy requires run before export; export
   failure drops the capture (counted), never the request.
 
+- The global ceiling is 7 years; classes beyond one year must be enabled
+  in a scope's policy by platform admins.
+
 ## Consequences
 
 - Retention can differ per key within a project, and changes to
@@ -49,6 +52,10 @@ not instant) and an organisation API for creating projects.
 - A Langfuse project per capturing scope: dozens to hundreds of projects,
   which the operator manages; Langfuse membership sync from golem scopes
   is M2.
+
+- Multi-year content in Langfuse means its ClickHouse and blob storage
+  grow for years: storage tiering (Langfuse's object storage lifecycle) is
+  part of the M2 operations work.
 
 ## To verify before M1
 

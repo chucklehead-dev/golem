@@ -173,7 +173,7 @@ Each binary also gets its own image and its own dependency list in
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
 | Single region (EKS in us-east-2, first) | Aurora DSQL single-region cluster in us-east-2 | One operator, control, worker; gateways across zones; ElastiCache for Valkey |
-| Multi-region (later: us-east-2 plus us-west-2 or us-east-1) | Aurora DSQL multi-region: two peered clusters, the third US region as witness | golem-control and worker in each region against the local endpoint; gateways use their region's control; Valkey per region; budgets through regional leases (ADR 0016) |
+| Multi-region (later: us-east-2 and us-west-2) | Aurora DSQL multi-region: peered clusters in us-east-2 and us-west-2, us-east-1 as witness | golem-control and worker in each region against the local endpoint; gateways use their region's control; Valkey per region; budgets through regional leases (ADR 0016) |
 | AKS or on-prem | Postgres (CloudNativePG or managed) | Same code, same SQL dialect (ADR 0015); Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
 
 The gateway, the worker and golem-control each scale independently; only

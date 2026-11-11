@@ -68,7 +68,7 @@ Decided in ADR 0018. Capture settings live at three levels:
 | Level | Set by | Settings |
 |---|---|---|
 | Scope policy (operator config) | platform admins | the ceiling: capture allowed or forbidden, maximum retention, maximum sample rate, required redaction hooks |
-| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the offered classes, within the ceiling); `sample`; `override`: locked, narrow, open |
+| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `sample`; `override`: locked, narrow, open |
 | Key or service | the key's owner; the service's owner | `capture` and `retention`: inherit (default), or an override the scope permits |
 
 What a child (key or service) may override:
@@ -78,6 +78,10 @@ What a child (key or service) may override:
   lower the sample, shorten retention.
 - `open`: also towards more: turn capture on, lengthen retention, up to
   the scope policy's ceiling.
+
+The classes above one year are available only in scopes whose policy
+allows them (set by platform admins), since long-lived content is the
+largest privacy and storage commitment golem makes.
 
 The effective setting is computed per request from the snapshot: the most
 specific permitted value, clipped to the ceiling. A switch may be

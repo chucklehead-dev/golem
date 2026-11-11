@@ -148,34 +148,43 @@ Foundry (a base path and auth change).
 
 #### 5.2.1 Self-hosted model servers (ADR 0019)
 
-vLLM and SGLang run on GPU clusters that are not the gateways' clusters.
+Today's vLLM instances are standalone machines (DGX Spark, Mac mini and
+Mac Studio), each serving one or a few models, outside Kubernetes and the
+mesh. SGLang, and clusters behind their own balancers, may follow.
 
-- **Endpoints**: a Backend is either a *service* (one URL fronted by the
-  serving platform's own balancer: llm-d, an Inference Gateway, KServe, a
-  plain load balancer), the default, or a list of *replicas* (static,
-  DNS, or the mesh's multi-cluster service discovery) when golem should
-  pick the replica itself.
-- **Dialects**: OpenAI Chat, Completions and Embeddings on both;
-  Anthropic Messages pass-through where the server exposes it (vLLM's
-  `/v1/messages`; to confirm per version), so coding agents can use
-  self-hosted models without translation; otherwise Messages to Chat
-  translation (M2).
-- **Load-aware routing** for replica lists: golem polls each replica's
-  load (vLLM's `/metrics`: running and waiting requests, KV-cache use;
-  SGLang's load endpoint and metrics) every second and routes to the
-  least loaded, with **prefix affinity** so requests sharing a prompt
-  prefix land on the replica holding it in KV cache.
-- **Backpressure**: a server's 429/503 or a full queue sheds to fallback
-  pools (commercial models, other regions) before the first byte; long
-  queue times count against the first-byte timeout, which is set per
-  backend.
-- **Health**: active probes (`/health`) and passive ejection; WAN-aware
-  timeouts and keepalives.
-- **Pricing**: internal per-token rates set by `PriceOverride` (e.g. from
-  GPU cost amortised over measured throughput), so self-hosted spend is
+- **Each machine is a deployment.** A Backend lists its machines by DNS
+  name; an alias pools the machines serving a model. Each deployment
+  declares the models it serves (checked against its `/v1/models`) and a
+  **concurrency cap**, since one box serves only a few requests at once
+  before latency collapses.
+- **Routing**: least in-flight per deployment, counted by golem itself
+  (exact, since golem sees every request to these boxes), refined by the
+  server's own metrics where it exposes them (vLLM's `/metrics`: running
+  and waiting requests, KV-cache use; not every build on Apple silicon
+  does). **Prefix affinity** sends a conversation back to the box holding
+  its prefix in cache, unless that box is at its cap.
+- **Overflow**: at the cap, or on 429/503, requests go to the alias's
+  fallback pool (a commercial model, or a Foundry or Bedrock deployment of
+  a comparable one) before the first byte. Optionally a short bounded wait
+  for a slot (`queue: 2s`) first, for callers who prefer the local model.
+- **Availability**: desktops sleep, reboot and update. Active health
+  probes (`/health` every few seconds) and passive ejection take a box out
+  quickly and bring it back without config changes.
+- **Reaching them**: TLS on each machine (a small terminating proxy such as
+  Caddy in front of vLLM, which listens on localhost only) with vLLM's
+  `--api-key` as a bearer secret, or a client certificate; reached from the
+  gateways through the mesh's egress gateway with a ServiceEntry per
+  machine, so egress is visible and controlled.
+- **Dialects**: OpenAI Chat, Completions and Embeddings; Anthropic
+  Messages pass-through where the vLLM version exposes `/v1/messages` (to
+  confirm per box), so coding agents can use local models; otherwise
+  Messages to Chat translation (M2).
+- **Pricing**: the platform team sets per-token rates through
+  `PriceOverride`, the same interface as for commercial models; spend is
   charged to scopes like any other.
-- **Model names**: the server's `--served-model-name` is the deployment's
-  model; aliases hide it.
+- **Clusters later**: a Backend may instead be one *service* URL whose own
+  balancer (llm-d, an Inference Gateway, KServe) picks the replica; golem
+  then routes to it as one deployment.
 
 ### 5.3 Authentication and identity
 
@@ -416,27 +425,22 @@ Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
 Aurora DSQL preferred, PostgreSQL elsewhere (ADR 0015); teams as drafted;
 console then Backstage (tools.md); team-to-project grants need no
 approval; allocations may oversubscribe; EKS first, AKS and on-prem later;
-backends: OpenAI, Foundry, remote vLLM and SGLang (§5.2); content capture
-and retention per scope with override control (ADR 0018); notifications by
-email and Teams (control-plane.md §5.1); limit store: Valkey as the
-reference engine, ElastiCache for Valkey on AWS (ADR 0005); regions:
-us-east-2 first (architecture.md §6); Entra app registrations listed in
-entra.md.
+backends: OpenAI, Foundry, standalone vLLM machines (§5.2); content
+capture and retention per scope with override control, retention classes
+7, 30, 90, 365 days and 3, 5, 7 years (ADR 0018); notifications by email
+and Teams (control-plane.md §5.1); limit store: Valkey, ElastiCache for
+Valkey on AWS (ADR 0005); regions: us-east-2 first, us-west-2 second,
+us-east-1 the DSQL witness (architecture.md §6); the platform team owns
+the Entra app registrations (entra.md); self-hosted rates set by the
+platform team through `PriceOverride`.
 
 1. **Waypoint identity header.** Verified in an M1 spike against your Gloo
    Mesh version (ADR 0003).
-2. **Second region.** us-west-2 or us-east-1 as the second active region
-   (the third becomes the DSQL witness). Recommendation: us-west-2, for
-   geographic separation from us-east-2; it matters little to latency at
-   LLM response times.
-3. **Entra ownership.** Who owns the app registrations in entra.md, and who
-   grants admin consent for the worker's Graph permissions?
-4. **Retention classes.** Which retention durations to offer (e.g. 7, 30,
-   90, 365 days) and the global ceiling; whether any data classes forbid
-   capture outright.
-5. **Self-hosted fronting.** Do the vLLM/SGLang clusters already have a
-   balancer (llm-d, an Inference Gateway, KServe), or should golem route to
-   replicas (ADR 0019)? And how are they reached: Gloo multi-cluster, or
-   TLS over the network?
-6. **Internal prices.** Who sets the per-token rates for self-hosted
-   models, and from what (GPU cost, a flat rate)?
+2. **Admin consent** for the worker's Graph permissions and golemctl's
+   delegated scope: which Entra administrator grants it.
+3. **Never-capture data.** Whether any data classes or scopes must forbid
+   capture outright (the scope policy can), and who may approve the 3-, 5-
+   and 7-year classes (drafted: platform admins only, by scope policy).
+4. **Standalone machines.** Which boxes serve which models today, and
+   whether each can run a TLS terminator; the vLLM version on the Macs
+   (for `/v1/messages` and metrics).

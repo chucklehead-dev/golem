@@ -11,9 +11,21 @@ than by refusing. Serving platforms (llm-d, Gateway API Inference
 Extension, KServe) already do load- and cache-aware replica selection
 where they are deployed.
 
+Today's servers are standalone machines (DGX Spark, Mac mini and Mac
+Studio running vLLM), each with a handful of concurrent slots, outside
+Kubernetes and the mesh, and liable to sleep or reboot.
+
 ## Decision
 
-- A self-hosted Backend is a **service** (one URL; the platform picks the
+- Standalone machines are deployments of their own, with a declared
+  concurrency cap and model list; golem counts in-flight requests itself
+  (exact for boxes only golem calls), uses server metrics where present,
+  applies prefix affinity within the cap, and overflows to fallback pools
+  (or waits briefly for a slot, if configured). Reached over TLS through
+  the mesh's egress gateway, with health probes and ejection tuned for
+  machines that come and go.
+
+- For clusters (later): a self-hosted Backend is a **service** (one URL; the platform picks the
   replica) unless configured as **replicas**. golem does not duplicate a
   platform's endpoint picker.
 - For replicas, golem's `load` strategy polls each replica's metrics

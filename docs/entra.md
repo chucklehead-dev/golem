@@ -24,5 +24,5 @@ golem's registrations beyond an assignment of app role `golem.service` on
 #1 (which is how golem knows a token's `azp` is a service), plus the
 service's registration in golem (org-model §1).
 
-Owners: the platform team that runs golem should own all seven; an Entra
+Owners: the platform team owns all seven (decided); an Entra
 administrator grants admin consent for #2–#4.
