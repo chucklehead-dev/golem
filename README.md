@@ -23,7 +23,7 @@ Status: design. Nothing is built yet.
 - [docs/gateway.md](docs/gateway.md): the data plane: the request path,
   packages, Go facilities, performance.
 - [docs/control-plane.md](docs/control-plane.md): golem-control and
-  its api and worker roles: services, the DSQL/Postgres store, distribution, jobs.
+  its api and worker roles: services, the PostgreSQL store, distribution, jobs.
 - [docs/operator.md](docs/operator.md): CRDs and day-2 operations.
 - [docs/tools.md](docs/tools.md): golemctl, the console, Backstage.
 - [docs/org-model.md](docs/org-model.md): users, teams, projects, services,

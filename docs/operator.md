@@ -14,7 +14,7 @@ Group `golem.dev`, version `v1alpha1`.
 
 | Kind | Describes | The operator creates |
 |---|---|---|
-| `ControlPlane` | golem-control's two roles for one region: image version, replicas, store connection (DSQL cluster endpoint and IAM role, or a Postgres DSN Secret), Entra app registration, ClickHouse and Valkey references, region name | Deployments (api, worker), Services, PDBs, ServiceAccounts (with workload identity annotations), RBAC to read config CRDs and write their status, the migration Job, AuthorizationPolicies |
+| `ControlPlane` | golem-control's two roles for one region: image version, replicas, store connection (Aurora cluster endpoint and IAM role, or a Postgres DSN Secret), Entra app registration, ClickHouse and Valkey references, region name | Deployments (api, worker), Services, PDBs, ServiceAccounts (with workload identity annotations), RBAC to read config CRDs and write their status, the migration Job, AuthorizationPolicies |
 | `GatewayPool` | A set of gateways (internal, or `edge` for internet-facing consumers with its ingress, WAF and source ranges; ADR 0022): version, replicas, region, the label selector for the config it receives, Valkey reference, drain grace, waypoint on/off, provider Secrets to mount | Deployment, Service, PDB, ServiceAccount, waypoint and its AuthorizationPolicies, egress ServiceEntries for the providers its backends use; registers the pool with the control plane |
 
 **Config** (golem-control's; ADR 0023, 0025): `Backend`, `ModelRoute`,
@@ -53,7 +53,7 @@ they change through the control API (ADR 0009, 0023).
 | **Mesh** | Waypoint for the gateway Service; AuthorizationPolicies: only the waypoint may reach the gateway's data port when identity headers are trusted (ADR 0003); only gateways may call the distribution API; admin ports reachable only from the operator and the control plane. |
 | **Langfuse projects** | For each scope with capture set to metadata or content (read from the control API): ensure a Langfuse project through the organisation API, set its retention to the scope's maximum, create its API keys, add them to the `golem-langfuse` Secret mounted into gateways and the worker, and report the destination ready (ADR 0018). Archived scopes' projects are deleted after their longest retention. |
 | **Telemetry plumbing** | Applies the ClickHouse DDL (`golem.spend`, rollups, audit) as a Job; publishes Grafana dashboards as ConfigMaps for Grafana's sidecar (or Grafana operator resources); emits the collector routing snippet to merge into the enterprise collector config. |
-| **Store** | Backups and PITR belong to the store (DSQL, or CloudNativePG); the operator reports connectivity and migration state, it does not back up. |
+| **Store** | Backups and point-in-time restore belong to the store (Aurora, Azure, or CloudNativePG); the operator reports connectivity and migration state, it does not back up. |
 | **Support** | `golemctl support-bundle` collects CRDs, statuses, gateway versions and acks, recent errors and a flight-recorder trace from a chosen gateway. |
 
 ## 4. Build

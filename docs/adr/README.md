@@ -21,7 +21,7 @@ milestone (M0) confirms them.
 | [0012](0012-config-through-the-control-plane.md) | Config reaches gateways through the control plane; CRDs are written by the operator | Write path superseded by 0023 |
 | [0013](0013-components-and-layering.md) | Components with one job each; layering checked by a test | Amended by 0025 |
 | [0014](0014-connect-protobuf-apis.md) | APIs in protobuf, served with Connect | Amended by 0025 |
-| [0015](0015-sql-store-postgres-and-dsql.md) | One SQL store for Aurora DSQL and PostgreSQL | Proposed |
+| [0015](0015-sql-store-postgres-and-dsql.md) | One SQL store for Aurora DSQL and PostgreSQL | Superseded by 0027 |
 | [0016](0016-regional-budget-leases.md) | Budgets enforced through regional leases | Deferred to the second region (0025) |
 | [0017](0017-operator.md) | An operator for installation and day-2, writing config through the API | Amended by 0023 |
 | [0018](0018-capture-and-retention.md) | Content capture per scope with override control; a Langfuse project per scope; retention per record | Amended by 0025 |
@@ -32,4 +32,5 @@ milestone (M0) confirms them.
 | [0023](0023-config-from-crds-operational-overrides.md) | Config is CRDs read by golem-control; the API adds expiring operational overrides; the operator is install and day-2 only | Proposed |
 | [0024](0024-scopes-and-roles.md) | Teams and projects are one Scope entity; four roles; caps unify allocations and key caps | Amended by 0026 |
 | [0025](0025-smaller-surfaces.md) | Smaller surfaces: one control binary in two roles, five config kinds, four hook phases, no LROs, leases deferred, explain in the control plane, no sampling at first | Proposed |
-| [0026](0026-design-envelope.md) | Designed for the enterprise's size: whole snapshots, fixed replicas, small stores, sub-teams, fair share, capture cost | Proposed |
+| [0026](0026-design-envelope.md) | Designed for the enterprise's size: whole snapshots, fixed replicas, small stores, sub-teams, fair share, capture cost | Amended by 0027 |
+| [0027](0027-aurora-postgresql.md) | PostgreSQL everywhere: Aurora PostgreSQL on AWS, Global Database for the second region | Accepted |

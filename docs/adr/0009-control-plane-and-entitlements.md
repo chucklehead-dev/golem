@@ -15,13 +15,12 @@ is not a transactional store.
 ## Decision
 
 - A control plane, **golem-control** (APIs) with **golem-worker** (jobs),
-  owns entitlements in a SQL store, **Aurora DSQL or PostgreSQL** (ADR
-  0015), and serves the self-service and admin API (Entra-authenticated,
+  owns entitlements in **PostgreSQL** (Aurora PostgreSQL on AWS; ADR
+  0027, which superseded 0015), and serves the self-service and admin API (Entra-authenticated,
   roles per org model §2) and the distribution API.
 - The gateway holds an immutable snapshot (entitlements and, since ADR
   0012, operator config) behind an atomic pointer, kept current by the
-  distribution stream (control-plane.md §4: a polled change log, since
-  DSQL has no LISTEN/NOTIFY). No store access from the gateway.
+  distribution stream (control-plane.md §4). No store access from the gateway.
 - Behind an interface (`entitle.Source`) so that an external key or
   identity system can be a source instead (PRD §8 Q1).
 - golem-control being down stops changes, not traffic: the data plane
@@ -29,7 +28,7 @@ is not a transactional store.
 
 ## Consequences
 
-- Two more deployments and a store to run (DSQL managed, or Postgres via
+- Two more deployments and a store to run (Aurora PostgreSQL, or Postgres via
   CloudNativePG or a managed service).
 - Revocation latency is the feed's (about a second), not a cache TTL.
 - The snapshot's size grows with keys and members; at tens of thousands

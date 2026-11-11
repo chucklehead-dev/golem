@@ -5,7 +5,7 @@ Status: Proposed. Supersedes the write path of 0012 and the config half of 0017.
 ## Context
 
 ADR 0012 has the operator push config CRDs into the control API, which
-stores them in DSQL; `golemctl apply` writes there too, and every object
+stores them in the control plane's database; `golemctl apply` writes there too, and every object
 carries an owner so the two writers do not collide. Every deployment target
 (EKS, AKS, on-prem) is Kubernetes, so CRDs are always available. The
 two-writer design costs an ownership model, a config table, a resync loop,

@@ -19,7 +19,7 @@ rules that keep them apart. Each component's inside has its own document:
 | Component | Does | Does not | State |
 |---|---|---|---|
 | **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; touch the database or Kubernetes | Caches; limit counters in the RESP store |
-| **golem-control**, `api` role | The control API (config read and check, overrides, entitlements, self-service, admin, spend), the distribution API, the watch on config CRDs and their status | Serve model traffic; run background jobs | Aurora DSQL or Postgres (owner); reads ClickHouse and Valkey |
+| **golem-control**, `api` role | The control API (config read and check, overrides, entitlements, self-service, admin, spend), the distribution API, the watch on config CRDs and their status | Serve model traffic; run background jobs | PostgreSQL (owner: Aurora PostgreSQL on AWS); reads ClickHouse and Valkey |
 | **golem-control**, `worker` role | Background jobs: Entra sync, period rollover, expiries, notifications, ledger reconciliation, retention deletion | Serve any API but probes | The same store, through the same service layer |
 | **golem-operator** (M2) | Installs and upgrades the other components, migrations, drains, canaries, credential mounting, mesh policies, Langfuse projects | Handle config; talk to gateways | None (Kubernetes is its state) |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
@@ -45,7 +45,7 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
      distribution API ───────────────┐            golem-operator (M2): installs,
    golem-control  worker role        │            upgrades, drains, mesh policies,
      jobs, same service layer        │            Langfuse projects
-   store: Aurora DSQL | Postgres     │ stream: whole snapshots; acks
+   store: PostgreSQL (Aurora)        │ stream: whole snapshots; acks
                                      ▼
                               golem-gateway ×N ──▶ providers, model servers
                                      │   └──▶ Valkey (limits, quotas)
@@ -66,7 +66,7 @@ All defined in protobuf under `proto/golem/`, served with Connect
 plain HTTP/JSON (`curl` works), with generated Go and TypeScript clients
 (ADR 0014). Resource-oriented in the AIP style: standard methods
 (Get, List, Create, Update, Delete), `etag` on every resource for
-optimistic concurrency (it maps onto DSQL's), field masks, page tokens,
+optimistic concurrency, field masks, page tokens,
 `request_id` for idempotent creates. Requests that wait on someone
 (approvals) are resources with a state, not long-running operations.
 
@@ -102,7 +102,7 @@ control/
   api/                     Connect handlers: decode, call service, encode; no logic
   service/                 domain logic and authorization: org, keys, budget, config, spend
   store/                   repository interfaces
-  store/sql/               one SQL implementation for Postgres and Aurora DSQL (ADR 0015)
+  store/sql/               the PostgreSQL implementation (ADR 0027)
   config/                  the CRD watch, validation, status, overrides layering
   distribution/            snapshot building and the Watch/Ack server
   spend/                   ClickHouse queries
@@ -126,7 +126,7 @@ docs/
      ↓
  service (control/service) — the only place rules live: authz, invariants, transactions
      ↓
- store (control/store interfaces) → store/sql (Postgres | DSQL)
+ store (control/store interfaces) → store/sql (PostgreSQL)
 ```
 
 The worker and the console sit beside the transport layer: the worker
@@ -173,25 +173,21 @@ Each binary also gets its own image and its own dependency list in
   the `golem.spend` row in ClickHouse.
 - **A budget manager approves a one-time adjustment.** The request's state
   becomes `approved`; the grant takes effect in the same transaction; the
-  pool's new total reaches gateways through the change log.
+  pool's new total reaches gateways in the next snapshot.
 
 ## 6. Deployment topologies
 
 | Topology | Store | Notes |
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
-| Single region (EKS in us-east-2, first) | Aurora DSQL single-region cluster in us-east-2 | golem-control (api, worker), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
-| Multi-region (later: us-east-2 and us-west-2) | Aurora DSQL multi-region: peered clusters in us-east-2 and us-west-2, us-east-1 as witness | golem-control in each region against the local endpoint, reading that region's CRDs; gateways use their region's control plane; Valkey per region; budgets through regional leases (ADR 0016) |
-| AKS or on-prem | Postgres (CloudNativePG or managed) | Same code, same SQL dialect (ADR 0015); Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
+| Single region (EKS in us-east-2, first) | Aurora PostgreSQL Serverless v2 in us-east-2 | golem-control (api, worker), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
+| Multi-region (later: us-east-2 and us-west-2) | Aurora Global Database: writer in us-east-2, secondary in us-west-2 | golem-control in each region reading its local cluster and that region's CRDs, writing through the global writer endpoint; gateways use their region's control plane; Valkey per region; budgets through regional leases (ADR 0016) |
+| AKS or on-prem | Azure Database for PostgreSQL, or CloudNativePG | Same code, same engine (ADR 0027); Bedrock reached through Entra-to-AWS federation or IAM Roles Anywhere |
 
 The gateway and golem-control's two roles each scale independently; only
 the gateway is on the request path.
 
-**Going multi-region later.** AWS documents creating peered DSQL clusters,
-not converting a single-region one, so the move is planned as a migration:
-create the peered pair, pause control-plane writes (the API answers
-read-only; gateways keep serving from their snapshots and leases, so model
-traffic is unaffected), copy the store with `golem-control store copy`
-(through the store layer, in chunks), point golem-control at the new
-endpoint, resume. The store is small (entitlements and config, not
-spend), so the pause is minutes.
+**Going multi-region later.** Adding us-west-2 is adding a secondary
+cluster to an Aurora Global Database and deploying golem-control and
+gateways there: no store migration, no pause. Writes from us-west-2 cross
+to the writer region, which is fine at golem's write rate.

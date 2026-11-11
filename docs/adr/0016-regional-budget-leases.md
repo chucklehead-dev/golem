@@ -6,8 +6,8 @@ Status: Proposed, for the second region. Deferred by [0025](0025-smaller-surface
 
 Gateways in several regions charge the same pools. The RESP store is
 regional (Dragonfly, Valkey), and a cross-region round trip per request is
-not acceptable. DSQL is global but too slow and conflict-prone to take a
-write per request.
+not acceptable. The store is too far and too slow to take a write per
+request.
 
 ## Decision
 
@@ -16,7 +16,7 @@ write per request.
   store enforces its lease as the pool level of ADR 0005.
 - Gateways report lease consumption (through the distribution API's
   `Lease` method) every few seconds; the worker rebalances every 30 s,
-  moving unused lease to regions that consume it, in DSQL transactions
+  moving unused lease to regions that consume it, in store transactions
   that keep `Σ leases + spent ≤ available`.
 - A region near exhaustion asks for more synchronously (one control API
   call, not per request). If the control plane is unreachable, the region

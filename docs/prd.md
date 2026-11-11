@@ -379,8 +379,8 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
   golem-control; entitlements and operational overrides change only through
   the control API (protobuf, Connect; ADR 0014, 0023). The CLI, console and
   plugin are API clients; the gateway reads only the distribution stream.
-- **Store**: Aurora DSQL (multi-region, preferred) or PostgreSQL (AKS,
-  on-prem), one implementation (ADR 0015).
+- **Store**: PostgreSQL everywhere: Aurora PostgreSQL on AWS, Azure
+  Database for PostgreSQL on AKS, CloudNativePG on-prem (ADR 0027).
 - **Gateway probes**: `/livez`, `/readyz` (a snapshot loaded, a usable
   deployment per required pool, limit store reachable when required),
   `/healthz`, `/startupz`; snapshot dump and `explain` on the admin port,
@@ -399,7 +399,8 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
   Provider secrets stay in Kubernetes Secrets, mounted into the gateways
   that need them.
 - **Multiple instances and regions**: `GatewayPool`s per region or zone;
-  in multi-region, a control plane per region over one DSQL cluster.
+  in multi-region, a control plane per region over an Aurora Global
+  Database.
 - Container-aware GOMAXPROCS (runtime default), `GOMEMLIMIT` from the
   limit, PDBs; fixed replicas sized for the design envelope (ADR 0026)
   *(added)*.
@@ -465,14 +466,14 @@ edge pool); M3 multi-region, Temporal and the long tail.
 
 Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
 (§5.3); Gloo Mesh ambient (§5.9); the telemetry stack (§5.8); store:
-Aurora DSQL preferred, PostgreSQL elsewhere (ADR 0015); teams as drafted;
+PostgreSQL everywhere, Aurora PostgreSQL on AWS (ADR 0027); teams as drafted;
 console then Backstage (tools.md); team-to-project grants need no
 approval; member caps may oversubscribe; EKS first, AKS and on-prem later;
 backends: OpenAI, Foundry, self-hosted vLLM on standalone machines now and
 NVL boxes and cloud GPUs later (§5.2.1); content capture and retention
 per scope with override control, classes 7, 30, 90, 365 days and 3, 5, 7
 years (ADR 0018); notifications by email and Teams; limit store Valkey
-(ADR 0005); regions us-east-2, then us-west-2, us-east-1 as witness; the
+(ADR 0005); regions us-east-2, then us-west-2; the
 platform team owns the Entra registrations and grants consent (entra.md);
 self-hosted rates through `PriceList`; Temporal later, behind a seam
 (ADR 0020); Copilot by BYOK, then enterprise custom models (ADR 0021);
@@ -523,7 +524,7 @@ is revoked automatically.
 ### 9.4 SLOs and recovery
 
 Gateway availability 99.95% (it serves from snapshots through
-control-plane outages); control plane 99.9%; store RPO by DSQL PITR; the
+control-plane outages); control plane 99.9%; store RPO by Aurora's continuous backups and point-in-time restore; the
 ledger's ClickHouse backups; RTO for a region's control plane 30 min.
 
 ### 9.5 Error catalog

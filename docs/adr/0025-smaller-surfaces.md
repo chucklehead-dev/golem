@@ -37,7 +37,7 @@ several surfaces are larger than what they must do.
 7. **Capture without sampling at first** (amends 0018). Off, metadata or
    content, retention and the override mode; sample rates when someone
    needs them.
-8. **Entitlement delivery**: unchanged (0009), but the change log covers only
+8. **Entitlement delivery**: unchanged (0009), but change detection (since ADR 0027, a version row) covers only
    store-held state (entitlements, overrides); CRD changes reach the
    snapshot builder through the Kubernetes watch.
 

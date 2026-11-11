@@ -1,6 +1,6 @@
 # 0015: One SQL store implementation for Aurora DSQL and PostgreSQL
 
-Status: Proposed
+Status: Superseded by [0027](0027-aurora-postgresql.md): PostgreSQL everywhere, Aurora PostgreSQL on AWS.
 
 ## Context
 

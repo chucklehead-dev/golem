@@ -1,6 +1,6 @@
 # 0026: Designed for the enterprise's size, with the envelope stated
 
-Status: Proposed. Amends 0009, 0012, 0024, 0025.
+Status: Proposed. Amends 0009, 0012, 0024, 0025. Amended by [0027](0027-aurora-postgresql.md): change detection by a version row, not a change log.
 
 ## Context
 
@@ -29,7 +29,7 @@ be most of the spend and most of the local GPU demand.
 ## Decision
 
 1. **Whole snapshots, no deltas.** golem-control rebuilds the whole
-   snapshot when the change log or a CRD changes (debounced to once per
+   snapshot when the store (ADR 0027: its version row) or a CRD changes (debounced to once per
    second) and streams it compressed (~ 0.5 MB) to each gateway, which
    swaps it in. No delta protocol, no idempotent upserts, no per-object
    versions; the distribution model to check is "the latest snapshot
@@ -38,7 +38,7 @@ be most of the spend and most of the local GPU demand.
    availability, sized for the envelope with headroom; no HPA or KEDA. A
    gateway of 2 vCPU and 2 GiB holds thousands of streams.
 3. **Small stores.** Valkey: one primary and one replica (ElastiCache,
-   smallest memory-optimised node); no cluster mode. DSQL and ClickHouse
+   smallest memory-optimised node); no cluster mode. The store and ClickHouse
    are far inside their comfort zones.
 4. **Sub-teams are scopes with a parent** (amends 0024): a team scope may
    have a parent team (depth at most 2: top-level team, sub-team). A parent

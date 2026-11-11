@@ -28,15 +28,16 @@ service method:
 3. validates the change (cross-resource: a key's models are within its
    scope's policy; a cap's member is in the scope; an override names a
    deployment that exists),
-4. runs one store transaction that writes the change, its audit event and
-   its change-log row, retried on optimistic-concurrency conflicts,
+4. runs one serializable store transaction that writes the change, its
+   audit event and the `store_version` increment, retried on
+   serialization failures (ADR 0027),
 5. returns the new resource with its etag.
 
 Services: `ConfigService` (read, validate a candidate CRD, explain,
 overrides), `OrgService` (scopes, memberships, services, role bindings),
 `KeyService`, `BudgetService` (grants, caps, adjustment requests),
 `SpendService`, `AuditService`, `AdminService`, and the internal
-`SnapshotBuilder` (CRDs from the watch, store state from the change log;
+`SnapshotBuilder` (CRDs from the watch, store state when `store_version` moves;
 `LeaseService` joins when there are two regions). The worker role calls
 the same services as a service principal; it never writes the store
 directly.
@@ -47,24 +48,29 @@ console show errors (with field paths) before anything is written.
 
 ## 3. Store
 
-Repository interfaces in `control/store`; one implementation,
-`control/store/sql`, that runs unchanged on PostgreSQL 16+ and Aurora
-DSQL (ADR 0015). The SQL is written to DSQL's subset:
+PostgreSQL everywhere (ADR 0027): Aurora PostgreSQL Serverless v2 on AWS,
+Azure Database for PostgreSQL on AKS, CloudNativePG on-prem. Repository
+interfaces in `control/store`; one implementation, `control/store/sql`
+(pgx).
 
-| DSQL constraint | Consequence in golem |
-|---|---|
-| Optimistic concurrency only; conflicts fail at commit with SQLSTATE 40001 (OC000 data, OC001 schema); `SELECT ... FOR UPDATE` does not block | Every transaction runs in `store.InTx(ctx, fn)`, which retries the whole function on 40001 with jittered backoff; functions are pure apart from the transaction; etags give clients the same model |
-| Repeatable read, snapshot at `BEGIN` | Read-then-write invariants (pool arithmetic) are written so that a concurrent conflicting write touches the same row (e.g. a pool row's `version`), forcing a conflict instead of write skew |
-| ≤ 3,000 modified rows, ≤ 10 MiB, ≤ 300 s per transaction | Bulk work (Entra sync of a large group, period rollover) is chunked by the worker into idempotent batches of ≤ 1,000 rows |
-| No triggers, no PL/pgSQL, no LISTEN/NOTIFY, no temp tables | Audit and change-log rows are written by the service, in the transaction; change detection by polling (§4) |
-| No `SERIAL`; identity columns and sequences only with large caches | Ids are UUIDv7, generated in Go; no ordering is derived from ids across writers |
-| One DDL statement per transaction, not mixed with DML; `CREATE INDEX ASYNC` | Migrations are one statement each, applied by a migration Job (Helm hook in M1; the operator from M2) before golem-control rolls out (operator.md §3); a DSQL dialect flag turns `CREATE INDEX` into `ASYNC` and waits on `sys.jobs` |
-| JSONB not indexable | Anything queried is a column; JSONB only for opaque payloads (audit diffs, hook config) |
-| IAM auth tokens; connections ≤ 60 min | A pgx `BeforeConnect` hook mints tokens (AWS SDK); pool `MaxConnLifetime` 50 min. On Postgres, password or Entra/IAM as the platform offers |
-| UTC only, C collation | Times stored UTC; display time zones are a client concern; periods computed in Go from the configured period time zone |
+- **Transactions**: `SERIALIZABLE`, through `store.InTx(ctx, fn)`, which
+  retries the whole function on SQLSTATE 40001 with jittered backoff;
+  functions are pure apart from the transaction. Invariants (pool
+  arithmetic, a key's cap within its owner's) are plain read-check-write.
+- **Migrations**: goose, embedded in the binary, transactional DDL, run by
+  a migration Job (a Helm hook in M1, the operator from M2) before
+  golem-control rolls out (operator.md §3).
+- **Ids**: UUIDv7, generated in Go.
+- **Audit**: written by the service in the same transaction as the change.
+- **Columns over JSONB** for anything queried; JSONB for opaque payloads
+  (audit diffs, hook config).
+- **Auth**: IAM database authentication on Aurora (a pgx `BeforeConnect`
+  hook mints tokens; `MaxConnLifetime` 10 min), Entra on Azure, a
+  Secret-held password on-prem.
+- **Times** in UTC; periods computed in Go from the configured period time
+  zone.
 
-CI runs the store suite against Postgres (containers) on every change and
-against a DSQL cluster nightly.
+CI runs the store suite against Postgres containers on every change.
 
 ### 3.1 Schema outline
 
@@ -72,28 +78,23 @@ against a DSQL cluster nightly.
 group bindings), `memberships`, `role_bindings`, `cost_centers`, `keys`
 (hash, prefix, owner, scope, constraints as columns, expiry, revoked_at),
 `grants`, `caps`, `adjustment_requests`, `pools` (per scope per period:
-totals and a `version` for conflict forcing), `overrides` (target, change,
+totals), `overrides` (target, change,
 expiry, author), `registrations` (self-registered model server endpoints),
 `jobs` (the durable job table, ADR 0020), `gateways` (registered instances,
-last acked version), `change_log`, `audit_events`; `leases` when there are
+last acked version), `audit_events`, `store_version` (one row); `leases` when there are
 two regions. Declarative config is not in the store.
 
 ## 4. Distribution
 
-The gateway needs a consistent snapshot, quickly, with no database access
-and no LISTEN/NOTIFY to lean on.
+The gateway needs a consistent snapshot, quickly, with no database access.
 
-- **Change log.** Every transaction writes one `change_log` row: id
-  (UUIDv7), commit-ish time (`now()` at write), affected object kinds and
-  ids. No global sequence (DSQL has none cheap, and none across regions).
-- **Detection.** Each golem-control replica polls `change_log` every
-  500 ms for rows newer than its watermark minus a lookback window (the
-  maximum transaction age, 300 s), deduplicating by id. A transaction that
-  commits late with an early timestamp is therefore still seen. Writes
-  made by the replica itself are applied immediately, without waiting for
-  the poll.
-- **Whole snapshots** (ADR 0026). On a new change-log row or a CRD
-  change, debounced to once a second, a replica rebuilds the whole snapshot
+- **Detection** (ADR 0027). Every write transaction increments the single
+  `store_version` row. Each golem-control replica polls it every 500 ms,
+  and in the writer's region also `LISTEN`s for the `NOTIFY` each write
+  sends on commit, so changes there are seen at once. Every 60 seconds a
+  replica rebuilds regardless and compares hashes, as a backstop.
+- **Whole snapshots** (ADR 0026). When `store_version` moves or a CRD
+  changes, debounced to once a second, a replica rebuilds the whole snapshot
   from the store and its CRD cache (a few thousand rows: milliseconds). Its
   version is its content hash; gateways compare hashes.
 - **Watch.** A gateway calls `Watch(pool, have_hash)` on any replica of its
@@ -103,9 +104,9 @@ and no LISTEN/NOTIFY to lean on.
 - **Selection.** Each gateway pool's snapshot includes the config CRDs
   matching its label selector (e.g. per region, or the edge pool's
   consumers only) and every pool gets the entitlements.
-- **Revocation latency** is the poll interval plus the stream's latency:
-  about a second within a region, a few seconds across regions
-  (DSQL's cross-region replication included).
+- **Revocation latency** is detection plus the stream: well under a
+  second in the writer's region, about a second elsewhere (Aurora Global
+  Database's replication lag included).
 - **Acks.** Gateways ack each applied hash with compile errors, if any;
   control records them per gateway and writes them into the CRDs' status
   (`Applied n/m`).
@@ -165,22 +166,24 @@ ClickHouse, so a manager's view matches what enforcement sees.
 
 ## 7. Multi-region
 
-In each region: golem-control (both roles) against the local endpoint of
-a multi-region DSQL cluster, reading that region's CRDs; gateways watch
-their own region's control plane.
-A region losing its control plane keeps serving on its last snapshot and
-its current leases; a region losing DSQL's local endpoint is a region
-without changes, not without traffic.
+With the second region (M3): Aurora Global Database, writer in us-east-2,
+a secondary cluster in us-west-2. Each region runs golem-control (both
+roles) reading its own cluster and its own CRDs; us-west-2's writes go to
+the writer through the global writer endpoint (or write forwarding; the
+M3 spike decides). Gateways watch their own region's control plane. A
+region losing its control plane keeps serving on its last snapshot and
+its leases; losing the writer region means a managed failover of minutes,
+during which control-plane writes wait and model traffic continues.
 
 ## 8. Testing
 
 - Service-layer tests against an in-memory store (fast) and the SQL
-  store (Postgres containers), with the same suite; nightly on DSQL.
+  store (Postgres containers), with the same suite.
 - Conflict tests: concurrent grants on one pool, concurrent key minting
   against a user's cap, approval racing withdrawal: each must end in a
   state the org model allows, with retries visible in metrics.
-- The change-log detection with late commits and replica failover is
-  checked against a small model of "every committed change is in a
-  snapshot that reaches every watching gateway within the bound" (a good
-  fit for gotogether's simulation and Quint tooling).
+- Change detection with replica failover, missed notifications and
+  replication lag is checked against a small model of "every committed
+  change is in a snapshot that reaches every watching gateway within the
+  bound" (a good fit for gotogether's simulation and Quint tooling).
 - API compatibility: `buf breaking` against the last release in CI.
