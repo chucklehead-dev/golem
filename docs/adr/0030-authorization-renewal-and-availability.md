@@ -44,6 +44,16 @@ every gateway refuses new requests.
   records in the site's Valkey with append-only persistence and a replica;
   and batched objects in the bucket. The choice must survive a crash at
   every dispatch, settlement and export boundary.
+  The accounting model (`model/accounting.md` §9) settles what any
+  candidate must do: make the intent durable **before** dispatch, keep
+  uncertain attempts until evidence resolves them, trim only acknowledged
+  events, and balance by event identity. A local volume, or Valkey with
+  asynchronous replication, can lose durable events with the medium, so it
+  qualifies only with synchronous replication or a recorded acceptance
+  that attempts in flight on a lost node are recovered only by provider
+  reconciliation. The bucket qualifies, at a PUT per intent (or small
+  batch) on the request path. The spike measures latency and cost among
+  the candidates that qualify.
 
 ## Consequences
 

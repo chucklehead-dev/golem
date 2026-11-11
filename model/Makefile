@@ -2,20 +2,22 @@
 # Needs quint (npm i -g @informalsystems/quint) and lmt (go install github.com/driusan/lmt@latest).
 QUINT ?= quint
 LMT ?= lmt
+MODELS = publication accounting
 
 .PHONY: all check tangle verify-tangled
 all: check
 
-publication.qnt: publication.md
-	$(LMT) publication.md
+%.qnt: %.md
+	$(LMT) $<
 
-tangle: publication.qnt
+tangle: $(MODELS:=.qnt)
 
-check: publication.qnt
+check: tangle
 	QUINT=$(QUINT) ./check.sh
+	QUINT=$(QUINT) ./check-accounting.sh
 
-# CI: the committed .qnt must match the markdown.
+# CI: the committed .qnt files must match the markdown.
 verify-tangled:
-	cp publication.qnt /tmp/publication.qnt.committed
-	$(LMT) publication.md
-	diff -u /tmp/publication.qnt.committed publication.qnt
+	@for m in $(MODELS); do cp $$m.qnt /tmp/$$m.qnt.committed; done
+	$(LMT) $(MODELS:=.md)
+	@for m in $(MODELS); do diff -u /tmp/$$m.qnt.committed $$m.qnt; done
