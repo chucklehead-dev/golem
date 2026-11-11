@@ -46,7 +46,7 @@ request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
 inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0028)
            or a file, for development and tests (the same snapshot format)
-state:     Valkey (reservations, counters, provider quotas; regional lease with two regions) (ADR 0005, 0016)
+state:     the site's Valkey (reservations, counters, provider quota shares; spend against site ceilings) (ADR 0005, 0031)
 outputs:   OTLP → collector (ADR 0010); captured traces → the scope's Langfuse project (ADR 0018);
            status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
@@ -115,7 +115,7 @@ gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT), meshi
 gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object-storage poller,
                        the file source, the on-disk last-good copy, status writes
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
-gateway/limit/         Limiter; local GCRA/windows; RESP implementation; regional lease use
+gateway/limit/         Limiter; GCRA/windows; the Valkey implementation; site ceilings; an in-memory one for development
 gateway/price/         model catalog lookups and pricing (the catalog comes in the snapshot)
 gateway/hook/          phases, in-process registry, remote client, built-ins
 gateway/upstream/      per-deployment transports, provider auth (keys, SigV4, Entra, Roles Anywhere)
@@ -157,8 +157,7 @@ and introspection fetches, semaphore for shadow concurrency),
 
 Third-party, each confined to one package: OpenTelemetry Go SDK and
 `otelslog` bridge (telemetry), `cel-go` (route, hook), `go-jose/v4`
-(auth/entra), `valkey-go` (limit; RESP3, works against Dragonfly and
-Valkey), `aws-sdk-go-v2`'s SigV4 signer and credential providers only
+(auth/entra), `valkey-go` (limit), `aws-sdk-go-v2`'s SigV4 signer and credential providers only
 (upstream/bedrock), `azidentity` (upstream/azure), the blob adapters'
 read path (snapshot), protobuf for the snapshot format. No `pgx`, ClickHouse, Graph or
 Kubernetes client: the import test (architecture.md §4.2) fails if one
@@ -173,9 +172,15 @@ except OTel's API.
   configured bound (or any snapshot, if object storage is unreachable and
   the pool allows stale starts).
 - Every second: a conditional GET of `snapshots/<pool>/current`. On a
-  change, it fetches the snapshot by hash, verifies the hash, and ignores
-  it if its `state_version` and `crd_generation` are older than what it
-  holds (so a stale pointer can never roll it back).
+  change it verifies the pointer's signature against the pinned public key
+  and that its `publish_seq` exceeds its floor (the larger of its local
+  last-good copy and its own status object, so an empty disk does not reset
+  it), then fetches the snapshot by hash and verifies its signature and
+  hash (ADR 0033). Anything unsigned, wrongly signed or older is ignored and
+  alarmed; so is a pointer more than a day old.
+- An **emergency denylist** (a ConfigMap mounted as a file, read with
+  `os.Root`) is applied over every snapshot: a site admin's way to revoke a
+  key or principal when the control plane or the bucket is unreachable.
 - Each new snapshot is compiled (CEL, lookup maps) off the request path and
   swapped in; a failure to compile keeps the previous snapshot.
 - After each apply (or failure) the gateway writes
@@ -217,11 +222,11 @@ except OTel's API.
   with a small Quint model of "never double-charge, never replay a started
   stream, never exceed a hard budget by more than one in-flight
   reservation" as the judge. Worth doing once M1's routing settles.
-- Budget enforcement (no double charge, reservation expiry after a crash,
-  regional lease exhaustion and refill) is the other candidate for a
+- Budget enforcement (no double charge, reservation renewal and expiry
+  after a crash, site ceilings moving) is the other candidate for a
   model-checked simulation; the control plane's side is in
   control-plane.md §8.
-- Limit scripts tested against Valkey and Dragonfly containers in CI.
+- Limit scripts tested against Valkey containers in CI.
 - End-to-end: kind cluster with Istio ambient, the chart, a stub provider,
   ClickHouse, and the real OpenAI and Anthropic SDKs (and a coding agent)
   as clients.

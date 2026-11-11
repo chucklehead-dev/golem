@@ -30,8 +30,8 @@ be most of the spend and most of the local GPU demand.
 
 1. **Whole snapshots, no deltas.** golem-control rebuilds the whole
    snapshot when the store (ADR 0027: its version row) or a CRD changes (debounced to once per
-   second) and streams it compressed (~ 0.5 MB) to each gateway, which
-   swaps it in. No delta protocol, no idempotent upserts, no per-object
+   second) and publishes it compressed (~ 0.5 MB) for each gateway pool,
+   whose gateways swap it in (through the bucket since ADR 0028). No delta protocol, no idempotent upserts, no per-object
    versions; the distribution model to check is "the latest snapshot
    reaches every gateway". Revisit beyond the envelope's snapshot size.
 2. **Fixed gateway replicas.** Three per region (one per zone) for
@@ -48,14 +48,14 @@ be most of the spend and most of the local GPU demand.
    when they are made.
 5. **Fair share on scarce capacity.** Local GPU machines are few and the
    very heavy users are many times the rest: on capped pools (ADR 0019)
-   golem queues per principal and serves round-robin across principals, and
    each principal's in-flight share of a pool is limited (default: half of
-   its capacity), so one user's agents cannot occupy every Spark.
+   its capacity), so one user's agents cannot occupy every Spark; round-robin
+   queueing across principals follows in M2 (ADR 0032).
 6. **Capture cost is dominated by coding agents.** A heavy agent session
    sends 50–200k tokens of context per request; content capture at
    ~ 2,000 requests per heavy user per day is tens of GB per day before
-   retention. The default for keys minted by `golemctl agent setup` is
-   `metadata`, and the console shows the projected storage of a capture
+   retention. When capture arrives (M2), the default for keys and tokens
+   set up by `golemctl agent setup` is `metadata`, and the console shows the projected storage of a capture
    setting before it is saved.
 
 ## Consequences

@@ -12,7 +12,7 @@ only, a separate control plane, an operator for day-2, and CLI/UI tools.
 ## Decision
 
 - Six deliverables (architecture.md §1): golem-gateway, golem-control,
-  golem-worker, golem-operator, golemctl, golem-console, plus an optional
+  golem-worker (folded into golem-control by 0025 and 0032), golem-operator, golemctl, golem-console, plus an optional
   Backstage plugin. One Go module and repository; one image per binary.
 - Exactly one API changes state: the control API. The operator, CLI,
   console and plugin are its clients with no private endpoints.

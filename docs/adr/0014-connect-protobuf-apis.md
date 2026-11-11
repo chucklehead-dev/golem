@@ -1,13 +1,12 @@
 # 0014: APIs in protobuf, served with Connect
 
-Status: Proposed. Amended by [0025](0025-smaller-surfaces.md): no long-running operations.
+Status: Proposed. Amended by [0025](0025-smaller-surfaces.md) (no long-running operations); the distribution API it mentioned went with [0028](0028-state-and-snapshots-in-object-storage.md).
 
 ## Context
 
 The control API has Go clients (operator, CLI, console, gateway's
 distribution client) and TypeScript ones (Backstage, possibly a richer
-console later), plus people with `curl`. The distribution API needs server
-streaming.
+console later), plus people with `curl`.
 
 ## Decision
 

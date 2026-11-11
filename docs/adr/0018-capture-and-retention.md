@@ -22,7 +22,7 @@ not instant) and an organisation API for creating projects.
   access control then matches the scope: its members can see its traces,
   and nobody else's.
 - **Retention** is enforced per record: each captured trace carries
-  `golem.capture.expires_at`. golem-worker deletes expired traces through
+  `golem.capture.expires_at`. golem-control's jobs deletes expired traces through
   Langfuse's batch delete API, driven by a ClickHouse query on the ledger
   (which records trace id and expiry). The Langfuse project's own retention
   is set to the scope's maximum allowed retention, as a backstop if the

@@ -22,11 +22,11 @@ Fit, by piece:
 | Scope onboarding: project, Langfuse project, Teams webhook check, initial grant request | Good | A saga across external systems |
 | Capture retention deletion | Good | Scheduled, batched, external API with retries |
 | Store migration to multi-region | Good, one-off | Pause, copy, verify, switch, resume |
-| Period rollover, ledger reconciliation, Entra sync | Neutral | Scheduled idempotent batches; a loop in the worker is enough |
+| Period rollover, ledger reconciliation, Entra sync | Neutral | Scheduled idempotent batches; a loop in golem-control's jobs is enough |
 | Lease rebalancing (every 30 s), distribution, anything on the request path | **No** | Latency-critical, high frequency |
 | Operator reconciliation | **No** | Kubernetes' level-triggered model is the right one there |
 
-- golem-worker defines its jobs behind a `workflow` seam: steps are
+- golem-control's jobs defines its jobs behind a `workflow` seam: steps are
   activities that call the control plane's services (never the store
   directly, so layering holds), and waits are timers or signals.
 - M1 implements the seam with a small durable job table in the store (a
@@ -34,7 +34,7 @@ Fit, by piece:
   needs at M1's volume.
 - Approvals, key rotation and batch jobs move to Temporal when the
   platform's Temporal is production-grade, without changing the
-  services they call. The rest stays in the worker.
+  services they call. The rest stays in golem-control's jobs.
 
 ## Consequences
 

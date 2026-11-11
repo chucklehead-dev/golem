@@ -45,7 +45,7 @@ the API servers of the AKS and on-prem clusters.
 ## Consequences
 
 - Each site's failure domain is its own; the only shared dependency is
-  the bucket (and, for budgets, site leases from the control plane).
+  the bucket (budgets reach sites as ceilings in their snapshots).
 - Per-site config requires the relay, a small addition to the site
   operator, rather than a central watch.
 

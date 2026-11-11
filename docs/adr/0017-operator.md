@@ -13,7 +13,7 @@ sequence, observe or report.
 
 - golem-operator (controller-runtime) owns installation CRDs
   (`ControlPlane`, `GatewayPool`) and config CRDs (`Backend`,
-  `ModelRoute`, `ScopePolicy`, `LimitPolicy`, `Hook`, `PriceList`)
+  `ModelRoute`, `ScopePolicy`, `Hook`, `PriceList`)
   (operator.md §1).
 - Config CRDs are written to the control API (ADR 0012) and their status
   reports acceptance and gateway application.

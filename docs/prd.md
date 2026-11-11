@@ -21,7 +21,7 @@ enforced by invoices a month later.
    its funding cost centers; priced; visible in ClickStack, Langfuse and
    Grafana.
 3. Self-service within delegated authority: users mint their own keys,
-   team and project managers cap their members, budget managers fund
+   managers cap their scopes' members, budget managers fund
    and approve. Budgets are enforced at request time, not at invoice time.
 4. Model names decoupled from deployments: aliases, load balancing,
    failover and mirroring, changed by config without caller redeploys.
@@ -29,7 +29,7 @@ enforced by invoices a month later.
    memory and the like are built, in-process or out-of-process.
 6. Operates like any well-behaved Kubernetes service in the enterprise's
    Istio (Gloo Mesh, ambient mode): probes, graceful drain, declarative
-   config, horizontal scaling.
+   config, fixed replicas sized for the design envelope (ADR 0026).
 7. Simple, fast Go: the proxy adds well under a millisecond at p50 to a
    non-translated request, and its code stays readable end to end.
 8. Well layered: the gateway does data-plane work only; configuration,
@@ -81,8 +81,8 @@ it translates.
 | OpenAI Responses | `POST /v1/responses`, `GET/DELETE /v1/responses/{id}`, streaming events | M1 |
 | Anthropic Messages | `POST /v1/messages`, `POST /v1/messages/count_tokens` | M1 |
 | OpenAI Embeddings | `POST /v1/embeddings` | M1 |
-| OpenAI Decisions | `POST /v1/decisions` (non-streaming; predicate, choice, score) | M1 (pass-through) |
-| TypeSafe System One (Jev) | `POST /v1/systemone` (non-streaming; yes/no, choice, score) | M1 (pass-through) |
+| OpenAI Decisions | `POST /v1/decisions` (non-streaming; predicate, choice, score) | M2 (pass-through) |
+| TypeSafe System One (Jev) | `POST /v1/systemone` (non-streaming; yes/no, choice, score) | M2 (pass-through) |
 | Model listing | `GET /v1/models`, filtered by the caller's effective rights *(added)* | M1 |
 | OpenAI legacy Completions | `POST /v1/completions` | M2 |
 | Rerank (Cohere shape) *(added)* | `POST /v1/rerank`, Bedrock rerank models as backend | M3 |
@@ -132,8 +132,8 @@ the provider as is, authenticated and metered where usage can be read.
 | Microsoft Foundry: Azure OpenAI models (the v1 OpenAI-compatible API: Chat, Responses, Embeddings) | Entra token (workload identity federation from the EKS service account), API key for testing | M1 |
 | Microsoft Foundry: Claude (`https://<resource>.services.ai.azure.com/anthropic/v1/messages`) | Entra bearer token (scope to confirm: Microsoft's docs say `https://ai.azure.com/.default`; some models are Entra-only), API key | M1 |
 | Microsoft Foundry: other Foundry Models (OpenAI-compatible chat) | Entra token, API key | M2 |
-| OpenAI Decisions | API key | M1 |
-| TypeSafe System One | API key | M1 |
+| OpenAI Decisions | API key | M2 |
+| TypeSafe System One | API key | M2 |
 | Self-hosted vLLM and SGLang, in other clusters or data centers (§5.2.1) | mesh mTLS (multi-cluster), bearer key, or TLS client certificate | M1 |
 | Other OpenAI-compatible servers (Ollama, KServe, TGI) | none, key, mTLS | M2 |
 | Google Vertex AI | workload identity federation | M3, if needed |
@@ -179,16 +179,12 @@ Models on all of them change over time.
   `/v1/models`; aliases select deployments by model name or by a label
   the registration carries (`family: qwen3-coder`), so a box changing its
   model moves it between pools without config changes.
-- **Capacity**: an adaptive concurrency limit per endpoint (it grows while
-  latency holds and shrinks when it rises) discovers what a Mac mini or an
-  NVL8 can take, with an optional declared ceiling; routing is least
-  in-flight relative to that limit, refined by vLLM's `/metrics` (running
-  and waiting requests, KV-cache use) and with **prefix affinity** within
-  the limit.
-- **Fair share** (ADR 0026): on these scarce pools golem queues per
-  principal and serves round-robin across principals, and caps each
-  principal's share of a pool's capacity (default half), so the few very
-  heavy users cannot occupy every machine.
+- **Capacity** (M1): a static concurrency ceiling per endpoint and a
+  per-principal in-flight limit on each pool (default half its capacity),
+  so the few very heavy users cannot occupy every machine (ADR 0026, 0032).
+  **M2**: an adaptive concurrency limit per endpoint (grows while latency
+  holds, shrinks when it rises), vLLM `/metrics` polling, **prefix
+  affinity** within the limit, and round-robin queueing across principals.
 - **Overflow**: at the limit, or on 429/503, requests go to the alias's
   fallback pool before the first byte, or wait briefly for a slot if the
   route allows (`queue: 2s`).
@@ -258,30 +254,32 @@ The full model is [org-model.md](org-model.md). In short:
 | Capability | Milestone |
 |---|---|
 | Users, teams (Entra-group bound), services, personal and service keys, scope policies, member caps, team pools granted by admins, enforcement modes | M1 |
-| Projects, cost centers, budget managers, grants, approvals, adjustments, audit | M2 |
+| Audit of every change | M1 |
+| Projects, cost centers, budget managers, grants, approvals, adjustments | M2 |
 | Content capture settings and overrides (org-model §3.1) | M2 |
 | golem-console; notifications (email/Teams) on thresholds and approvals | M2 |
-| Multi-region budgets through regional leases (ADR 0016) | M2 |
+| Budgets across sites through site ceilings (ADR 0031) | M2 (with the first remote site) |
 | Backstage plugin; budget downgrade to a cheaper alias; chargeback export per cost center | M3 |
 
 ### 5.5 Limits
 
 - **Enforcement modes** per scope: `observe`, `warn`, `enforce` (§9.1).
-- **Provider quota limits** per deployment, shared by all gateways (§9.2).
+- **Provider quota limits** per deployment, shared by a site's gateways,
+  split statically between sites (§9.2, ADR 0032).
 - **Rate limits** in requests/min, tokens/min and $/min, at any of the
   levels of §5.4 and per model or route; **concurrency limits** on
   in-flight streams per principal *(added)*.
-- **Estimate then reconcile** (ADR 0005): reserve the estimate at every
-  level before the call, correct with actual usage at the end; streams that
-  end early are charged what they used.
-- Shared state in a Redis-protocol store: Valkey, Redis or **Dragonfly**,
-  tested against Valkey and Dragonfly (ADR 0005). M1 may run without it
-  (per-instance shares); M2 requires it for budgets.
-- Counters are rebuilt from the ClickHouse ledger on store loss and
-  reconciled against it daily, so a store failure loses at most the
-  in-flight reservations.
-- On store outage: rate limits fall back to local shares; budget levels
-  are fail-open or fail-closed per scope policy.
+- **Estimate then reconcile** (ADR 0005, 0034): reserve the expected cost
+  (recent cache-hit ratio and output size, not worst case) at every level
+  before the call, renew it on long streams, correct with actual usage at
+  the end; cut streams are charged what was produced, flagged as
+  estimated; a daily job reconciles the ledger with providers' usage APIs.
+- **Valkey at every site**, required from M1 (ADR 0032); budgets across
+  sites through site ceilings published in snapshots (ADR 0031).
+- Counters are rebuilt from the ClickHouse ledger (data older than the
+  collector's maximum delay) after a Valkey loss.
+- On Valkey outage: budget levels fail open or closed per scope policy;
+  rate limits fail open with a warning.
 - 429 bodies, in the caller's dialect, say which limit, at which level,
   and when it resets; `x-ratelimit-*` headers in the provider's style.
 
@@ -363,14 +361,13 @@ routes it (ADR 0010):
 ### 5.9 Components, Kubernetes and the mesh
 
 The system is these deliverables (architecture.md, ADR 0013 as amended by
-0025):
+0025 and 0032):
 
 | Component | Role | Milestone |
 |---|---|---|
 | golem-gateway | Data plane only: model requests in, provider calls out | M0 |
-| golem-control, `api` role | Control API (config read and check, overrides, org, keys, budgets, spend, audit), the CRD watch, snapshot publication to object storage | M1 |
-| golem-control, `worker` role | Jobs: Entra sync, period rollover, expiries, notifications, ledger reconciliation, retention | M1 |
-| golem-operator | Installation and day-2: upgrades, migrations, drains, canaries, credential mounting, mesh policies, Langfuse projects, telemetry plumbing (ADR 0023) | M2 (Helm in M1) |
+| golem-control | Control API (config read, explain, overrides, org, keys, budgets, spend, audit), the CRD watch; its leader runs the jobs and signs and publishes snapshots (ADR 0032, 0033) | M1 |
+| golem-operator | Installation and day-2 in each cluster: upgrades, drains, canaries, credential mounting, mesh policies, Langfuse projects, telemetry plumbing (ADR 0023) | M2 (Helm in M1) |
 | golemctl | CLI for every persona, including `login` and coding-agent setup | M1 |
 | golem-console | Small web UI for keys, caps, requests and approvals | M2 |
 | Backstage plugin | Spend, budgets and keys on Backstage entities | M3 |
@@ -387,8 +384,8 @@ The system is these deliverables (architecture.md, ADR 0013 as amended by
   Entra-to-AWS federation and IAM Roles Anywhere (ADR 0029).
 - **Gateway probes**: `/livez`, `/readyz` (a snapshot loaded, a usable
   deployment per required pool, limit store reachable when required),
-  `/healthz`, `/startupz`; snapshot dump and `explain` on the admin port,
-  read-only.
+  `/healthz`, `/startupz`; pprof and the applied snapshot hash on the
+  admin port (explain is golem-control's).
 - **Graceful drain** *(added)*: readiness fails, in-flight streams get a
   long grace, then end with a dialect error event; orchestrated by the
   operator on rollouts (operator.md §3).
@@ -468,54 +465,24 @@ edge pool); M3 multi-region, Temporal and the long tail.
 
 ## 8. Open questions
 
-Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
-(§5.3); Gloo Mesh ambient (§5.9); the telemetry stack (§5.8); store:
-control-plane state as one document in object storage, snapshots
-distributed through it (ADR 0028, after 0027's Aurora PostgreSQL);
-teams as drafted;
-console then Backstage (tools.md); team-to-project grants need no
-approval; member caps may oversubscribe; EKS first, AKS and on-prem later;
-backends: OpenAI, Foundry, self-hosted vLLM on standalone machines now and
-NVL boxes and cloud GPUs later (§5.2.1); content capture and retention
-per scope with override control, classes 7, 30, 90, 365 days and 3, 5, 7
-years (ADR 0018); notifications by email and Teams; limit store Valkey
-(ADR 0005); regions us-east-2, then us-west-2; the
-platform team owns the Entra registrations and grants consent (entra.md);
-self-hosted rates through `PriceList`; Temporal later, behind a seam
-(ADR 0020); Copilot by BYOK, then enterprise custom models (ADR 0021);
-testing (testing.md).
+Decisions are recorded in the ADRs (index: adr/README.md); this list holds
+only what is still open.
 
-To be decided (TBD):
-
-1. **Waypoint identity header** (ADR 0003): the M1 spike.
-2. **Never-capture data** and who may enable multi-year retention
+1. **Waypoint identity header** (ADR 0003): which header carries the
+   caller's SPIFFE ID through a Gloo Mesh ambient waypoint; the M1 spike.
+2. **Never-capture data**: which data classes or scopes must forbid
+   capture outright, and who may enable the multi-year retention classes
    (drafted: platform admins, by scope policy).
-
-Resolved this round: the enterprise is migrating to GitHub Enterprise
-Managed Users (login mapping through SAML identities until then, ADR
-0021); internet-facing access through an edge gateway pool for GitHub and
-SaaS apps (ADR 0022); registration identity by workload identity, then
-PKI certificates, then bootstrap tokens (§5.2.1).
-
-New:
-
-3. **SaaS consumers**: which SaaS apps first, and whether they support
-   OAuth client credentials or only static keys.
-
-Resolved in the sixth pass: SaaS consumers use static service keys for
-now (ADR 0022); the size of the enterprise and its organisation set the
-design envelope (§9.12, ADR 0026), which adds sub-teams to the org model.
-
-Resolved in the eighth pass: Azure and on-prem sites share the us-east-2 S3
-store and control plane in the initial phase (ADR 0029).
-
-New:
-
-6. **Site connectivity** (TBD): the round trip from each AKS and on-prem
-   site to us-east-2, and whether they reach AWS privately (Direct Connect,
-   a VPN, an S3 interface endpoint). Working assumption: a Valkey per site
-   with site leases (ADR 0029); cross-cluster Kubernetes access is not
-   needed (ADR 0030).
+3. **Site connectivity**: the round trip from each AKS and on-prem site to
+   us-east-2, and whether they reach AWS privately. Working assumption: a
+   Valkey per site and site ceilings (ADR 0029, 0031).
+4. **Data residency**: whether central telemetry, the ledger, captured
+   content and the us-east-2 state document (identity and entitlement
+   metadata, no prompts) satisfy every site's residency rules; a compliance
+   review before the first remote site.
+5. **Provider usage APIs**: access for the daily reconciliation (ADR 0034)
+   to OpenAI's and Anthropic's organisation usage APIs, AWS cost data and
+   Azure cost exports.
 
 ## 9. Cross-cutting requirements
 
@@ -552,8 +519,9 @@ dialect, documented with what to do next.
 
 ### 9.6 Compatibility policy
 
-The control API and the snapshot format are versioned; gateways accept
-snapshots from n−1 control planes; `buf breaking` gates CI; CRDs move
+The control API, the state document and the snapshot format are
+versioned; stored formats change by the two-release rule of §9.14; the
+control API serves n−1 clients; `buf breaking` gates CI; CRDs move
 v1alpha1 → v1beta1 before the enterprise default.
 
 ### 9.7 Price list upkeep
@@ -592,3 +560,20 @@ dashboards that alert as traffic approaches it. Within it: whole-snapshot
 distribution, fixed gateway replicas, a single Valkey primary with a
 replica. The heavy tail drives cost and local GPU demand, so per-principal
 fairness on scarce pools and per-user concurrency limits are M1.
+
+### 9.13 Watching golem
+
+Every gateway reports its applied snapshot's age (status objects and a
+metric), alarmed past a minute; a synthetic request per site and pool every
+minute (a canary key against a cheap model or a stub) checks the whole path
+from outside; an alert on the absence of golem's own metrics catches a
+silent collector; the leader's pointer refresh and CAS retry rate are
+watched (ADR 0033, 0028).
+
+### 9.14 Upgrades and compatibility of stored formats
+
+The state document and the snapshot format change additively where they
+can (protobuf ignores unknown fields). A breaking change takes two
+releases: the first teaches every reader the new form while writers keep
+the old; the second switches the writers. Rollouts may therefore go in any
+order within one release step: control plane first, gateways next.

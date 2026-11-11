@@ -1,6 +1,6 @@
 # 0016: Budgets are enforced through regional leases
 
-Status: Proposed. Deferred by [0025](0025-smaller-surfaces.md) for regions; needed for the first remote site, which has its own Valkey ([0029](0029-one-s3-store-for-every-site.md)).
+Status: Superseded by [0031](0031-site-ceilings.md): site ceilings published in snapshots, consumption from the ledger; no lease protocol.
 
 ## Context
 

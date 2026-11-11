@@ -38,7 +38,7 @@ The usage metrics API reports per-user activity and `ai_credits_used`
    whether any header identifies the user (if so, golem attributes per
    user under the service key; if not, per organisation only), and the
    ranges to allow.
-3. **Copilot's own usage as showback (M2).** golem-worker ingests the
+3. **Copilot's own usage as showback (M2).** golem-control's jobs ingests the
    Copilot usage metrics API daily into ClickHouse, mapping GitHub logins
    to Entra users, so Grafana
    and golem's spend views show Copilot credits beside golem spend. Not

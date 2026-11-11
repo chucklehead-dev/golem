@@ -6,7 +6,7 @@ rules that keep them apart. Each component's inside has its own document:
 | Document | Component |
 |---|---|
 | [gateway.md](gateway.md) | golem-gateway, the data plane |
-| [control-plane.md](control-plane.md) | golem-control, api and worker roles: APIs, store, distribution, jobs |
+| [control-plane.md](control-plane.md) | golem-control: APIs, the state document, signed distribution, jobs, bootstrap |
 | [roadmap.md](roadmap.md) | the phases and their exit criteria |
 | [operator.md](operator.md) | golem-operator: CRDs, deployment, day-2 operations |
 | [tools.md](tools.md) | golemctl, golem-console, the Backstage plugin |
@@ -19,14 +19,13 @@ rules that keep them apart. Each component's inside has its own document:
 | Component | Does | Does not | State |
 |---|---|---|---|
 | **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; call the control plane or Kubernetes | Caches; limit counters in Valkey; reads its snapshots from object storage |
-| **golem-control**, `api` role | The control API (config read and check, overrides, entitlements, self-service, admin, spend), the watch on config CRDs and their status, snapshot publication to object storage | Serve model traffic; run background jobs | The state document in object storage (owner, ADR 0028); reads ClickHouse and Valkey |
-| **golem-control**, `worker` role | Background jobs: Entra sync, period rollover, expiries, notifications, ledger reconciliation, retention deletion | Serve any API but probes | The same store, through the same service layer |
-| **golem-operator** (M2) | Installs and upgrades the other components, migrations, drains, canaries, credential mounting, mesh policies, Langfuse projects | Handle config; talk to gateways | None (Kubernetes is its state) |
+| **golem-control** | The control API (config read, explain, overrides, entitlements, self-service, admin, spend) and the watch on config CRDs and their status; its leader (a Kubernetes Lease) runs the jobs and signs and publishes snapshots | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADR 0028, 0033); reads ClickHouse |
+| **golem-operator** (M2) | Installs and upgrades golem in its own cluster: drains, canaries, credential mounting, mesh policies, Langfuse projects | Handle config; talk to gateways | None (Kubernetes is its state) |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
 | **golem-console** | A small web UI for the same tasks (M2) | Anything the API does not offer | None |
 | **Backstage plugin** | Keys, spend and budgets inside Backstage (M3, optional) | Same | None |
 
-One image serves both golem-control roles; the gateway has its own.
+golem-control and the gateway are separate binaries and images.
 
 External: Entra ID (identity, groups), the providers, the RESP store
 (Valkey), the OTel collector feeding ClickStack,
@@ -40,14 +39,14 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
             │                                     (Backend, ModelRoute,     │ watch,
             │ control API (Connect, Entra)         ScopePolicy, Hook,       │ status
             ▼                                      PriceList)               │
-   golem-control  api role ◀────────────────────────────────────────────────┘
+   golem-control ◀────────────────────────────────────────────────┘
      entitlements · overrides · spend · audit · explain
-   golem-control  worker role (jobs, same service layer)
-            │  state document: CAS (If-Match)        golem-operator (M2): installs,
-            │  snapshots: snapshots/<pool>/<hash>    upgrades, drains, mesh policies,
-            ▼                                        Langfuse projects
-   object storage (S3 · Azure Blob · Nutanix Objects)
-            ▲  poll pointer, fetch by hash; write status/<pool>/<id>
+     leader: jobs; signs and publishes snapshots
+            │  state document: CAS (If-Match)        golem-operator (M2), one per
+            │  snapshots + signed pointers           cluster: installs, upgrades,
+            ▼                                        drains, mesh policies
+   S3 bucket, us-east-2, shared by every site (replicated to a backup account)
+            ▲  poll signed pointer, fetch by hash; write status/<pool>/<id>
             │
    golem-gateway ×N ──▶ providers, model servers
             │   └──▶ Valkey (limits, quotas)
@@ -80,7 +79,7 @@ optimistic concurrency, field masks, page tokens,
 | Budget | `golem.budget.v1` | managers, budget managers | Grant, Cap, AdjustmentRequest (`Approve`, `Reject`, `Withdraw`), Pool (read) |
 | Spend | `golem.spend.v1` | everyone, within their rights | Spend queries by scope, principal, key, cost center, model, period |
 | Audit | `golem.audit.v1` | admins, auditors | AuditEvent (list, filter) |
-| Admin | `golem.admin.v1` | admins | Gateways and pools (applied snapshot hashes from their status objects, health), drain, snapshot inspection, state history and restore; `Lease` for gateways with the second region (ADR 0016) |
+| Admin | `golem.admin.v1` | admins | Gateways and pools (applied snapshots from their status objects, health), drain, snapshot inspection, state history and restore |
 | Registration | `golem.registration.v1` | model servers | `Register`, `Heartbeat` (PRD §5.2.1) |
 
 Authorization is in the service layer, not the transport: every method
@@ -95,7 +94,7 @@ libraries, and nothing else.
 proto/golem/...            API definitions (buf); the contract between components
 gen/                       generated Go (protobuf, connect) and TypeScript clients
 cmd/golem-gateway/         each main only wires its component
-cmd/golem-control/         --role=api|worker
+cmd/golem-control/
 cmd/golem-operator/
 cmd/golemctl/
 gateway/...                data plane (gateway.md §4)
@@ -104,11 +103,11 @@ control/
   service/                 domain logic and authorization: org, keys, budget, config, spend
   store/                   repository interfaces
   store/doc/               the state document over a blob CAS interface (ADR 0028)
-  store/blob/              adapters: S3, Azure Blob, Nutanix Objects, in-memory
+  store/blob/              adapters: S3 and in-memory (others when a site needs them)
   config/                  the CRD watch, validation, status, overrides layering
-  distribution/            snapshot building and publication to object storage
+  distribution/            snapshot building, signing and publication
   spend/                   ClickHouse queries
-worker/                    job runner and jobs; calls control/service, never the store directly
+  jobs/                    the leader's jobs; call control/service, never the store directly
 api/v1alpha1/              CRD types for config and installation (kubebuilder markers)
 operator/
   controllers/             installation and day-2 reconcilers
@@ -131,22 +130,22 @@ docs/
  store (control/store interfaces) → store/doc (state document, blob CAS)
 ```
 
-The worker and the console sit beside the transport layer: the worker
-calls services, the console calls the API. No component reaches past the
+Jobs and the console sit beside the transport layer: jobs call services,
+the console calls the API. No component reaches past the
 layer below it.
 
 ### 4.2 Rules, checked by a test
 
 `internal/archtest` runs `go list -deps` per binary and fails when:
 
-- `cmd/golem-gateway` depends on `control/...`, `worker/...`,
+- `cmd/golem-gateway` depends on `control/...`,
   `operator/...`, `pgx`, `clickhouse-go`, `client-go` or
   `controller-runtime`;
 - anything outside `control/store/...` writes the state document;
 - `control/api` imports `control/store`;
 - `operator`, `cli` or `console` import anything of `control` but the
   generated clients and `api/v1alpha1`;
-- `control/api` imports `worker/` or the reverse;
+- `control/api` imports `control/jobs` or the reverse;
 - `gen/` or `lib/` import any component.
 
 Each binary also gets its own image and its own dependency list in
@@ -155,9 +154,9 @@ Each binary also gets its own image and its own dependency list in
 ## 5. Data flow, by example
 
 - **The platform team adds a model alias.** They open a PR with a
-  `ModelRoute` CRD; CI runs `golemctl config validate` against the control
-  API. After merge, Argo or Flux applies it (the admission webhook rejects
-  it if invalid). golem-control sees it through its watch, builds the new
+  `ModelRoute` CRD; CI runs `golemctl config validate` on the repository
+  offline (the snapshot compiler as a library). After merge, Argo or Flux
+  applies it (the API server enforces the schema's rules). golem-control sees it through its watch, builds the new
   snapshot, and publishes it for every gateway pool that
   selects it; the pools' gateways pick it up within a second, compile it and
   write their status; golem-control writes
@@ -168,10 +167,10 @@ Each binary also gets its own image and its own dependency list in
   on its own; the audit log has who, why and when.
 - **A user mints a key.** `golemctl keys create --scope team/platform
   --models 'claude-*' --cap 50/month`. golem-control checks the user's
-  membership and rights, stores the hash, writes the audit event, and the
+  membership and rights, stores the hash with its audit event in one write, and the
   key reaches the gateways in about a second (ADR 0012).
 - **A request is charged.** The gateway reserves at the key, the member
-  cap and the scope's pool (with two regions, its regional lease: ADR 0016), calls
+  cap and its site's ceiling of the scope's pool (ADR 0031), calls
   the provider, reconciles, and emits the access-log record, which becomes
   the `golem.spend` row in ClickHouse.
 - **A budget manager approves a one-time adjustment.** The request's state
@@ -187,14 +186,14 @@ Each binary also gets its own image and its own dependency list in
 | Topology | Store | Notes |
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
-| Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (api, worker), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
-| Multi-region (later: us-east-2 and us-west-2) | Writer bucket in us-east-2, Cross-Region Replication to us-west-2 | golem-control in each region reading its local bucket and that region's CRDs, writing to the writer bucket; gateways read their region's bucket; Valkey per region; budgets through regional leases (ADR 0016) |
-| AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0029): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site with site leases (ADR 0016, 0029); no cross-cluster Kubernetes access (ADR 0030); Bedrock through the same federation |
+| Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
+| Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0032); Valkey and site ceilings there as at any site |
+| AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0029): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site with site ceilings (ADR 0031); no cross-cluster Kubernetes access (ADR 0030); Bedrock through the same federation |
 
-The gateway and golem-control's two roles each scale independently; only
-the gateway is on the request path.
+Replicas are fixed, sized for the design envelope (ADR 0026); only the
+gateway is on the request path.
 
-**Going multi-region later.** Adding us-west-2 is enabling Cross-Region
-Replication to a bucket there and deploying golem-control and gateways:
-no migration, no pause. Writes from us-west-2 cross to the writer bucket,
-which is fine at golem's write rate; failover promotes the replica.
+**Going multi-region later.** Adding us-west-2 is enabling replication of
+the bucket there, deploying gateways that read the replica, and a
+golem-control Deployment scaled to zero for failover: no migration, no
+second writer.

@@ -14,7 +14,7 @@ is not a transactional store.
 
 ## Decision
 
-- A control plane, **golem-control** (APIs) with **golem-worker** (jobs),
+- A control plane, **golem-control** (APIs) with **golem-control's jobs** (jobs),
   owns entitlements (since ADR 0028, as one document in object storage)
   and serves the self-service and admin API (Entra-authenticated, roles
   per org model §2).
@@ -30,7 +30,7 @@ is not a transactional store.
 ## Consequences
 
 - More deployments to run, and a bucket (ADR 0028).
-- Revocation latency is the feed's (about a second), not a cache TTL.
+- Revocation latency is the publication and poll (about two seconds), not a cache TTL.
 - The snapshot's size grows with keys and members; at tens of thousands
   of keys it is still a few MB per instance.
 

@@ -33,9 +33,8 @@ and an operator on the critical path of every config change, in M1.
   credential mounting, mesh policies, Langfuse projects, telemetry
   plumbing. It is not on the path of a config change, and is M2; M1
   installs with Helm.
-- **Multi-region**: each region's control plane reads its own cluster's
-  CRDs, so per-region config is natural; GitOps keeps the regions' CRDs in
-  step where they should match.
+- **Sites and regions**: one control plane reads the EKS cluster's CRDs for
+  every pool, selected by site (ADR 0029, 0030).
 
 ## Consequences
 

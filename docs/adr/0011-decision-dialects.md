@@ -1,6 +1,6 @@
 # 0011: Decision APIs are a dialect family of their own
 
-Status: Proposed
+Status: Proposed. Scheduled for M2 by the roadmap (pass-through), M3 (translation).
 
 ## Context
 

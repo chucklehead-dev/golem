@@ -1,6 +1,6 @@
 # 0028: Control-plane state as one document in object storage; snapshots distributed through it
 
-Status: Accepted. Supersedes [0027](0027-aurora-postgresql.md) for the entitlement store (PostgreSQL remains the fallback implementation of the store interface). Amends 0009, 0012, 0016, 0026. Amended by [0029](0029-one-s3-store-for-every-site.md): one S3 store for every site at first.
+Status: Accepted. Supersedes [0027](0027-aurora-postgresql.md) for the entitlement store. Amended by [0029](0029-one-s3-store-for-every-site.md) (one S3 store at first), [0032](0032-control-plane-simplified.md) (audit outbox, a leader, cold standby) and [0033](0033-integrity-of-the-bucket.md) (signing, publish sequence, restore, locked writes).
 entitlement store (PostgreSQL remains the fallback implementation of the
 store interface). Amends 0009, 0012, 0016, 0026.
 
@@ -72,8 +72,8 @@ to be up for a gateway to start or to see a change.
   `status/<pool>/<gateway-id>` (their only write permission) and in
   telemetry; golem-control reads the status objects for `Applied n/m` and
   `golemctl gateways`.
-- The distribution API (Watch, Ack) goes. Regional leases (ADR 0016), when
-  there is a second region, are a control API method.
+- The distribution API (Watch, Ack) goes. Budgets across sites reach
+  gateways in their snapshots too (ADR 0031).
 
 ### Where it runs
 

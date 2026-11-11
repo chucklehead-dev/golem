@@ -13,14 +13,15 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 | Spike | Question | Depends on it |
 |---|---|---|
 | Waypoint identity | Which header carries the caller's SPIFFE ID through a Gloo Mesh ambient waypoint, and can the gateway's port be limited to the waypoint? | ADR 0003 mesh identity (M2) |
-| Object storage CAS | S3 `If-Match` PutObject behaviour (412, retries, lost responses) | ADR 0028, the store |
-| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and leases assumed) | ADR 0029, before the first remote site |
+| Bucket as the root of trust | S3 `If-Match` behaviour (412, retries, lost responses); KMS asymmetric signing and verification of snapshots and pointers; the bucket policy that denies all other writers; replication to the backup account under Object Lock | ADR 0028, 0033 |
+| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and ceilings assumed) | ADR 0029, before the first remote site |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
 | Provider envelopes | Claude on Foundry (Entra scope, `/anthropic/v1/messages`), Anthropic on Bedrock (event-stream framing), Chat→Converse fidelity on tool calls | §5.1.2 translation scope |
-| vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; adaptive concurrency against one box | ADR 0019 |
+| vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADR 0019, 0032 |
 | Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0018 |
 | Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0021 |
-| Valkey scripts | reserve/reconcile scripts on ElastiCache for Valkey and Dragonfly: latency, failover behaviour | ADR 0005 |
+| Valkey scripts | reserve, renew and reconcile scripts on ElastiCache for Valkey: latency, behaviour across a failover | ADR 0005, 0034 |
+| Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0032 |
 
 ## Phase 1 (M0): walking skeleton (3–4 weeks)
 
@@ -31,7 +32,9 @@ The gateway end to end with nothing optional.
 - Gateway: snapshot from a file; OpenAI Chat and Anthropic Messages
   frontends; one OpenAI-compatible backend and Anthropic; fast path,
   streaming, usage extraction; probes; drain; OTLP to ClickStack.
-- Proto skeletons for the control API and distribution.
+- Proto skeletons for the control API and the snapshot format.
+- The Terraform module for the bucket, KMS keys and IAM roles, and
+  `golemctl bootstrap` (control-plane.md §5).
 - Benchmarks and the stub-upstream load test as baselines.
 
 Exit: a real SDK and Claude Code stream through it; a trace with GenAI
@@ -45,24 +48,29 @@ The platform team's own apps and coding agents, us-east-2, EKS.
 - **Gateway**: Chat, Responses, Messages, Embeddings, models list; backends
   OpenAI, Anthropic, Foundry (Azure OpenAI and Claude), Bedrock (Anthropic
   envelope, Chat→Converse), standalone vLLM (static endpoints, discovered
-  models, adaptive concurrency, prefix affinity, per-principal fair share,
-  overflow); Chat→Anthropic
+  models, static concurrency ceilings, per-principal limits, overflow);
+  Chat→Anthropic
   translation; aliases, weighted and least-in-flight balancing, failover,
   retries with a retry budget, ejection, prompt-cache affinity; provider
   quota limits per deployment (below); in-process hooks (`Request`,
   `Response`, `Complete`).
-- **Identity**: virtual keys (format below), Entra users and services,
-  `golemctl login`, `golemctl agent setup` for Claude Code, Codex and
-  Copilot BYOK.
+- **Identity**: virtual keys (checksummed, secret-scanning webhook
+  revocation), Entra users and services, `golemctl token` for agents with
+  a credential helper, minted keys for the rest, `golemctl agent setup` for
+  Claude Code, Codex and Copilot BYOK, the emergency denylist.
 - **Org**: scopes (teams), members, managers, services, keys with
   constraints, caps, team pools granted by admins; enforcement modes
   (below), starting in `observe`.
-- **Limits**: Valkey, reserve and reconcile, rate and concurrency limits.
-- **Control plane**: golem-control (api and worker roles) on the S3 state document, CRD
-  config source, operational overrides, snapshot publication to S3,
-  explain, audit.
+- **Limits**: Valkey, expected-cost reservations renewed on long streams,
+  reconcile, cut-stream estimates, rate and concurrency limits; one site, so
+  its ceiling is each pool's total.
+- **Control plane**: golem-control (one Deployment, a leader) on the S3
+  state document; CRD config with schema rules and offline validation;
+  operational overrides; signed snapshot publication; explain; audit
+  through the document's outbox.
 - **Ledger and dashboards**: ClickHouse `golem.spend` by materialized view;
-  Grafana dashboards for spend, limits, latency, TTFT.
+  Grafana dashboards for spend, limits, latency, TTFT; snapshot-age alerts,
+  a synthetic request per pool, provider usage reconciliation.
 - **Install**: Helm (no operator yet).
 - **Testing**: the regime of testing.md for these parts; Quint models of
   reserve/reconcile and the attempt loop with their mutants; the limiter in
@@ -80,9 +88,11 @@ outage drill fails over without caller changes; budgets switched from
   Teams.
 - **Capture**: settings and overrides, Langfuse projects per scope,
   retention deletion.
-- **Operator**: `ControlPlane`, `GatewayPool`, ordered upgrades with
-  migrations, drains, canaries, credential mounting, mesh policies.
+- **Operator**, one per cluster: `ControlPlane`, `GatewayPool`, upgrades,
+  drains, canaries, credential mounting, mesh policies, Langfuse projects.
 - **Console**; spend APIs; Copilot usage ingestion as showback.
+- **Local GPU routing**: adaptive concurrency, metrics polling, prefix
+  affinity, round-robin queueing across principals.
 - **Gateway**: Decisions and System One; legacy Completions; embeddings to
   Bedrock; context-window fallback; latency EWMA and quota-headroom
   balancing; shadowing; conditional routing; remote hooks and built-in
@@ -93,8 +103,9 @@ outage drill fails over without caller changes; budgets switched from
   consumers.
 - **Registration** of model server endpoints (for cloud GPUs and NVL boxes).
 - **Remote sites** (AKS, on-prem) as gateway pools on the shared S3 store
-  (ADR 0029): a Valkey per site, site leases (ADR 0016) and provider quota
-  leases, a per-cluster operator; the leases model and its mutants first.
+  (ADR 0029): a Valkey per site, site ceilings (ADR 0031; its model and
+  mutants first), static provider quota shares, Bedrock through federation,
+  a per-cluster operator; after the residency review (PRD §8).
 - **Testing**: the state and distribution model; the state document under races in simulation;
   metastability analysis of overflow and retries (gotogether trials 2–4, 6).
 
@@ -103,14 +114,14 @@ onboarded; budgets enforced for all of them.
 
 ## Phase 4 (M3): resilience and reach
 
-- Multi-region: us-west-2 by Cross-Region Replication of the bucket (with
-  Replication Time Control), the replica-promotion runbook and a failover
-  drill, regional leases.
+- Second region: us-west-2 by replication of the bucket, gateways reading
+  the replica, a golem-control there scaled to zero, the failover runbook
+  and a drill (ADR 0032).
 - Temporal for approvals, key rotation and batch jobs, when the platform's
   Temporal is ready (ADR 0020).
 - Batch and Files, rerank, Decisions↔System One translation, cost-based
   routing, priority classes, budget downgrade, chargeback export, response
-  cache, Backstage plugin, Bedrock from AKS/on-prem, Entra OBO pass-through.
+  cache, Backstage plugin, Entra OBO pass-through.
 
 ## Later
 
@@ -120,14 +131,14 @@ MCP and A2A fronting; semantic cache; audio, images, Realtime; Vertex.
 
 Enforcement modes, provider quota limits, the key format and leak
 response, SLOs and recovery, the error catalog, the compatibility policy,
-price list upkeep, model lifecycle, release engineering, the threat model
-and onboarding: each was implicit or missing, and is now a requirement in
+price list upkeep, model lifecycle, release engineering, the threat model,
+onboarding, watching golem and stored-format upgrades: each was implicit or missing, and is now a requirement in
 PRD §9, scheduled in the phases above.
 
 ## Sizing
 
 Settled by the design envelope (PRD §9.12, ADR 0026): three gateways per
-region, two api and one worker replicas of golem-control, one Valkey
-primary with a replica, the state document at about 1–2 MB, and ClickHouse far inside its limits.
-Per-principal fair share on local GPU pools moves into M1 with those
-pools.
+site, two replicas of golem-control (one leader), one Valkey primary with
+a replica per site, the state document at about 1–2 MB, and ClickHouse far
+inside its limits. Per-principal limits on local GPU pools are M1, with
+those pools.
