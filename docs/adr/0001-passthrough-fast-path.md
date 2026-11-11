@@ -40,5 +40,7 @@ tested on its own; unsupported features fail loudly (PRD §5.1.2).
 
 - Canonical format for everything (LiteLLM): one path, but slower and lossy.
 - Pass-through only, no translation (Langfuse gateway at launch): simplest;
-  rules out serving Anthropic-dialect agents from OpenAI-compatible
-  self-hosted models. Kept as the M1 scope; translation is M2.
+  rules out OpenAI Chat callers on Anthropic and Bedrock.
+- Any-to-any translation: the most code in the project for pairs nobody
+  asked for. The pairs are those Bedrock needs plus OpenAI Chat to every
+  backend (PRD §5.1.2); others are refused at config validation.

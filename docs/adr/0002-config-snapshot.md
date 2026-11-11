@@ -4,6 +4,11 @@ Status: Proposed
 
 ## Context
 
+This record covers **operator config**: backends, model routes and
+aliases, scope policies' model sets, limit policies, hooks. Entitlements
+(users, teams, projects, keys, budgets) change by self-service many times
+a day and are not config: ADR 0009.
+
 Operators want CRDs and GitOps; developers and tests want a single YAML
 file. Config changes (a new alias, a rotated key) must apply without
 restarts and without a half-applied state on the request path.

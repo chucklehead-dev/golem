@@ -21,7 +21,9 @@ plain Service, rather than golem reimplementing KV-cache-aware routing.
 
 - Much less code: no listener management, no xDS, no conformance suite.
 - TLS, WAF and north-south policy stay where the enterprise already has
-  them. mTLS identity can arrive from the mesh (ADR 0003).
+  them (Gloo Mesh's ingress). In-mesh traffic is mTLS by ztunnel (ambient
+  mode); golem serves plain HTTP inside it, and caller identity from the
+  mesh, if used, arrives through a waypoint (ADR 0003).
 - Two hops for external callers (ingress, golem); acceptable at LLM
   latencies.
 

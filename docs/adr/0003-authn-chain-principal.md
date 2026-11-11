@@ -5,9 +5,11 @@ Status: Proposed
 ## Context
 
 Callers present virtual keys (`Authorization: Bearer` or `x-api-key`,
-depending on SDK), JWTs from the enterprise IdP, opaque OAuth tokens, or
-client certificates. Some routes must forward the caller's own provider
-credential.
+depending on SDK) or Entra ID access tokens (users, and services by client
+credentials or workload identity federation). golem runs in Gloo Mesh's
+ambient mode, where ztunnel terminates mTLS and the pod sees plain HTTP:
+the peer certificate is not available to golem. Some routes must forward
+the caller's own provider credential.
 
 ## Decision
 
@@ -17,13 +19,20 @@ credential.
   a JWT and fails verification is rejected, not retried as a key.
 - Credential recognition is by shape (key prefix `glm_`, three-part JWS,
   TLS peer certificate present) before any network call.
-- `Principal` carries subject, kind, teams, cost center, the matched
-  authenticator, and attributes for CEL. Mapping from claims or cert SANs
-  is config.
+- `Principal` carries subject (Entra `oid`, or service id), kind, the
+  **scope** it acts in (a key's bound scope; for Entra tokens the
+  `x-golem-scope` header or the user's default scope), the key if any, and
+  attributes for CEL. Membership and rights come from the entitlements
+  snapshot (ADR 0009), not from token claims, so group changes and
+  revocations do not wait for token expiry.
 - Keys are stored as SHA-256 hashes of high-entropy secrets (no slow hash
   needed: they are random, not passwords). Lookups cached.
-- Behind a mesh, mTLS identity may come from a trusted forwarded header
-  (XFCC) only when the listener is configured to trust it.
+- Mesh identity: in ambient mode golem cannot read the peer certificate.
+  If a waypoint fronts golem's service and forwards the caller's SPIFFE ID
+  (to be confirmed for the Gloo Mesh version in use), golem trusts that
+  header only on connections whose peer is the waypoint (enforced by an
+  Istio AuthorizationPolicy, so nothing else can reach the port). It binds
+  keys to workloads; it is not a standalone credential in M1.
 - Pass-through is a route property: `none` | `forward` | `exchange`. With
   `forward`, golem still authenticates the caller by some other method
   unless the route is explicitly `byo-only` (metered by key hash).
@@ -35,6 +44,9 @@ credential.
 
 ## Alternatives
 
-- Delegate authn to the ingress (oauth2-proxy, Istio RequestAuthentication)
-  and trust headers: fine for JWT, does not cover virtual keys. Supported
-  as the XFCC/trusted-header mode, not the default.
+- Delegate JWT validation to Istio RequestAuthentication at the waypoint:
+  possible, but golem still needs the claims and must handle keys, so it
+  validates Entra tokens itself (cheap: local signature check, cached
+  JWKS).
+- Direct mTLS termination in golem: incompatible with ambient's ztunnel
+  without opting golem out of the mesh.
