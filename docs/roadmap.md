@@ -14,7 +14,7 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 |---|---|---|
 | Waypoint identity | Which header carries the caller's SPIFFE ID through a Gloo Mesh ambient waypoint, and can the gateway's port be limited to the waypoint? | ADR 0003 mesh identity (M2) |
 | Object storage CAS | S3 `If-Match` PutObject behaviour (412, retries, lost responses) | ADR 0028, the store |
-| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to the us-east-2 Valkey (≤ 30 ms decides central counters vs site leases) | ADR 0029, before the first remote site |
+| Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and leases assumed) | ADR 0029, before the first remote site |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
 | Provider envelopes | Claude on Foundry (Entra scope, `/anthropic/v1/messages`), Anthropic on Bedrock (event-stream framing), Chat→Converse fidelity on tool calls | §5.1.2 translation scope |
 | vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; adaptive concurrency against one box | ADR 0019 |
@@ -93,7 +93,8 @@ outage drill fails over without caller changes; budgets switched from
   consumers.
 - **Registration** of model server endpoints (for cloud GPUs and NVL boxes).
 - **Remote sites** (AKS, on-prem) as gateway pools on the shared S3 store
-  (ADR 0029), with site leases if a site's round trip needs them.
+  (ADR 0029): a Valkey per site, site leases (ADR 0016) and provider quota
+  leases, a per-cluster operator; the leases model and its mutants first.
 - **Testing**: the state and distribution model; the state document under races in simulation;
   metastability analysis of overflow and retries (gotogether trials 2–4, 6).
 

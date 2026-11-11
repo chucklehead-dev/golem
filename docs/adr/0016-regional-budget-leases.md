@@ -1,6 +1,6 @@
 # 0016: Budgets are enforced through regional leases
 
-Status: Proposed, for a second region or a remote site. Deferred by [0025](0025-smaller-surfaces.md); brought forward by [0029](0029-one-s3-store-for-every-site.md) for a remote site whose round trip to the central Valkey is too long.
+Status: Proposed. Deferred by [0025](0025-smaller-surfaces.md) for regions; needed for the first remote site, which has its own Valkey ([0029](0029-one-s3-store-for-every-site.md)).
 
 ## Context
 

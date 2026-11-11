@@ -33,16 +33,14 @@ share the S3 store instead.
   Reached over the sites' private connectivity to AWS where it exists
   (an S3 interface endpoint), else over TLS on the internet; snapshots are
   KMS-encrypted and the role can read only its pool's prefix.
-- **Budget counters across sites.** A request's reservation is on the
-  request path, so where a remote site's gateways keep counters matters:
-  - if the site's round trip to us-east-2 is low (≤ 30 ms, measured in
-    Phase 0), its gateways use the us-east-2 Valkey over private
-    connectivity: one store, no leases;
-  - otherwise the site gets its own Valkey and its pools are enforced
-    through **site leases**: ADR 0016's regional leases, with "region"
-    read as "site", brought forward to whenever the first such site goes
-    live.
-  Rate limits and provider quota counters follow the same choice.
+- **Budget counters across sites**: each remote site has its own Valkey,
+  and its pools are enforced through **site leases**: ADR 0016's regional
+  leases, with "region" read as "site", built for the first remote site
+  (decided for now; site round trips are TBD, and a site close enough to
+  us-east-2 could later use the central Valkey instead). Rate limits are
+  per site. Provider quota counters, which must be shared because the
+  quota is the provider account's, are split between sites by the same
+  lease mechanism.
 - **Telemetry and capture** from remote sites go to the central collector,
   ClickHouse and Langfuse, as from EKS.
 - **Gateways keep their independence**: a remote site's gateways serve
@@ -60,6 +58,10 @@ share the S3 store instead.
   own document and control plane) or a replicated bucket, decided then.
 
 ## Alternatives
+
+- Central Valkey for every site: one store and no leases, but a
+  cross-site round trip on every request's reservation; kept as an option
+  for a site measured close enough.
 
 - A store per site (0028's table): local, but splits one enterprise's
   state, or needs replication between unlike stores.

@@ -22,7 +22,7 @@ milestone (M0) confirms them.
 | [0013](0013-components-and-layering.md) | Components with one job each; layering checked by a test | Amended by 0025 |
 | [0014](0014-connect-protobuf-apis.md) | APIs in protobuf, served with Connect | Amended by 0025 |
 | [0015](0015-sql-store-postgres-and-dsql.md) | One SQL store for Aurora DSQL and PostgreSQL | Superseded by 0027 |
-| [0016](0016-regional-budget-leases.md) | Budgets enforced through regional leases | Deferred to a second region or remote site (0025, 0029) |
+| [0016](0016-regional-budget-leases.md) | Budgets enforced through regional leases | Needed for the first remote site (0029) |
 | [0017](0017-operator.md) | An operator for installation and day-2, writing config through the API | Amended by 0023 |
 | [0018](0018-capture-and-retention.md) | Content capture per scope with override control; a Langfuse project per scope; retention per record | Amended by 0025 |
 | [0019](0019-self-hosted-model-servers.md) | Self-hosted servers: each instance a deployment, discovered or registered, adaptive capacity, prefix affinity, overflow | Proposed |
@@ -36,3 +36,4 @@ milestone (M0) confirms them.
 | [0027](0027-aurora-postgresql.md) | PostgreSQL everywhere: Aurora PostgreSQL on AWS, Global Database for the second region | Superseded by 0028 (kept as the fallback store) |
 | [0028](0028-state-and-snapshots-in-object-storage.md) | Control-plane state as one CAS-updated document in object storage; gateways poll their snapshots there | Accepted; amended by 0029 |
 | [0029](0029-one-s3-store-for-every-site.md) | One S3 store and one control plane for every site in the initial phase; remote gateways read S3 by federation; central counters or site leases | Accepted |
+| [0030](0030-no-cross-cluster-kubernetes-access.md) | Object storage is the only cross-site channel; multicluster-runtime not adopted for now; a pull-based site relay if sites keep their own config | Accepted |

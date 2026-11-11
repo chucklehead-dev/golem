@@ -172,8 +172,9 @@ ClickHouse, so a manager's view matches what enforcement sees.
 **Sites** (ADR 0029): one control plane in us-east-2 serves every site. AKS
 and on-prem clusters run gateway pools that read their snapshots from the
 us-east-2 bucket; their config CRDs live in the EKS cluster, selected by a
-`site` label. Their budget counters are the central Valkey when the round
-trip allows, otherwise a site Valkey with site leases (ADR 0016).
+`site` label. Each site has its own Valkey; pools and provider quotas are
+enforced there through site leases (ADR 0016, 0029). No cluster reaches
+another's API server (ADR 0030).
 
 **Regions**:
 

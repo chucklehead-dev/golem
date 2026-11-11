@@ -56,7 +56,15 @@ they change through the control API (ADR 0009, 0023).
 | **Store** | Bucket versioning and lifecycle rules (set when the `ControlPlane` is created), replication for the second region and the failover runbook (promote the replica bucket); the operator reports the document's size and CAS retry rate. |
 | **Support** | `golemctl support-bundle` collects CRDs, statuses, gateway versions and acks, recent errors and a flight-recorder trace from a chosen gateway. |
 
-## 4. Build
+## 4. Sites
+
+One operator per cluster (ADR 0030): EKS's installs the control plane and
+its gateway pools; each AKS or on-prem cluster's installs its own gateway
+pools and Valkey, and, if a site keeps its own config CRDs, runs the site
+relay (CRDs to `config/<site>/` in the bucket, status back). Fleet-wide
+rollouts are the GitOps tool's. No operator reaches another cluster.
+
+## 5. Build
 
 `operator/` uses controller-runtime and the generated control API client;
 it imports nothing else of golem (architecture.md §4.2). CRD YAML is

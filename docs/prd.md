@@ -511,10 +511,11 @@ store and control plane in the initial phase (ADR 0029).
 
 New:
 
-6. **Site connectivity**: the round trip from each AKS and on-prem site to
-   us-east-2 (decides central budget counters or site leases), and whether
-   they reach AWS privately (Direct Connect, a VPN, an S3 interface
-   endpoint).
+6. **Site connectivity** (TBD): the round trip from each AKS and on-prem
+   site to us-east-2, and whether they reach AWS privately (Direct Connect,
+   a VPN, an S3 interface endpoint). Working assumption: a Valkey per site
+   with site leases (ADR 0029); cross-cluster Kubernetes access is not
+   needed (ADR 0030).
 
 ## 9. Cross-cutting requirements
 
