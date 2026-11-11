@@ -17,6 +17,14 @@ every gateway refuses new requests.
 - **Renewal cadence**: the leader renews every pool's authorization every
   60 seconds from current state and CRDs (a fresh build, not a re-signature
   of old content), so a gateway always holds about four minutes of margin.
+- **The lease is counted from the source read, not from signing.** A
+  snapshot's `authorization-valid-until` is the time its source state was
+  read plus the lease. Fencing cannot stop an old leader whose successor
+  has not yet published, or a leader with a slightly stale view; counting
+  from the read bounds what such a publication can do. Gateways must also
+  check expiry: the publication model (`model/publication.md` §8) shows
+  that dropping either half lets a stale publication serve a revoked key
+  past the bound.
 - **The control plane is on the availability path.** golem-control's SLO
   rises to match the gateway's: 99.95%, two replicas in different zones,
   leader failover within 30 seconds (Kubernetes Lease timings set for it),
