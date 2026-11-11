@@ -28,3 +28,4 @@ milestone (M0) confirms them.
 | [0019](0019-self-hosted-model-servers.md) | Self-hosted servers: each instance a deployment, discovered or registered, adaptive capacity, prefix affinity, overflow | Proposed |
 | [0020](0020-temporal.md) | Durable workflows behind a seam; Temporal for approvals, key rotation and batch jobs when ready | Proposed |
 | [0021](0021-github-copilot.md) | Copilot through golem by BYOK, then enterprise custom models; Copilot usage as showback | Proposed |
+| [0022](0022-edge-gateways-for-external-consumers.md) | An edge gateway pool for internet-facing consumers (Copilot enterprise models, SaaS apps) | Proposed |

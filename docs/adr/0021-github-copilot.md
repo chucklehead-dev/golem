@@ -32,18 +32,22 @@ The usage metrics API reports per-user activity and `ai_credits_used`
 2. **Enterprise custom models through golem (M2, after a spike).** golem
    registered as an OpenAI-compatible (or Anthropic) provider with one
    service key per Copilot organisation, each bound to the scope that pays
-   for it. Needs an internet-facing route to the gateway through the mesh
-   ingress, restricted to GitHub's published egress ranges and the
-   service keys. The spike establishes which API shapes Copilot sends,
+   for it. Served by the internet-facing edge gateway pool (ADR 0022),
+   restricted to GitHub's published egress ranges and the consumer's
+   keys. The spike establishes which API shapes Copilot sends,
    whether any header identifies the user (if so, golem attributes per
    user under the service key; if not, per organisation only), and the
    ranges to allow.
 3. **Copilot's own usage as showback (M2).** golem-worker ingests the
    Copilot usage metrics API daily into ClickHouse, mapping GitHub logins
-   to Entra users (Enterprise Managed Users makes this direct), so Grafana
+   to Entra users, so Grafana
    and golem's spend views show Copilot credits beside golem spend. Not
    enforced by golem; Copilot's own budgets and policies remain the
-   control for GitHub-hosted models.
+   control for GitHub-hosted models. The enterprise is migrating to
+   Enterprise Managed Users: until then, logins map to Entra users through
+   the organisation's SAML SSO identities (GitHub's external identities,
+   which carry the IdP name ID; to verify for the enterprise's setup);
+   after the migration, EMU accounts map directly.
 
 ## Consequences
 

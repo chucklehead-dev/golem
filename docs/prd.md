@@ -162,6 +162,19 @@ Models on all of them change over time.
   service identity and heartbeats, which suits cloud GPU machines that
   come and go. Registered endpoints that stop heartbeating leave the
   snapshot.
+- **Registration identity**, in order of preference: the platform's
+  workload identity where the machine has one (Entra workload identity on
+  AKS or Azure VMs; EKS service accounts federated to Entra; an EC2
+  instance role, proven by a signed STS `GetCallerIdentity` request that
+  golem-control verifies); otherwise an X.509 client certificate from the
+  enterprise PKI or SPIRE, the same certificate the machine's TLS proxy
+  serves, so one identity covers both directions; for machines without
+  either (a Mac on a desk), a one-time bootstrap token per machine pool,
+  exchanged at first registration for a short-lived, rotated machine
+  credential. Each registration identity is allowed only into named
+  Backends, with labels and endpoint names constrained to an allowed
+  domain, and the gateway checks the endpoint's TLS name: a registration
+  can never point golem at an arbitrary host.
 - **Models are discovered, not declared**: golem polls each endpoint's
   `/v1/models`; aliases select deployments by model name or by a label
   the registration carries (`family: qwen3-coder`), so a box changing its
@@ -406,7 +419,9 @@ their personal golem key (M1): golem's models, budgets and capture apply,
 attributed per user; code completions stay on GitHub. Enterprise custom
 models pointing at golem, called from GitHub's side, follow a spike (M2).
 Copilot's own usage is ingested from GitHub's usage metrics API into
-ClickHouse as showback beside golem spend (M2).
+ClickHouse as showback beside golem spend (M2). External callers
+(Copilot's enterprise custom models, SaaS apps with configurable model
+endpoints) use the internet-facing edge gateway pool (ADR 0022).
 
 ### 5.13 Agent protocols *(added, Later)*
 
@@ -457,11 +472,13 @@ To be decided (TBD):
 2. **Never-capture data** and who may enable multi-year retention
    (drafted: platform admins, by scope policy).
 
+Resolved this round: the enterprise is migrating to GitHub Enterprise
+Managed Users (login mapping through SAML identities until then, ADR
+0021); internet-facing access through an edge gateway pool for GitHub and
+SaaS apps (ADR 0022); registration identity by workload identity, then
+PKI certificates, then bootstrap tokens (§5.2.1).
+
 New:
 
-3. **Copilot**: is the enterprise on Enterprise Managed Users (for login
-   mapping), and may the gateway have an internet-facing route for
-   enterprise custom models (ADR 0021)?
-4. **Registration identity** for cloud GPU machines: Entra workload
-   identity where they run in Azure or EKS, otherwise a service key per
-   machine pool?
+3. **SaaS consumers**: which SaaS apps first, and whether they support
+   OAuth client credentials or only static keys.

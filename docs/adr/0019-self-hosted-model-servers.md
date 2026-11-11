@@ -48,6 +48,11 @@ change over time.
 - Usage comes from the servers' own usage fields (streamed with
   `include_usage`); prices from `PriceOverride`.
 
+- Registration identity: workload identity where available, else PKI or
+  SPIRE certificates, else bootstrap tokens exchanged for rotated machine
+  credentials; registrations are confined to named Backends and an allowed
+  domain, and the gateway verifies endpoint TLS names (PRD §5.2.1).
+
 ## Consequences
 
 - No golem code for platforms that already balance; a small, contained

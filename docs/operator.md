@@ -13,7 +13,7 @@ Group `golem.dev`, version `v1alpha1`. Two kinds of resource:
 | Kind | Describes | The operator creates |
 |---|---|---|
 | `ControlPlane` | golem-control and golem-worker for one region: image version, replicas, store connection (Postgres DSN Secret, or DSQL cluster endpoint and IAM role), Entra app registration, ClickHouse reference, region name | Deployments, Services, PDBs, ServiceAccounts (with workload identity annotations), the migration Job, AuthorizationPolicies |
-| `GatewayPool` | A set of gateways: version, replicas or autoscaling, region, the config selector its `Gateway` resource uses, RESP store reference, drain grace, waypoint on/off, provider Secrets to mount | Deployment, Service, HPA (or KEDA ScaledObject), PDB, ServiceAccount, waypoint and its AuthorizationPolicies, egress ServiceEntries for the providers its backends use, and the `Gateway` resource in the control API |
+| `GatewayPool` | A set of gateways (internal, or `edge` for internet-facing consumers with its ingress, WAF and source ranges; ADR 0022): version, replicas or autoscaling, region, the config selector its `Gateway` resource uses, RESP store reference, drain grace, waypoint on/off, provider Secrets to mount | Deployment, Service, HPA (or KEDA ScaledObject), PDB, ServiceAccount, waypoint and its AuthorizationPolicies, egress ServiceEntries for the providers its backends use, and the `Gateway` resource in the control API |
 
 **Config** (the operator writes them through the config API and reports
 the result in status; ADR 0012):
