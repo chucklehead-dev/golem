@@ -12,17 +12,24 @@ Extension, KServe) already do load- and cache-aware replica selection
 where they are deployed.
 
 Today's servers are standalone machines (DGX Spark, Mac mini and Mac
-Studio running vLLM), each with a handful of concurrent slots, outside
-Kubernetes and the mesh, and liable to sleep or reboot.
+Studio running a current vLLM behind a TLS proxy), outside Kubernetes and
+the mesh, and liable to sleep or reboot. NVL4/NVL8 boxes and cloud GPU
+machines (some short-lived) will follow, and the models on all of them
+change over time.
 
 ## Decision
 
-- Standalone machines are deployments of their own, with a declared
-  concurrency cap and model list; golem counts in-flight requests itself
-  (exact for boxes only golem calls), uses server metrics where present,
-  applies prefix affinity within the cap, and overflows to fallback pools
-  (or waits briefly for a slot, if configured). Reached over TLS through
-  the mesh's egress gateway, with health probes and ejection tuned for
+- Each server instance is a deployment. Endpoints come from a static
+  list, DNS, or self-registration with heartbeats through the control API
+  (for machines that come and go). Models are discovered from each
+  endpoint's `/v1/models`, and aliases select by model name or registered
+  label, so model changes need no config.
+- Capacity is an adaptive concurrency limit per endpoint (with an
+  optional ceiling), so one mechanism fits a Mac mini and an NVL8. golem
+  counts in-flight requests itself, uses server metrics where present,
+  applies prefix affinity within the limit, and overflows to fallback
+  pools (or waits briefly for a slot, if configured). Reached over TLS
+  through the mesh's egress gateway, with probes and ejection tuned for
   machines that come and go.
 
 - For clusters (later): a self-hosted Backend is a **service** (one URL; the platform picks the

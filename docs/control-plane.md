@@ -139,6 +139,13 @@ Both channels, chosen per event and per recipient preference:
   relevant Grafana panel. Delivery failures retry with backoff and are
   visible in audit.
 
+Jobs run behind the worker's `workflow` seam (ADR 0020): a durable job
+table in M1, Temporal later for approvals, key rotation and batch jobs.
+Two more jobs: **endpoint registrations** (expire self-registered model
+server endpoints that stop heartbeating; PRD §5.2.1) and **Copilot usage
+ingestion** (daily, from GitHub's usage metrics API into ClickHouse; ADR
+0021).
+
 Jobs take a lease row in the store (one runner per job per region) so the
 worker can run more than one replica.
 

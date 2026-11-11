@@ -148,43 +148,49 @@ Foundry (a base path and auth change).
 
 #### 5.2.1 Self-hosted model servers (ADR 0019)
 
-Today's vLLM instances are standalone machines (DGX Spark, Mac mini and
-Mac Studio), each serving one or a few models, outside Kubernetes and the
-mesh. SGLang, and clusters behind their own balancers, may follow.
+Today: standalone machines (DGX Spark, Mac mini and Mac Studio) running a
+current vLLM behind a TLS proxy, outside Kubernetes and the mesh. Coming:
+NVL4 and NVL8 boxes and cloud GPU machines, some of them short-lived.
+Models on all of them change over time.
 
-- **Each machine is a deployment.** A Backend lists its machines by DNS
-  name; an alias pools the machines serving a model. Each deployment
-  declares the models it serves (checked against its `/v1/models`) and a
-  **concurrency cap**, since one box serves only a few requests at once
-  before latency collapses.
-- **Routing**: least in-flight per deployment, counted by golem itself
-  (exact, since golem sees every request to these boxes), refined by the
-  server's own metrics where it exposes them (vLLM's `/metrics`: running
-  and waiting requests, KV-cache use; not every build on Apple silicon
-  does). **Prefix affinity** sends a conversation back to the box holding
-  its prefix in cache, unless that box is at its cap.
-- **Overflow**: at the cap, or on 429/503, requests go to the alias's
-  fallback pool (a commercial model, or a Foundry or Bedrock deployment of
-  a comparable one) before the first byte. Optionally a short bounded wait
-  for a slot (`queue: 2s`) first, for callers who prefer the local model.
-- **Availability**: desktops sleep, reboot and update. Active health
-  probes (`/health` every few seconds) and passive ejection take a box out
-  quickly and bring it back without config changes.
-- **Reaching them**: TLS on each machine (a small terminating proxy such as
-  Caddy in front of vLLM, which listens on localhost only) with vLLM's
-  `--api-key` as a bearer secret, or a client certificate; reached from the
-  gateways through the mesh's egress gateway with a ServiceEntry per
-  machine, so egress is visible and controlled.
-- **Dialects**: OpenAI Chat, Completions and Embeddings; Anthropic
-  Messages pass-through where the vLLM version exposes `/v1/messages` (to
-  confirm per box), so coding agents can use local models; otherwise
-  Messages to Chat translation (M2).
+- **Each server instance is a deployment.** A Backend has endpoints, each
+  one vLLM (or SGLang) instance: one per small machine; one or several per
+  NVL box (a model per instance, or one data-parallel instance).
+- **Discovery**, by Backend: a static list of DNS names; DNS (SRV or
+  several A records); or **registration**, where an instance (or a small
+  sidecar next to it) registers itself with the control API under a
+  service identity and heartbeats, which suits cloud GPU machines that
+  come and go. Registered endpoints that stop heartbeating leave the
+  snapshot.
+- **Models are discovered, not declared**: golem polls each endpoint's
+  `/v1/models`; aliases select deployments by model name or by a label
+  the registration carries (`family: qwen3-coder`), so a box changing its
+  model moves it between pools without config changes.
+- **Capacity**: an adaptive concurrency limit per endpoint (it grows while
+  latency holds and shrinks when it rises) discovers what a Mac mini or an
+  NVL8 can take, with an optional declared ceiling; routing is least
+  in-flight relative to that limit, refined by vLLM's `/metrics` (running
+  and waiting requests, KV-cache use) and with **prefix affinity** within
+  the limit.
+- **Overflow**: at the limit, or on 429/503, requests go to the alias's
+  fallback pool before the first byte, or wait briefly for a slot if the
+  route allows (`queue: 2s`).
+- **Availability**: health probes every few seconds and passive ejection
+  for machines that sleep, reboot or are reclaimed.
+- **Reaching them**: TLS at each machine with vLLM's `--api-key` as a
+  bearer secret or a client certificate; through the mesh's egress gateway
+  (a ServiceEntry per static endpoint; registered endpoints by an allowed
+  domain); cloud GPU machines in the same way, or in-mesh where they join a
+  cluster.
+- **Dialects**: OpenAI Chat, Completions and Embeddings, and Anthropic
+  Messages pass-through (current vLLM serves `/v1/messages`), so coding
+  agents can use local models without translation.
 - **Pricing**: the platform team sets per-token rates through
-  `PriceOverride`, the same interface as for commercial models; spend is
-  charged to scopes like any other.
-- **Clusters later**: a Backend may instead be one *service* URL whose own
-  balancer (llm-d, an Inference Gateway, KServe) picks the replica; golem
-  then routes to it as one deployment.
+  `PriceOverride`, as for commercial models; for cloud GPU machines a rate
+  can be derived from the instance's hourly cost and measured throughput
+  (M3).
+- **Clusters later**: a Backend may be one *service* URL whose own balancer
+  (llm-d, an Inference Gateway, KServe) picks the replica.
 
 ### 5.3 Authentication and identity
 
@@ -392,7 +398,17 @@ by scope, model and normalised body, in the Redis-protocol store.
 Decision-model answers are good candidates (cheap to store, often
 repeated). Semantic caching: Later, if at all.
 
-### 5.12 Agent protocols *(added, Later)*
+### 5.12 GitHub Copilot *(added)*
+
+ADR 0021. Users' Copilot clients (VS Code, JetBrains, Copilot CLI, the
+Copilot app) can use golem as a BYOK "OpenAI-compatible" provider with
+their personal golem key (M1): golem's models, budgets and capture apply,
+attributed per user; code completions stay on GitHub. Enterprise custom
+models pointing at golem, called from GitHub's side, follow a spike (M2).
+Copilot's own usage is ingested from GitHub's usage metrics API into
+ClickHouse as showback beside golem spend (M2).
+
+### 5.13 Agent protocols *(added, Later)*
 
 Fronting MCP servers and A2A with the same principal, scope, budget and
 telemetry machinery. Out of scope until the LLM path is done; routes stay
@@ -405,7 +421,7 @@ protocol-agnostic so it can be added.
 | M0 | Gateway skeleton: snapshot from a file, one OpenAI-compatible backend, fast-path proxy, probes, OTLP to ClickStack; repository layout and the import test; proto skeletons | Streams a chat completion with a trace and token metrics in HyperDX |
 | M1 | §5.1/§5.2 M1 dialects and backends incl. Bedrock and the decision APIs; Chat→Anthropic and Chat→Converse translation; Entra users and services; personal and service keys; `golemctl login`; teams, scopes, member allocations; aliases, balancing, failover, ejection, cache affinity; limits (Dragonfly/Valkey if present); in-process hooks; ClickHouse ledger; Langfuse export; Grafana dashboards; golem-control and golem-worker on DSQL (and Postgres in CI); distribution API; golem-operator (ControlPlane, GatewayPool, config CRDs, upgrades, drains); golemctl; mesh identity spike | One team's apps and coding agents in production through it, on EKS |
 | M2 | Projects, cost centers, grants, approvals, adjustments, audit; golem-console and notifications; multi-region leases; Bedrock from AKS/on-prem; mesh identity via waypoint; shadowing; conditional routing; remote and built-in hooks; embeddings to Bedrock; context-window fallback; Entra OBO pass-through | Default path for the enterprise; direct provider keys revoked |
-| M3 | Backstage plugin, Batch/Files, rerank, Decisions↔System One translation, cost-based routing, priority classes, budget downgrade, chargeback export, response cache, Vertex | By demand |
+| M3 | Temporal for approvals, key rotation and batch jobs (ADR 0020, when the platform's Temporal is ready); Backstage plugin, Batch/Files, rerank, Decisions↔System One translation, cost-based routing, priority classes, budget downgrade, chargeback export, response cache, Vertex | By demand |
 
 ## 7. Success measures
 
@@ -425,22 +441,27 @@ Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
 Aurora DSQL preferred, PostgreSQL elsewhere (ADR 0015); teams as drafted;
 console then Backstage (tools.md); team-to-project grants need no
 approval; allocations may oversubscribe; EKS first, AKS and on-prem later;
-backends: OpenAI, Foundry, standalone vLLM machines (§5.2); content
-capture and retention per scope with override control, retention classes
-7, 30, 90, 365 days and 3, 5, 7 years (ADR 0018); notifications by email
-and Teams (control-plane.md §5.1); limit store: Valkey, ElastiCache for
-Valkey on AWS (ADR 0005); regions: us-east-2 first, us-west-2 second,
-us-east-1 the DSQL witness (architecture.md §6); the platform team owns
-the Entra app registrations (entra.md); self-hosted rates set by the
-platform team through `PriceOverride`.
+backends: OpenAI, Foundry, self-hosted vLLM on standalone machines now and
+NVL boxes and cloud GPUs later (§5.2.1); content capture and retention
+per scope with override control, classes 7, 30, 90, 365 days and 3, 5, 7
+years (ADR 0018); notifications by email and Teams; limit store Valkey
+(ADR 0005); regions us-east-2, then us-west-2, us-east-1 as witness; the
+platform team owns the Entra registrations and grants consent (entra.md);
+self-hosted rates through `PriceOverride`; Temporal later, behind a seam
+(ADR 0020); Copilot by BYOK, then enterprise custom models (ADR 0021);
+testing (testing.md).
 
-1. **Waypoint identity header.** Verified in an M1 spike against your Gloo
-   Mesh version (ADR 0003).
-2. **Admin consent** for the worker's Graph permissions and golemctl's
-   delegated scope: which Entra administrator grants it.
-3. **Never-capture data.** Whether any data classes or scopes must forbid
-   capture outright (the scope policy can), and who may approve the 3-, 5-
-   and 7-year classes (drafted: platform admins only, by scope policy).
-4. **Standalone machines.** Which boxes serve which models today, and
-   whether each can run a TLS terminator; the vLLM version on the Macs
-   (for `/v1/messages` and metrics).
+To be decided (TBD):
+
+1. **Waypoint identity header** (ADR 0003): the M1 spike.
+2. **Never-capture data** and who may enable multi-year retention
+   (drafted: platform admins, by scope policy).
+
+New:
+
+3. **Copilot**: is the enterprise on Enterprise Managed Users (for login
+   mapping), and may the gateway have an internet-facing route for
+   enterprise custom models (ADR 0021)?
+4. **Registration identity** for cloud GPU machines: Entra workload
+   identity where they run in Azure or EKS, otherwise a service key per
+   machine pool?

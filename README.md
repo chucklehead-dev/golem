@@ -27,6 +27,8 @@ Status: design. Nothing is built yet.
 - [docs/org-model.md](docs/org-model.md): users, teams, projects, services,
   keys, roles, budgets, grants, approvals, capture and retention.
 - [docs/entra.md](docs/entra.md): the Entra ID app registrations.
+- [docs/testing.md](docs/testing.md): the testing regime; what to model in
+  Quint and where to trial gotogether.
 - [docs/adr/](docs/adr/): the decisions, one per record.
 
 Comparable products, for reference: LiteLLM, agentgateway, Langfuse AI

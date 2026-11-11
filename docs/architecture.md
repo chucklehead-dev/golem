@@ -11,6 +11,7 @@ rules that keep them apart. Each component's inside has its own document:
 | [tools.md](tools.md) | golemctl, golem-console, the Backstage plugin |
 | [org-model.md](org-model.md) | the entitlement model all of them share |
 | [entra.md](entra.md) | the Entra ID app registrations they need |
+| [testing.md](testing.md) | the testing regime, and where gotogether is trialled |
 
 ## 1. Components
 

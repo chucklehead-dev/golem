@@ -25,4 +25,6 @@ milestone (M0) confirms them.
 | [0016](0016-regional-budget-leases.md) | Budgets enforced through regional leases | Proposed |
 | [0017](0017-operator.md) | An operator for installation and day-2, writing config through the API | Proposed |
 | [0018](0018-capture-and-retention.md) | Content capture per scope with override control; a Langfuse project per scope; retention per record | Proposed |
-| [0019](0019-self-hosted-model-servers.md) | Self-hosted vLLM/SGLang as services by default, load- and prefix-aware replica routing when golem must choose | Proposed |
+| [0019](0019-self-hosted-model-servers.md) | Self-hosted servers: each instance a deployment, discovered or registered, adaptive capacity, prefix affinity, overflow | Proposed |
+| [0020](0020-temporal.md) | Durable workflows behind a seam; Temporal for approvals, key rotation and batch jobs when ready | Proposed |
+| [0021](0021-github-copilot.md) | Copilot through golem by BYOK, then enterprise custom models; Copilot usage as showback | Proposed |
