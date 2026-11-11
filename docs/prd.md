@@ -1,6 +1,6 @@
 # golem: product requirements
 
-Status: draft for discussion. Revised 2026-11-11 (second pass).
+Status: draft for discussion. Revised 2026-11-11 (third pass).
 
 ## 1. Problem
 
@@ -32,14 +32,18 @@ enforced by invoices a month later.
    config, horizontal scaling.
 7. Simple, fast Go: the proxy adds well under a millisecond at p50 to a
    non-translated request, and its code stays readable end to end.
+8. Well layered: the gateway does data-plane work only; configuration,
+   self-service and administration are a separate control plane behind one
+   API; an operator runs day-2; CLI and UI tools are clients of that API
+   (architecture.md, ADR 0013).
 
 ## 3. Non-goals
 
 - Multi-tenant SaaS: one enterprise, one Entra tenant (guest users aside),
   no signup or invoicing.
-- A large management UI. Grafana and HyperDX are where people look; the
-  self-service API and CLI are where they act. A small self-service web UI
-  (keys, allocations, approvals) is M2 (§8 Q4).
+- A large management UI. Grafana and HyperDX are where people look;
+  golemctl, a small console (M2) and optionally a Backstage plugin (M3)
+  are where they act (tools.md).
 - Being a Kubernetes Gateway API implementation. golem runs behind the
   mesh's ingress and in the ambient mesh (ADR 0006).
 - Prompt management, evaluation, datasets: Langfuse does these; golem
@@ -52,7 +56,7 @@ enforced by invoices a month later.
 | User | Needs |
 |---|---|
 | Application developer | Base URL and key (or their service's Entra identity); their SDK works unchanged; clear errors when limited. |
-| Coding-agent user | Their agent's native API (Anthropic Messages, OpenAI Responses) with their Entra identity via `golem login`; streaming without stalls. |
+| Coding-agent user | Their agent's native API (Anthropic Messages, OpenAI Responses) with their Entra identity via `golemctl login`; streaming without stalls. |
 | Team / project manager | Membership, services, allocations to members, adjustment requests, spend by member. |
 | Budget manager | Fund teams and projects from their cost centers; approve requests; spend against cost center. |
 | Platform operator | CRDs/GitOps for backends and routes, probes, dashboards, alerts, safe rollouts, provider key rotation. |
@@ -124,7 +128,7 @@ the provider as is, authenticated and metered where usage can be read.
 |---|---|---|
 | OpenAI | API key | M1 |
 | Anthropic | API key | M1 |
-| AWS Bedrock (InvokeModel, Converse, embeddings) | SigV4 from Pod Identity/IRSA, or from Entra via AWS IAM OIDC federation (`AssumeRoleWithWebIdentity`) off-AWS *(added)*; Bedrock API keys | M1 |
+| AWS Bedrock (InvokeModel, Converse, embeddings) | SigV4: EKS Pod Identity (initially); on AKS or on-prem, Entra-to-AWS OIDC federation (`AssumeRoleWithWebIdentity`) or IAM Roles Anywhere with the workload's X.509 identity *(added)*; Bedrock API keys | M1 (EKS), M2 (elsewhere) |
 | Azure OpenAI / Azure AI Foundry | Entra workload identity *(added)*, API key | M1 |
 | OpenAI Decisions | API key | M1 |
 | TypeSafe System One | API key | M1 |
@@ -147,8 +151,8 @@ that recognises its credential decides.
 | Virtual keys | `glm_...` as bearer or `x-api-key` (OpenAI and Anthropic SDKs both work); hashed; bound to one scope; constrained (org model §3) | M1 |
 | Entra ID JWT (users) | v2 access tokens for golem's app registration; JWKS cached; `tid`, `aud`, `iss` checked; `oid` is the user; scope from a header (`x-golem-scope`) or the user's default | M1 |
 | Entra ID JWT (services) | client credentials or workload identity federation; `azp`/`appid` maps to a Service | M1 |
-| `golem login` for coding agents *(added)* | Entra device-code or browser flow; mints a short-lived personal key in the chosen scope, written where the agent reads it | M1 |
-| Mesh identity | In ambient mode the app does not see the peer certificate (ztunnel terminates mTLS). golem's waypoint forwards the caller's SPIFFE ID in a header golem trusts only from the waypoint; used to bind keys to workloads and to identify mesh services without keys | M2 (to confirm, §8 Q2) |
+| `golemctl login` for coding agents *(added)* | Entra device-code or browser flow; mints a short-lived personal key in the chosen scope, written where the agent reads it | M1 |
+| Mesh identity | In ambient mode the app does not see the peer certificate (ztunnel terminates mTLS). A waypoint in front of the gateway passes the caller's SPIFFE ID in a header, trusted only when the operator has restricted the data port to the waypoint (ADR 0003); binds keys to workloads, identifies in-mesh services without keys | Spike in M1, feature in M2 |
 | OAuth introspection (non-Entra IdPs) | RFC 7662 | Later, if ever |
 
 **Credential pass-through** (optional, per route): `none` (golem's provider
@@ -184,8 +188,10 @@ The full model is [org-model.md](org-model.md). In short:
 |---|---|
 | Users, teams (Entra-group bound), services, personal and service keys, scope policies, member allocations, team pools granted by admins | M1 |
 | Projects, cost centers, budget managers, grants, approvals, adjustments, audit | M2 |
-| Self-service web UI; notifications (email/Teams) on thresholds and approvals | M2 |
-| Budget downgrade to a cheaper alias; chargeback export per cost center | M3 |
+| Content capture switches: users for their own keys; team and project managers for their services and projects; bounded by the scope policy's ceiling | M1 (keys), M2 (services, projects) |
+| golem-console; notifications (email/Teams) on thresholds and approvals | M2 |
+| Multi-region budgets through regional leases (ADR 0016) | M2 |
+| Backstage plugin; budget downgrade to a cheaper alias; chargeback export per cost center | M3 |
 
 ### 5.5 Limits
 
@@ -265,8 +271,12 @@ routes it (ADR 0010):
   `gen_ai.client.operation.duration`, `gen_ai.server.time_to_first_token`,
   `gen_ai.server.time_per_output_token`; cost; limit decisions; retries,
   failovers, ejections; hooks; in-flight streams.
-- **Content capture** off by default; per scope policy, sampled, redacted
-  by hooks first, sent only to Langfuse (not to ClickStack).
+- **Content capture** off by default. Users may turn it on for their own
+  keys; team and project managers for their services and projects; the
+  scope policy sets the ceiling (allowed or not, sample rate, redaction
+  hooks that must run). Captured content goes only to Langfuse, tagged
+  with who enabled it; retention is Langfuse's, set per project there
+  (§8 Q5).
 - **Request metadata headers** *(added)*: `x-golem-session`,
   `x-golem-tags`, `x-golem-end-user` (or OpenAI's `user`, Anthropic's
   `metadata.user_id`); coding-agent sessions grouped automatically where
@@ -276,28 +286,44 @@ routes it (ADR 0010):
 - **Debug** *(added)*: runtime/trace flight-recorder snapshots of slow
   requests; pprof including the goroutine-leak profile on the admin port.
 
-### 5.9 Kubernetes and the mesh
+### 5.9 Components, Kubernetes and the mesh
 
-- Two deployments: **golem** (data plane) and **golem-control** (control
-  plane: self-service/admin API, Entra group sync, approvals; ADR 0009).
-- Ports: data, admin (probes, pprof, config dump). In ambient mode golem
-  serves plain HTTP; ztunnel provides mTLS. A waypoint for golem's service
-  is optional (M2), for L7 authorization and the caller identity header.
-- `/livez`, `/readyz` (config and entitlements snapshot loaded, a usable
+The system is six deliverables (architecture.md, ADR 0013):
+
+| Component | Role | Milestone |
+|---|---|---|
+| golem-gateway | Data plane only: model requests in, provider calls out | M0 |
+| golem-control | Control API (config, org, keys, budgets, spend, audit, admin) and the distribution API for gateways | M1 |
+| golem-worker | Jobs: Entra sync, period rollover, leases, expiries, notifications, ledger reconciliation | M1 |
+| golem-operator | CRDs for installation and config; upgrades, migrations, drains, canaries, credential mounting, mesh policies, telemetry plumbing | M1 |
+| golemctl | CLI for every persona, including `login` and coding-agent setup | M1 |
+| golem-console | Small web UI for keys, allocations, requests and approvals | M2 |
+| Backstage plugin | Spend, budgets and keys on Backstage entities | M3 |
+
+- **One API changes state**: the control API (protobuf, Connect; ADR
+  0014). The operator, CLI, console and plugin are its clients; the gateway
+  reads only the distribution stream (ADR 0012).
+- **Store**: Aurora DSQL (multi-region, preferred) or PostgreSQL (AKS,
+  on-prem), one implementation (ADR 0015).
+- **Gateway probes**: `/livez`, `/readyz` (a snapshot loaded, a usable
   deployment per required pool, limit store reachable when required),
-  `/healthz`, `/startupz`.
-- **Graceful drain** *(added)*: readiness fails, new requests stop,
-  in-flight streams get a long grace, then end with a dialect error event.
-- **Backend health probes** *(added, M2)*.
+  `/healthz`, `/startupz`; snapshot dump and `explain` on the admin port,
+  read-only.
+- **Graceful drain** *(added)*: readiness fails, in-flight streams get a
+  long grace, then end with a dialect error event; orchestrated by the
+  operator on rollouts (operator.md §3).
+- **Mesh**: ambient mode; the gateway serves plain HTTP behind ztunnel;
+  the operator installs the gateway's waypoint (optional) and the
+  AuthorizationPolicies (only the waypoint to the data port when identity
+  headers are trusted; only gateways to the distribution API; admin ports
+  to the operator and control plane).
+- **Config**: CRDs reconciled by the operator into the config API, or
+  `golemctl apply`; each object has one owner. Provider secrets stay in
+  Kubernetes Secrets, mounted into the gateways that need them.
+- **Multiple instances and regions**: `GatewayPool`s per region or zone;
+  in multi-region, a control plane per region over one DSQL cluster.
 - Container-aware GOMAXPROCS (runtime default), `GOMEMLIMIT` from the
-  limit, PDB and HPA on in-flight streams in the Helm chart *(added)*.
-- **Operator config** (backends, model routes and aliases, scope policies'
-  model sets, limit policies, hooks) by CRDs or one YAML file, compiled into
-  an immutable snapshot (ADR 0002). **Entitlements** (users, teams,
-  projects, services, keys, budgets) are not CRDs: they are data managed
-  through golem-control (ADR 0009).
-- Multiple instances (e.g. per region) select their CRDs by label and share
-  golem-control and the limit store, or run their own.
+  limit, PDBs, HPA or KEDA *(added)*.
 
 ### 5.10 Security and compliance
 
@@ -329,10 +355,10 @@ protocol-agnostic so it can be added.
 
 | Milestone | Contents | Exit criterion |
 |---|---|---|
-| M0 | Skeleton: config snapshot, file source, one OpenAI-compatible backend, fast-path proxy, probes, OTLP to ClickStack | Streams a chat completion with a trace and token metrics in HyperDX |
-| M1 | §5.1/§5.2 M1 dialects and backends incl. Bedrock and the decision APIs; Chat→Anthropic and Chat→Converse translation; Entra users and services; personal and service keys; `golem login`; teams, scopes, member allocations; aliases, balancing, failover, ejection, cache affinity; limits (Dragonfly/Valkey if present); in-process hooks; CRD source; ClickHouse ledger; Langfuse export; Grafana dashboards; drain; Helm | One team's apps and coding agents in production through it |
-| M2 | Projects, cost centers, grants, approvals, adjustments, audit; self-service UI and notifications; mesh identity via waypoint; shadowing; conditional routing; remote and built-in hooks; embeddings to Bedrock; context-window fallback; Entra OBO pass-through | Default path for the enterprise; direct provider keys revoked |
-| M3 | Batch/Files, rerank, Decisions↔System One translation, cost-based routing, priority classes, budget downgrade, chargeback export, response cache, Vertex | By demand |
+| M0 | Gateway skeleton: snapshot from a file, one OpenAI-compatible backend, fast-path proxy, probes, OTLP to ClickStack; repository layout and the import test; proto skeletons | Streams a chat completion with a trace and token metrics in HyperDX |
+| M1 | §5.1/§5.2 M1 dialects and backends incl. Bedrock and the decision APIs; Chat→Anthropic and Chat→Converse translation; Entra users and services; personal and service keys; `golemctl login`; teams, scopes, member allocations; aliases, balancing, failover, ejection, cache affinity; limits (Dragonfly/Valkey if present); in-process hooks; ClickHouse ledger; Langfuse export; Grafana dashboards; golem-control and golem-worker on DSQL (and Postgres in CI); distribution API; golem-operator (ControlPlane, GatewayPool, config CRDs, upgrades, drains); golemctl; mesh identity spike | One team's apps and coding agents in production through it, on EKS |
+| M2 | Projects, cost centers, grants, approvals, adjustments, audit; golem-console and notifications; multi-region leases; Bedrock from AKS/on-prem; mesh identity via waypoint; shadowing; conditional routing; remote and built-in hooks; embeddings to Bedrock; context-window fallback; Entra OBO pass-through | Default path for the enterprise; direct provider keys revoked |
+| M3 | Backstage plugin, Batch/Files, rerank, Decisions↔System One translation, cost-based routing, priority classes, budget downgrade, chargeback export, response cache, Vertex | By demand |
 
 ## 7. Success measures
 
@@ -347,36 +373,26 @@ protocol-agnostic so it can be added.
 
 ## 8. Open questions
 
-Resolved in the second pass: "decisions" is OpenAI's Decisions API and
-"systemone" TypeSafe's System One (§5.1); translation is what Bedrock needs
-plus Chat to all (§5.1.2); Entra for end users (§5.3); Gloo Mesh ambient
-(§5.9); ClickHouse, ClickStack, Langfuse, Grafana available (§5.8).
+Resolved: the decision APIs (§5.1); translation scope (§5.1.2); Entra
+(§5.3); Gloo Mesh ambient (§5.9); the telemetry stack (§5.8); store:
+Aurora DSQL preferred, PostgreSQL elsewhere (ADR 0015); teams as drafted
+(golem-managed, optionally Entra-bound); console then Backstage (tools.md);
+team-to-project grants need no approval; allocations may oversubscribe;
+EKS first, AKS and on-prem later (§5.2); content capture switches (§5.4,
+§5.8).
 
-1. **Where entitlements live.** "Virtual keys can be external": read here as
-   "golem does not need Kubernetes Secrets for keys; an external store is
-   fine". ADR 0009 proposes PostgreSQL (CloudNativePG or managed) for
-   golem-control's transactional data, because ClickHouse is not suited to
-   approvals and key revocation. Is a Postgres acceptable? If you instead
-   meant keys issued by an *external system* (e.g. an existing API-key
-   service), golem's `KeyStore` would call it, and we need its API.
-2. **Mesh identity in ambient mode.** Confirm whether Gloo Mesh's waypoint
-   in your version can forward the caller's SPIFFE identity (XFCC or a
-   custom header) to golem; otherwise services authenticate with Entra
-   tokens or keys only, and the mesh contributes L4 authorization alone.
-3. **Team ↔ Entra groups.** Should teams be strictly Entra groups (golem
-   reads membership, cannot edit it), or golem-managed with optional group
-   binding (as drafted)? golem-control needs Graph `GroupMember.Read.All`
-   either way for groups-claim overage.
-4. **Self-service UI.** CLI and API in M1, a small server-rendered UI in M2
-   (as drafted), or is the API enough with a Backstage plugin or similar?
-5. **Team-to-project grants.** Drafted as needing no approval (the team's
-   money was already approved); confirm, or require a budget manager for
-   those too.
-6. **Oversubscription** of member allocations, default on as drafted?
-7. **Limit store.** Dragonfly, Valkey or Redis: any preference? Dragonfly
-   needs all script keys declared (golem's scripts do) and runs fine
-   single-node; Redis Cluster would need hash-tagged keys per scope.
-8. **AWS identity.** Does golem run on EKS (Pod Identity for Bedrock) or in
-   Azure/on-prem (Entra → AWS IAM OIDC federation)?
-9. **Content capture policy**: who may enable it per scope, Langfuse
-   retention, and whether Langfuse is the only place content may go.
+1. **Waypoint identity header.** Verified in an M1 spike against your Gloo
+   Mesh version (ADR 0003): which header carries the caller's SPIFFE ID
+   and how the waypoint is configured to set it.
+2. **Limit store.** Dragonfly, Valkey or Redis per region: any
+   preference? (Scripts are written for Dragonfly's declared-keys rule and
+   Redis Cluster hash tags.)
+3. **Regions.** Which regions, and is a DSQL multi-region cluster
+   (two regions plus a witness) available, or single-region first?
+4. **Entra app registrations.** One app for golem's API audience and one
+   for the console, plus Graph `GroupMember.Read.All` for the worker:
+   who owns them?
+5. **Content retention.** Langfuse project retention for captured content,
+   and whether some scopes must never capture (the scope policy can forbid
+   it).
+6. **Notifications.** Email (which relay), Teams webhooks, or both?

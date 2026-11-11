@@ -1,7 +1,9 @@
-# golem: design
+# golem: the gateway (data plane)
 
-Status: draft, second pass. Read with [prd.md](prd.md) and
-[org-model.md](org-model.md); decisions are in [adr/](adr/).
+Status: draft, third pass. The system's components and how they fit are in
+[architecture.md](architecture.md); this document is the gateway's inside.
+The gateway does data-plane work only: it serves model requests. It has no
+API for changing anything, no database, and no Kubernetes client.
 
 ## 1. Principles
 
@@ -19,12 +21,13 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
 - **Stream, don't buffer.** Responses are copied as they arrive and
   flushed through `http.ResponseController`; usage is read from the stream
   by a tee'd scanner, not by buffering it.
-- **Immutable config.** One validated snapshot behind an
-  `atomic.Pointer`; a request takes the pointer once and uses it to the
-  end. No locks on the request path for config (ADR 0002).
+- **Immutable config.** One validated snapshot (routes and entitlements)
+  behind an `atomic.Pointer`, delivered by the control plane's
+  distribution API (ADR 0012); a request takes the pointer once and uses
+  it to the end. No locks on the request path for config.
 - **Standard library first.** Dependencies only where the standard library
-  has no answer (OTel, CEL, JWT/JOSE, Redis, Kubernetes client), each behind
-  a small interface in one package.
+  has no answer (OTel, CEL, JWT/JOSE, the RESP client, provider signers),
+  each behind a small interface in one package.
 - **Context everywhere, goroutines owned.** Every goroutine is started by
   `sync.WaitGroup.Go` or an errgroup owned by its request or the server, and
   ends with it. A goroutine-leak profile is checked in tests.
@@ -34,25 +37,16 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
 
 ## 2. Shape
 
-Two binaries, one module:
-
-- **golem** (data plane): the request path. Stateless apart from caches;
-  scaled horizontally.
-- **golem-control** (control plane): the self-service and admin API, Entra
-  group sync, approvals, notifications, spend queries. Owns PostgreSQL.
-  Two or three replicas; the data plane keeps serving if it is down.
-
 ```
-request:   ztunnel (mesh mTLS) → listener → frontend (dialect, scan) → authn (Principal, scope)
+request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect, scan) → authn (Principal, scope)
            → OnRequest hooks → router (alias, pool, deployment) → limits (reserve: key, member, pool)
            → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
-admin:     /livez /readyz /healthz /startupz, pprof, config dump, explain
-operator config:  file | CRDs → compile + validate → atomic Snapshot          (ADR 0002)
-entitlements:     golem-control (Postgres) → change feed → atomic Entitlements (ADR 0009)
-limit state:      Dragonfly | Valkey | Redis (reservations, counters)        (ADR 0005)
-telemetry:        OTLP → collector → ClickStack, ClickHouse golem.spend, Langfuse (ADR 0010)
-dashboards:       Grafana over ClickHouse and metrics, provisioned from deploy/grafana
+inputs:    distribution stream from golem-control → compile → atomic Snapshot   (ADR 0012)
+           or a file, for development and tests (the same snapshot format)
+state:     Dragonfly | Valkey | Redis (reservations, counters, regional lease) (ADR 0005, 0016)
+outputs:   OTLP → collector (ADR 0010); status reports → golem-control
+local:     /livez /readyz /healthz /startupz, pprof, snapshot dump, explain (read-only, admin port)
 ```
 
 ## 3. The request path
@@ -68,7 +62,8 @@ dashboards:       Grafana over ClickHouse and metrics, provisioned from deploy/g
    `jsontext.Decoder` scan extracts the routing fields; it stops early once
    it has them unless a hook or translation needs the whole tree.
 3. **Authenticate** (ADR 0003). The chain yields a `Principal` (user or
-   service, scope, key) or an error in the caller's dialect. Keys are
+   service, scope, key, mesh identity if present) or an error in the
+   caller's dialect. Keys are
    looked up by hash in the entitlements snapshot (no network call); Entra
    JWTs are verified locally against cached JWKS. Effective rights are
    computed from the snapshot: scope policy ∩ membership ∩ key constraints
@@ -101,41 +96,31 @@ bounding shadow concurrency so mirroring cannot exhaust the pool.
 
 ## 4. Packages
 
+All under `gateway/` (architecture.md §4 gives the repository and the
+import rules that keep the gateway free of control-plane code):
+
 ```
-cmd/golem/            data plane main: flags, signals, wiring; nothing else
-cmd/golem-control/    control plane main
-cmd/golemctl/         CLI: login, keys, allocations, requests/approvals, route explain, config check
-internal/config/      the snapshot types (one schema for file and CRDs), compile, validate
-internal/config/file  file source (fsnotify-free: poll or ConfigMap symlink swap, via os.Root)
-internal/config/kube  CRD source (client-go informers), Secret watching
-internal/dialect/     one subpackage per dialect: openai/chat, openai/responses,
-                      anthropic/messages, gemini, bedrock; each: scan, errors, SSE events,
-                      usage extraction; translation via ir/
-internal/dialect/ir   the intermediate representation used only for translation
-internal/auth/        Authenticator interface, chain, Principal; keys, entra (JWT), meshid
-internal/entitle/     the Entitlements snapshot and its client (change feed from golem-control)
-internal/route/       aliases, pools, strategies, affinity, ejection, retry budget
-internal/limit/       limiter interface; local GCRA/sliding windows; RESP implementation (Dragonfly, Valkey, Redis)
-internal/price/       model catalog, pricing, the vendored price list
-internal/hook/        phases, in-process registry, remote (gRPC/HTTP) client, built-ins
-internal/upstream/    per-deployment transports, provider auth (keys, SigV4, Entra, GCP)
-internal/proxy/       the request path (§3): the only package that knows the order of steps
-internal/telemetry/   OTel setup, semconv attribute helpers, access log, flight recorder
-internal/admin/       probes, config dump, explain (data plane)
-internal/control/     golem-control: API handlers, org model, grants, approvals, audit, Entra sync
-internal/control/store  PostgreSQL schema and queries (pgx), migrations
-internal/spend/       spend queries over ClickHouse (control plane only)
-api/v1alpha1/         CRD Go types (kubebuilder markers), generated CRD YAML
-api/control/v1/       control plane HTTP API (OpenAPI), shared by golemctl and the UI
-deploy/helm/          chart (both binaries, CRDs, collector routing example)
-deploy/clickhouse/    golem.spend and golem.audit tables, materialized views
-deploy/grafana/       dashboards and alert rules as code
+cmd/golem-gateway/     main: flags, signals, wiring; nothing else
+gateway/proxy/         the request path (§3): the only package that knows the order of steps
+gateway/dialect/       one subpackage per dialect: openai/{chat,responses,embeddings,decisions},
+                       anthropic/messages, typesafe/systemone, bedrock/{invoke,converse};
+                       each: scan, errors, SSE events, usage extraction
+gateway/dialect/ir     the intermediate representation, used only for translation
+gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT), meshid
+gateway/snapshot/      the compiled Snapshot (routes + entitlements), its distribution client,
+                       the file source, the on-disk last-good copy
+gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
+gateway/limit/         Limiter; local GCRA/windows; RESP implementation; regional lease use
+gateway/price/         model catalog lookups and pricing (the catalog comes in the snapshot)
+gateway/hook/          phases, in-process registry, remote client, built-ins
+gateway/upstream/      per-deployment transports, provider auth (keys, SigV4, Entra, Roles Anywhere)
+gateway/telemetry/     OTel setup, semconv helpers, access log, flight recorder
+gateway/local/         probes, pprof, snapshot dump, explain
 ```
 
 `proxy` depends on interfaces from the others; nothing depends on `proxy`.
 Each dialect package is independent of the others and of `ir` except for its
-translation file, so the fast path never links the translation code's
-behaviour into a same-dialect request.
+translation file.
 
 ## 5. Go 1.27 facilities used
 
@@ -169,39 +154,28 @@ Third-party, each confined to one package: OpenTelemetry Go SDK and
 `otelslog` bridge (telemetry), `cel-go` (route, hook), `go-jose/v4`
 (auth/entra), `valkey-go` (limit; RESP3, works against Dragonfly and
 Valkey), `aws-sdk-go-v2`'s SigV4 signer and credential providers only
-(upstream/bedrock), `azidentity` (upstream/azure, control's Graph sync),
-`client-go` and `sigs.k8s.io/yaml` (config/kube, config). Control plane
-only: `pgx/v5`, `clickhouse-go/v2`, `msgraph` or plain Graph REST calls.
-The data path's core (proxy, dialect, route, price, entitle) imports none
-of them except OTel's API.
+(upstream/bedrock), `azidentity` (upstream/azure), the generated
+distribution client (connect-go, protobuf). No `pgx`, ClickHouse, Graph or
+Kubernetes client: the import test (architecture.md §4.2) fails if one
+appears. The core (proxy, dialect, route, price) imports none of these
+except OTel's API.
 
-## 6. Control plane and entitlements
+## 6. Snapshot lifecycle
 
-golem-control owns the org model (org-model.md) in PostgreSQL. The data
-plane never queries Postgres on the request path; it holds an
-`atomic.Pointer[Entitlements]`: keys by hash, principals, memberships,
-scope policies, allocations and pool totals for the current period.
-
-- **Delivery**: each data plane instance streams changes from
-  golem-control (`GET /v1/feed?since=<version>`, a long-lived response of
-  JSON lines, resumable by version; a full snapshot when `since` is too
-  old). golem-control fans out from Postgres `LISTEN/NOTIFY` on an
-  outbox table. Revocation reaches every instance in about a second.
-- **Startup**: a data plane instance is not ready until it has a snapshot.
-  It persists the last one to an `emptyDir` so a restart during a control
-  plane outage still comes up (with keys revoked during the outage still
-  valid until it ends: a stated limit).
-- **Writes**: only golem-control writes Postgres. Every write is a
-  transaction that also inserts the audit event and the outbox entry.
-- **Entra sync**: golem-control reads bound groups' memberships from
-  Graph on a schedule and on change notifications (M2), and resolves
-  groups-claim overage for tokens it validates.
-- **Spend and pool usage**: live counters are in the limit store; month to
-  date is also computable from ClickHouse, which is the reference.
-  golem-control's spend API queries ClickHouse; a daily job compares it with
-  the counters and corrects drift.
-- **Approvals and notifications** are golem-control's; notifications go out
-  by email or Teams webhooks, and as audit events Grafana can alert on.
+- At start the gateway loads its last-good snapshot from disk (an
+  `emptyDir` or a small PVC) if present, then opens the distribution
+  stream. It is ready once it holds a snapshot no older than a configured
+  bound (or any snapshot, if the control plane is unreachable and the
+  operator allows stale starts).
+- Each update is compiled (CEL, lookup maps) off the request path and
+  swapped in; a failure to compile keeps the previous snapshot and is
+  reported back on the stream (and so reaches the CRD's status through the
+  operator).
+- The gateway acknowledges every version it applies; golem-control knows
+  which gateways run which version (`golemctl gateways`).
+- Runtime state that must survive updates (transports, ejection state,
+  EWMAs, affinity tables) is keyed by deployment identity, not held in the
+  snapshot.
 
 ## 7. Performance notes
 
@@ -235,9 +209,10 @@ scope policies, allocations and pool totals for the current period.
   with a small Quint model of "never double-charge, never replay a started
   stream, never exceed a hard budget by more than one in-flight
   reservation" as the judge. Worth doing once M1's routing settles.
-- Budget enforcement and the change feed (no double charge, reservation
-  expiry after a crash, revocation ordering, counter rebuild from the
-  ledger) are the other candidates for a model-checked simulation.
+- Budget enforcement (no double charge, reservation expiry after a crash,
+  regional lease exhaustion and refill) is the other candidate for a
+  model-checked simulation; the control plane's side is in
+  control-plane.md §8.
 - Limit scripts tested against Valkey and Dragonfly containers in CI.
 - End-to-end: kind cluster with Istio ambient, the chart, a stub provider,
   ClickHouse, and the real OpenAI and Anthropic SDKs (and a coding agent)

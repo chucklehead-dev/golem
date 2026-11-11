@@ -28,11 +28,17 @@ the caller's own provider credential.
 - Keys are stored as SHA-256 hashes of high-entropy secrets (no slow hash
   needed: they are random, not passwords). Lookups cached.
 - Mesh identity: in ambient mode golem cannot read the peer certificate.
-  If a waypoint fronts golem's service and forwards the caller's SPIFFE ID
-  (to be confirmed for the Gloo Mesh version in use), golem trusts that
-  header only on connections whose peer is the waypoint (enforced by an
-  Istio AuthorizationPolicy, so nothing else can reach the port). It binds
-  keys to workloads; it is not a standalone credential in M1.
+  A waypoint in front of the gateway Service passes the caller's SPIFFE ID
+  in a header (XFCC, or a header set by the waypoint's route from the
+  peer principal). The gateway trusts the header only when the operator
+  has also installed the AuthorizationPolicy that admits nothing but the
+  waypoint to the gateway's data port, and strips it otherwise. The
+  identity binds keys to workloads and identifies in-mesh services without
+  keys (M2). The exact waypoint configuration for the Gloo Mesh version in
+  use is an M1 spike: the public docs we found do not describe it, so it
+  is verified by test (inspect headers at a stub upstream) before relying
+  on it. Fallback if it cannot be done: services use Entra workload
+  identity tokens, and the mesh contributes L4 authorization only.
 - Pass-through is a route property: `none` | `forward` | `exchange`. With
   `forward`, golem still authenticates the caller by some other method
   unless the route is explicitly `byo-only` (metered by key hash).

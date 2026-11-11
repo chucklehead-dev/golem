@@ -1,6 +1,6 @@
 # 0002: One config schema, compiled into an immutable snapshot
 
-Status: Proposed
+Status: Superseded by [0012](0012-config-through-the-control-plane.md) (the snapshot and its atomic swap stand; config now reaches gateways through the control plane, not by gateways watching CRDs)
 
 ## Context
 

@@ -38,7 +38,7 @@ The model in [org-model.md](../org-model.md):
 - A team cannot overspend through its projects: grants out reduce its
   available money at grant time.
 - A user who wants one key for everything cannot have it; scopes are what
-  make the spend attributable. `golem login` makes picking a scope cheap.
+  make the spend attributable. `golemctl login` makes picking a scope cheap.
 
 ## Alternatives
 

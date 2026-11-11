@@ -1,7 +1,8 @@
 # golem: organisation, keys and budgets
 
-Status: draft. The entitlement model behind PRD §5.3–§5.5; decided in
-ADR 0008 (the model) and ADR 0009 (where it lives).
+Status: draft, third pass. The entitlement model behind PRD §5.3–§5.5;
+decided in ADR 0008 (the model), ADR 0009 (where it lives) and ADR 0016
+(multi-region enforcement).
 
 ## 1. Entities
 
@@ -25,9 +26,9 @@ Roles are assigned in golem and audited; the Entra app role
 
 | Role | Held on | May |
 |---|---|---|
-| Member | team, project | Use the scope's models within their allocation; mint personal keys in the scope. |
-| Team manager | team | Manage team membership (where not Entra-bound), create projects owned by the team, create team services, allocate the team's budget to members, services and projects; request adjustments. |
-| Project manager | project | Add/remove member teams, services, users; create project services; allocate the project's budget to members and services; request adjustments. A project's primary team's managers are its project managers by default. |
+| Member | team, project | Use the scope's models within their allocation; mint personal keys in the scope; turn content capture on or off for their own keys. |
+| Team manager | team | Manage team membership (where not Entra-bound), create projects owned by the team, create team services, allocate the team's budget to members, services and projects; request adjustments; turn content capture on or off for team services and for the projects the team owns. |
+| Project manager | project | Add/remove member teams, services, users; create project services; allocate the project's budget to members and services; request adjustments; turn content capture on or off for the project and its services. A project's primary team's managers are its project managers by default. |
 | Budget manager | cost center (or globally) | Assign budgets to teams and projects from the cost center; approve or reject requests that draw on it (new budgets, permanent and one-time adjustments). |
 | Service owner | service | Mint, rotate and revoke the service's keys (team or project managers by default). |
 | Admin | global | Everything, plus operator config views; break-glass. |
@@ -60,10 +61,24 @@ Key constraints, all optional:
 - `max_tokens` ceiling, allowed `reasoning` effort, no-content-capture flag;
 - metadata: name, purpose, tags (become telemetry attributes).
 
+### 3.1 Content capture
+
+Prompt and completion capture is off unless switched on for the request's
+key, service or project (whichever is most specific wins), and never beyond
+the scope policy's ceiling (forbidden, or allowed with a sample rate and
+required redaction hooks). A switch may be time-boxed; the worker turns
+it off at expiry. Every switch is an audit event, and captured records
+carry who enabled capture. Content goes to Langfuse only.
+
+### 3.2 Minting
+
 Personal keys are minted by users for themselves (self-service, API/CLI,
-or `golem login` for coding agents, which mints a short-lived key after an
+or `golemctl login` for coding agents, which mints a short-lived key after an
 Entra device-code or browser flow). Service keys are minted by the service
 owner. Keys are shown once; golem stores the hash and a display prefix.
+
+The model is stored and enforced by golem-control's service layer
+(control-plane.md §2); the gateway only evaluates the snapshot of it.
 
 Services may also authenticate without keys, by Entra tokens (client
 credentials or workload identity federation from their Kubernetes service
@@ -84,7 +99,7 @@ by a **grant**:
 |---|---|---|---|
 | Cost center | team | budget manager | none (the budget manager is the approver) |
 | Cost center | project | budget manager, or requested by a project/team manager | budget manager |
-| Team | project (any project the team owns or is a member of) | team manager | none by default; policy may require a budget manager |
+| Team | project (any project the team owns or is a member of) | team manager | none (confirmed) |
 | Team or project | member user or service (an **allocation**) | team / project manager | none |
 
 A grant is **recurring** (every period from a start period, until ended:
@@ -102,8 +117,8 @@ pool.available = total − granted − spent − reserved
 ```
 
 Allocations to members do not move money; they are caps within the pool.
-Their sum may exceed the pool (oversubscription, default on, since few
-members use all of theirs); a pool may forbid it. A member without an
+Their sum may exceed the pool (oversubscription, on, since few members
+use all of theirs). A member without an
 allocation draws from the pool up to the scope's **default member cap**
 (possibly zero).
 
@@ -115,7 +130,8 @@ reserves the estimated cost at each level, atomically, and fails with a
 
 1. the key's own cap (if any);
 2. the member's allocation in the scope (or the default member cap);
-3. the scope pool's `available`.
+3. the scope pool's `available` (in multi-region deployments, the
+   region's lease of it: ADR 0016).
 
 At completion the reservation becomes spend (corrected to actual cost).
 Team pools are not charged for a project's spend: the grant already
