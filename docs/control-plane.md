@@ -1,8 +1,8 @@
 # golem: the control plane
 
 Status: draft, ninth pass. golem-control: one Deployment, every replica
-serving the API, one leader running jobs and publishing snapshots (ADR
-0003), over one state document in object storage (ADRs 0006, 0007).
+serving the API, one leader running jobs and publishing snapshots (ADRs
+0003, 0019), over one state document in object storage (ADRs 0006, 0007).
 Components and APIs at a glance: architecture.md §1–3.
 
 ## 1. Responsibilities
@@ -46,7 +46,7 @@ writes the document except through them.
 show errors with field paths before anything is written. Config CRDs are
 validated by their schemas' CEL rules and offline by `golemctl config
 validate` (the snapshot compiler as a library), not by a live API call
-(ADR 0003).
+(ADR 0005).
 
 ## 3. Store: the state document
 
@@ -58,7 +58,7 @@ validate` (the snapshot compiler as a library), not by a live API call
   `fn`, check invariants, increment `state_version`, `PutObject` with
   `If-Match: <etag>`; on 412 re-read and retry. Every write is serialized.
 - **Reads**: from memory, refreshed by a conditional GET every 500 ms.
-- **Audit outbox** (ADR 0003): a write's audit events go into the document
+- **Audit outbox** (ADR 0006): a write's audit events go into the document
   with it; the leader ships them to ClickHouse as OTel log records and
   trims them once accepted. Optionally also archived under Object Lock.
 - **Schema evolution**: additive protobuf changes need nothing. A breaking
@@ -123,7 +123,7 @@ control plane.
   groups) or on their first control-API call; a user unknown to the
   snapshot cannot use the gateway yet (seconds after their first sign-in).
 - **Coding agents**: `golemctl token` prints a cached Entra access token for
-  agents with a credential helper (ADR 0003); others get a minted personal
+  agents with a credential helper (ADR 0009); others get a minted personal
   key, 12-hour TTL by default for `golemctl login`, pruned at expiry.
 - **Disabled users**: Entra sync (every 5 minutes; change notifications in
   M2) revokes the keys and memberships of disabled or deleted users.
@@ -185,9 +185,9 @@ ledger's too (seconds behind); golem-control reads no site's Valkey.
   their gateways read the us-east-2 bucket (Entra-to-AWS federation, IAM
   Roles Anywhere). Their config CRDs live in the EKS cluster, selected by a
   `site` label. Budgets reach them as ceilings (ADR 0013); provider quotas
-  are split statically per site (ADR 0003). No cluster reaches another's
+  are split statically per site (ADR 0012). No cluster reaches another's
   API server.
-- **Second region** (M3, ADR 0003): the bucket replicated to us-west-2;
+- **Second region** (M3, ADR 0008): the bucket replicated to us-west-2;
   us-west-2's gateways read the replica; a golem-control Deployment there
   scaled to zero, started by the failover runbook (promote the replica,
   scale up) within the 30-minute RTO. One active control plane at a time.

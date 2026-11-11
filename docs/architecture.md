@@ -1,6 +1,6 @@
 # golem: architecture
 
-Status: draft, fifth pass (simplified by ADRs 0005, 0003). The system as components, their APIs, and the
+Status: v1 baseline. The system as components, their APIs, and the
 rules that keep them apart. Each component's inside has its own document:
 
 | Document | Component |
@@ -168,7 +168,7 @@ Each binary also gets its own image and its own dependency list in
 - **A user mints a key.** `golemctl keys create --scope team/platform
   --models 'claude-*' --cap 50/month`. golem-control checks the user's
   membership and rights, stores the hash with its audit event in one write, and the
-  key reaches the gateways in about a second (ADR 0005).
+  key reaches the gateways in about a second (ADR 0006).
 - **A request is charged.** The gateway reserves at the key, the member
   cap and its site's ceiling of the scope's pool (ADR 0013), calls
   the provider, reconciles, and emits the access-log record, which becomes
@@ -187,7 +187,7 @@ Each binary also gets its own image and its own dependency list in
 |---|---|---|
 | Development | none: gateway reads a snapshot file | `golemctl snapshot build` renders one from YAML |
 | Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
-| Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0003); Valkey and site ceilings there as at any site |
+| Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0008); Valkey and site ceilings there as at any site |
 | AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0008): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site with site ceilings (ADR 0013); no cross-cluster Kubernetes access (ADR 0008); Bedrock through the same federation |
 
 Replicas are fixed, sized for the design envelope (ADR 0021); only the

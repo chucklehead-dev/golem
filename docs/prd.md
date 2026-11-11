@@ -194,7 +194,7 @@ Models on all of them change over time.
   model moves it between pools without config changes.
 - **Capacity** (M1): a static concurrency ceiling per endpoint and a
   per-principal in-flight limit on each pool (default half its capacity),
-  so the few very heavy users cannot occupy every machine (ADRs 0021, 0003).
+  so the few very heavy users cannot occupy every machine (ADRs 0017, 0021).
   **M2**: an adaptive concurrency limit per endpoint (grows while latency
   holds, shrinks when it rises), vLLM `/metrics` polling, **prefix
   affinity** within the limit, and round-robin queueing across principals.
@@ -278,7 +278,7 @@ The full model is [org-model.md](org-model.md). In short:
 
 - **Enforcement modes** per scope: `observe`, `warn`, `enforce` (§9.1).
 - **Provider quota limits** per deployment, shared by a site's gateways,
-  split statically between sites (§9.2, ADR 0003).
+  split statically between sites (§9.2, ADR 0012).
 - **Rate limits** in requests/min, tokens/min and $/min, at any of the
   levels of §5.4 and per model or route; **concurrency limits** on
   in-flight streams per principal *(added)*.
@@ -287,7 +287,7 @@ The full model is [org-model.md](org-model.md). In short:
   before the call, renew it on long streams, correct with actual usage at
   the end; cut streams are charged what was produced, flagged as
   estimated; a daily job reconciles the ledger with providers' usage APIs.
-- **Valkey at every site**, required from M1 (ADR 0003); budgets across
+- **Valkey at every site**, required from M1 (ADR 0012); budgets across
   sites through site ceilings published in snapshots (ADR 0013).
 - Counters are rebuilt from the ClickHouse ledger (data older than the
   collector's maximum delay) after a Valkey loss.
@@ -407,7 +407,7 @@ The system is these deliverables (architecture.md, ADR 0003):
   bucket policies let each gateway pool read its snapshots and write only
   its own status objects.
 - **Config**: five CRD kinds (`Backend`, `ModelRoute`, `ScopePolicy`,
-  `Hook`, `PriceList`; ADR 0003) watched by golem-control, with status
+  `Hook`, `PriceList`; ADR 0005) watched by golem-control, with status
   written back; incident levers as expiring overrides through the API.
   Provider secrets stay in Kubernetes Secrets, mounted into the gateways
   that need them.

@@ -66,7 +66,7 @@ Decided in ADR 0016. Capture settings live at three levels:
 | Level | Set by | Settings |
 |---|---|---|
 | Scope policy (a `ScopePolicy` CRD) | platform admins | the ceiling: capture allowed or forbidden, maximum retention, required redaction hooks |
-| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `override`: locked, narrow, open (sampling later: ADR 0003) |
+| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `override`: locked, narrow, open (sampling later: ADR 0016) |
 | Key or service | the key's owner; the service's owner | `capture` and `retention`: inherit (default), or an override the scope permits |
 
 What a child (key or service) may override:

@@ -17,11 +17,11 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 | Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and ceilings assumed) | ADR 0008, before the first remote site |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
 | Bedrock envelope | Claude Code against Claude on Bedrock through a stub envelope: event-stream framing to SSE, `anthropic_beta` in the body, prompt caching, token counting, inference-profile IDs as alias targets | ADR 0001 |
-| vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADRs 0017, 0003 |
+| vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADR 0017 |
 | Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0016 |
 | Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0020 |
 | Valkey scripts | reserve, renew and reconcile scripts on ElastiCache for Valkey: latency, behaviour across a failover | ADR 0012 |
-| Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0003 |
+| Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0009 |
 
 ## Phase 1 (M0): walking skeleton (3–4 weeks)
 
@@ -136,7 +136,7 @@ onboarded; budgets enforced for all of them.
 
 - Second region: us-west-2 by replication of the bucket, gateways reading
   the replica, a golem-control there scaled to zero, the failover runbook
-  and a drill (ADR 0003).
+  and a drill (ADR 0008).
 - Temporal for approvals, key rotation and batch jobs, when the platform's
   Temporal is ready (ADR 0019).
 - Batch and Files, rerank, Decisions↔System One translation, cost-based

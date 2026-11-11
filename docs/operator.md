@@ -17,14 +17,14 @@ Group `golem.dev`, version `v1alpha1`.
 | `ControlPlane` | golem-control for one installation: image version, replicas, store (bucket, KMS key, and the identity to reach it: Pod Identity, workload identity, Roles Anywhere, or a credentials Secret), Entra app registration, ClickHouse and Valkey references, region name | a Deployment, Services, the leader-election Lease and RBAC, PDBs, ServiceAccounts (with workload identity annotations), RBAC to read config CRDs and write their status, AuthorizationPolicies |
 | `GatewayPool` | A set of gateways (internal, or `edge` for internet-facing consumers with its ingress, WAF and source ranges; ADR 0018): version, replicas, region, the label selector for the config it receives, Valkey reference, the bucket and the identity to read its snapshots (and write its status), drain grace, waypoint on/off, provider Secrets to mount | Deployment, Service, PDB, ServiceAccount, waypoint and its AuthorizationPolicies, egress ServiceEntries for the providers its backends use; registers the pool with the control plane |
 
-**Config** (golem-control's; ADRs 0005, 0003): `Backend`, `ModelRoute`,
+**Config** (golem-control's; ADR 0005): `Backend`, `ModelRoute`,
 `ScopePolicy`, `Hook`, `PriceList`. golem-control validates them, writes
 `Accepted` (or the validation errors with field paths), `Applied` (`n/m`
 gateways in the selecting pools acked the version that contains them) and
 `observedGeneration`. Structural rules are CEL validation rules in the
 CRDs' schemas, enforced by the API server at `kubectl apply`; semantic
 errors appear in status, and an invalid object keeps its last accepted
-generation in snapshots (ADR 0003).
+generation in snapshots (ADR 0005).
 
 Org data (scopes, keys, budgets) and operational overrides are not CRDs:
 they change through the control API (ADRs 0006, 0005).

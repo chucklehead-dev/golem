@@ -72,7 +72,7 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    computed from the snapshot: scope policy ∩ membership ∩ key constraints
    (org model §3).
 4. **Request hooks**, selected by precompiled CEL programs; they may
-   reject, rewrite, or add routing hints (ADR 0003).
+   reject, rewrite, or add routing hints (ADR 0014).
 5. **Route.** Alias to route; CEL conditions; authorization check; pool
    selection by strategy (affinity key first, then the strategy among
    healthy deployments).
