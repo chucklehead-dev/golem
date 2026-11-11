@@ -1,6 +1,6 @@
 # 0011: Budgets: pools funded by grants, three levels of enforcement, modes
 
-Status: Accepted (v1 baseline). From archive 0008.
+Status: Accepted (v1 baseline). From archive 0008. Amended by [0034](0034-budgets-for-m2.md) (M2 scope).
 
 ## Decision
 

@@ -40,3 +40,11 @@ baseline one, marked in both.
 | [0029](0029-security-and-correctness-revision.md) | Proposed security and correctness review amendments and production gates |
 | [0030](0030-authorization-renewal-and-availability.md) | Authorization renewed every minute within a five-minute lease; the control plane, bucket and KMS on the availability path; the accounting spool spike |
 | [0031](0031-soft-budgets.md) | Budgets are soft and eventually consistent; overshoot bounded by concurrency limits and an optional strict worst-case check; no journal, reservations or site allocations |
+| [0032](0032-authorization-lease-length.md) | Internal pools: a four-hour authorization lease, renewed every minute; jitter on polls and retries, none on expiry |
+| [0033](0033-explicit-cross-dialect-conversion.md) | Cross-dialect conversion only where a route asks for it; no implicit cross-dialect failover |
+| [0034](0034-budgets-for-m2.md) | M2 budgets are caps and a cost-center mapping; grants and approvals wait for demand |
+| [0035](0035-capture-projects-and-the-collector.md) | A Langfuse project per top-level team, inheritable; retention per project; the collector holds the credentials |
+| [0036](0036-no-mesh-identity-no-operator.md) | No mesh-identity header; no operator (Helm, GitOps, Argo Rollouts) |
+| [0037](0037-request-policy-and-cache-stability.md) | Forward unknown fields, enforce the policy-relevant ones; semantic cache stability |
+| [0038](0038-accounting-refinements.md) | Dedicated provider accounts, monthly reconciliation within tolerance, renewed concurrency slots, bounded worst case |
+| [0039](0039-bypass-controls.md) | Block bypass: SCPs for Bedrock, egress blocks, provider key-creation limits, managed agent settings |

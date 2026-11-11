@@ -28,8 +28,8 @@ for v in overshoots refusesWhenSpent crashThenBalanced duplicateAbsorbed; do
 done
 
 echo "== each broken design is caught"
-# noLimit's counterexample (every call admitted before any completes) is too
-# rare for random simulation; its story, unlimitedTest, is the witness below.
+# noLimit's and noSlotRenewal's counterexamples (every call admitted before any completes; slots expiring mid-call) are too
+# rare for random simulation; their stories, unlimitedTest and slotExpiryTest, are the witnesses below.
 for pair in rawSum:noDoubleCount noReconcile:booksMatch; do
   m=${pair%%:*}; i=${pair##*:}
   r=$(run --main="$m" --invariant="$i"); echo "$m breaks $i: $r"
@@ -49,5 +49,7 @@ expect softDesign crashReconciledTest pass
 expect noReconcile crashReconciledTest fail
 expect rawSum duplicateCountedTest pass
 expect softDesign duplicateCountedTest fail
+expect noSlotRenewal slotExpiryTest pass
+expect softDesign slotExpiryTest fail
 
 exit $fail

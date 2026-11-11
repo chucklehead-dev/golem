@@ -12,7 +12,7 @@ rules that keep them apart. Each component's inside has its own document:
 | [gateway.md](gateway.md) | golem-gateway, the data plane |
 | [control-plane.md](control-plane.md) | golem-control: APIs, the state document, signed distribution, jobs, bootstrap |
 | [roadmap.md](roadmap.md) | the phases and their exit criteria |
-| [operator.md](operator.md) | golem-operator: CRDs, deployment, day-2 operations |
+| [operations.md](operations.md) | installation and day-2 with Helm, GitOps and Argo Rollouts |
 | [tools.md](tools.md) | golemctl, golem-console, the Backstage plugin |
 | [contracts.md](contracts.md) | the interfaces others depend on: errors, the ledger, prices, headers |
 | [canonical-model.md](canonical-model.md) | translation through the canonical model; capabilities; determinism |
@@ -26,7 +26,6 @@ rules that keep them apart. Each component's inside has its own document:
 |---|---|---|---|
 | **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; call the control plane or Kubernetes | Caches; limit counters in Valkey; reads its snapshots from object storage |
 | **golem-control** | The control API (config read, explain, overrides, entitlements, self-service, admin, spend) and the watch on config CRDs and their status; its leader (a Kubernetes Lease) runs the jobs and signs and publishes snapshots | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADRs 0006, 0007); reads ClickHouse |
-| **golem-operator** (M2) | Installs and upgrades golem in its own cluster: drains, canaries, credential mounting, mesh policies, Langfuse projects | Handle config; talk to gateways | None (Kubernetes is its state) |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
 | **golem-console** | A small web UI for the same tasks (M2) | Anything the API does not offer | None |
 | **Backstage plugin** | Keys, spend and budgets inside Backstage (M3, optional) | Same | None |
@@ -48,9 +47,9 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
    golem-control ◀────────────────────────────────────────────────┘
      entitlements · overrides · spend · audit · explain
      leader: jobs; signs and publishes snapshots
-            │  state document: CAS (If-Match)        golem-operator (M2), one per
-            │  snapshots + signed pointers           cluster: installs, upgrades,
-            ▼                                        drains, mesh policies
+            │  state document: CAS (If-Match)        Helm + GitOps (Argo CD or Flux)
+            │  snapshots + signed pointers           + Argo Rollouts install and
+            ▼                                        upgrade every cluster
    S3 bucket, us-east-2, shared by every site (replicated to a backup account)
             ▲  poll signed pointer, fetch by hash; write status/<pool>/<id>
             │
@@ -101,7 +100,6 @@ proto/golem/...            API definitions (buf); the contract between component
 gen/                       generated Go (protobuf, connect) and TypeScript clients
 cmd/golem-gateway/         each main only wires its component
 cmd/golem-control/
-cmd/golem-operator/
 cmd/golemctl/
 gateway/...                data plane (gateway.md §4)
 control/
@@ -114,8 +112,6 @@ control/
   distribution/            snapshot building, signing and publication
   spend/                   ClickHouse queries
   jobs/                    the leader's jobs; call control/service, never the store directly
-operator/
-  controllers/             installation and day-2 reconcilers
 console/                   web UI (Go html/template + htmx), a client of the control API
 cli/                       golemctl commands, a client of the control API
 plugins/backstage/         TypeScript, generated client (M3)
@@ -124,7 +120,7 @@ lib/                       shared libraries with no control-plane or Kubernetes-
                            snapshot format, the CRD types (lib/api/v1alpha1) and the snapshot
                            compiler (lib/compile), used by golem-control, golemctl and the
                            standalone gateway
-deploy/                    Helm chart (installs the operator and CRDs), ClickHouse DDL, Grafana
+deploy/                    Helm charts (CRDs, golem-control, gateway pools), Terraform, ClickHouse DDL, Grafana
 docs/
 ```
 
@@ -146,12 +142,11 @@ layer below it.
 
 `internal/archtest` runs `go list -deps` per binary and fails when:
 
-- `cmd/golem-gateway` depends on `control/...`,
-  `operator/...`, `pgx`, `clickhouse-go`, `client-go` or
-  `controller-runtime`;
+- `cmd/golem-gateway` depends on `control/...`, `pgx`, `clickhouse-go`,
+  `client-go` or `controller-runtime`;
 - anything outside `control/store/...` writes the state document;
 - `control/api` imports `control/store`;
-- `operator`, `cli` or `console` import anything of `control` but the
+- `cli` or `console` import anything of `control` but the
   generated clients and `lib/api/v1alpha1`;
 - `lib/` imports client-go, controller-runtime or anything of the control
   plane (the standalone gateway imports `lib/compile`);
@@ -198,7 +193,7 @@ Each binary also gets its own image and its own dependency list in
 |---|---|---|
 | Laptop | none | `golem-gateway --standalone ./config/`: the gateway alone from CRD YAML, in-memory limits, the developer's own provider credentials (ADR 0023) |
 | Development of golem itself | MinIO | `make dev-up`: kind, MinIO, Valkey, dex, ClickHouse and Langfuse in containers, production code unchanged; also the integration-test environment |
-| Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm in M1, the operator from M2 |
+| Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm charts through GitOps (ADR 0036) |
 | Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0008); Valkey there as at any site |
 | AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0008): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site; budgets by known spend in snapshots (ADR 0031); no cross-cluster Kubernetes access (ADR 0008); Bedrock through the same federation |
 

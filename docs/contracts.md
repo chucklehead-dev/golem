@@ -176,3 +176,26 @@ rules.
 - When a provider ships a breaking change, the pass-through path requires
   policy compatibility review before enabling new provider features; the adapters and envelopes get a fix and a matrix
   row, and the release notes name it.
+
+## 8. Policy-relevant request fields (ADR 0037)
+
+Unknown fields and beta headers are forwarded, logged by name (never by
+value), and diffed nightly against the known set. These are enforced
+wherever they appear, and the list grows with the nightly review:
+
+| Field or family | Policy |
+|---|---|
+| `store`, `previous_response_id`, `background`, conversation identifiers | provider-side storage (ADR 0027; M1 refuses stateful use) |
+| file, container and upload identifiers | provider-side storage |
+| `mcp_servers`, server-side tools with network access (web search, fetch, code execution) | egress and data movement; billing units |
+| `n`, `max_tokens` above the scope's ceiling, input above the scope's size ceiling | cost (ADR 0038) |
+| `metadata.user_id`, `user`, session fields | attribution only, never identity |
+
+## 9. Reconciliation (ADR 0038)
+
+golem's providers run on dedicated accounts or projects. Each month the
+ledger is compared with provider usage and cost per account and model;
+differences within 3–5% are booked as adjustments, larger ones
+investigated. Chargeback uses the provider's cost per account and model,
+split across scopes in proportion to golem's per-request attribution.
+

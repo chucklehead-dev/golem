@@ -44,7 +44,7 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
 ## 2. Shape
 
 ```
-request:   ztunnel (mesh mTLS) [→ waypoint] → listener → frontend (dialect, scan) → authn (Principal, scope)
+request:   ztunnel (mesh mTLS) → listener → frontend (dialect, scan) → authn (Principal, scope)
            → Request hooks → router (alias, pool, deployment) → limits (check: known spend, concurrency, rate, quota)
            → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
@@ -67,10 +67,12 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    (`POST /v1/chat/completions`, `POST /v1/messages`, ...). The body is read
    into a pooled buffer with a size cap (`http.MaxBytesReader`). A
    `jsontext.Decoder` scan extracts the routing fields; it scans the complete
-   document and rejects duplicate members before forwarding. Hook rewrites
+   document and rejects duplicate members before forwarding; unknown fields
+   are forwarded and logged by name, policy-relevant ones enforced
+   (ADR 0037). Hook rewrites
    trigger policy and capability revalidation.
 3. **Authenticate** (ADR 0009). The chain yields a `Principal` (user or
-   service, scope, key, mesh identity if present) or an error in the
+   service, scope, key) or an error in the
    caller's dialect. Keys are
    looked up by hash in the entitlements snapshot (no network call); Entra
    JWTs are verified locally against cached JWKS. Effective rights are
@@ -84,7 +86,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
 6. **Check** (ADR 0031), in one Valkey round trip: known spend (the
    snapshot's, plus the site's counter since) against the key cap, member
    cap and scope pool, with the request's worst-case cost added in strict
-   scopes; a concurrency slot for the principal; rate limits and the
+   scopes (bounded by the scope's `max_tokens` and input-size ceilings,
+   input tokens by byte count: ADR 0038); a concurrency slot for the
+   principal, renewed every 30 seconds while the call is in flight; rate limits and the
    deployment's provider quota share. Refusals are 402 (budgets) or 429
    (limits).
 7. **Attempt loop.** For each attempt: build the upstream request (fast
@@ -123,7 +127,7 @@ gateway/dialect/       one subpackage per dialect: openai/{chat,responses,embedd
 gateway/canon/         the canonical model (requests, responses, stream events); internal, never an API
 gateway/envelope/      how hosts carry a dialect: anthropic, bedrock (InvokeModel, event-stream
                        framing, SigV4), vertex, foundry, openai, vllm
-gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT), meshid
+gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT)
 gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object-storage poller,
                        the file source, the on-disk last-good copy, status writes
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
@@ -185,7 +189,8 @@ except OTel's API.
   object storage. It is ready once it holds a snapshot no older than a
   configured bound (only while its signed authorization lease is valid;
   internal exceptions require an explicit approved maximum).
-- Every second: a conditional GET of `snapshots/<pool>/current`. On a
+- Every second (±20% jitter, full-jitter backoff on errors: ADR 0032): a
+  conditional GET of `snapshots/<pool>/current`. On a
   change it verifies the pointer's signature against the pinned public key
   and that its `publish_seq` exceeds its floor (the trusted publisher checkpoint and atomically persisted local
   checkpoint; status is diagnostic and cannot set the trusted floor), then fetches the snapshot by hash and verifies its signature and

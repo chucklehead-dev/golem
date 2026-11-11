@@ -4,7 +4,7 @@ Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
 and its normative security and correctness requirements. Baseline text below
 must be read with those amendments.
 
-Status: Accepted. Detailed in canonical-model.md.
+Status: Accepted. Detailed in canonical-model.md. Amended by [0037](0037-request-policy-and-cache-stability.md) (semantic, not byte, stability).
 
 ## Decision
 

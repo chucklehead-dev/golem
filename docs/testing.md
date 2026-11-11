@@ -33,7 +33,7 @@ and the least where the compiler and a table test suffice.
 | Time | retries, backoff, ejection windows, limiter windows, drain, idle-chunk timeouts, concurrency-slot expiry | `testing/synctest`, no sleeps |
 | Store suite | every state operation, lost CAS races included; the blob adapter's conformance (MinIO and a fake); signature verification and the publish-sequence floor | Per change (control-plane.md §8) |
 | Contract tests | each provider backend against its recorded fixtures; Valkey with the real scripts | Containers in CI |
-| End-to-end | kind with Istio ambient, the operator installing everything, a stub provider, ClickHouse, Langfuse; clients: the OpenAI and Anthropic SDKs, Claude Code, Codex, Copilot CLI with BYOK | Per merge for a smoke set, nightly in full |
+| End-to-end | kind with Istio ambient, the Helm charts installing everything, a stub provider, ClickHouse, Langfuse; clients: the OpenAI and Anthropic SDKs, Claude Code, Codex, Copilot CLI with BYOK | Per merge for a smoke set, nightly in full |
 | Performance | `testing.B.Loop` benchmarks with allocation budgets; a load test against a stub upstream that streams with realistic timing; a soak that checks the goroutine-leak profile | Baselines from M0 |
 | Mutation testing | the budget, rights, capture and router packages | Survivors are tests to write; run nightly |
 | Race detector | all packages | CI |
@@ -56,7 +56,7 @@ Its value for golem is in the protocols, not the plumbing.
 | **Accounting** (ADR 0031; written: [model/accounting.md](../model/accounting.md)) | admissions under soft and strict checks, concurrency limits, completions, crashes, Valkey loss, duplicate delivery, reconciliation | overshoot within the stated bound; never counted twice; books match after reconciliation; strict with one in flight is a hard ceiling apart from crash losses |
 | **State and distribution** (control-plane.md §3–4; publication and freshness written: [model/publication.md](../model/publication.md)) | writers racing with `If-Match` (lost responses included), leader changes, signed publication with a publish sequence, gateway polls and restarts with empty disks, restore | every acknowledged write is in a snapshot every gateway applies; no gateway applies a lower publish sequence or an unsigned snapshot; no write is lost to a race; a restore never revives a revoked key; revocation within the bound after a settle |
 | **Attempt loop** (ADR 0002) | attempts, first byte, failover, retry budget, ejection | no retry after the first byte; retries bounded by the budget; an ejected deployment receives nothing until probed back |
-| **Approvals and grants** (org-model §4.3) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
+| **Approvals and grants** (org-model §4.3; when built, ADR 0034) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
 
 Each starts small (two regions, two gateways, one pool) and stays a
 design-level check: the model alone first (scenarios, safety, then

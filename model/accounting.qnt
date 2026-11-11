@@ -7,6 +7,7 @@ module accounting {
   const LIMIT: int
 
   const LIMIT_ON: bool
+  const RENEW_SLOTS: bool
   const STRICT: bool
   const DEDUP: bool
   const RECONCILE: bool
@@ -18,6 +19,7 @@ module accounting {
   var adjustment: int
   var uncounted: int
   var closed: bool
+  var slotless: Set[str]
   action init = all {
     phase' = REQUESTS.mapBy(r => "idle"),
     billed' = REQUESTS.mapBy(r => 0),
@@ -27,9 +29,12 @@ module accounting {
     adjustment' = 0,
     uncounted' = 0,
     closed' = false,
+    slotless' = Set(),
   }
 
   def inflight: int = REQUESTS.filter(r => phase.get(r) == "inflight").size()
+  def holdingSlots: int =
+    REQUESTS.filter(r => phase.get(r) == "inflight" and not(slotless.contains(r))).size()
   def totalBilled: int = REQUESTS.fold(0, (acc, r) => acc + billed.get(r))
   def ledgerSet: Set[(str, int)] = ledger.foldl(Set(), (s, e) => s.union(Set(e)))
   def ledgerSpend: int =
@@ -37,11 +42,12 @@ module accounting {
     else ledger.foldl(0, (acc, e) => acc + e._2)
   action admit(request: str): bool = all {
     phase.get(request) == "idle",
-    if (LIMIT_ON) inflight < LIMIT else true,
+    if (LIMIT_ON) holdingSlots < LIMIT else true,
     if (STRICT) known + WORST <= BUDGET else known < BUDGET,
     phase' = phase.put(request, "inflight"),
     billed' = billed, known' = known, buffer' = buffer, ledger' = ledger,
     adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
+    slotless' = slotless,
   }
   action complete(request: str, cost: int): bool = all {
     phase.get(request) == "inflight",
@@ -50,7 +56,7 @@ module accounting {
     known' = known + cost,
     buffer' = buffer.union(Set((request, cost))),
     ledger' = ledger, adjustment' = adjustment, uncounted' = uncounted,
-    closed' = false,
+    closed' = false, slotless' = slotless.exclude(Set(request)),
   }
   action crash(cost: int): bool = all {
     val lostNow = REQUESTS.filter(r => phase.get(r) == "inflight")
@@ -61,7 +67,7 @@ module accounting {
     },
     buffer' = Set(),
     known' = known, ledger' = ledger, adjustment' = adjustment,
-    closed' = false,
+    closed' = false, slotless' = Set(),
   }
   action loseCounter: bool = all {
     val fallback = ledgerSpend + adjustment
@@ -71,14 +77,14 @@ module accounting {
       uncounted' = uncounted + (known - fallback),
     },
     phase' = phase, billed' = billed, buffer' = buffer, ledger' = ledger,
-    adjustment' = adjustment, closed' = closed,
+    adjustment' = adjustment, closed' = closed, slotless' = slotless,
   }
   action deliver(request: str, cost: int): bool = all {
     buffer.contains((request, cost)),
     buffer' = buffer.exclude(Set((request, cost))),
     ledger' = ledger.append((request, cost)),
     phase' = phase, billed' = billed, known' = known, adjustment' = adjustment,
-    uncounted' = uncounted, closed' = closed,
+    uncounted' = uncounted, closed' = closed, slotless' = slotless,
   }
 
   action duplicate(request: str, cost: int): bool = all {
@@ -86,6 +92,7 @@ module accounting {
     ledger' = ledger.append((request, cost)),
     phase' = phase, billed' = billed, known' = known, buffer' = buffer,
     adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
+    slotless' = slotless,
   }
   action closeBooks: bool = all {
     inflight == 0,
@@ -98,7 +105,15 @@ module accounting {
     },
     closed' = true,
     phase' = phase, billed' = billed, buffer' = buffer, ledger' = ledger,
-    uncounted' = uncounted,
+    uncounted' = uncounted, slotless' = slotless,
+  }
+  action expireSlot(request: str): bool = all {
+    not(RENEW_SLOTS),
+    phase.get(request) == "inflight",
+    not(slotless.contains(request)),
+    slotless' = slotless.union(Set(request)),
+    phase' = phase, billed' = billed, known' = known, buffer' = buffer, ledger' = ledger,
+    adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
   }
   action step = {
     nondet request = REQUESTS.oneOf()
@@ -111,6 +126,7 @@ module accounting {
       deliver(request, cost),
       duplicate(request, cost),
       closeBooks,
+      expireSlot(request),
     }
   }
   val slack = if (STRICT) (LIMIT - 1) * WORST else LIMIT * WORST
@@ -148,6 +164,21 @@ module accounting {
       .then(complete("r4", 3))
       .then(complete("r5", 3))
       .expect(not(withinBound))
+  run slotExpiryTest =
+    init
+      .then(admit("r1"))
+      .then(complete("r1", 3))
+      .then(admit("r2"))
+      .then(admit("r3"))
+      .then(expireSlot("r2"))
+      .then(expireSlot("r3"))
+      .then(admit("r4"))
+      .then(admit("r5"))
+      .then(complete("r2", 3))
+      .then(complete("r3", 3))
+      .then(complete("r4", 3))
+      .then(complete("r5", 3))
+      .expect(not(withinBound))
   run crashReconciledTest =
     init
       .then(admit("r1"))
@@ -168,32 +199,37 @@ module accounting {
 
 module softDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
 module strictDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
 }
 
 module strictSingle {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
 
   val hardCeiling = totalBilled <= BUDGET + uncounted
 }
 
 module noLimit {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
 module rawSum {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = false, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = false, RECONCILE = true).*
+}
+
+module noSlotRenewal {
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = false, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
 module noReconcile {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = true, RECONCILE = false).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = false).*
 }

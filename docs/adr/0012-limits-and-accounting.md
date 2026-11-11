@@ -4,7 +4,7 @@ Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
 and its normative security and correctness requirements. Baseline text below
 must be read with those amendments.
 
-Status: Accepted (v1 baseline). Accounting parts superseded by [ADR 0031](0031-soft-budgets.md): no money reservations or renewal; known spend, concurrency limits and an optional strict worst-case check.
+Status: Accepted (v1 baseline). Accounting parts superseded by [ADR 0031](0031-soft-budgets.md): no money reservations or renewal; known spend, concurrency limits and an optional strict worst-case check. Amended by [0038](0038-accounting-refinements.md).
 
 ## Decision
 

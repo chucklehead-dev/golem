@@ -14,7 +14,7 @@ lives) and 0013 (multi-region enforcement).
 |---|---|---|
 | **User** | Entra `oid` (+ `tid`) | Created on first sign-in. Display name and UPN from the token. |
 | **Scope** | golem id; `kind: team \| project` | Where spend is charged and rights come from. A **team** may have a parent team (a sub-team; depth at most two, ADR 0021) and may be bound to Entra groups (membership synced from Graph) and/or managed in golem. A **project** is owned by exactly one team (its primary team); its members may be other teams (all their members), services and users. |
-| **Service** | golem id; Entra app (client id) and/or SPIFFE ID; service keys | Owned by one scope. A non-human principal. May be added to other projects. |
+| **Service** | golem id; Entra app (client id); service keys | Owned by one scope. A non-human principal. May be added to other projects. |
 | **Cost center** | external code (e.g. `CC-4410`) | Not managed by golem: a funding source referenced by budgets, with its budget managers. |
 | **Key** | `glm_` + 32 random bytes, stored as SHA-256 | Belongs to a user or a service; bound to one **scope**. |
 
@@ -59,37 +59,32 @@ Key constraints, all optional:
   $/min) and max concurrent streams;
 - expiry (personal keys must expire; the maximum lifetime is policy,
   e.g. 90 days); not-before;
-- source binding: allowed SPIFFE IDs (from the mesh), CIDRs;
+- source binding: allowed CIDRs;
 - `max_tokens` ceiling, allowed `reasoning` effort; capture and retention overrides (§3.1);
 - metadata: name, purpose, tags (become telemetry attributes).
 
 ### 3.1 Content capture and retention
 
-Decided in ADR 0016. Capture settings live at three levels:
+Decided in ADRs 0016 and 0035.
 
 | Level | Set by | Settings |
 |---|---|---|
-| Scope policy (a `ScopePolicy` CRD) | platform admins | the ceiling: capture allowed or forbidden, maximum retention, required redaction hooks |
-| Team or project | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; `retention` (one of the classes: 7, 30, 90 or 365 days, or 3, 5 or 7 years, within the ceiling); `override`: locked, narrow, open (sampling later: ADR 0016) |
-| Key or service | the key's owner; the service's owner | `capture` and `retention`: inherit (default), or an override the scope permits |
+| Scope policy (a `ScopePolicy` CRD) | platform admins | the ceiling: capture allowed or forbidden, the retention classes allowed, required redaction hooks |
+| Top-level team | its managers | `capture`: off, metadata (Langfuse sees traces without content), content; its Langfuse project, whose retention is one of the classes (7, 30, 90 or 365 days, or 3, 5 or 7 years) |
+| Sub-team or project | its managers | inherit the parent's settings and Langfuse project, or have its own project (with its own retention) and `capture` setting |
+| Key or service | the key's owner; the service's owner | inherit, or turn capture **down** only (content to metadata, or off) |
 
-What a child (key or service) may override:
+Retention is the Langfuse project's own setting: a scope that needs a
+different retention from its parent has its own project. Keys and services
+cannot lengthen retention or turn capture on. The classes above one year
+are available only in scopes whose policy allows them, since long-lived
+content is the largest privacy and storage commitment golem makes.
 
-- `locked`: nothing; the scope's settings apply.
-- `narrow`: only towards less: turn capture off or down to metadata,
-  shorten retention.
-- `open`: also towards more: turn capture on, lengthen retention, up to
-  the scope policy's ceiling.
-
-The classes above one year are available only in scopes whose policy
-allows them (set by platform admins), since long-lived content is the
-largest privacy and storage commitment golem makes.
-
-The effective setting is computed per request from the snapshot: the most
-specific permitted value, clipped to the ceiling. A switch may be
-time-boxed (the worker turns it off at expiry). Every change is an audit
-event; every captured record carries its effective retention, its expiry
-and who enabled capture. Content goes only to the scope's Langfuse project.
+The effective setting is computed per request from the snapshot. A switch
+may be time-boxed (a job turns it off at expiry). Every change is an audit
+event; every captured record names the project it went to and who enabled
+capture. Content goes only to the scope's Langfuse project, through the
+collector, which holds the credentials.
 
 ### 3.2 Minting
 
@@ -171,7 +166,7 @@ grant already moved that money. Thresholds (e.g. 50/80/100%) at every level emit
 event and notify the pool's managers; 100% at level 2 or 3 rejects, or
 downgrades to a configured cheaper alias.
 
-### 4.3 Approvals
+### 4.3 Approvals (when a budget manager asks for them; M2 ships caps and a cost-center mapping: ADR 0034)
 
 A request (new grant from a cost center, permanent or one-time
 adjustment) has states `pending → approved | rejected | expired |

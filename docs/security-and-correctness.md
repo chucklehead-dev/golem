@@ -33,13 +33,9 @@ rights are explicit exceptions, never an implicit result of an outage.
 - JWKS has a bounded cache and background refresh; an unknown key fails
   closed when refresh is unavailable. Do not accept caller-controlled
   issuer, discovery, jku or x5u URLs.
-- The waypoint removes all caller-supplied identity-header variants and
-  writes exactly one identity derived from its authenticated peer. The
-  gateway rejects ambiguous duplicates. Restricting the data port to the
-  waypoint is necessary but insufficient on its own.
-- Mesh identity is enabled only after an end-to-end test proves overwrite,
-  authenticated provenance and rejection on bypass paths. Otherwise use
-  Entra or virtual keys. Conflicting explicit credentials are rejected;
+- No identity is taken from a mesh header (ADR 0036): services use Entra
+  workload identity or keys; the mesh contributes L4 authorization only.
+  Conflicting explicit credentials are rejected;
   source binding is a constraint on the authenticated principal.
 - Keys, tokens, cookies and provider credentials are excluded from logs,
   traces, errors and support bundles. Session IDs and end-user tags are
@@ -53,9 +49,10 @@ and signing-key ID. Snapshots bind the same installation and audience.
 Verification checks those bindings, supported schema, hash, signature and
 time bounds, including bounded clock skew.
 
-Default maximum authorization age is five minutes; edge pools may not
-override it to serve stale authorization. Internal exceptions require an
-explicit per-pool maximum and security approval. Refresh must incorporate
+Maximum authorization age is four hours for internal pools (3–4 hours
+without an exception) and five minutes for the edge pool, which may not
+override it (ADR 0032). Longer internal leases require an explicit
+per-pool maximum and security approval. Refresh must incorporate
 current authoritative state and CRDs; it cannot merely re-sign stale content.
 At expiry reject new model requests, even when routing configuration remains
 usable. Existing streams follow a documented termination policy; the default
@@ -63,7 +60,7 @@ is termination at authorization expiry, with locally applied emergency
 revocations terminating matching streams promptly.
 
 The five-second revocation target applies to healthy connected gateways,
-not partitions or five-minute leases. Publish lag, lease expiry, clock skew,
+not partitions within the lease. Publish lag, lease expiry, clock skew,
 denylist apply latency and active-stream termination are separate metrics.
 Emergency denylist changes remain effective until durable revocation and
 fresh publication are confirmed at that site.
@@ -97,10 +94,10 @@ replication alone does not establish a zero-loss recovery point.
 Scan the entire bounded JSON document before forwarding; reject malformed
 JSON, trailing values and duplicate object members. Extract every
 policy-relevant field regardless of order, including model, capabilities,
-output limits, storage controls, object references and tools. Forwarding
-unknown fields cannot bypass policy: reject unknown features on a protected
-endpoint unless reviewed as policy-neutral. Provider feature compatibility
-is tested; pass-through is not a promise of automatic policy compatibility.
+output limits, storage controls, object references and tools. Amended by
+ADR 0037: unknown fields are forwarded, logged by name and reviewed from a
+nightly diff; the policy-relevant fields (contracts.md §8) are enforced
+wherever they appear. Provider feature compatibility is tested.
 
 Hooks may rewrite content or add hints, but cannot grant rights. After each
 rewrite, recompute capability, residency, storage and size checks before
@@ -146,18 +143,16 @@ Shadows obey the original scope's data restrictions even when platform-funded.
 
 ## 6. Capture, retention and administrative access (M2)
 
-Gateway pods must not hold read-capable Langfuse project credentials.
-Use verified write-only ingestion credentials where supported; otherwise a
-capture broker holds project credentials and authenticates pool workloads.
-The broker validates scope against authoritative pool permissions and derives
-the destination itself; gateways cannot select arbitrary project IDs.
-Only destinations needed by a pool are accessible. Langfuse capability
-verification is a spike, not an assumed write-only permission.
+Gateway pods must not hold Langfuse project credentials. Amended by ADR
+0035: the enterprise OTel collector holds them and routes captured traces
+to the project the snapshot names for the scope; it accepts captured
+traces only from gateway workloads and only for projects the pool's scopes
+map to, so a gateway cannot select an arbitrary project.
 
 Required redaction occurs before every authorized content export. Capture
 off forbids content in operational telemetry, error bodies, flight-recording
 exports and support bundles. Bound and scrub metadata, including session,
-tag and end-user fields. Retention covers broker queues, failed deliveries,
+tag and end-user fields. Retention covers collector queues, failed deliveries,
 backups and exports as well as live traces; legal holds and deletion evidence
 have named administrators and audit records.
 
@@ -239,12 +234,12 @@ add later. Record spike results and approval of exceptions in docs/spikes/.
 
 | Review finding | Required evidence |
 |---|---|
-| Mesh header spoofing | Caller injection, duplicate headers and bypass paths cannot impersonate another workload |
+| Bypass | Direct provider calls from outside golem are blocked or visible (ADR 0039) |
 | Stale auth and rollback | Partition, restart, empty disk, forged status, retired signing key and clock-skew tests; expiry refuses traffic |
 | Stale publisher | Paused old leader resumes after revocation; publication cannot restore the revoked right |
 | Restore widening rights | Random restrictive changes followed by restore cannot widen rights without separate approval |
 | Stored response authorization | M1 rejects every stored-object path; later cross-principal/scope/account tests deny access |
-| Capture credentials | Compromised gateway credential cannot read historical traces or select another scope's destination |
+| Capture credentials | No gateway holds Langfuse credentials; a compromised gateway cannot route captures to another scope's project (ADR 0035) |
 | Scanner and hook bypass | Duplicate/late/nested fields, unknown features and rewrites cannot evade policy |
 | SSRF and raw routes | Redirects, rebinding, IPv6, metadata and encoded paths cannot escape approved destinations |
 | GitOps bypass and audit | Unauthorized spec writes denied; audit archive survives collector outage and query-store deletion |

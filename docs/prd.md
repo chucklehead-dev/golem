@@ -38,7 +38,7 @@ enforced by invoices a month later.
    non-translated request, and its code stays readable end to end.
 8. Well layered: the gateway does data-plane work only; configuration,
    self-service and administration are a separate control plane behind one
-   API; an operator runs day-2; CLI and UI tools are clients of that API
+   API; Helm and GitOps run day-2 (ADR 0036); CLI and UI tools are clients of that API
    (architecture.md, ADR 0003).
 
 ## 3. Non-goals
@@ -235,7 +235,6 @@ that recognises its credential decides.
 | Entra ID JWT (users) | v2 access tokens for golem's app registration; JWKS cached; `tid`, `aud`, `iss` checked; `oid` is the user; scope from a header (`x-golem-scope`) or the user's default | M1 |
 | Entra ID JWT (services) | client credentials or workload identity federation; `azp`/`appid` maps to a Service | M1 |
 | `golemctl login` for coding agents *(added)* | Entra device-code or browser flow; mints a short-lived personal key in the chosen scope, written where the agent reads it | M1 |
-| Mesh identity | In ambient mode the app does not see the peer certificate (ztunnel terminates mTLS). A waypoint in front of the gateway passes the caller's SPIFFE ID in a header, trusted only when the operator has restricted the data port to the waypoint (ADR 0009); binds keys to workloads, identifies in-mesh services without keys | Spike in M1, feature in M2 |
 | OAuth introspection (non-Entra IdPs) | RFC 7662 | Later, if ever |
 
 **Credential pass-through** (optional, per route): `none` (golem's provider
@@ -272,9 +271,10 @@ The full model is [org-model.md](org-model.md). In short:
 |---|---|
 | Users, teams (Entra-group bound), services, personal and service keys, scope policies, member caps, team pools granted by admins, enforcement modes | M1 |
 | Audit of every change | M1 |
-| Projects, cost centers, budget managers, grants, approvals, adjustments | M2 |
+| Projects, monthly caps per scope set by admins or parent managers, cost-center mapping for chargeback (ADR 0034) | M2 |
+| Grants, adjustment requests and budget-manager approvals | when a budget manager asks for them |
 | Content capture settings and overrides (org-model §3.1) | M2 |
-| golem-console; notifications (email/Teams) on thresholds and approvals | M2 |
+| golem-console; notifications (email/Teams) on thresholds | M2 |
 | Budgets across sites through known spend in snapshots (ADR 0031) | M2 (with the first remote site) |
 | Backstage plugin; budget downgrade to a cheaper alias; chargeback export per cost center | M3 |
 
@@ -386,9 +386,8 @@ The system is these deliverables (architecture.md, ADR 0003):
 |---|---|---|
 | golem-gateway | Data plane only: model requests in, provider calls out | M0 |
 | golem-control | Control API (config read, explain, overrides, org, keys, budgets, spend, audit), the CRD watch; its leader runs the jobs and signs and publishes snapshots (ADRs 0003, 0007) | M1 |
-| golem-operator | Installation and day-2 in each cluster: upgrades, drains, canaries, credential mounting, mesh policies, Langfuse projects, telemetry plumbing (ADR 0005) | M2 (Helm in M1) |
 | golemctl | CLI for every persona, including `login` and coding-agent setup | M1 |
-| golem-console | Small web UI for keys, caps, requests and approvals | M2 |
+| golem-console | Small web UI for keys, caps and spend | M2 |
 | Backstage plugin | Spend, budgets and keys on Backstage entities | M3 |
 
 - **Two writers, one each**: declarative config is CRDs (GitOps), read by
@@ -406,13 +405,11 @@ The system is these deliverables (architecture.md, ADR 0003):
   `/healthz`, `/startupz`; pprof and the applied snapshot hash on the
   admin port (explain is golem-control's).
 - **Graceful drain** *(added)*: readiness fails, in-flight streams get a
-  long grace, then end with a dialect error event; orchestrated by the
-  operator on rollouts (operator.md §3).
+  long grace, then end with a dialect error event (operations.md §2).
 - **Mesh**: ambient mode; the gateway serves plain HTTP behind ztunnel;
-  the operator installs the gateway's waypoint (optional) and the
-  AuthorizationPolicies (only the waypoint to the data port when identity
-  headers are trusted; admin ports to the operator and control plane);
-  bucket policies let each gateway pool read its snapshots and write only
+  the charts install `AuthorizationPolicies` limiting which namespaces and
+  service accounts reach golem, and admin ports to golem-control; no
+  identity header is trusted (ADR 0036); bucket policies let each gateway pool read its snapshots and write only
   its own status objects.
 - **Config**: five CRD kinds (`Backend`, `ModelRoute`, `ScopePolicy`,
   `Hook`, `PriceList`; ADR 0005) watched by golem-control, with status
@@ -470,8 +467,8 @@ short: Phase 0 spikes; M0 walking skeleton; M1 the first team in
 production (single region, Helm, observe-then-enforce budgets, no
 translation); M1.5 translation through the canonical model (Chat ↔
 Messages, so Claude on Bedrock serves OpenAI callers); M2 the
-enterprise default (projects, approvals, capture, the operator, console,
-edge pool); M3 multi-region, Temporal and the long tail.
+enterprise default (projects and caps, capture, console, edge pool,
+bypass controls); M3 multi-region, Temporal and the long tail.
 
 ## 7. Success measures
 
@@ -479,10 +476,13 @@ edge pool); M3 multi-region, Temporal and the long tail.
   core; TTFT overhead < 2 ms; limit check ≤ 1 store round trip.
 - Memory per in-flight stream < 64 KiB on the fast path.
 - 100% of requests attributed to a principal, a scope and its funding.
-- Ledger, with reconciliation adjustments, within 1% of provider
-  invoices; no budget exceeded by more than ADR 0031's stated bound.
+- Ledger, with reconciliation adjustments, within 3–5% of provider usage
+  per account and model each month, on dedicated provider accounts
+  (ADR 0038); no budget exceeded by more than its stated bound.
 - Key revocation within 5 s on healthy connected gateways; partitioned
-  authorization expires at its signed lease bound (five-minute default).
+  authorization expires at its signed lease (four hours for internal pools,
+  five minutes for the edge pool: ADR 0032), sooner with the emergency
+  denylist.
 - A provider outage moves traffic to fallbacks within one ejection window.
 
 ## 8. Open questions
@@ -490,8 +490,9 @@ edge pool); M3 multi-region, Temporal and the long tail.
 Decisions are recorded in the ADRs (index: adr/README.md); this list holds
 only what is still open.
 
-1. **Waypoint identity header** (ADR 0009): which header carries the
-   caller's SPIFFE ID through a Gloo Mesh ambient waypoint; the M1 spike.
+1. **Responses API clients**: whether any tool the teams use relies on
+   `previous_response_id`, stored responses or background mode (the SDK
+   compatibility spike); M1 refuses them.
 2. **Never-capture data**: which data classes or scopes must forbid
    capture outright, and who may enable the multi-year retention classes
    (drafted: platform admins, by scope policy).
@@ -530,9 +531,10 @@ is revoked automatically.
 
 ### 9.4 SLOs and recovery
 
-Gateway availability 99.95% while golem-control, the bucket and KMS meet
-their own; golem-control 99.95% as well, since authorization is renewed
-every minute within a five-minute lease (ADR 0030); store RPO by bucket versioning (every prior state kept) and, with two regions, replication; the
+Gateway availability 99.9% for errors golem itself causes
+(`error.origin = gateway`, ADR 0024; provider errors are the provider's);
+golem-control 99.9%, since internal pools ride out up to four hours without
+it (ADR 0032); store RPO by bucket versioning (every prior state kept) and, with two regions, replication; the
 ledger's ClickHouse backups; RTO for a region's control plane 30 min.
 
 ### 9.5 Error catalog
@@ -574,7 +576,7 @@ pool, including floods of failed authentication (throttled per source at
 the ingress and the gateway); the bucket and its signing key (ADR 0007);
 insider access to captured content in Langfuse and to metadata in
 ClickHouse (who used which model when, even without prompts); the
-operator's and golem-control's RBAC.
+golem-control's RBAC and the bypass controls (ADR 0039).
 
 ### 9.11 Onboarding
 
@@ -641,3 +643,11 @@ fails on anything resembling a key or a real prompt.
 A tested matrix of `anthropic-version` values, beta features, OpenAI API
 features, and SDK and agent versions, run nightly; it pins the SDKs' retry
 rules and the agents' session headers (contracts.md §7).
+
+### 9.19 Bypass controls
+
+Traffic that bypasses golem is blocked where the enterprise can block it
+(ADR 0039): an AWS SCP limiting Bedrock invocation to golem's roles,
+egress blocks on provider hosts except golem's, provider key creation
+limited to the platform team, and managed agent settings pointing at
+golem; blocked attempts are dashboarded.

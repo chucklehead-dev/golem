@@ -121,10 +121,11 @@ control plane.
   alert.
 - **Revocation latency**: the write plus the one-second poll, about two
   seconds.
-- **Freshness** (ADRs 0029, 0030): every snapshot carries a signed
-  authorization lease (five minutes by default). The leader renews every
-  pool's authorization every 60 seconds from current state and CRDs; a
-  gateway refuses new requests once its lease has expired.
+- **Freshness** (ADRs 0029, 0030, 0032): every snapshot carries a signed
+  authorization lease: four hours for internal pools, five minutes for the
+  edge pool. The leader renews every pool's authorization every 60 seconds
+  from current state and CRDs; a gateway refuses new requests once its
+  lease has expired, and alerts warn hours before.
 
 ## 5. Identity, keys and bootstrap
 
@@ -164,9 +165,9 @@ Run by the leader; each an idempotent scan.
 | Audit shipping | every few seconds | Archive before outbox trim; ClickHouse is a query projection |
 | Authorization renewal | every 60 s | Rebuilds and republishes every pool's snapshot from current state, extending its authorization lease (ADR 0030) |
 | Key, request and registration expiry; reminders | hourly | Expires keys, adjustment requests, registrations past TTL; notifies 7 days and 1 day ahead |
-| Provider reconciliation | daily | The ledger against provider usage APIs; differences booked as adjustments, unattributed where needed (ADR 0031) |
+| Provider reconciliation | monthly (daily preview) | The ledger against provider usage and cost data per dedicated account and model; differences booked as adjustments, unattributed where needed, within the 3–5% tolerance (ADRs 0031, 0038) |
 | Threshold notifications | with known spend | 50/80/100% at key, member and pool level |
-| Capture expiry and retention (M2) | hourly | Switch expiry; deletion of expired traces in Langfuse (ADR 0016) |
+| Capture expiry and Langfuse projects (M2) | hourly | Switch expiry; create a Langfuse project when a scope first needs its own and add its credentials to the collector's Secret (ADR 0035) |
 | Copilot usage ingestion (M2) | daily | GitHub usage metrics into ClickHouse (ADR 0020) |
 
 ### 6.1 Notifications

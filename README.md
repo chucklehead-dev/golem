@@ -10,7 +10,7 @@ budget managers delegate to their members, and reports everything through
 OpenTelemetry to ClickStack, ClickHouse and Langfuse. It runs in
 Kubernetes (Istio ambient) as separate components: a gateway that only
 serves model traffic, a control plane with one API for configuration and
-self-service, an operator for day-2, and a CLI and console.
+self-service, Helm and GitOps for day-2, and a CLI and console.
 
 Status: design. Nothing is built yet.
 
@@ -24,7 +24,8 @@ Status: design. Nothing is built yet.
   packages, Go facilities, performance.
 - [docs/control-plane.md](docs/control-plane.md): golem-control and
   services, the state document in object storage, signed snapshot distribution, jobs, bootstrap.
-- [docs/operator.md](docs/operator.md): CRDs and day-2 operations.
+- [docs/operations.md](docs/operations.md): installation and day-2 with Helm,
+  GitOps and Argo Rollouts.
 - [docs/tools.md](docs/tools.md): golemctl, the console, Backstage.
 - [docs/contracts.md](docs/contracts.md): refusals and status codes, error
   origin, the ledger schema, the price model, identifiers and headers,

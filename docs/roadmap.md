@@ -16,7 +16,6 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 
 | Spike | Question | Depends on it |
 |---|---|---|
-| Waypoint identity | Which header carries the caller's SPIFFE ID through a Gloo Mesh ambient waypoint, and can the gateway's port be limited to the waypoint? | ADR 0009 mesh identity (M2) |
 | Bucket as the root of trust | S3 `If-Match` behaviour (412, retries, lost responses); KMS asymmetric signing and verification of snapshots and pointers; the bucket policy that denies all other writers; replication to the backup account under Object Lock | ADRs 0006, 0007 |
 | Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; a Valkey per site assumed) | ADR 0008, before the first remote site |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
@@ -86,13 +85,15 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   with the contract's schema, TTLs and the full price model;
   Grafana dashboards for spend, limits, latency, TTFT; snapshot-age alerts,
   a synthetic request per pool, provider usage reconciliation.
-- **Install**: Helm (no operator yet).
+- **Install**: Helm charts through GitOps, Argo Rollouts for gateway canaries (ADR 0036).
+- **Bypass controls** for the first team: the Bedrock SCP, egress blocks, provider key-creation limits, managed agent settings (ADR 0039).
+- **Dedicated provider accounts or projects** for golem (ADR 0038).
 - **Testing**: the regime of testing.md for these parts; Quint models of
   accounting (overshoot bound, dedup, reconciliation) and the attempt loop with their mutants; the limiter in
   simulation (gotogether trial 1, testing.md §3.2).
 
 Exit: the platform team uses golem for all its model traffic for two
-weeks; ledger within 1% of provider invoices for that period; outage
+weeks; ledger within 3–5% of provider usage for those accounts (ADR 0038); outage
 drills fail over without caller changes (a Bedrock region to another
 region or inference profile; a local box to its fallback pool); budgets switched from
 `observe` to `enforce` for the team.
@@ -100,31 +101,30 @@ region or inference profile; a local box to its fallback pool); budgets switched
 ## Phase 2b (M1.5): translation through the canonical model (4–6 weeks)
 
 - `gateway/canon` and the Chat and Messages adapter pairs (requests,
-  responses, streams) (ADR 0001, canonical-model.md), deterministic
-  encoders (ADR 0028).
-- OpenAI-SDK callers reach Claude on Bedrock (Chat decoder, Messages
-  encoder, the M1 `bedrock` envelope); Anthropic-SDK callers and agents
-  reach Chat-only models on OpenAI and vLLM.
-- Cross-dialect failover (a Claude pool falling back to an OpenAI pool, and
-  the reverse) and golem-placed prompt-cache breakpoints for Chat callers on
-  Claude.
+  responses, streams) (ADR 0001, canonical-model.md), cache-stable
+  encoders (ADRs 0028, 0037).
+- Explicit conversion routes only (ADR 0033): OpenAI-SDK applications
+  routed to Claude on Bedrock (Chat decoder, Messages encoder, the M1
+  `bedrock` envelope), and Messages routes pointed at Chat-only models.
+  No implicit cross-dialect failover; coding-agent routes never convert.
+- golem-placed prompt-cache breakpoints for Chat callers on Claude.
 - Testing: adapter round-trip properties, stream-chunking properties,
   decoder fuzzing, goldens from recorded traffic, and a nightly differential
   run against Bedrock and OpenAI with real SDKs.
 
 Exit: the platform team's OpenAI-SDK applications run against Claude on
-Bedrock, and Claude Code against a vLLM Chat model, with tool use and
-streaming, for a week without a translation defect.
+Bedrock through an explicit route, with tool use and streaming, for a week
+without a translation defect.
 
 ## Phase 3 (M2): enterprise default (10–12 weeks)
 
-- **Org**: projects, cost centers, budget managers, grants, adjustment
-  requests and approvals (durable job table), notifications by email and
-  Teams.
-- **Capture**: settings and overrides, Langfuse projects per scope,
-  retention deletion.
-- **Operator**, one per cluster: `ControlPlane`, `GatewayPool`, upgrades,
-  drains, canaries, credential mounting, mesh policies, Langfuse projects.
+- **Org**: projects and sub-teams, monthly caps per scope set by admins or
+  parent managers, cost-center mapping for chargeback, threshold
+  notifications by email and Teams (ADR 0034); grants and approvals only
+  when a budget manager asks.
+- **Capture**: settings and down-only overrides; a Langfuse project per
+  top-level team, inherited or overridden by sub-teams and projects;
+  retention per project; credentials in the collector (ADR 0035).
 - **Console**; spend APIs; Copilot usage ingestion as showback.
 - **Local GPU routing**: adaptive concurrency, metrics polling, prefix
   affinity, round-robin queueing across principals.
@@ -134,14 +134,14 @@ streaming, for a week without a translation defect.
   balancing; shadowing; conditional routing; remote hooks and built-in
   guardrails (`Chunk` phase if a guardrail needs it); credential
   pass-through `forward`; raw pass-through routes.
-- **Mesh identity** through the waypoint, if the spike succeeded.
 - **Edge pool** for Copilot enterprise custom models and the first SaaS
   consumers.
 - **Registration** of model server endpoints (for cloud GPUs and NVL boxes).
 - **Remote sites** (AKS, on-prem) as gateway pools on the shared S3 store
   (ADR 0008): a Valkey per site, budgets by known spend in snapshots
   (ADR 0031), static provider quota shares, Bedrock through federation,
-  a per-cluster operator; after the residency review (PRD §8).
+  the same charts through GitOps; after the residency review (PRD §8).
+- **Bypass controls** for every onboarded team (ADR 0039).
 - **Testing**: the state and distribution model; the state document under races in simulation;
   metastability analysis of overflow and retries (gotogether trials 2–4, 6).
 

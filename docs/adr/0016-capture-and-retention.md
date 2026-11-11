@@ -4,7 +4,7 @@ Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
 and its normative security and correctness requirements. Baseline text below
 must be read with those amendments.
 
-Status: Accepted (v1 baseline), M2. From archive 0018, 0025, 0026.
+Status: Accepted (v1 baseline), M2. From archive 0018, 0025, 0026. Amended by [0035](0035-capture-projects-and-the-collector.md) (projects per top-level team, retention per project, collector as broker).
 
 ## Decision
 

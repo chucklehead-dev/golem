@@ -58,8 +58,11 @@ module publication {
 
 There are **replicas** of golem-control (one of which leads at a time),
 **gateways** (in one pool, for simplicity), and **keys**. Time is a
-counter; `LEASE` is the authorization lease (five minutes in production,
-a few ticks here) and `MAX_TIME` bounds a run.
+counter; `LEASE` is the authorization lease (in production four hours for
+internal pools and five minutes for the edge pool, ADR 0032; a few ticks
+here) and `MAX_TIME` bounds a run. The length of the lease does not change
+which mechanisms are needed, only how long a stale publication could do
+harm without them, which is why a longer lease keeps every one of them.
 
 ```quint publication.qnt +=
   const REPLICAS: Set[str]

@@ -22,12 +22,13 @@ questions:
 > counted twice? And do the books still match the provider's bill after a
 > crash loses some events?
 
-The answers hold if three rules do, each a switch as in the publication
+The answers hold if four rules do, each a switch as in the publication
 model, plus a fourth switch for the strict option:
 
 | Switch | When on (the design) | When off (the bug it prevents) |
 |---|---|---|
 | `LIMIT_ON` | A principal has at most `LIMIT` calls in flight | Any number of calls admitted at the same moment overshoot without bound |
+| `RENEW_SLOTS` | A call renews its concurrency slot while it is in flight (ADR 0038) | A long stream's slot expires mid-call, a new call takes it, and the in-flight limit is silently exceeded |
 | `DEDUP` | Balances count each event once, by event ID | At-least-once delivery counts duplicates |
 | `RECONCILE` | The daily job books the difference between the provider's bill and the ledger as an adjustment | Events a crash lost are never paid for in golem's books |
 | `STRICT` | (a scope option, not a fix) A call is admitted only if known spend plus its worst-case cost fits | The soft check: still bounded, one call looser |
@@ -59,6 +60,7 @@ can cost is `WORST` (what a strict scope's worst-case check computes).
   const LIMIT: int
 
   const LIMIT_ON: bool
+  const RENEW_SLOTS: bool
   const STRICT: bool
   const DEDUP: bool
   const RECONCILE: bool
@@ -86,6 +88,9 @@ keeps one site, where the lag is zero, and §9 says what the lag adds.
   it until reconciliation and the next snapshot catch up.
 - `closed`: whether the books have been closed (reconciled) since the last
   change.
+- `slotless`: calls still in flight whose concurrency slot has expired
+  (only possible without `RENEW_SLOTS`); they no longer count against the
+  limit.
 
 ```quint accounting.qnt +=
   var phase: str -> str
@@ -96,6 +101,7 @@ keeps one site, where the lag is zero, and §9 says what the lag adds.
   var adjustment: int
   var uncounted: int
   var closed: bool
+  var slotless: Set[str]
 ```
 
 ## 5. The initial state and helpers
@@ -110,9 +116,12 @@ keeps one site, where the lag is zero, and §9 says what the lag adds.
     adjustment' = 0,
     uncounted' = 0,
     closed' = false,
+    slotless' = Set(),
   }
 
   def inflight: int = REQUESTS.filter(r => phase.get(r) == "inflight").size()
+  def holdingSlots: int =
+    REQUESTS.filter(r => phase.get(r) == "inflight" and not(slotless.contains(r))).size()
   def totalBilled: int = REQUESTS.fold(0, (acc, r) => acc + billed.get(r))
   def ledgerSet: Set[(str, int)] = ledger.foldl(Set(), (s, e) => s.union(Set(e)))
   def ledgerSpend: int =
@@ -131,11 +140,12 @@ principal needs a free in-flight slot (`LIMIT_ON`).
 ```quint accounting.qnt +=
   action admit(request: str): bool = all {
     phase.get(request) == "idle",
-    if (LIMIT_ON) inflight < LIMIT else true,
+    if (LIMIT_ON) holdingSlots < LIMIT else true,
     if (STRICT) known + WORST <= BUDGET else known < BUDGET,
     phase' = phase.put(request, "inflight"),
     billed' = billed, known' = known, buffer' = buffer, ledger' = ledger,
     adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
+    slotless' = slotless,
   }
 ```
 
@@ -152,7 +162,7 @@ site's counter and emits the spend event.
     known' = known + cost,
     buffer' = buffer.union(Set((request, cost))),
     ledger' = ledger, adjustment' = adjustment, uncounted' = uncounted,
-    closed' = false,
+    closed' = false, slotless' = slotless.exclude(Set(request)),
   }
 ```
 
@@ -172,7 +182,7 @@ the risk ADR 0031 accepts instead of a durable journal.
     },
     buffer' = Set(),
     known' = known, ledger' = ledger, adjustment' = adjustment,
-    closed' = false,
+    closed' = false, slotless' = Set(),
   }
 ```
 
@@ -191,7 +201,7 @@ snapshot's known spend): increments the ledger does not have yet are out of
       uncounted' = uncounted + (known - fallback),
     },
     phase' = phase, billed' = billed, buffer' = buffer, ledger' = ledger,
-    adjustment' = adjustment, closed' = closed,
+    adjustment' = adjustment, closed' = closed, slotless' = slotless,
   }
 ```
 
@@ -206,7 +216,7 @@ at-least-once transport may deliver an event a second time.
     buffer' = buffer.exclude(Set((request, cost))),
     ledger' = ledger.append((request, cost)),
     phase' = phase, billed' = billed, known' = known, adjustment' = adjustment,
-    uncounted' = uncounted, closed' = closed,
+    uncounted' = uncounted, closed' = closed, slotless' = slotless,
   }
 
   action duplicate(request: str, cost: int): bool = all {
@@ -214,6 +224,7 @@ at-least-once transport may deliver an event a second time.
     ledger' = ledger.append((request, cost)),
     phase' = phase, billed' = billed, known' = known, buffer' = buffer,
     adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
+    slotless' = slotless,
   }
 ```
 
@@ -236,11 +247,30 @@ principal). The next snapshot then carries the corrected known spend.
     },
     closed' = true,
     phase' = phase, billed' = billed, buffer' = buffer, ledger' = ledger,
-    uncounted' = uncounted,
+    uncounted' = uncounted, slotless' = slotless,
   }
 ```
 
-### 6.7 The step
+### 6.7 A slot expires
+
+Concurrency slots carry a TTL so that a crashed gateway's slots free
+themselves. With `RENEW_SLOTS`, a live call renews its slot (every 30
+seconds, TTL 90: ADR 0038), so only a dead gateway's slots expire. Without
+it, a long agent stream's slot can expire while the stream is still
+running.
+
+```quint accounting.qnt +=
+  action expireSlot(request: str): bool = all {
+    not(RENEW_SLOTS),
+    phase.get(request) == "inflight",
+    not(slotless.contains(request)),
+    slotless' = slotless.union(Set(request)),
+    phase' = phase, billed' = billed, known' = known, buffer' = buffer, ledger' = ledger,
+    adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
+  }
+```
+
+### 6.8 The step
 
 ```quint accounting.qnt +=
   action step = {
@@ -254,6 +284,7 @@ principal). The next snapshot then carries the corrected known spend.
       deliver(request, cost),
       duplicate(request, cost),
       closeBooks,
+      expireSlot(request),
     }
   }
 ```
@@ -344,6 +375,29 @@ calls admitted together it would go further still.
       .expect(not(withinBound))
 ```
 
+**An expired slot lets extra calls in** (`noSlotRenewal`). Two calls are in
+flight at the limit; their slots expire while they stream; two more calls
+are admitted. Four calls at 3 each on top of 3 already spent take the
+principal to 15, past the bound of 12.
+
+```quint accounting.qnt +=
+  run slotExpiryTest =
+    init
+      .then(admit("r1"))
+      .then(complete("r1", 3))
+      .then(admit("r2"))
+      .then(admit("r3"))
+      .then(expireSlot("r2"))
+      .then(expireSlot("r3"))
+      .then(admit("r4"))
+      .then(admit("r5"))
+      .then(complete("r2", 3))
+      .then(complete("r3", 3))
+      .then(complete("r4", 3))
+      .then(complete("r5", 3))
+      .expect(not(withinBound))
+```
+
 **A crash loses events, and reconciliation books them** (the design). A
 call is in flight when the gateway crashes; the provider bills it; the
 ledger never hears of it; closing the books adds it as an adjustment and
@@ -391,9 +445,8 @@ The model ends here:
 - **Prices.** One number per call. The worst-case formula (no cache
   discount, `max_tokens` or the model maximum, no server-side tools) is
   what makes `WORST` a real upper bound.
-- **Concurrency slots that outlive a crash.** Slots carry a short TTL in
-  Valkey; until a crashed gateway's slots expire they only make the limit
-  stricter.
+- **Prices.** `WORST` is a real number only because each scope caps
+  `max_tokens` and input size (ADR 0038); the model takes it as given.
 
 ## 10. The designs to check
 
@@ -405,54 +458,62 @@ The model ends here:
 | `noLimit` | no concurrency limit | break `withinBound` |
 | `rawSum` | no deduplication | break `noDoubleCount` |
 | `noReconcile` | no reconciliation | break `booksMatch` |
+| `noSlotRenewal` | slots expire mid-call | break `withinBound` |
 
 Which story passes where (as `check-accounting.sh` confirms):
 
-| Story | softDesign | strictDesign | strictSingle | noLimit | rawSum | noReconcile |
-|---|---|---|---|---|---|---|
-| siblings overshoot (accepted risk) | **passes** | impossible | impossible | **passes** | **passes** | **passes** |
-| unlimited overshoot | impossible | impossible | impossible | **passes** | impossible | impossible |
-| crash reconciled | **passes** | **passes** | **passes** | **passes** | **passes** | impossible |
-| duplicate counted | impossible | impossible | impossible | impossible | **passes** | impossible |
+| Story | softDesign | strictDesign | strictSingle | noLimit | rawSum | noReconcile | noSlotRenewal |
+|---|---|---|---|---|---|---|---|
+| siblings overshoot (accepted risk) | **passes** | impossible | impossible | **passes** | **passes** | **passes** | **passes** |
+| unlimited overshoot | impossible | impossible | impossible | **passes** | impossible | impossible | impossible |
+| expired slots let calls in | impossible | impossible | impossible | impossible | impossible | impossible | **passes** |
+| crash reconciled | **passes** | **passes** | **passes** | **passes** | **passes** | impossible | **passes** |
+| duplicate counted | impossible | impossible | impossible | impossible | **passes** | impossible | impossible |
 
 Two lessons in it. The accepted risk is real and bounded: the siblings
 story passes in every soft design and is impossible in the strict ones.
-And `noLimit`'s counterexample is the rare kind: every call must be
-admitted before any completes, which random simulation did not find in
-40,000 runs. Its story is the witness; a guided search would find it
-directly (the gotogether feedback on issue #144).
+And the concurrency bugs (`noLimit`, `noSlotRenewal`) have the rare kind
+of counterexample: several calls must be admitted, or slots expire, before
+any call completes, which random simulation did not find in tens of
+thousands of runs. Their stories are the witnesses; a guided search would
+find them directly (the gotogether feedback on issue #144).
 
 ```quint accounting.qnt +=
 
 module softDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
 module strictDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
 }
 
 module strictSingle {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
 
   val hardCeiling = totalBilled <= BUDGET + uncounted
 }
 
 module noLimit {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
 module rawSum {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = false, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = false, RECONCILE = true).*
+}
+
+module noSlotRenewal {
+  import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = false, STRICT = false, DEDUP = true, RECONCILE = true).*
 }
 
 module noReconcile {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, STRICT = false, DEDUP = true, RECONCILE = false).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = false).*
 }
 ```

@@ -1,6 +1,6 @@
 # 0001: Same-dialect pass-through; translation through one canonical model; hosting as envelopes
 
-Status: Accepted (v1 baseline). From archive 0001, 0011, 0035.
+Status: Accepted (v1 baseline). From archive 0001, 0011, 0035. Amended by [0033](0033-explicit-cross-dialect-conversion.md) (conversion only where a route asks), [0037](0037-request-policy-and-cache-stability.md) (semantic cache stability).
 
 ## Context
 

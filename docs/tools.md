@@ -14,7 +14,7 @@ default, `-o json|yaml` for scripts. Every mutating command takes
 | Persona | Commands |
 |---|---|
 | Everyone | `login`, `whoami` (identity, scopes, roles), `models` (what I may use, by scope), `spend` (mine, by period/model) |
-| User | `keys create --scope … [--models … --cap 50/month --rate … --expires 30d --bind-spiffe …]`, `keys list`, `keys constrain`, `keys rotate`, `keys revoke`, `capture on|off --key …` (own keys, within the scope's ceiling) |
+| User | `keys create --scope … [--models … --cap 50/month --rate … --expires 30d …]`, `keys list`, `keys constrain`, `keys rotate`, `keys revoke`, `capture on|off --key …` (own keys, within the scope's ceiling) |
 | Coding agents | `agent setup claude-code|codex|cursor|copilot --scope …` writes the agent's config to point at golem; `token` prints a cached Entra access token for agents with a credential helper (Claude Code's `apiKeyHelper` and equivalents), with the scope sent as a header; agents that take only a static key get a minted personal key (12-hour default); either way no long-lived key sits on disk |
 | Manager | `scopes get`, `members add|remove`, `projects create --team …`, `services create --scope …`, `services keys …`, `caps set --member … 200/month`, `grants create --from team/… --to project/…`, `requests create` (adjustments), `capture set --scope|--service … [--retention 90d --override narrow]`, `mode set observe|warn|enforce`, `spend --scope …` |
 | Budget manager | `requests list --pending`, `requests approve|reject`, `grants create --from cc/…`, `spend --cost-center …` |
@@ -34,7 +34,7 @@ A small web UI for the tasks people do weekly, not for operating golem.
   rights of its own.
 - Pages: my keys (mint with a constraint form, revoke, copy once), my
   spend; my teams and projects (members, services, caps, grants);
-  requests (raise, my pending, approvals inbox for budget managers); cost
+  caps and spend (approvals when they arrive, ADR 0034); cost
   center view; admin: gateways and versions, config (read-only, linking to
   the CRD or `golemctl` for edits), audit search.
 - Charts link to Grafana panels (spend by member, model, day) filtered to

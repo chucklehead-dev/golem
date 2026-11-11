@@ -2,8 +2,8 @@
 
 Status: v1 baseline, for M1.5. The internal representation that dialect
 adapters translate through (ADR 0001), the capability matrix that routing
-uses (ADR 0028), and the determinism rule that keeps provider prompt
-caches working (ADR 0028). Internal to the gateway: never an API.
+uses (ADR 0028), and the cache-stability rule that keeps provider prompt
+caches working (ADRs 0028, 0037). Internal to the gateway: never an API.
 
 ## 1. Shape
 
@@ -88,38 +88,35 @@ output, server-side tools.
   express) gates translation: a request whose features the backend
   dialect cannot express is refused before any upstream call.
 
-## 4. Determinism (ADR 0028)
+## 4. Cache stability (ADRs 0028, 0037)
 
-Provider prompt caches match on exact prefixes. An encoder that varies its
-output for the same input (map order, whitespace, number formatting, field
-order, merged-message boundaries) turns every translated request into a
-cache miss, which on coding-agent traffic can double its cost.
+Provider prompt caches match on prompt content: the same system content,
+tool definitions and earlier turns, in the same order. An encoder that
+reorders tools, merges or splits turns differently, or changes content
+between requests for the same conversation turns every translated request
+into a cache miss, which on long conversations can double their cost.
+JSON formatting (whitespace, field order) does not affect the providers'
+caches and is not constrained.
 
 - Encoders are pure functions of the canonical value: the same canonical
-  conversation prefix always produces the same bytes, independent of the
-  rest of the request.
-- JSON is written by golem's own encoder in a fixed field order with no
-  map iteration; numbers in a canonical form; tool input JSON re-emitted in
-  its original form where it was received (kept as raw bytes), not
-  re-serialised.
+  conversation prefix always produces the same content blocks, tool
+  definitions and order.
+- Tool input JSON is re-emitted as received (kept as raw bytes).
 - Cache breakpoints placed by golem (for Chat callers on Claude) are put at
   stable positions: the end of the system content and the last stable turn.
 - A property test: for random conversations and random extensions of them,
-  the encoded cache-relevant blocks of the prefix (system content, tools,
-  earlier turns) are byte-identical in the encoding of the extended
-  conversation, for every encoder. Whole request bodies are not prefixes of
-  each other (closing delimiters and per-request fields change); the
-  property is about the blocks providers cache.
+  the decoded content blocks and tool definitions of the prefix are equal,
+  in order, in the encoding of the extended conversation, for every
+  encoder.
 
 ## 5. Tests
 
 - Per adapter: `EncodeRequest(DecodeRequest(x)) == x` on the supported
-  subset (byte-identical where the dialect is byte-stable, structurally
-  otherwise); `DecodeRequest(EncodeRequest(c)) == c` for canonical values
+  subset (structurally equal); `DecodeRequest(EncodeRequest(c)) == c` for canonical values
   the dialect can express; features outside the subset refused, never
   dropped.
 - Streams: any chunking of the same upstream stream produces the same
   canonical events and the same client output.
-- Determinism (§4) and capability filtering (§3) as properties.
+- Cache stability (§4) and capability filtering (§3) as properties.
 - Decoders fuzzed; goldens from recorded traffic per pair; a nightly
   differential run with real SDKs against Bedrock and OpenAI.
