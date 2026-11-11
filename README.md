@@ -24,8 +24,8 @@ Status: design. Nothing is built yet.
   packages, Go facilities, performance.
 - [docs/control-plane.md](docs/control-plane.md): golem-control and
   services, the state document in object storage, signed snapshot distribution, jobs, bootstrap.
-- [docs/operations.md](docs/operations.md): installation and day-2 with Helm,
-  GitOps and Argo Rollouts.
+- [docs/operations.md](docs/operations.md): installation and day-2 with Argo CD,
+  Argo Rollouts and Crossplane.
 - [docs/tools.md](docs/tools.md): golemctl, the console, Backstage.
 - [docs/contracts.md](docs/contracts.md): refusals and status codes, error
   origin, the ledger schema, the price model, identifiers and headers,

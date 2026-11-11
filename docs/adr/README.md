@@ -48,3 +48,4 @@ baseline one, marked in both.
 | [0037](0037-request-policy-and-cache-stability.md) | Forward unknown fields, enforce the policy-relevant ones; semantic cache stability |
 | [0038](0038-accounting-refinements.md) | Dedicated provider accounts, monthly reconciliation within tolerance, renewed concurrency slots, bounded worst case |
 | [0039](0039-bypass-controls.md) | Block bypass: SCPs for Bedrock, egress blocks, provider key-creation limits, managed agent settings |
+| [0040](0040-argo-cd-and-crossplane.md) | Delivery through Argo CD and Argo Rollouts; cloud resources through the platform's Crossplane (`GolemInstallation`, `GolemSite`) |

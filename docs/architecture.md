@@ -12,7 +12,7 @@ rules that keep them apart. Each component's inside has its own document:
 | [gateway.md](gateway.md) | golem-gateway, the data plane |
 | [control-plane.md](control-plane.md) | golem-control: APIs, the state document, signed distribution, jobs, bootstrap |
 | [roadmap.md](roadmap.md) | the phases and their exit criteria |
-| [operations.md](operations.md) | installation and day-2 with Helm, GitOps and Argo Rollouts |
+| [operations.md](operations.md) | installation and day-2 with Argo CD, Argo Rollouts and Crossplane |
 | [tools.md](tools.md) | golemctl, golem-console, the Backstage plugin |
 | [contracts.md](contracts.md) | the interfaces others depend on: errors, the ledger, prices, headers |
 | [canonical-model.md](canonical-model.md) | translation through the canonical model; capabilities; determinism |
@@ -47,9 +47,9 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
    golem-control ◀────────────────────────────────────────────────┘
      entitlements · overrides · spend · audit · explain
      leader: jobs; signs and publishes snapshots
-            │  state document: CAS (If-Match)        Helm + GitOps (Argo CD or Flux)
-            │  snapshots + signed pointers           + Argo Rollouts install and
-            ▼                                        upgrade every cluster
+            │  state document: CAS (If-Match)        Argo CD + Argo Rollouts deliver;
+            │  snapshots + signed pointers           Crossplane composes the bucket,
+            ▼                                        KMS, IAM, Valkey, Entra apps
    S3 bucket, us-east-2, shared by every site (replicated to a backup account)
             ▲  poll signed pointer, fetch by hash; write status/<pool>/<id>
             │
@@ -120,7 +120,7 @@ lib/                       shared libraries with no control-plane or Kubernetes-
                            snapshot format, the CRD types (lib/api/v1alpha1) and the snapshot
                            compiler (lib/compile), used by golem-control, golemctl and the
                            standalone gateway
-deploy/                    Helm charts (CRDs, golem-control, gateway pools), Terraform, ClickHouse DDL, Grafana
+deploy/                    Helm charts (CRDs, golem-control, gateway pools), the Crossplane composition and XRDs, Argo CD ApplicationSet, ClickHouse DDL, Grafana
 docs/
 ```
 
@@ -160,7 +160,7 @@ Each binary also gets its own image and its own dependency list in
 
 - **The platform team adds a model alias.** They open a PR with a
   `ModelRoute` CRD; CI runs `golemctl config validate` on the repository
-  offline (the snapshot compiler as a library). After merge, Argo or Flux
+  offline (the snapshot compiler as a library). After merge, Argo CD
   applies it (the API server enforces the schema's rules). golem-control sees it through its watch, builds the new
   snapshot, and publishes it for every gateway pool that
   selects it; the pools' gateways pick it up within a second, compile it and

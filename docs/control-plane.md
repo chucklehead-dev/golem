@@ -145,10 +145,11 @@ control plane.
   mounted into its gateways and read as a file, applied over the snapshot.
   A site admin edits it with `kubectl`; it is cleared once the control
   plane has the revocation.
-- **Bootstrap**: a Terraform module creates the bucket (versioning,
-  lifecycle, policy, replication to the backup account), the KMS keys
-  (encryption, signing), and the IAM roles (control plane, each gateway
-  pool, break-glass); `golemctl bootstrap` writes the first empty document
+- **Bootstrap**: a `GolemInstallation` claim on the platform's Crossplane
+  (ADR 0040) composes the bucket (versioning, lifecycle, policy,
+  replication to the backup account), the KMS keys (encryption, signing),
+  the IAM roles (control plane, each gateway pool, break-glass), Valkey and
+  the Entra registrations; `golemctl bootstrap` writes the first empty document
   with `If-None-Match: *`, registers the gateway pools, and creates the
   first scopes; the first admin is whoever holds the `golem.admin` Entra
   app role.

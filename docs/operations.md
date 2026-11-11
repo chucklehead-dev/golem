@@ -1,18 +1,20 @@
 # golem: operations
 
 Status: draft. How golem is installed and run day to day, without an
-operator (ADR 0036): Helm charts deployed by the GitOps tool (Argo CD or
-Flux), Argo Rollouts for gateway canaries, and a few golem-control jobs.
+operator (ADR 0036), on the platform's own tools (ADR 0040): Helm charts
+delivered by Argo CD, Argo Rollouts for gateway canaries, Upbound's managed
+Crossplane for cloud resources, and a few golem-control jobs.
 
 ## 1. What is installed, and by what
 
 | Piece | Delivered as | Notes |
 |---|---|---|
-| Config CRDs (`Backend`, `ModelRoute`, `ScopePolicy`, `Hook`, `PriceList`) | CRD definitions in the chart; objects in the GitOps repository (CODEOWNERS: platform team) | Validated by schema CEL rules at `kubectl apply` and by `golemctl config validate` in CI; status written by golem-control (ADR 0005) |
+| Config CRDs (`Backend`, `ModelRoute`, `ScopePolicy`, `Hook`, `PriceList`) | CRD definitions in the chart (first sync wave); objects in the GitOps repository (CODEOWNERS: platform team), synced by Argo CD | Validated by schema CEL rules at `kubectl apply` and by `golemctl config validate` in CI; status written by golem-control (ADR 0005) |
 | golem-control | Helm chart: Deployment (two replicas), Service, PDB, ServiceAccount with workload identity, RBAC to read config CRDs, write their status, hold the leader Lease and update the collector's Langfuse Secret | One installation, on EKS (ADR 0008) |
 | Gateway pools | Helm chart per pool: Argo Rollout (three replicas across zones), Service, PDB, ServiceAccount, the emergency-denylist ConfigMap, provider Secrets mounted for the pool's backends, egress ServiceEntries, the `AuthorizationPolicy` limiting who may reach it | Internal pools and the edge pool (its ingress, WAF and source ranges) |
-| Valkey | ElastiCache (AWS) or the platform's Valkey, per site | |
-| Bucket, KMS keys, IAM roles, SCPs | The Terraform module (control-plane.md §5) | Includes the bypass SCPs of ADR 0039 |
+| Valkey | ElastiCache, composed by Crossplane per site | |
+| Bucket, KMS keys, IAM roles, SCPs, Entra registrations | Crossplane claims: `GolemInstallation` once, `GolemSite` per remote site (ADR 0040) | Includes the bypass SCP of ADR 0039 and remote sites' Roles Anywhere or federation |
+| Argo CD Applications | An ApplicationSet over the site list; sync waves: CRDs, then golem-control, then gateway pools | |
 | ClickHouse DDL, Grafana dashboards and alerts | Chart hooks (a Job for DDL; ConfigMaps for Grafana's sidecar) | |
 | Collector routing | A snippet merged into the enterprise collector's config, plus the Langfuse credentials Secret it reads | ADR 0035 |
 
@@ -20,8 +22,8 @@ Flux), Argo Rollouts for gateway canaries, and a few golem-control jobs.
 
 | Operation | How |
 |---|---|
-| **Upgrade** | GitOps bumps the chart version: golem-control first (rolling; reads the state document's n−1 schema), then gateway pools. Stored formats change by the two-release rule (PRD §9.14). |
-| **Gateway rollout and canary** | Argo Rollouts: a canary step (one replica or a traffic share), promoted when error and latency SLOs hold, aborted otherwise. New pods become ready only with a valid snapshot. |
+| **Upgrade** | A chart version bump in the GitOps repository; Argo CD syncs in waves: golem-control first (rolling; reads the state document's n−1 schema), then gateway pools. Stored formats change by the two-release rule (PRD §9.14). |
+| **Gateway rollout and canary** | Argo Rollouts: a canary step (one replica or a traffic share) with an analysis on golem's `error.origin = gateway` rate and latency, promoted when they hold, aborted otherwise. New pods become ready only with a valid snapshot. |
 | **Drain** | `preStop` turns readiness off and waits for in-flight streams up to the drain grace (default 10 minutes for agent streams), then ends them with a dialect error event; `terminationGracePeriodSeconds` follows it. |
 | **Provider credential rotation** | Update the Secret; kubelet refreshes the mounted file; the gateway re-reads it. Workload identity needs none. |
 | **Backend maintenance** | Planned: `Backend.spec.disabled` or `weight: 0` in GitOps. Unplanned: an expiring override (`golemctl overrides create --disable deployment/... --for 2h --reason ...`). |
@@ -34,7 +36,7 @@ Flux), Argo Rollouts for gateway canaries, and a few golem-control jobs.
 
 ## 3. Sites
 
-Each cluster's charts are deployed by the GitOps tool, which already
-knows every cluster; nothing in one cluster reaches another's API server
+Each cluster's charts are deployed by Argo CD's ApplicationSet, which
+already knows every cluster; nothing in one cluster reaches another's API server
 (ADR 0008). Remote sites run gateway pools and a Valkey; their config CRDs
 live in the EKS cluster, selected by a `site` label.

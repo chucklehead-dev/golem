@@ -38,7 +38,8 @@ The gateway end to end with nothing optional.
   streaming, usage extraction; probes; drain; OTLP to ClickStack.
 - Proto skeletons for the control API and the snapshot format; the error
   codes, headers and ledger schema of contracts.md as code and DDL.
-- The Terraform module for the bucket, KMS keys and IAM roles, and
+- The Crossplane composition (`GolemInstallation`, `GolemSite`) for the
+  bucket, KMS keys, IAM roles, Valkey and Entra registrations, and
   `golemctl bootstrap` (control-plane.md §5).
 - Benchmarks and the stub-upstream load test as baselines.
 - Standalone mode (`--standalone`, ADR 0023) and `make dev-up` (kind,
@@ -85,7 +86,7 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   with the contract's schema, TTLs and the full price model;
   Grafana dashboards for spend, limits, latency, TTFT; snapshot-age alerts,
   a synthetic request per pool, provider usage reconciliation.
-- **Install**: Helm charts through GitOps, Argo Rollouts for gateway canaries (ADR 0036).
+- **Install**: Helm charts through Argo CD, Argo Rollouts for gateway canaries, Crossplane claims for cloud resources (ADRs 0036, 0040).
 - **Bypass controls** for the first team: the Bedrock SCP, egress blocks, provider key-creation limits, managed agent settings (ADR 0039).
 - **Dedicated provider accounts or projects** for golem (ADR 0038).
 - **Testing**: the regime of testing.md for these parts; Quint models of

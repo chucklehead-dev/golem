@@ -16,7 +16,7 @@ Status: Accepted (v1 baseline). From archive 0029, 0030, 0032.
   quotas are split statically per site (ADR 0012).
 - **No cross-cluster Kubernetes access**: object storage is the only
   channel between sites; no cluster holds another's credentials; one
-  operator per cluster; fleet-wide rollouts by the GitOps tool. If a site
+  operator per cluster; fleet-wide rollouts by Argo CD (ADR 0040). If a site
   later wants its own config CRDs, a site relay uploads them to
   `config/<site>/` and copies status back, pull only.
   multicluster-runtime is revisited if a cluster inventory with managed

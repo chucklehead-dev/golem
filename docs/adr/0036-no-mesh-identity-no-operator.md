@@ -1,6 +1,6 @@
 # 0036: No mesh-identity header; no operator
 
-Status: Accepted. Amends [0009](0009-identity-and-authentication.md) and [0003](0003-components-and-layering.md).
+Status: Accepted; delivery and infrastructure detailed by [0040](0040-argo-cd-and-crossplane.md). Amends [0009](0009-identity-and-authentication.md) and [0003](0003-components-and-layering.md).
 
 ## Decision
 
@@ -10,7 +10,7 @@ Status: Accepted. Amends [0009](0009-identity-and-authentication.md) and [0003](
   namespaces and service accounts can reach golem at all. Revisit only for a
   service that cannot use Entra.
 - **No golem-operator.** Installation and day-2 are Helm charts deployed by
-  the GitOps tool (Argo CD or Flux), with Argo Rollouts for gateway canaries;
+  Argo CD, with Argo Rollouts for gateway canaries;
   drains are the gateway's `preStop` and `terminationGracePeriodSeconds`;
   mesh policies and mounted Secrets are chart templates; Langfuse
   provisioning is a golem-control job (ADR 0035). docs/operations.md
