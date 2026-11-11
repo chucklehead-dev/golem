@@ -16,7 +16,7 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 | Bucket as the root of trust | S3 `If-Match` behaviour (412, retries, lost responses); KMS asymmetric signing and verification of snapshots and pointers; the bucket policy that denies all other writers; replication to the backup account under Object Lock | ADR 0028, 0033 |
 | Remote sites | Entra-to-AWS federation from AKS and IAM Roles Anywhere from on-prem to the bucket; round trip from each site to us-east-2 (recorded; site Valkey and ceilings assumed) | ADR 0029, before the first remote site |
 | Fast-path budget | jsontext scan and splice, SSE tee, a stub upstream: overhead and allocations per request | PRD §7 targets, ADR 0001 |
-| Provider envelopes | Claude on Foundry (Entra scope, `/anthropic/v1/messages`), Anthropic on Bedrock (event-stream framing), Chat→Converse fidelity on tool calls | §5.1.2 translation scope |
+| Bedrock envelope | Claude Code against Claude on Bedrock through a stub envelope: event-stream framing to SSE, `anthropic_beta` in the body, prompt caching, token counting, inference-profile IDs as alias targets | ADR 0035 |
 | vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADR 0019, 0032 |
 | Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0018 |
 | Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0021 |
@@ -45,12 +45,12 @@ fast-path budget.
 
 The platform team's own apps and coding agents, us-east-2, EKS.
 
-- **Gateway**: Chat, Responses, Messages, Embeddings, models list; backends
-  OpenAI, Anthropic, Foundry (Azure OpenAI and Claude), Bedrock (Anthropic
-  envelope, Chat→Converse), standalone vLLM (static endpoints, discovered
+- **Gateway**: Chat, Responses, Messages, Embeddings, models list; three
+  backends with no translation (ADR 0035): Claude on Bedrock (the Messages
+  envelope), OpenAI (pass-through), standalone vLLM (pass-through for
+  Chat, Completions, Embeddings and Messages; static endpoints, discovered
   models, static concurrency ceilings, per-principal limits, overflow);
-  Chat→Anthropic
-  translation; aliases, weighted and least-in-flight balancing, failover,
+  aliases, weighted and least-in-flight balancing, failover,
   retries with a retry budget, ejection, prompt-cache affinity; provider
   quota limits per deployment (below); in-process hooks (`Request`,
   `Response`, `Complete`).
@@ -77,8 +77,9 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   simulation (gotogether trial 1, testing.md §3.2).
 
 Exit: the platform team uses golem for all its model traffic for two
-weeks; ledger within 1% of provider invoices for that period; a provider
-outage drill fails over without caller changes; budgets switched from
+weeks; ledger within 1% of provider invoices for that period; outage
+drills fail over without caller changes (a Bedrock region to another
+region or inference profile; a local box to its fallback pool); budgets switched from
 `observe` to `enforce` for the team.
 
 ## Phase 3 (M2): enterprise default (10–12 weeks)
@@ -93,8 +94,9 @@ outage drill fails over without caller changes; budgets switched from
 - **Console**; spend APIs; Copilot usage ingestion as showback.
 - **Local GPU routing**: adaptive concurrency, metrics polling, prefix
   affinity, round-robin queueing across principals.
-- **Gateway**: Decisions and System One; legacy Completions; embeddings to
-  Bedrock; context-window fallback; latency EWMA and quota-headroom
+- **Gateway**: translation (Chat → Anthropic, Chat → Converse); the direct
+  Anthropic API; Microsoft Foundry (Azure OpenAI and Claude); Decisions and
+  System One; legacy Completions; embeddings to Bedrock; context-window fallback; latency EWMA and quota-headroom
   balancing; shadowing; conditional routing; remote hooks and built-in
   guardrails (`Chunk` phase if a guardrail needs it); credential
   pass-through `forward`; raw pass-through routes.

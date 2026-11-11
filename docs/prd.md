@@ -94,13 +94,15 @@ flushed as they arrive, keepalive comments on idle, usage extracted from the
 stream without buffering it, and `stream_options.include_usage` set on
 OpenAI requests so usage is always reported *(added)*.
 
-5.1.2 **Translation** is scoped to what the backends need (ADR 0001):
+5.1.2 **Translation** is scoped to what the backends need (ADR 0001). M1
+needs none: its paths are Anthropic Messages to Claude on Bedrock (an
+envelope), and pass-through to OpenAI and vLLM (ADR 0035).
 
 | Frontend → backend | Kind | Milestone |
 |---|---|---|
-| Anthropic Messages → Bedrock (Anthropic models) | envelope only: model in path, `anthropic_version` in body, event-stream framing to SSE | M1 |
-| OpenAI Chat → Anthropic Messages | translation | M1 |
-| OpenAI Chat → Bedrock Converse / ConverseStream | translation | M1 |
+| Anthropic Messages → Bedrock (Anthropic models) | envelope only: model in path, `anthropic_version` and `anthropic_beta` in body, event-stream framing to SSE (ADR 0035) | M1 |
+| OpenAI Chat → Anthropic Messages | translation | M2 |
+| OpenAI Chat → Bedrock Converse / ConverseStream | translation | M2 |
 | OpenAI Embeddings → Bedrock (Titan, Cohere embed) | per-model body adapter | M2 |
 | OpenAI Chat → Gemini (Vertex), if Vertex is used | translation | M3 |
 | OpenAI Decisions ↔ System One | translation of the shared decision shape (predicate/yes-no, choice, score), so one decision alias can fail over between them *(added)* | M3 |
@@ -127,14 +129,14 @@ the provider as is, authenticated and metered where usage can be read.
 | Backend | Auth to provider | Milestone |
 |---|---|---|
 | OpenAI (commercial API: Chat, Responses, Embeddings, Decisions) | project API keys; organisation and project headers per deployment | M1 |
-| Anthropic | API key | M1 |
-| AWS Bedrock (InvokeModel, Converse, embeddings) | SigV4: EKS Pod Identity (initially); on AKS or on-prem, Entra-to-AWS OIDC federation (`AssumeRoleWithWebIdentity`) or IAM Roles Anywhere with the workload's X.509 identity *(added)*; Bedrock API keys | M1 (EKS), M2 (elsewhere) |
-| Microsoft Foundry: Azure OpenAI models (the v1 OpenAI-compatible API: Chat, Responses, Embeddings) | Entra token (workload identity federation from the EKS service account), API key for testing | M1 |
-| Microsoft Foundry: Claude (`https://<resource>.services.ai.azure.com/anthropic/v1/messages`) | Entra bearer token (scope to confirm: Microsoft's docs say `https://ai.azure.com/.default`; some models are Entra-only), API key | M1 |
+| Anthropic (direct API) | API key | M2 |
+| AWS Bedrock (Anthropic models by InvokeModel in M1; Converse and embeddings in M2) | SigV4: EKS Pod Identity (initially); on AKS or on-prem, Entra-to-AWS OIDC federation (`AssumeRoleWithWebIdentity`) or IAM Roles Anywhere with the workload's X.509 identity *(added)*; Bedrock API keys | M1 (EKS), M2 (elsewhere) |
+| Microsoft Foundry: Azure OpenAI models (the v1 OpenAI-compatible API: Chat, Responses, Embeddings) | Entra token (workload identity federation from the EKS service account), API key for testing | M2 |
+| Microsoft Foundry: Claude (`https://<resource>.services.ai.azure.com/anthropic/v1/messages`) | Entra bearer token (scope to confirm: Microsoft's docs say `https://ai.azure.com/.default`; some models are Entra-only), API key | M2 |
 | Microsoft Foundry: other Foundry Models (OpenAI-compatible chat) | Entra token, API key | M2 |
 | OpenAI Decisions | API key | M2 |
 | TypeSafe System One | API key | M2 |
-| Self-hosted vLLM and SGLang, in other clusters or data centers (§5.2.1) | mesh mTLS (multi-cluster), bearer key, or TLS client certificate | M1 |
+| Self-hosted vLLM (M1) and SGLang (M2), on standalone machines and later clusters (§5.2.1) | bearer key or TLS client certificate, through the mesh's egress | M1 |
 | Other OpenAI-compatible servers (Ollama, KServe, TGI) | none, key, mTLS | M2 |
 | Google Vertex AI | workload identity federation | M3, if needed |
 

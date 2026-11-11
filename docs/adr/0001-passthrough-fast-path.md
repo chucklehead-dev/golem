@@ -1,6 +1,6 @@
 # 0001: Same-dialect requests are forwarded as bytes
 
-Status: Proposed
+Status: Proposed. M1 scope narrowed by [0035](0035-m1-providers-without-translation.md): no translation until M2.
 
 ## Context
 

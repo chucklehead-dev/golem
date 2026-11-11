@@ -41,3 +41,4 @@ milestone (M0) confirms them.
 | [0032](0032-control-plane-simplified.md) | A smaller control plane: one Deployment and a leader, no job table, registration TTLs, one validation path, Valkey only, static quota shares, audit outbox, cold standby, Entra tokens for agents | Accepted |
 | [0033](0033-integrity-of-the-bucket.md) | The bucket is the root of trust: signed snapshots, one publisher and sequence, safe restore, locked writes, offsite backup, edge pools see only their consumers | Accepted |
 | [0034](0034-accounting-correctness.md) | Accounting correctness: expected-cost reservations, renewal, cut streams, provider reconciliation, Responses state pinning | Accepted |
+| [0035](0035-m1-providers-without-translation.md) | M1 serves Claude on Bedrock (envelope), OpenAI and vLLM (pass-through), with no translation | Accepted |
