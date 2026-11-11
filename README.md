@@ -36,6 +36,9 @@ Status: design. Nothing is built yet.
 - [docs/entra.md](docs/entra.md): the Entra ID app registrations.
 - [docs/testing.md](docs/testing.md): the testing regime; what to model in
   Quint and where to trial gotogether.
+- [model/](model/): literate Quint models of golem's protocols, each
+  readable as an explanation and checked by `make` (first: how a
+  revocation reaches every gateway).
 - [docs/adr/](docs/adr/): the v1 baseline of decisions, one per record
   (their history in docs/adr/archive/).
 
