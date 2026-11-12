@@ -87,3 +87,31 @@ func TestEntitlementProblems(t *testing.T) {
 		})
 	}
 }
+
+func TestMembers(t *testing.T) {
+	y := strings.Replace(identity(""), "  keys:\n", `  users:
+  - {name: alice, entra: aaaa-1, scopes: [team-a]}
+  services:
+  - {name: bot, entra: bbbb-2, scopes: [team-a], default: team-a}
+  keys:
+`, 1)
+	y = strings.Replace(y, "secretRef: {name: anthropic, key: api-key}", "env: K", 1)
+	s, err := Compile(objects(t, map[string]string{"golem.yaml": y}), standalone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := s.Entitlements
+	if len(e.Users) != 1 || e.Users[0].Default != "team-a" || len(e.Services) != 1 || e.Services[0].Entra != "bbbb-2" {
+		t.Fatalf("members %+v %+v", e.Users, e.Services)
+	}
+	for name, bad := range map[string][2]string{
+		"unknown scope":       {"scopes: [team-a]}\n  services", "scopes: [team-z]}\n  services"},
+		"default not a scope": {"default: team-a}", "default: team-z}"},
+		"listed twice":        {"entra: bbbb-2", "entra: aaaa-1"},
+	} {
+		yy := strings.Replace(y, bad[0], bad[1], 1)
+		if _, err := Compile(objects(t, map[string]string{"golem.yaml": yy}), standalone); err == nil {
+			t.Errorf("%s: compiled", name)
+		}
+	}
+}

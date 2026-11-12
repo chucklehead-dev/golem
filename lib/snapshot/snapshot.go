@@ -47,6 +47,18 @@ type Entitlements struct {
 	Implicit bool    `json:"implicit,omitempty"`
 	Scopes   []Scope `json:"scopes,omitempty"`
 	Keys     []Key   `json:"keys,omitempty"`
+	// Users and Services are the principals Entra tokens name: a user by
+	// its object ID, a service by its app (client) ID (ADR 0009).
+	Users    []Member `json:"users,omitempty"`
+	Services []Member `json:"services,omitempty"`
+}
+
+// Member is a principal and the scopes it may act in.
+type Member struct {
+	ID      string   `json:"id"`      // golem's principal ID
+	Entra   string   `json:"entra"`   // the user's oid, or the service's app ID
+	Scopes  []string `json:"scopes"`  // memberships
+	Default string   `json:"default"` // the scope used without a golem-scope header
 }
 
 // Scope is a scope's rights and limits for the period.

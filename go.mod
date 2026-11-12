@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/chucklehead-dev/gotogether v0.0.0-20261112171447-7707ddf5f585
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/valkey-io/valkey-go v1.0.79
 	sigs.k8s.io/yaml v1.4.0
 )

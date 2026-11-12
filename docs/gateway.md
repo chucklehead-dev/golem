@@ -223,7 +223,12 @@ Built (M0, first part): `gateway/snapshot` (the holder: floor and lease
 enforced, transports kept across swaps; the directory source through
 `os.Root`), `lib/compile` and `lib/api/v1alpha1` (Backend, ModelRoute,
 PriceList, LocalIdentity), golem keys (`lib/key`, `gateway/auth`: by hash
-from the snapshot, Bearer or x-api-key, each refusal its own code), the
+from the snapshot, Bearer or x-api-key, each refusal its own code), Entra
+v2 tokens (RS256 only; tenant, audience, expiry with a minute's leeway;
+`golem.access` for users by oid, `golem.service` for services by azp; keys
+cached and refreshed hourly or on an unknown kid, never on the request
+path; the scope from `golem-scope`, else the principal's default, rights
+from the snapshot; `-entra-tenant`), the
 limiter in the request path (402 budgets, 429 concurrency, cancellation
 holding the slot until the upstream closes), `golemctl config validate`
 and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway

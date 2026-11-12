@@ -25,7 +25,7 @@ func TestAuthenticate(t *testing.T) {
 		snapshot.Key{Hash: hashOf(narrow), Principal: "bob", Scope: "team-a", Models: []string{"claude"}},
 		snapshot.Key{Hash: hashOf(revoked), Principal: "carol", Scope: "team-a", Revoked: true},
 		snapshot.Key{Hash: hashOf(expired), Principal: "dan", Scope: "team-a", ExpiresAt: now},
-	), key.Live, func() time.Time { return now })
+	), key.Live, func() time.Time { return now }, nil)
 
 	for _, tc := range []struct {
 		name   string
@@ -64,7 +64,7 @@ func TestAuthenticate(t *testing.T) {
 }
 
 func TestImplicit(t *testing.T) {
-	k := Compile(snapshot.Entitlements{Implicit: true}, key.Dev, time.Now)
+	k := Compile(snapshot.Entitlements{Implicit: true}, key.Dev, time.Now, nil)
 	p, r := k.Authenticate(http.Header{"Authorization": {"Bearer sk-anything-the-sdk-wants"}})
 	if r != nil || p.ID != "local" || !p.Allows([]byte("whatever")) {
 		t.Fatalf("%+v %+v: standalone's implicit principal takes any credential", p, r)

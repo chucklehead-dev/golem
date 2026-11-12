@@ -109,6 +109,44 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 		}
 		e.Keys = append(e.Keys, sk)
 	}
+	// One namespace for users and services: gateway/auth finds both by
+	// their Entra ID, so the same ID twice would shadow one of them.
+	seen := map[string]bool{}
+	members := func(kind string, ms []v1.LocalMember) []snapshot.Member {
+		var out []snapshot.Member
+		for i, m := range ms {
+			at := fmt.Sprintf("spec.%s[%d]", kind, i)
+			switch {
+			case m.Name == "":
+				add(obj, at+".name", "required")
+				continue
+			case m.Entra == "":
+				add(obj, at+".entra", "required: the user's Entra object ID, or the service's app ID")
+				continue
+			case seen[m.Entra]:
+				add(obj, at+".entra", "%q is already a user or service here", m.Entra)
+				continue
+			case len(m.Scopes) == 0:
+				add(obj, at+".scopes", "a member of no scope can call nothing")
+				continue
+			}
+			seen[m.Entra] = true
+			for j, sc := range m.Scopes {
+				if scopes[sc] == nil {
+					add(obj, fmt.Sprintf("%s.scopes[%d]", at, j), "no scope named %q", sc)
+				}
+			}
+			def := cmp.Or(m.Default, m.Scopes[0])
+			if !slices.Contains(m.Scopes, def) {
+				add(obj, at+".default", "%q is not one of its scopes", def)
+			}
+			out = append(out, snapshot.Member{ID: m.Name, Entra: m.Entra, Scopes: slices.Sorted(slices.Values(m.Scopes)), Default: def})
+		}
+		slices.SortFunc(out, func(a, b snapshot.Member) int { return cmp.Compare(a.Entra, b.Entra) })
+		return out
+	}
+	e.Users = members("users", src.Object.Spec.Users)
+	e.Services = members("services", src.Object.Spec.Services)
 	for _, sc := range scopes {
 		e.Scopes = append(e.Scopes, *sc)
 	}

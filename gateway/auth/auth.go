@@ -38,12 +38,18 @@ type Limits struct {
 // of the scope's policy and the key's constraints (org-model.md §3).
 func (p *Principal) Allows(alias []byte) bool { return p.models == nil || p.models[string(alias)] }
 
-// Keys authenticates against one snapshot's entitlements.
+// Keys authenticates against one snapshot's entitlements: golem keys, and
+// Entra tokens when an Entra verifier is configured. The chain picks by the
+// credential's shape, and whichever recognises it decides (ADR 0009).
 type Keys struct {
 	env      key.Env
 	byHash   map[[32]byte]*entry
 	implicit *Principal
 	now      func() time.Time
+	entra    *Entra
+	// byEntra: a user's oid or a service's app ID, then a scope, to the
+	// principal acting there; the empty scope is the default's.
+	byEntra map[string]map[string]*Principal
 }
 
 type entry struct {
@@ -57,9 +63,10 @@ type entry struct {
 const implicitInFlight = 16
 
 // Compile indexes a snapshot's entitlements for an installation: env is the
-// key prefix this gateway accepts (Live in production, Dev standalone).
-func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time) *Keys {
-	k := &Keys{env: env, byHash: map[[32]byte]*entry{}, now: now}
+// key prefix this gateway accepts (Live in production, Dev standalone), and
+// entra verifies Entra tokens (nil: they are refused).
+func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *Entra) *Keys {
+	k := &Keys{env: env, byHash: map[[32]byte]*entry{}, now: now, entra: entra, byEntra: map[string]map[string]*Principal{}}
 	if e.Implicit {
 		k.implicit = &Principal{ID: "local", Kind: "user", Scope: "local",
 			Limits: Limits{PrincipalInFlight: implicitInFlight}}
@@ -68,6 +75,25 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time) *Keys {
 	for _, s := range e.Scopes {
 		scopes[s.ID] = s
 	}
+	member := func(kind string, ms []snapshot.Member) {
+		for _, m := range ms {
+			byScope := map[string]*Principal{}
+			for _, id := range m.Scopes {
+				sc := scopes[id]
+				models := map[string]bool{}
+				for _, a := range sc.Models {
+					models[a] = true
+				}
+				byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: models,
+					Limits: Limits{BudgetMicros: sc.BudgetMicros, Strict: sc.Strict,
+						PrincipalInFlight: sc.PrincipalInFlight, ScopeInFlight: sc.ScopeInFlight}}
+			}
+			byScope[""] = byScope[m.Default]
+			k.byEntra[m.Entra] = byScope
+		}
+	}
+	member("user", e.Users)
+	member("service", e.Services)
 	for _, sk := range e.Keys {
 		var h [32]byte
 		if b, err := hex.DecodeString(sk.Hash); err != nil || len(b) != 32 {
@@ -120,12 +146,15 @@ func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
 		return k.implicit, nil // standalone: whatever the SDK sends (ADR 0023)
 	}
 	if cred == "" {
-		return nil, &Refusal{contract.AuthMissing, "no credential: send a golem key as Authorization: Bearer or x-api-key (golemctl keys mint)"}
+		return nil, &Refusal{contract.AuthMissing, "no credential: send a golem key as Authorization: Bearer or x-api-key (golemctl keys mint), or an Entra token (golemctl token)"}
+	}
+	if looksLikeJWS(cred) {
+		return k.token(cred, h.Get(contract.HeaderScope))
 	}
 	env, err := key.Parse(cred)
 	if err != nil {
 		if !strings.HasPrefix(cred, "glm_") {
-			return nil, &Refusal{contract.AuthMissing, "this credential is not a golem key; golem takes its own keys (Entra tokens are coming): golemctl keys mint"}
+			return nil, &Refusal{contract.AuthMissing, "this credential is neither a golem key nor an Entra token: golemctl keys mint, or golemctl token"}
 		}
 		return nil, &Refusal{contract.AuthKeyUnknown, "this golem key is malformed (a mistyped or truncated key): copy it again"}
 	}
@@ -142,6 +171,31 @@ func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
 		return nil, &Refusal{contract.AuthKeyExpired, "this key expired at " + e.expires.Format(time.RFC3339) + ": mint a new one (golemctl keys mint)"}
 	}
 	return &e.p, nil
+}
+
+// token authenticates an Entra token and finds the principal in the scope
+// the golem-scope header names, else its default (contracts.md §5).
+func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
+	if k.entra == nil {
+		return nil, &Refusal{contract.AuthTokenInvalid, "this gateway does not take Entra tokens; use a golem key"}
+	}
+	id, r := k.entra.Verify(raw)
+	if r != nil {
+		return nil, r
+	}
+	byScope := k.byEntra[id.ID]
+	if byScope == nil {
+		what := "user"
+		if id.Service {
+			what = "service"
+		}
+		return nil, &Refusal{contract.AuthzScopeNotMember, "this " + what + " is not a member of any golem scope (Entra group sync runs every five minutes; a service must be registered in golem)"}
+	}
+	p := byScope[scope]
+	if p == nil || (p.Kind == "service") != id.Service {
+		return nil, &Refusal{contract.AuthzScopeNotMember, "not a member of scope " + scope + ": name one of yours in golem-scope, or leave it out for your default"}
+	}
+	return p, nil
 }
 
 func credential(h http.Header) string {

@@ -114,8 +114,19 @@ type LocalIdentity struct {
 
 // LocalIdentitySpec is a LocalIdentity's scopes and keys.
 type LocalIdentitySpec struct {
-	Scopes []LocalScope `json:"scopes"`
-	Keys   []LocalKey   `json:"keys"`
+	Scopes   []LocalScope  `json:"scopes"`
+	Keys     []LocalKey    `json:"keys,omitempty"`
+	Users    []LocalMember `json:"users,omitempty"`
+	Services []LocalMember `json:"services,omitempty"`
+}
+
+// LocalMember is a user (by Entra object ID) or a service (by app ID), for
+// testing Entra tokens standalone.
+type LocalMember struct {
+	Name    string   `json:"name"`
+	Entra   string   `json:"entra"` // oid, or app (client) ID
+	Scopes  []string `json:"scopes"`
+	Default string   `json:"default,omitempty"` // default: the first scope
 }
 
 // LocalScope is a scope: the aliases its members may call and its limits.

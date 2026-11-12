@@ -58,6 +58,8 @@ type Holder struct {
 	Now func() time.Time
 	// Env is the key prefix this gateway accepts: Live, or Dev standalone.
 	Env key.Env
+	// Entra verifies Entra tokens; nil: the gateway takes golem keys only.
+	Entra *auth.Entra
 	// OnApply, if set, is called with each snapshot applied (the limiter
 	// takes its known spend).
 	OnApply func(*Compiled)
@@ -201,7 +203,7 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 		prices[p.Model] = p
 	}
 	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...),
-		Auth: auth.Compile(s.Entitlements, env, h.now), Prices: prices}, nil
+		Auth: auth.Compile(s.Entitlements, env, h.now, h.Entra), Prices: prices}, nil
 }
 
 // Static is a Holder with one compiled snapshot and no lease: for tests.

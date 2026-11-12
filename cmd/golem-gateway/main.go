@@ -19,9 +19,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/proxy"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
@@ -32,6 +34,8 @@ func main() {
 	standalone := flag.String("standalone", "", "run from the CRD YAML in this directory, on this machine only (ADR 0023)")
 	listen := flag.String("listen", "127.0.0.1:8080", "address to serve on")
 	maxBody := flag.Int64("max-body", 32<<20, "largest request body accepted, in bytes")
+	tenant := flag.String("entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
+	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
 	if *standalone == "" {
 		fail("only --standalone <dir> is built so far; the bucket source comes with the publisher (roadmap M1)")
@@ -42,7 +46,14 @@ func main() {
 
 	// Standalone: dev keys, the in-memory limiter (ADR 0023).
 	limiter := limit.New(limit.NewMem())
-	holder := &snapshot.Holder{Env: key.Dev, OnApply: func(c *snapshot.Compiled) {
+	var entra *auth.Entra
+	if *tenant != "" {
+		entra = &auth.Entra{Tenant: *tenant, Audiences: strings.Split(*audience, ",")}
+		if err := entra.Refresh(context.Background()); err != nil {
+			fail("Entra's signing keys: %v", err)
+		}
+	}
+	holder := &snapshot.Holder{Env: key.Dev, Entra: entra, OnApply: func(c *snapshot.Compiled) {
 		for _, s := range c.Snapshot.Entitlements.Scopes {
 			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Spend: s.KnownSpend, Watermark: s.Watermark})
 		}
@@ -79,6 +90,9 @@ func main() {
 	defer stop()
 	go dir.Run(ctx)
 	go renew(ctx, limiter)
+	if entra != nil {
+		go entra.Run(ctx)
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
