@@ -35,7 +35,6 @@ CREATE TABLE IF NOT EXISTS golem.spend (
     tokens_cache_write_5m UInt64,
     tokens_cache_write_1h UInt64,
     tokens_reasoning      UInt64,
-
     units                 Map(String, UInt64),
     cost_micros           Int64,
     currency              FixedString(3),
