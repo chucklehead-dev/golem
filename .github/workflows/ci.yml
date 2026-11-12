@@ -9,6 +9,12 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:8.1
+        ports: ["6379:6379"]
+    env:
+      GOLEM_VALKEY_ADDR: localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -32,6 +38,12 @@ jobs:
 
   models:
     runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:8.1
+        ports: ["6379:6379"]
+    env:
+      GOLEM_VALKEY_ADDR: localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -52,7 +64,7 @@ jobs:
         env:
           QUINT_BACKEND: typescript
       - name: the gateway against its models (connect: the model drives)
-        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/...
+        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/...   # TestExposureModelValkey too
         env:
           QUINT_BACKEND: typescript
       - name: the gateway against its models (qhegel: Hegel drives, the model judges; planted bugs caught)

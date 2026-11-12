@@ -35,10 +35,11 @@ type Store interface {
 	// limit). It reports whether it did.
 	Acquire(ctx context.Context, s Slot, principalLimit, scopeLimit int) (bool, error)
 	// Release frees a call's slot.
-	Release(ctx context.Context, call string) error
-	// Reacquire registers slots for calls still running, after an outage
-	// in which their TTLs lapsed. It does not check limits: the calls are
-	// already running.
+	Release(ctx context.Context, s Slot) error
+	// Reacquire registers (or renews) slots for calls still running: the
+	// renewal every 30 seconds (ADR 0038), and after an outage in which
+	// their TTLs lapsed. It does not check limits: the calls are already
+	// running.
 	Reacquire(ctx context.Context, slots []Slot) error
 	// Add records spend events for a scope; adding one twice is harmless.
 	Add(ctx context.Context, scope string, es ...Event) error
@@ -85,13 +86,13 @@ func (m *Mem) Acquire(_ context.Context, s Slot, principalLimit, scopeLimit int)
 	return true, nil
 }
 
-func (m *Mem) Release(_ context.Context, call string) error {
+func (m *Mem) Release(_ context.Context, s Slot) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
 		return ErrUnavailable
 	}
-	delete(m.slots, call)
+	delete(m.slots, s.Call)
 	return nil
 }
 

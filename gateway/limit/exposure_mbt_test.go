@@ -29,9 +29,18 @@ type event struct {
 	Cost int64
 }
 
+// faultyStore is a Store the test can fault as the model's environment does.
+type faultyStore interface {
+	Store
+	SetDown(bool)
+	Failover(scope string, keep func(id string) bool)
+	Slots() []Slot
+}
+
 type expDriver struct {
 	t       testing.TB
-	store   *Mem
+	newSt   func(testing.TB) faultyStore
+	store   faultyStore
 	gws     map[string]*Limiter
 	tickets map[string]*Ticket
 }
@@ -42,7 +51,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 	cost := func() int64 { return connect.MustPick[int64](s, "cost") }
 	return connect.Switch{
 		"init": func(*connect.Step) error {
-			d.store = NewMem()
+			d.store = d.newSt(d.t)
 			d.gws = map[string]*Limiter{"g1": New(d.store), "g2": New(d.store)}
 			d.tickets = map[string]*Ticket{}
 			return nil
@@ -155,5 +164,22 @@ func TestExposureModel(t *testing.T) {
 		t.Skip("quint not installed")
 	}
 	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 100, MaxSteps: 30},
-		func(tb testing.TB) connect.Driver { return &expDriver{t: tb} })
+		func(tb testing.TB) connect.Driver {
+			return &expDriver{t: tb, newSt: func(testing.TB) faultyStore { return NewMem() }}
+		})
+}
+
+// TestExposureModelValkey: the same, over the Valkey store, its outages and
+// failovers injected by a wrapper.
+func TestExposureModelValkey(t *testing.T) {
+	if _, err := exec.LookPath("quint"); err != nil {
+		t.Skip("quint not installed")
+	}
+	addr := valkeyAddr(t)
+	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 50, MaxSteps: 30},
+		func(tb testing.TB) connect.Driver {
+			return &expDriver{t: tb, newSt: func(tb testing.TB) faultyStore {
+				return &valkeyFaults{Valkey: newValkey(tb.(*testing.T), addr)}
+			}}
+		})
 }

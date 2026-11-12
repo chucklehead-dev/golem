@@ -159,7 +159,7 @@ func (l *Limiter) release(ctx context.Context, t *Ticket) {
 	t.done = true
 	delete(l.running, t.call.ID)
 	if !l.down {
-		if err := l.store.Release(ctx, t.call.ID); err != nil {
+		if err := l.store.Release(ctx, Slot{t.call.ID, t.call.Principal, t.call.Scope}); err != nil {
 			l.down = true // the slot's TTL frees it
 		}
 	}
@@ -183,6 +183,26 @@ func (l *Limiter) ApplySnapshot(ctx context.Context, scope string, k Known) {
 			l.down = true
 		}
 	}
+}
+
+// Renew re-registers the slots of this gateway's running calls; the
+// request path calls it every 30 seconds (ADR 0038). A failed renewal is an
+// outage: the gateway admits on its own counts until Recover (ADR 0041 §7.3).
+func (l *Limiter) Renew(ctx context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.down {
+		return ErrUnavailable
+	}
+	var slots []Slot
+	for _, t := range l.running {
+		slots = append(slots, Slot{t.call.ID, t.call.Principal, t.call.Scope})
+	}
+	if err := l.store.Reacquire(ctx, slots); err != nil {
+		l.down = true
+		return err
+	}
+	return nil
 }
 
 // Recover is called when the store answers again: the held increments are
