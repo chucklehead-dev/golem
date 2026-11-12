@@ -69,10 +69,7 @@ module publication {
     }
   }
 
-  action init = {
-    nondet first = REPLICAS.oneOf()
-    initWith(first)
-  }
+  action init = initWith("r1")
   action keepState = all {
     revoked' = revoked, stateVersion' = stateVersion, history' = history,
     revokedAt' = revokedAt, everRevoked' = everRevoked,

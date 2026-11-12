@@ -225,11 +225,14 @@ it may serve from.
     }
   }
 
-  action init = {
-    nondet first = REPLICAS.oneOf()
-    initWith(first)
-  }
+  action init = initWith("r1")
 ```
+
+The first leader is `r1`. The replicas are interchangeable, so choosing
+it loses no behaviour (every run that starts with `r2` is the same run with
+the names swapped), and it means a recorded run of the real gateway
+replays from `init` without a search for which replica led first
+(test/props).
 
 Every action below changes a few variables and leaves the rest alone.
 These helpers say "the rest stays as it is" for each group, so each action
