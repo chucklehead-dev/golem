@@ -21,7 +21,8 @@ retry pointlessly and users wait through backoff before seeing why.
 | Rate or concurrency limit; provider quota share full | 429 + `Retry-After` | `limit.rate`, `limit.concurrency`, `limit.provider_quota` | yes, after the delay |
 | Budget or cap reached by known spend (in `enforce` mode) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
 | Not authenticated (missing, unknown, expired, revoked key or token) | 401 | `auth.missing`, `auth.key_revoked`, `auth.token_expired` | no |
-| Authenticated, not allowed (model, scope, dialect, capture policy) | 403 | `authz.model_not_allowed`, `authz.scope_not_member` | no |
+| Authenticated, not allowed (model, scope, dialect, capture policy, provider storage) | 403 | `authz.model_not_allowed`, `authz.scope_not_member`, `authz.provider_storage_forbidden` | no |
+| A malformed request (not one JSON object, duplicate members, a routing field of the wrong type, unreadable) or one over the size limit | 400 or 413 | `request.invalid`, `request.unreadable`, `request.too_large` | no |
 | Request golem cannot route (no deployment with the capabilities used, unknown alias, frontend that cannot reach the model) | 400 or 404 | `route.unknown_model`, `route.no_capable_deployment`, `route.wrong_frontend` | no |
 | A feature the translation cannot express | 400 | `translate.unsupported_feature` | no |
 | Every deployment failed before the first byte | 503 + `Retry-After` | `upstream.unavailable` | yes |
@@ -36,8 +37,10 @@ retry pointlessly and users wait through backoff before seeing why.
   manager), and the request ID.
 - `warn` mode lets the request through and adds `golem-warning:
   budget.member_cap 92%`; `observe` adds nothing to the response.
-- The codes are a stable, documented list (`docs/errors/`), checked by a
-  test that every code the gateway can emit is documented.
+- The codes are a stable, documented list: this table, defined as code in
+  `lib/contract` (the gateway can send no other), and checked against the
+  table by a test in both directions. The ledger's DDL
+  (`deploy/clickhouse/spend.sql`) is checked against §3 the same way.
 - The SDKs' retry rules are pinned by the SDK compatibility tests (§7):
   `test/compat` checks every status above against the official Python and
   TypeScript SDKs in CI (docs/spikes/sdk-compat.md).

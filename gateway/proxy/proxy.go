@@ -18,6 +18,8 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/sse"
+	"github.com/chucklehead-dev/golem/lib/contract"
+	"github.com/chucklehead-dev/golem/lib/id"
 )
 
 // Dialect selects the frontend a Handler serves.
@@ -45,10 +47,11 @@ type Snapshots interface {
 // Result is what a finished call reports: the input to pricing, the
 // counters and the access log (gateway.md §3 step 9).
 type Result struct {
-	Target *route.Target
-	Status int
-	Usage  canon.Usage
-	Err    error // a malformed usage report or a cut stream
+	RequestID id.UUID
+	Target    *route.Target
+	Status    int
+	Usage     canon.Usage
+	Err       error // a malformed usage report or a cut stream
 }
 
 // Handler serves one dialect's endpoint.
@@ -139,17 +142,19 @@ func (u *upstreamBody) Close() error {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	reqID := id.New()
+	var idBuf [36]byte
+	w.Header()[contract.HeaderRequestID] = []string{string(reqID.AppendString(idBuf[:0]))}
+
 	snap, err := h.Snapshots.Current()
 	switch err {
 	case nil:
 	case snapshot.ErrExpired:
-		w.Header()["Retry-After"] = retryAfter
-		h.fail(w, http.StatusServiceUnavailable, "gateway.authorization_expired",
+		h.fail(w, contract.GatewayAuthorizationExpired,
 			"this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted")
 		return
 	default:
-		w.Header()["Retry-After"] = retryAfter
-		h.fail(w, http.StatusServiceUnavailable, "gateway.not_ready", "this gateway has no configuration yet; retry shortly")
+		h.fail(w, contract.GatewayNotReady, "this gateway has no configuration yet; retry shortly")
 		return
 	}
 
@@ -174,10 +179,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			h.fail(w, http.StatusRequestEntityTooLarge, "request.too_large", "the request body is larger than this gateway accepts")
+			h.fail(w, contract.RequestTooLarge, "the request body is larger than this gateway accepts")
 			return
 		}
-		h.fail(w, http.StatusBadRequest, "request.unreadable", "the request body could not be read")
+		h.fail(w, contract.RequestUnreadable, "the request body could not be read")
 		return
 	}
 
@@ -191,16 +196,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err, alias, stream = ex.chat.Scan(body), ex.chat.Model, ex.chat.Stream
 	}
 	if err != nil {
-		h.fail(w, http.StatusBadRequest, "request.invalid", err.Error())
+		h.fail(w, contract.RequestInvalid, err.Error())
 		return
 	}
 	rt := snap.Routes.Lookup(alias)
 	if rt == nil {
-		h.fail(w, http.StatusNotFound, "route.unknown_model", "no route for this model; ask the scope's managers which aliases it may use")
+		h.fail(w, contract.RouteUnknownModel, "no route for this model; ask the scope's managers which aliases it may use")
 		return
 	}
 	if rt.Dialect != h.Dialect.Name() {
-		h.fail(w, http.StatusBadRequest, "route.wrong_frontend",
+		h.fail(w, contract.RouteWrongFrontend,
 			"this model speaks "+rt.Dialect+", not "+h.Dialect.Name()+": call it at that API's endpoint (golem converts only where a route says so)")
 		return
 	}
@@ -243,7 +248,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
-		h.fail(w, http.StatusBadGateway, "upstream.unavailable", "the provider could not be reached")
+		h.fail(w, contract.UpstreamUnavailable, "the provider could not be reached; retry shortly")
 		return
 	}
 	defer resp.Body.Close()
@@ -255,7 +260,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	res := Result{Target: target, Status: resp.StatusCode}
+	res := Result{RequestID: reqID, Target: target, Status: resp.StatusCode}
 	if stream && resp.StatusCode == http.StatusOK {
 		res.Usage, res.Err = h.stream(w, resp.Body, ex)
 	} else {
@@ -364,23 +369,36 @@ func (h *Handler) usage(ex *exchange, cut error) (canon.Usage, error) {
 	}
 }
 
-// fail writes a refusal in the caller's dialect (contracts.md §1).
-func (h *Handler) fail(w http.ResponseWriter, status int, code, msg string) {
+// fail writes a refusal in the caller's dialect, with golem's code, a
+// message that says what to do next, and the request ID (contracts.md §1).
+// Only contract codes can be sent.
+func (h *Handler) fail(w http.ResponseWriter, c contract.Code, msg string) {
 	w.Header()["Content-Type"] = jsonType
-	w.WriteHeader(status)
+	if c.RetryAfter() {
+		w.Header()["Retry-After"] = retryAfter
+	}
+	w.WriteHeader(c.Status)
+	var reqID string
+	if v := w.Header()[contract.HeaderRequestID]; len(v) > 0 {
+		reqID = v[0]
+	}
 	var b []byte
 	switch h.Dialect {
 	case AnthropicMessages:
 		b = append(b, `{"type":"error","error":{"type":"`...)
-		b = append(b, code...)
+		b = append(b, c.Name...)
 		b = append(b, `","message":`...)
 	default:
 		b = append(b, `{"error":{"code":"`...)
-		b = append(b, code...)
+		b = append(b, c.Name...)
+		b = append(b, `","type":"`...)
+		b = append(b, c.Origin...)
 		b = append(b, `","message":`...)
 	}
 	b = appendQuoted(b, msg)
-	b = append(b, "}}"...)
+	b = append(b, `,"request_id":"`...)
+	b = append(b, reqID...)
+	b = append(b, `"}}`...)
 	w.Write(b)
 }
 

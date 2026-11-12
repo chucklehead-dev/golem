@@ -138,6 +138,7 @@ func TestRefusals(t *testing.T) {
 		code       string
 	}{
 		{"unknown alias", `{"model":"gpt-9"}`, 1 << 20, 404, "route.unknown_model"},
+		{"not an object", `["claude"]`, 1 << 20, 400, "request.invalid"},
 		{"duplicate model", `{"model":"claude","model":"other"}`, 1 << 20, 400, "request.invalid"},
 		{"escaped duplicate", `{"model":"claude","model":"other"}`, 1 << 20, 400, "request.invalid"},
 		{"trailing value", `{"model":"claude"}{"model":"other"}`, 1 << 20, 400, "request.invalid"},
@@ -155,6 +156,9 @@ func TestRefusals(t *testing.T) {
 			json.Unmarshal(w.Body.Bytes(), &e)
 			if w.Code != tc.status || e.Type != "error" || e.Error.Type != tc.code || e.Error.Message == "" {
 				t.Fatalf("status %d body %s; want %d with an Anthropic error %q", w.Code, w.Body, tc.status, tc.code)
+			}
+			if id := w.Header().Get("Golem-Request-Id"); len(id) != 36 || !strings.Contains(w.Body.String(), `"request_id":"`+id+`"`) {
+				t.Fatalf("request id %q, body %s: every response carries one, and errors name it", id, w.Body)
 			}
 		})
 	}
