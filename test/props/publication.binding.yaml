@@ -1,0 +1,37 @@
+# How the publication test's recorded steps become calls of
+# model/publication.md's actions, with its design instance's constants. The
+# model's init chooses the first leader; the validator finds the choice
+# that fits the run (the stand-in publisher is r1).
+spec: ../../model/publication.qnt
+module: publication
+
+# The design instance's constants (model/publication.md §8).
+constants:
+  REPLICAS: 'Set("r1", "r2")'
+  GATEWAYS: 'Set("g1", "g2")'
+  KEYS: 'Set("k1", "k2")'
+  LEASE: '3'
+  MAX_TIME: '8'
+  FENCE: 'true'
+  LEASE_FROM_SOURCE: 'true'
+  TRUSTED_FLOOR: 'true'
+  PRESERVE_ON_RESTORE: 'true'
+  CHECK_EXPIRY: 'true'
+
+actions:
+  revoke: {}
+  loadState: {}
+  publish: {}
+  replayPointer:
+    args:
+      old: '{ seq: {{.seq}}, epoch: {{.epoch}}, source: {{.source}}, revoked: {{toSet .revoked}}, validUntil: {{.validUntil}} }'
+  # The real gateway applied a publication: the model must have been able
+  # to, and must hold the same one.
+  poll:
+    expect: 'gws.get({{.gateway}}).applied.seq == {{.obs.seq}}'
+  restartEmpty: {}
+  tick: {}
+  # The real gateway served a key: the model must allow it.
+  serve: {}
+
+invariants: [safe]

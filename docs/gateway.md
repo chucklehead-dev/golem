@@ -195,7 +195,8 @@ except OTel's API.
 - Every second (±20% jitter, full-jitter backoff on errors: ADR 0032): a
   conditional GET of `snapshots/<pool>/current`. On a
   change it verifies the pointer's signature against the pinned public key
-  and that its `publish_seq` exceeds its floor (the trusted publisher checkpoint and atomically persisted local
+  and that its `publish_seq` is at least its floor and above the snapshot it
+  holds (the trusted publisher checkpoint and atomically persisted local
   checkpoint; status is diagnostic and cannot set the trusted floor), then fetches the snapshot by hash and verifies its signature and
   hash (ADR 0007). Anything unsigned, wrongly signed or older is ignored and
   alarmed. Once the signed authorization lease has expired (five minutes

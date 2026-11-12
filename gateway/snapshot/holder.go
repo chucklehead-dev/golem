@@ -1,8 +1,14 @@
 // Package snapshot holds the gateway's current configuration: a compiled
 // lib/snapshot behind an atomic pointer, taken once per request and used to
-// its end (gateway.md §1, §6). It enforces the two rules the publication
-// model checks: a snapshot at or below the floor is never applied, and an
-// expired authorization lease serves nothing new (model/publication.md).
+// its end (gateway.md §1, §6). It enforces the rules the publication model
+// checks (model/publication.md, and its connect test here): a snapshot is
+// applied only if it is at least the floor and newer than the one applied,
+// and an expired authorization lease serves nothing new.
+//
+// The floor is inclusive: it is the lowest publication the gateway may
+// accept, such as the publisher's trusted checkpoint after a restart with an
+// empty disk. That checkpoint is the current publication, which the
+// restarted gateway must be able to apply.
 package snapshot
 
 import (
@@ -64,7 +70,8 @@ func (h *Holder) Current() (*Compiled, error) {
 	return c, nil
 }
 
-// Floor is the highest publication applied (or trusted from a checkpoint).
+// Floor is the lowest publication the gateway may apply: the last one it
+// applied, or a trusted checkpoint.
 func (h *Holder) Floor() uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -79,17 +86,20 @@ func (h *Holder) RaiseFloor(seq uint64) {
 	h.floor = max(h.floor, seq)
 }
 
-// Apply compiles s and swaps it in. A snapshot at or below the floor, one
-// whose lease has already expired, or one that does not compile is refused
-// and the previous snapshot kept.
+// Apply compiles s and swaps it in. A snapshot below the floor, one not
+// newer than the snapshot applied, one whose lease has already expired, or
+// one that does not compile is refused and the previous snapshot kept.
 func (h *Holder) Apply(s *snapshot.Snapshot, hash string, secrets Secrets) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// No exemption for the first snapshot after a start: the floor may come
 	// from a trusted checkpoint, and a replay below it is exactly what it
 	// is there to refuse (model/publication.md, the trusted floor).
-	if s.PublishSeq <= h.floor {
-		return fmt.Errorf("snapshot %d is not newer than %d: refused (a replay or a stale publisher)", s.PublishSeq, h.floor)
+	if s.PublishSeq < h.floor {
+		return fmt.Errorf("snapshot %d is below the floor %d: refused (a replay or a stale publisher)", s.PublishSeq, h.floor)
+	}
+	if c := h.cur.Load(); c != nil && s.PublishSeq <= c.Snapshot.PublishSeq {
+		return fmt.Errorf("snapshot %d is not newer than the applied %d: refused", s.PublishSeq, c.Snapshot.PublishSeq)
 	}
 	if !s.ValidUntil.IsZero() && !h.now().Before(s.ValidUntil) {
 		return fmt.Errorf("snapshot %d expired at %s: refused", s.PublishSeq, s.ValidUntil)

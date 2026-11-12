@@ -37,10 +37,11 @@ func TestHolder(t *testing.T) {
 	}
 	tr := c.Routes.Lookup([]byte("claude")).Pick().Transport
 
-	// The floor: a replay or a stale publisher's snapshot is refused.
+	// The floor: a replay or a stale publisher's snapshot is refused, and
+	// so is the applied one again.
 	for _, seq := range []uint64{5, 4} {
-		if err := h.Apply(snap(seq, now.Add(2*time.Hour)), "old", fixed{}); err == nil || !strings.Contains(err.Error(), "not newer") {
-			t.Fatalf("snapshot %d at floor 5: %v", seq, err)
+		if err := h.Apply(snap(seq, now.Add(2*time.Hour)), "old", fixed{}); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("snapshot %d with 5 applied: %v", seq, err)
 		}
 	}
 	// An already expired snapshot is refused.
@@ -74,7 +75,9 @@ func TestRaiseFloor(t *testing.T) {
 	if _, err := h.Current(); err != ErrNotReady || h.Floor() != 10 {
 		t.Fatalf("after the refused replay: %v, floor %d", err, h.Floor())
 	}
-	if err := h.Apply(snap(11, time.Now().Add(time.Hour)), "y", fixed{"a/key": "k"}); err != nil {
+	// The checkpoint itself is the current publication: a restarted gateway
+	// must be able to apply it (found by the publication model's connect test).
+	if err := h.Apply(snap(10, time.Now().Add(time.Hour)), "y", fixed{"a/key": "k"}); err != nil {
 		t.Fatal(err)
 	}
 }

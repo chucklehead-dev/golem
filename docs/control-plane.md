@@ -113,7 +113,7 @@ control plane.
   external consumers' service keys only. Every snapshot carries known
   spend for the period (ADR 0031).
 - **Gateways** poll the pointer every second (conditional GET), verify its
-  signature and that `publish_seq` exceeds their floor (the trusted publisher checkpoint and atomically persisted local
+  signature and that `publish_seq` is at least their floor and above the snapshot they hold (the trusted publisher checkpoint and atomically persisted local
   checkpoint; gateway status is diagnostic), fetch and verify the
   snapshot, compile, swap, and write `status/<pool>/<gateway-id>`.
 - **Status**: golem-control reads the status objects for the CRDs'
