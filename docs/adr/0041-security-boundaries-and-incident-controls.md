@@ -155,7 +155,7 @@ Extend model scenarios and implementation tests to include role removal,
 service deletion, capture/storage prohibition, route narrowing, CRD rollback,
 stale watch caches, reconnection and replica promotion. Restore cannot
 silently widen any of those rights. These are M1 gates; no model proof is
-claimed by this documentation revision.
+claimed by this documentation revision (see §7.5 for the model since written).
 
 ## 6. Budgets are not a proven scope-level abuse ceiling (M1)
 
@@ -246,3 +246,16 @@ Its compromise exposes the capture credentials it holds and nothing else;
 the enterprise collector keeps operational telemetry and holds no Langfuse
 credentials.
 
+**7.5 The freshness model (adds to §5).** [model/freshness.md](../../model/freshness.md)
+checks §5 and §7.2 on the model: rights from both sources, deletions and
+Git rollbacks as config revisions, stale watch caches, leader changes,
+pauses between read and publish, and restore. It shows each rule necessary
+(a mutant per rule: freshness from the watch cache, the lease anchored to
+the state read, fencing on the state version only, restore that keeps only
+some restrictions) and states the guarantee per source: a restriction in
+either source is honoured within one lease of that source's change. It is
+not stated for the intersection, because two reads at different moments can
+pair a state and a config that never coexisted (a route narrowed, the member
+removed, the route widened back); no read atomic across S3 and the API
+server exists, and each restriction is still bounded. Simulation, not
+proof; implementation tests remain M1 gates.

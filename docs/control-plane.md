@@ -224,6 +224,11 @@ ledger's too (seconds behind); golem-control reads no site's Valkey.
 accepted CRD set before lease renewal, by a consistent LIST of the config
 CRDs and a GET of the state document on every renewal (§7.2). It also reserves bounded audit capacity
 for restrictive mutations and moves emergency denial outside Argo ownership.
-The publication spike and tests must cover CRD deletion/rollback, stale caches
-and multiple restrictive rights; the current key-only model does not establish
-those guarantees. Capture provisioning is limited to named destination Secrets.
+The composite protocol is modelled in [model/freshness.md](../model/freshness.md):
+any restriction from either source is honoured within one lease of that
+source's change, under stale watch caches, Git rollbacks, leader changes and
+restore, given consistent reads, the earliest-read anchor, fencing on both
+source versions and restrictive-preserving restore. The guarantee is per
+source: a snapshot can pair reads that never coexisted (freshness.md §6.2).
+The publication spike and its tests must still show the implementation does
+the same. Capture provisioning is limited to named destination Secrets.
