@@ -53,7 +53,7 @@ Its value for golem is in the protocols, not the plumbing.
 
 | Model | State and actions | Properties |
 |---|---|---|
-| **Accounting** (ADR 0031; written: [model/accounting.md](../model/accounting.md)) | admissions under soft and strict checks, concurrency limits, completions, crashes, Valkey loss, duplicate delivery, reconciliation | overshoot within the stated bound; never counted twice; books match after reconciliation; strict with one in flight is a hard ceiling apart from crash losses |
+| **Accounting** (ADR 0031; written: [model/accounting.md](../model/accounting.md), [model/exposure.md](../model/exposure.md)) | admissions under soft and strict checks, concurrency limits, completions, crashes, Valkey loss, duplicate delivery, reconciliation | overshoot within the stated bound; never counted twice; books match after reconciliation; strict with one in flight is a hard ceiling apart from crash losses |
 | **State and distribution** (control-plane.md §3–4; written: [model/publication.md](../model/publication.md), [model/freshness.md](../model/freshness.md)) | writers racing with `If-Match` (lost responses included), leader changes, signed publication with a publish sequence, gateway polls and restarts with empty disks, restore | every acknowledged write is in a snapshot every gateway applies; no gateway applies a lower publish sequence or an unsigned snapshot; no write is lost to a race; a restore never revives a revoked key; revocation within the bound after a settle |
 | **Attempt loop** (ADR 0002) | attempts, first byte, failover, retry budget, ejection | no retry after the first byte; retries bounded by the budget; an ejected deployment receives nothing until probed back |
 | **Approvals and grants** (org-model §4.3; when built, ADR 0034) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
@@ -126,6 +126,7 @@ inherited-project readers; restricted/compatible request features and hostile
 field-name logging; and Argo/Crossplane privilege escalation. The model side
 of CRD freshness, deletion and rollback and of restrictive changes from
 either source is model/freshness.md; the implementation tests remain.
-Extend accounting scenarios for counter handoff, multi-principal scope exposure,
-failed renewal and continued billing after cancellation before asserting bounds.
+The model side of counter handoff, multi-principal scope exposure, failed
+renewal and continued billing after cancellation is model/exposure.md
+(ADR 0041 §7.6); the implementation tests remain.
 These tests and model extensions are required evidence, not completed work.

@@ -259,3 +259,32 @@ pair a state and a config that never coexisted (a route narrowed, the member
 removed, the route widened back); no read atomic across S3 and the API
 server exists, and each restriction is still bounded. Simulation, not
 proof; implementation tests remain M1 gates.
+
+**7.6 Scope exposure (adapts §6).** [model/exposure.md](../../model/exposure.md)
+checks a scope shared by several principals, on several gateways of a site,
+with late ledger ingestion, Valkey outages and failovers, and cancelled calls
+the provider keeps billing. It makes four rules requirements, each shown
+necessary by a mutant:
+
+- **A scope in-flight limit** alongside the principal's: without it a
+  scope's exposure is the sum of its active principals' limits. The bound a
+  scope can be told is `scope limit × W` over its budget (soft), on one site.
+- **Counter handoff by event**: the site counter is keyed by event ID and
+  known spend is the snapshot plus the counter's events the snapshot does
+  not include (the snapshot names its ingested events by a ledger
+  watermark). A counter that restarts with each snapshot loses increments
+  not yet ingested; one simply added counts twice.
+- **A cancelled call keeps its slot** until its upstream has ended: the
+  connection's close where the provider stops on close, else the
+  deployment's maximum duration. Freeing it at cancellation lets cancel and
+  resend escape the in-flight limit while the provider keeps working.
+- **Slots are re-acquired** for running calls when Valkey returns, so calls
+  that streamed through an outage still count.
+
+While Valkey is unreachable, admissions against a gateway's local counts are
+recorded as waivers (§7.3); with several gateways they can exceed the limits,
+and the model shows the bound holds once waived calls and spend lost to
+failures are added, the two terms reported rather than bounded in advance.
+Several sites are not modelled: each active site adds its own `scope limit
+× W` and what the others spend within one snapshot lag. Simulation, not
+proof.

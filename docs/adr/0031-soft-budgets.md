@@ -51,7 +51,9 @@ security):
   and `(L − 1) × W` under the strict check, plus spend lost by a crash or a
   Valkey failover until it is reconciled, plus, across sites, what the
   principal spends during one refresh lag. Strict with `L = 1` is a hard
-  ceiling on one site, apart from crash losses.
+  ceiling on one site, apart from crash losses. A scope also has an
+  in-flight limit, which bounds its overshoot as a whole: without it, a
+  shared scope's exposure is the sum of its principals' (ADR 0041 §7.6).
 - **No** journal, intent-before-dispatch, money reservations, reservation
   renewal, uncertain-liability tracking, recovery watermarks or site
   allocations. Spend events go out through the normal access-log path

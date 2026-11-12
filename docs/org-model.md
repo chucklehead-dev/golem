@@ -152,7 +152,9 @@ plus the site's counter since) at each level, and fails with a 402 (not
 
 Budgets are soft and eventually consistent (ADR 0031): calls already in
 flight can take spend past a limit, by at most the principal's in-flight
-limit times the largest call, plus what it spends within one refresh lag.
+limit times the largest call, plus what it spends within one refresh lag;
+a scope's pool, shared by its members, by the scope's own in-flight limit
+times the largest call (ADR 0041 §7.6).
 A scope may choose **strict**: the request's worst-case cost must also fit,
 which tightens the bound by one call (and makes it a hard ceiling on one
 site with an in-flight limit of one).
