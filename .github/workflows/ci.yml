@@ -51,6 +51,15 @@ jobs:
         run: make -C model check
         env:
           QUINT_BACKEND: typescript
+      - name: the gateway against the publication model (connect: the model drives)
+        run: go test -count=1 -run TestPublicationModel ./gateway/snapshot/
+        env:
+          QUINT_BACKEND: typescript
+      - name: the gateway against the publication model (qhegel: Hegel drives, the model judges; planted bugs caught)
+        working-directory: test/props
+        run: go test -count=1 -timeout 20m ./...
+        env:
+          QUINT_BACKEND: typescript
 
   compat:
     runs-on: ubuntu-latest

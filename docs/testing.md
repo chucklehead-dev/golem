@@ -108,6 +108,18 @@ checks are proved by planted mutants (a check that skips the concurrency
 limit, a balance that sums duplicates, a publisher that skips the pointer's version check, a stale leader that publishes after losing leadership) that the
 model must reject; a model whose mutants survive is not worth keeping.
 
+## Built so far
+
+The first model checks against real code (docs/spikes and ADR 0041's
+gates name what is still owed):
+
+| Code | Model | How | Found |
+|---|---|---|---|
+| `gateway/snapshot.Holder` | model/publication.md | `connect`: the model's traces drive the Holder (publisher actions are the environment), state compared after every step | the floor was strict where the model's is inclusive: a gateway restarted with an empty disk refused its own trusted checkpoint and could not become ready while the publisher was down |
+| the same | the same | `qhegel` (`test/props`): Hegel drives the Holder with a stand-in publisher and an attacker replaying any old publication; the model judges each run | planted bugs (no floor check, no expiry check) caught and shrunk to four steps; neither is visible to the connect test, since the model never asks for a forbidden step |
+| `gateway/dialect/...`, `gateway/sse` | — | fuzzing: scan acceptance equals `encoding/json`'s, rewrites change one field, usage independent of chunking | a split `\r\n` across an empty write |
+| the gateway end to end | — | `test/compat`: the official SDKs through it to a stub provider | the injected OpenAI usage chunk crashed the SDKs' usual loops |
+
 ## Review acceptance gates
 
 The evidence matrix in [security-and-correctness.md](security-and-correctness.md#10-required-evidence-and-review-traceability)

@@ -63,10 +63,13 @@ type machine struct {
 	clock        int
 	revoked      []string
 	stateVersion int
-	view         struct{ Version, LoadedAt int; Revoked []string }
-	record       struct{ Seq, Source int }
-	pointer      pub
-	published    []pub
+	view         struct {
+		Version, LoadedAt int
+		Revoked           []string
+	}
+	record    struct{ Seq, Source int }
+	pointer   pub
+	published []pub
 
 	gws       map[string]*gsnap.Holder
 	revokedAt map[uint64][]string // what each publication's entitlements revoke
@@ -83,7 +86,9 @@ func newMachine(ctx context.Context, mut mutation) *machine {
 	return m
 }
 
-func (m *machine) holder() *gsnap.Holder { return &gsnap.Holder{Now: func() time.Time { return at(m.clock) }} }
+func (m *machine) holder() *gsnap.Holder {
+	return &gsnap.Holder{Now: func() time.Time { return at(m.clock) }}
+}
 
 // apply is the gateway's poll: the real Holder decides.
 func (m *machine) apply(g string, p pub) error {
