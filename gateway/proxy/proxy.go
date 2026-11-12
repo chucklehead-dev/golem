@@ -60,7 +60,7 @@ var (
 	forwardResponse = []string{"Content-Type", "Request-Id", "X-Request-Id", "Retry-After"}  // read-only
 )
 
-const copyBuffer = 16 << 10
+const copyBuffer = 8 << 10 // events are mostly under 1 KB; a burst takes more reads
 
 // exchange is one request's working memory for the life of its stream,
 // pooled: the scan results, the usage readers, the copy buffer. The request
@@ -102,8 +102,15 @@ type upstreamBody struct {
 	once sync.Once
 }
 
+// Close returns the buffer and drops every reference to it: the transport
+// keeps the request, and so this body, for the whole response, and a
+// reference left here would pin a 200 KB agent request per open stream.
 func (u *upstreamBody) Close() error {
-	u.once.Do(func() { putBody(u.buf) })
+	u.once.Do(func() {
+		u.Reader.Reset(nil)
+		putBody(u.buf)
+		u.buf = nil
+	})
 	return nil
 }
 

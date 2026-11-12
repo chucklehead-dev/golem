@@ -23,7 +23,10 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
 - **Parse only what routing needs.** The request body is scanned with
   `encoding/json/jsontext` for `model`, `stream`, `max_tokens` and a few
   fields, not unmarshalled. The model name is rewritten by splicing bytes.
-  A same-dialect request is never decoded into a struct (ADR 0001).
+  A same-dialect request is never decoded into a struct (ADR 0001). Member
+  names are compared unescaped (`"mod\u0065l"` is `model`), and a body's
+  buffers are released once it has been sent, not when the stream ends
+  (docs/spikes/fast-path.md).
 - **Stream, don't buffer.** Responses are copied as they arrive and
   flushed through `http.ResponseController`; usage is read from the stream
   by a tee'd scanner, not by buffering it.

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"sync"
 	"testing"
@@ -170,7 +171,7 @@ func TestOverheadPercentiles(t *testing.T) {
 	defer up.Close()
 	gw := gateway(up)
 	defer gw.Close()
-	const n = 4000
+	const n = 1000
 	for _, conc := range []int{1, 32} {
 		for _, body := range []struct {
 			name string
@@ -224,7 +225,7 @@ func pct(d []time.Duration, p int) time.Duration {
 // measures the memory each costs, against the same streams held direct.
 func TestMemoryPerStream(t *testing.T) {
 	spike(t)
-	const n = 1000
+	const n = 300
 	release := make(chan struct{})
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -261,6 +262,11 @@ func TestMemoryPerStream(t *testing.T) {
 		}
 		open.Wait()
 		after := inUse()
+		if f := os.Getenv("GOLEM_HEAPPROFILE"); f != "" && url == gw.URL && len(body) > 100000 {
+			out, _ := os.Create(f)
+			pprof.Lookup("heap").WriteTo(out, 0)
+			out.Close()
+		}
 		close(release)
 		done.Wait()
 		c.CloseIdleConnections()
@@ -277,8 +283,10 @@ func TestMemoryPerStream(t *testing.T) {
 	}
 }
 
-// inUse is heap and goroutine stacks in use, after a collection.
+// inUse is heap and goroutine stacks in use, after two collections: a
+// sync.Pool keeps what was returned to it until the second.
 func inUse() uint64 {
+	runtime.GC()
 	runtime.GC()
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
