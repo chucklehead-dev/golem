@@ -51,6 +51,14 @@ func TestGatewayLinksNoControlPlane(t *testing.T) {
 	}
 }
 
+func TestGolemctlLinksNoComponent(t *testing.T) {
+	for _, d := range deps(t, "cmd/golemctl") {
+		if strings.HasPrefix(d, module+"gateway/") || strings.HasPrefix(d, module+"control/") {
+			t.Errorf("cmd/golemctl links %s: the CLI uses lib/ and the generated clients only (architecture.md §4.2)", d)
+		}
+	}
+}
+
 func TestGatewayPackages(t *testing.T) {
 	for pkg, imps := range imports(t) {
 		rel, ok := strings.CutPrefix(pkg, module)

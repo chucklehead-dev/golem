@@ -10,12 +10,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"sync"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
 	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
+	"github.com/chucklehead-dev/golem/gateway/route"
+	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/sse"
 )
 
@@ -27,19 +28,24 @@ const (
 	OpenAIChat                       // POST /v1/chat/completions
 )
 
-// Route is where an alias goes: the provider's model name, the endpoint,
-// the transport and the headers that authenticate golem to the provider.
-type Route struct {
-	Model     string
-	URL       *url.URL
-	Transport http.RoundTripper
-	Header    http.Header
+// Name is the dialect's name in config (Backend spec.dialect).
+func (d Dialect) Name() string {
+	if d == OpenAIChat {
+		return "openai.chat"
+	}
+	return "anthropic.messages"
+}
+
+// Snapshots gives the configuration a request uses: taken once, at the
+// start, and used to the end (gateway.md §1).
+type Snapshots interface {
+	Current() (*snapshot.Compiled, error)
 }
 
 // Result is what a finished call reports: the input to pricing, the
 // counters and the access log (gateway.md §3 step 9).
 type Result struct {
-	Route  *Route
+	Target *route.Target
 	Status int
 	Usage  canon.Usage
 	Err    error // a malformed usage report or a cut stream
@@ -47,10 +53,10 @@ type Result struct {
 
 // Handler serves one dialect's endpoint.
 type Handler struct {
-	Dialect Dialect
-	Routes  map[string]*Route // by alias; a snapshot's, read-only
-	MaxBody int64             // request body cap in bytes
-	Record  func(*http.Request, Result)
+	Dialect   Dialect
+	Snapshots Snapshots
+	MaxBody   int64 // request body cap in bytes
+	Record    func(*http.Request, Result)
 }
 
 // Request headers a caller may pass to the provider, and response headers
@@ -115,6 +121,20 @@ func (u *upstreamBody) Close() error {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	snap, err := h.Snapshots.Current()
+	switch err {
+	case nil:
+	case snapshot.ErrExpired:
+		w.Header()["Retry-After"] = retryAfter
+		h.fail(w, http.StatusServiceUnavailable, "gateway.authorization_expired",
+			"this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted")
+		return
+	default:
+		w.Header()["Retry-After"] = retryAfter
+		h.fail(w, http.StatusServiceUnavailable, "gateway.not_ready", "this gateway has no configuration yet; retry shortly")
+		return
+	}
+
 	ex := exchanges.Get().(*exchange)
 	defer func() {
 		if cap(ex.tail) <= maxRetained {
@@ -131,7 +151,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if n := r.ContentLength; n > 0 && n <= h.MaxBody && int64(cap(*in)) < n+1 {
 		*in = make([]byte, 0, n+1) // one allocation, not a doubling series
 	}
-	var err error
 	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, h.MaxBody))
 	body := *in
 	if err != nil {
@@ -157,20 +176,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, http.StatusBadRequest, "request.invalid", err.Error())
 		return
 	}
-	route := h.Routes[string(alias)]
-	if route == nil {
+	rt := snap.Routes.Lookup(alias)
+	if rt == nil {
 		h.fail(w, http.StatusNotFound, "route.unknown_model", "no route for this model; ask the scope's managers which aliases it may use")
 		return
 	}
+	if rt.Dialect != h.Dialect.Name() {
+		h.fail(w, http.StatusBadRequest, "route.wrong_frontend",
+			"this model speaks "+rt.Dialect+", not "+h.Dialect.Name()+": call it at that API's endpoint (golem converts only where a route says so)")
+		return
+	}
+	target := rt.Pick()
 	out := getBody()
-	if cap(*out) < len(body)+len(route.Model)+64 {
-		*out = make([]byte, 0, len(body)+len(route.Model)+64)
+	if cap(*out) < len(body)+len(target.Model)+64 {
+		*out = make([]byte, 0, len(body)+len(target.Model)+64)
 	}
 	switch h.Dialect {
 	case AnthropicMessages:
-		*out = ex.msg.Rewrite((*out)[:0], body, route.Model)
+		*out = ex.msg.Rewrite((*out)[:0], body, target.Model)
 	case OpenAIChat:
-		*out = ex.chat.Rewrite((*out)[:0], body, route.Model)
+		*out = ex.chat.Rewrite((*out)[:0], body, target.Model)
 	}
 	putBody(in) // the caller's body is no longer needed
 	in = nil
@@ -181,11 +206,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ub.Reset(*out)
 	up := &http.Request{
 		Method:        http.MethodPost,
-		URL:           route.URL,
-		Header:        make(http.Header, 4+len(route.Header)),
+		URL:           target.URL,
+		Header:        make(http.Header, 4+len(target.Header)),
 		Body:          ub,
 		ContentLength: int64(len(*out)),
-		Host:          route.URL.Host,
+		Host:          target.URL.Host,
 	}
 	up = up.WithContext(r.Context())
 	up.Header["Content-Type"] = jsonType
@@ -194,10 +219,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			up.Header[k] = v
 		}
 	}
-	for k, v := range route.Header {
+	for k, v := range target.Header {
 		up.Header[k] = v
 	}
-	resp, err := route.Transport.RoundTrip(up)
+	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
 		h.fail(w, http.StatusBadGateway, "upstream.unavailable", "the provider could not be reached")
@@ -212,7 +237,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	res := Result{Route: route, Status: resp.StatusCode}
+	res := Result{Target: target, Status: resp.StatusCode}
 	if stream && resp.StatusCode == http.StatusOK {
 		res.Usage, res.Err = h.stream(w, resp.Body, ex)
 	} else {
@@ -223,7 +248,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var jsonType = []string{"application/json"} // read-only
+var (
+	jsonType   = []string{"application/json"} // read-only
+	retryAfter = []string{"5"}                // read-only
+)
 
 // stream copies the response as it arrives, flushing each read, and feeds
 // the same bytes to the dialect's usage reader.

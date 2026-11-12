@@ -106,8 +106,7 @@ func gateway(up *httptest.Server) *httptest.Server {
 	u, _ := url.Parse(up.URL)
 	t := up.Client().Transport.(*http.Transport).Clone()
 	t.MaxIdleConnsPerHost = 256
-	return httptest.NewServer(&Handler{Dialect: AnthropicMessages, MaxBody: 4 << 20,
-		Routes: map[string]*Route{"claude": {Model: "claude-sonnet", URL: u, Transport: t}}})
+	return httptest.NewServer(&Handler{Dialect: AnthropicMessages, MaxBody: 4 << 20, Snapshots: routes(AnthropicMessages, u, t)})
 }
 
 func client() *http.Client {

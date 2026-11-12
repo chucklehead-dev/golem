@@ -1,0 +1,49 @@
+# A standalone config (ADR 0023): golem-gateway --standalone examples/standalone
+# Credentials come from the environment variables named in spec.auth.env.
+apiVersion: golem.dev/v1alpha1
+kind: Backend
+metadata: {name: anthropic}
+spec:
+  dialect: anthropic.messages
+  auth: {header: x-api-key, env: ANTHROPIC_API_KEY}
+  deployments:
+  - {name: sonnet, url: "https://api.anthropic.com/v1/messages", model: claude-sonnet-4-5}
+---
+apiVersion: golem.dev/v1alpha1
+kind: Backend
+metadata: {name: openai}
+spec:
+  dialect: openai.chat
+  auth: {header: authorization, scheme: Bearer, env: OPENAI_API_KEY}
+  deployments:
+  - {name: gpt, url: "https://api.openai.com/v1/chat/completions", model: gpt-5}
+---
+apiVersion: golem.dev/v1alpha1
+kind: Backend
+metadata: {name: studio}
+spec:
+  dialect: openai.chat
+  auth: {header: authorization, scheme: Bearer, env: STUDIO_API_KEY}
+  deployments:
+  - {name: qwen, url: "http://127.0.0.1:8000/v1/chat/completions", model: Qwen/Qwen3-Coder-30B-A3B-Instruct}
+---
+apiVersion: golem.dev/v1alpha1
+kind: ModelRoute
+metadata: {name: claude}
+spec:
+  alias: claude
+  pool: [{backend: anthropic, deployment: sonnet}]
+---
+apiVersion: golem.dev/v1alpha1
+kind: ModelRoute
+metadata: {name: gpt}
+spec:
+  alias: gpt
+  pool: [{backend: openai, deployment: gpt}]
+---
+apiVersion: golem.dev/v1alpha1
+kind: ModelRoute
+metadata: {name: local}
+spec:
+  alias: local
+  pool: [{backend: studio, deployment: qwen}]

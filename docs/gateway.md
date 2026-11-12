@@ -214,6 +214,12 @@ except OTel's API.
 
 ## 6a. Standalone mode
 
+Built (M0, first part): `gateway/snapshot` (the holder: floor and lease
+enforced, transports kept across swaps; the directory source through
+`os.Root`), `lib/compile` and `lib/api/v1alpha1` (Backend and ModelRoute so
+far), and `golemctl config validate`. The bucket source, the on-disk
+last-good copy, status writes and the denylist are next.
+
 `golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop
 from the same CRD YAML as the GitOps repository, compiled in-process by
 `lib/compile` and recompiled on change, with one implicit local principal

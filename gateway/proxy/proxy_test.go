@@ -13,14 +13,20 @@ import (
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
+	"github.com/chucklehead-dev/golem/gateway/route"
+	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 )
 
 var upstreamURL, _ = url.Parse("https://provider.example/v1/messages")
 
+// routes is a snapshot with one alias, "claude", of dialect d.
+func routes(d Dialect, u *url.URL, s http.RoundTripper) *gsnap.Holder {
+	return gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(&route.Route{Alias: "claude", Dialect: d.Name(),
+		Pool: []*route.Target{{Model: "claude-sonnet", URL: u, Transport: s, Header: http.Header{"X-Api-Key": {"provider-key"}}}}})})
+}
+
 func handler(d Dialect, s http.RoundTripper, record func(*http.Request, Result)) *Handler {
-	return &Handler{Dialect: d, MaxBody: 1 << 20, Record: record, Routes: map[string]*Route{
-		"claude": {Model: "claude-sonnet", URL: upstreamURL, Transport: s, Header: http.Header{"X-Api-Key": {"provider-key"}}},
-	}}
+	return &Handler{Dialect: d, MaxBody: 1 << 20, Record: record, Snapshots: routes(d, upstreamURL, s)}
 }
 
 func TestAnthropicStream(t *testing.T) {
@@ -139,7 +145,7 @@ func TestCallerCancels(t *testing.T) {
 	u, _ := url.Parse(up.URL)
 	results := make(chan Result, 1)
 	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Record: func(_ *http.Request, r Result) { results <- r },
-		Routes: map[string]*Route{"claude": {Model: "m", URL: u, Transport: up.Client().Transport}}}
+		Snapshots: routes(AnthropicMessages, u, up.Client().Transport)}
 	gw := httptest.NewServer(h)
 	defer gw.Close()
 
@@ -159,5 +165,30 @@ func TestCallerCancels(t *testing.T) {
 	}
 	if r := <-results; r.Err == nil || r.Usage.Input != 2048 {
 		t.Fatalf("result %+v; want the cut reported and the usage seen so far", r)
+	}
+}
+
+func TestWrongFrontend(t *testing.T) {
+	h := handler(OpenAIChat, &stub{}, nil)
+	h.Snapshots = routes(AnthropicMessages, upstreamURL, &stub{})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"claude"}`)))
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "route.wrong_frontend") {
+		t.Fatalf("%d %s; want a refusal naming the dialect, not an implied conversion (ADR 0033)", w.Code, w.Body)
+	}
+}
+
+type expired struct{}
+
+func (expired) Current() (*gsnap.Compiled, error) { return nil, gsnap.ErrExpired }
+
+func TestLeaseExpired(t *testing.T) {
+	s := &stub{events: anthropicStream(1)}
+	h := handler(AnthropicMessages, s, nil)
+	h.Snapshots = expired{}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(smallRequest)))
+	if w.Code != 503 || !strings.Contains(w.Body.String(), "gateway.authorization_expired") || s.got != nil {
+		t.Fatalf("%d %s; want a 503 and nothing sent upstream", w.Code, w.Body)
 	}
 }

@@ -23,6 +23,8 @@ jobs:
         run: go test -race -shuffle=on ./...
       - name: benchmarks compile and run once
         run: go test -run='^$' -bench=. -benchtime=1x ./...
+      - name: the example config validates
+        run: go run ./cmd/golemctl config validate --standalone examples/standalone
       - name: fuzz smoke
         run: ci/fuzz-smoke.sh
         env:

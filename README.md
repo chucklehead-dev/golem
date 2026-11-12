@@ -12,8 +12,10 @@ Kubernetes (Istio ambient) as separate components: a gateway that only
 serves model traffic, a control plane with one API for configuration and
 self-service, Helm and GitOps for day-2, and a CLI and console.
 
-Status: design, with the first spike's code: the gateway's fast path for
-Anthropic Messages and OpenAI Chat ([docs/spikes/fast-path.md](docs/spikes/fast-path.md)).
+Status: design, and the start of M0: the gateway's fast path for Anthropic
+Messages and OpenAI Chat ([docs/spikes/fast-path.md](docs/spikes/fast-path.md)),
+standalone mode from CRD YAML (`golem-gateway --standalone examples/standalone`)
+and `golemctl config validate`.
 
 - [docs/prd.md](docs/prd.md): what it does and for whom, the feature set,
   cross-cutting requirements, and the open questions.
