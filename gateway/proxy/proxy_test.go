@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,35 @@ func TestOpenAIStreamRequestsUsage(t *testing.T) {
 	}
 	if want := (canon.Usage{Input: 10, Output: 2}); res.Usage != want {
 		t.Fatalf("usage %+v, want %+v", res.Usage, want)
+	}
+}
+
+// TestInjectedUsageWithheld: the caller did not ask for usage, so the
+// usage-only chunk golem asked for is not forwarded; every other event is,
+// as sent. A caller that asked gets it.
+func TestInjectedUsageWithheld(t *testing.T) {
+	events := [][]byte{
+		[]byte(`data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}` + "\n\n"),
+		[]byte(`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}` + "\n\ndata: [DONE]\n\n"),
+	}
+	for _, tc := range []struct {
+		body      string
+		wantUsage bool
+	}{
+		{`{"model":"claude","stream":true,"messages":[]}`, false},
+		{`{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`, true},
+	} {
+		var res Result
+		h := handler(OpenAIChat, &stub{events: slices.Clone(events)}, func(_ *http.Request, r Result) { res = r })
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(tc.body)))
+		got := w.Body.String()
+		if strings.Contains(got, `"choices":[]`) != tc.wantUsage || !strings.Contains(got, `"content":"hi"`) || !strings.HasSuffix(got, "data: [DONE]\n\n") {
+			t.Errorf("%s: the caller got %q", tc.body, got)
+		}
+		if res.Usage.Input != 10 {
+			t.Errorf("%s: usage %+v: golem must still read it", tc.body, res.Usage)
+		}
 	}
 }
 

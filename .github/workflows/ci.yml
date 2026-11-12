@@ -51,3 +51,26 @@ jobs:
         run: make -C model check
         env:
           QUINT_BACKEND: typescript
+
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install the SDKs
+        run: |
+          python -m pip install -r test/compat/clients/requirements.txt
+          npm install --prefix test/compat/clients
+      - name: the official SDKs through the gateway
+        run: go test -count=1 -v ./test/compat/
+        env:
+          GOLEM_COMPAT_PYTHON: python
+          GOLEM_COMPAT_NODE_MODULES: ${{ github.workspace }}/test/compat/clients/node_modules

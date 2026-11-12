@@ -148,6 +148,38 @@ func (r *Request) Scan(body []byte) error {
 	return nil
 }
 
+// InjectedUsage reports whether Rewrite asks the provider for usage the
+// caller did not request: the stream's usage-only chunk must then be
+// withheld from the caller, whose code may read choices[0] of every chunk
+// (test/compat found both official SDKs' usual loops crash on it).
+func (r *Request) InjectedUsage() bool { return r.Stream && !r.usageOn }
+
+// UsageOnly reports whether a stream chunk is the usage report alone: an
+// empty choices array and a usage object.
+func UsageOnly(data []byte) bool {
+	emptyChoices, usage := false, false
+	err := jsonscan.Object(data, func(name []byte, d *jsonscan.Decoder) error {
+		switch string(name) {
+		case "choices":
+			v, _, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			emptyChoices = v.Kind() == '[' && len(bytes.TrimSpace(v[1:len(v)-1])) == 0
+		case "usage":
+			v, _, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			usage = v.Kind() == '{'
+		default:
+			return d.SkipValue()
+		}
+		return nil
+	})
+	return err == nil && emptyChoices && usage
+}
+
 // Rewrite appends body to dst with the model replaced and, for a stream,
 // usage requested.
 func (r *Request) Rewrite(dst, body []byte, model string) []byte {

@@ -81,6 +81,24 @@ type exchange struct {
 	chatUsage chat.StreamUsage
 	parser    sse.Parser
 	tail      []byte // a non-streamed response, for its usage
+	events    []byte // a filtered stream's next bytes to the caller
+}
+
+// forwardChat is the OpenAI stream's event handler when golem injected
+// include_usage: usage is read from every event, and every event but the
+// usage-only one is re-serialised to the caller. OpenAI streams carry only
+// data lines, so this is exact.
+func (ex *exchange) forwardChat(event, data []byte) {
+	ex.chatUsage.OnEvent(event, data)
+	if chat.UsageOnly(data) {
+		return
+	}
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
+		ex.events = append(ex.events, "data: "...)
+		ex.events = append(ex.events, line...)
+		ex.events = append(ex.events, '\n')
+	}
+	ex.events = append(ex.events, '\n')
 }
 
 var exchanges = sync.Pool{New: func() any { return &exchange{buf: make([]byte, copyBuffer)} }}
@@ -266,10 +284,24 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 		ex.chatUsage = chat.StreamUsage{}
 		ex.parser.OnEvent = ex.chatUsage.OnEvent
 	}
+	filter := h.Dialect == OpenAIChat && ex.chat.InjectedUsage()
+	if filter {
+		ex.parser.OnEvent = ex.forwardChat
+	}
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
-		if n > 0 {
+		if n > 0 && filter {
+			ex.events = ex.events[:0]
+			ex.parser.Write(ex.buf[:n])
+			if len(ex.events) > 0 {
+				if _, werr := w.Write(ex.events); werr != nil {
+					cut = werr
+					break
+				}
+				rc.Flush()
+			}
+		} else if n > 0 {
 			if _, werr := w.Write(ex.buf[:n]); werr != nil {
 				cut = werr // the caller went away (cancellation: ADR 0041 §7.6)
 				break

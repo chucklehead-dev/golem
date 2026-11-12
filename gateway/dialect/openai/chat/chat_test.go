@@ -32,6 +32,21 @@ func TestRewriteRequestsUsage(t *testing.T) {
 	}
 }
 
+func TestUsageOnly(t *testing.T) {
+	for data, want := range map[string]bool{
+		`{"choices":[],"usage":{"prompt_tokens":1}}`:             true,
+		`{"choices":[ ],"usage":{"prompt_tokens":1}}`:            true,
+		`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":1}}`: false,
+		`{"choices":[],"usage":null}`:                            false,
+		`{"choices":[{"delta":{"content":"x"}}],"usage":null}`:   false,
+		`[DONE]`: false,
+	} {
+		if got := UsageOnly([]byte(data)); got != want {
+			t.Errorf("UsageOnly(%s) = %v, want %v", data, got, want)
+		}
+	}
+}
+
 func TestScanMaxTokens(t *testing.T) {
 	var r Request
 	if err := r.Scan([]byte(`{"model":"a","max_completion_tokens":50,"max_tokens":10,"store":true,"n":2}`)); err != nil {

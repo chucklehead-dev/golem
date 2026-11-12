@@ -24,7 +24,7 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 | Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0016 |
 | Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0020 |
 | Valkey scripts | the check script (known spend, concurrency slot, rate, quota) on ElastiCache for Valkey: latency, behaviour across a failover | ADRs 0012, 0031 |
-| SDK retry rules | Which status codes each OpenAI and Anthropic SDK, Claude Code and Codex retry, and their session headers; confirms 402 for budgets | ADRs 0024, 0026 |
+| SDK retry rules (SDKs done: [docs/spikes/sdk-compat.md](spikes/sdk-compat.md); agents open) | Which status codes each OpenAI and Anthropic SDK, Claude Code and Codex retry, and their session headers; confirms 402 for budgets | ADRs 0024, 0026 |
 | Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0009 |
 
 ## Phase 1 (M0): walking skeleton (3–4 weeks)

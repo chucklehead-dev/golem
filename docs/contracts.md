@@ -38,7 +38,9 @@ retry pointlessly and users wait through backoff before seeing why.
   budget.member_cap 92%`; `observe` adds nothing to the response.
 - The codes are a stable, documented list (`docs/errors/`), checked by a
   test that every code the gateway can emit is documented.
-- The SDKs' retry rules are pinned by the SDK compatibility tests (§7).
+- The SDKs' retry rules are pinned by the SDK compatibility tests (§7):
+  `test/compat` checks every status above against the official Python and
+  TypeScript SDKs in CI (docs/spikes/sdk-compat.md).
 
 ## 2. Error origin (ADR 0024)
 
@@ -174,7 +176,11 @@ rules.
   BYOK clients), each tested nightly against the gateway with recorded and
   live providers.
 - The tests pin each SDK's retry behaviour (§1) and each agent's session
-  and header behaviour (§5).
+  and header behaviour (§5). Built for the SDKs (`test/compat`); the agents
+  are next.
+- golem never changes a stream's shape for a caller: where it asks a
+  provider for more than the caller did (OpenAI's `include_usage`), it
+  withholds the extra from the caller.
 - When a provider ships a breaking change, the pass-through path requires
   policy compatibility review before enabling new provider features; the adapters and envelopes get a fix and a matrix
   row, and the release notes name it.
