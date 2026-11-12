@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "not gofmt'd:"; echo "$out"; exit 1; fi
+      - run: go vet ./...
+      - name: test (race, shuffled)
+        run: go test -race -shuffle=on ./...
+      - name: benchmarks compile and run once
+        run: go test -run='^$' -bench=. -benchtime=1x ./...
+      - name: fuzz smoke
+        run: ci/fuzz-smoke.sh
+        env:
+          FUZZTIME: 10s
+
+  models:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install quint and lmt
+        run: |
+          npm install --global @informalsystems/quint@0.33.1
+          go install github.com/driusan/lmt@v0.0.0-20210421124901-62fe18f2f6a6
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: the generated models match the markdown
+        run: make -C model verify-tangled
+      - name: check the models
+        run: make -C model check
+        env:
+          QUINT_BACKEND: typescript
