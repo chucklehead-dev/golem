@@ -135,6 +135,8 @@ gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object
                        the file source, the on-disk last-good copy, status writes
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
 gateway/limit/         Limiter: known-spend checks, worst-case cost, concurrency slots, GCRA rate windows; Valkey and in-memory implementations
+                       (built: known spend with the hand-off by event, strict and soft, principal and scope slots, holding on
+                       cancel, outages with waivers and replay, over an in-memory store; checked against model/exposure.md)
 gateway/price/         model catalog lookups and pricing (the catalog comes in the snapshot)
 gateway/hook/          phases, in-process registry, remote client, built-ins
 gateway/upstream/      per-deployment transports, provider auth (keys, SigV4, Entra, Roles Anywhere)

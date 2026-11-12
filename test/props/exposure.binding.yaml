@@ -1,0 +1,33 @@
+# How the limiter test's recorded steps become calls of model/exposure.md's
+# actions, with its exposureDesign instance's constants.
+spec: ../../model/exposure.qnt
+module: exposure
+
+constants:
+  REQUESTS: 'Set("a1", "a2", "b1", "b2", "c1")'
+  OWNER: 'Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3")'
+  GATEWAYS: 'Set("g1", "g2")'
+  COSTS: 'Set(1, 2, 3)'
+  WORST: '3'
+  BUDGET: '4'
+  LIMIT: '1'
+  SCOPE_LIMIT: '2'
+  SCOPE_LIMIT_ON: 'true'
+  HANDOFF: '"byEvent"'
+  HOLD_ON_CANCEL: 'true'
+  REACQUIRE: 'true'
+
+actions:
+  admit: {}
+  complete: {}
+  cancel: {}
+  providerEnds: {}
+  deliver:
+    args:
+      e: '({{.id}}, {{.cost}})'
+  publishSnapshot: {}
+  valkeyDown: {}
+  valkeyBack: {}
+  failover: {}
+
+invariants: [safe]

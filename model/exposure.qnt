@@ -26,6 +26,7 @@ module exposure {
   var ledger: Set[Event]
   var slots: Set[str]
   var valkeyUp: bool
+  var views: str -> Set[Event]
   var observed: Set[Event]
   var uncounted: int
   var waived: Set[str]
@@ -37,7 +38,7 @@ module exposure {
     seenCost' = REQUESTS.mapBy(r => 0),
     snap' = { events: Set(), spend: 0 },
     counter' = Set(), pending' = Set(), buffer' = Set(), ledger' = Set(),
-    slots' = Set(), valkeyUp' = true,
+    slots' = Set(), valkeyUp' = true, views' = GATEWAYS.mapBy(g => Set()),
     observed' = Set(), uncounted' = 0, waived' = Set(), overAdmit' = false,
   }
 
@@ -46,23 +47,27 @@ module exposure {
   def ownedBy(rs: Set[str], p: str): Set[str] = rs.filter(r => OWNER.get(r) == p)
   def totalBilled: int = REQUESTS.fold(0, (acc, r) => acc + billed.get(r))
   def counted: int = sum(observed)
-  def known: int =
-    snap.spend + (if (HANDOFF == "sum") sum(counter) else sum(counter.exclude(snap.events)))
+  def knownFrom(c: Set[Event]): int =
+    snap.spend + (if (HANDOFF == "sum") sum(c) else sum(c.exclude(snap.events)))
+  def known: int = knownFrom(counter)
   action keepCalls = all { phase' = phase, gatewayOf' = gatewayOf, billed' = billed, seenCost' = seenCost }
-  action keepSpend = all { snap' = snap, counter' = counter, pending' = pending, buffer' = buffer, ledger' = ledger }
+  action keepSpend = all { snap' = snap, counter' = counter, pending' = pending, buffer' = buffer, ledger' = ledger, views' = views }
   action keepGhosts = all { observed' = observed, uncounted' = uncounted, waived' = waived, overAdmit' = overAdmit }
   action admit(request: str, gateway: str): bool = all {
     phase.get(request) == "idle",
-    known < BUDGET,
     val p = OWNER.get(request)
     val local = running.filter(r => gatewayOf.get(r) == gateway)
     if (valkeyUp) all {
+      known < BUDGET,
+      views' = views.put(gateway, counter), // the check reads the counter
       ownedBy(slots, p).size() < LIMIT,
       if (SCOPE_LIMIT_ON) slots.size() < SCOPE_LIMIT else true,
       slots' = slots.union(Set(request)),
       waived' = waived,
       overAdmit' = (overAdmit or ownedBy(running, p).size() >= LIMIT or running.size() >= SCOPE_LIMIT),
     } else all {
+      knownFrom(views.get(gateway)) < BUDGET,
+      views' = views,
       ownedBy(local, p).size() < LIMIT,
       if (SCOPE_LIMIT_ON) local.size() < SCOPE_LIMIT else true,
       slots' = slots,
@@ -72,14 +77,15 @@ module exposure {
     phase' = phase.put(request, "inflight"),
     gatewayOf' = gatewayOf.put(request, gateway),
     billed' = billed, seenCost' = seenCost,
-    valkeyUp' = valkeyUp, keepSpend, observed' = observed, uncounted' = uncounted,
+    valkeyUp' = valkeyUp, observed' = observed, uncounted' = uncounted,
+    snap' = snap, counter' = counter, pending' = pending, buffer' = buffer, ledger' = ledger,
   }
   action emit(e: Event): bool = all {
     observed' = observed.union(Set(e)),
     buffer' = buffer.union(Set(e)),
     counter' = if (valkeyUp) counter.union(Set(e)) else counter,
     pending' = if (valkeyUp) pending else pending.union(Set(e)),
-    snap' = snap, ledger' = ledger,
+    snap' = snap, ledger' = ledger, views' = views,
   }
   action complete(request: str, cost: int): bool = all {
     phase.get(request) == "inflight",
@@ -115,7 +121,7 @@ module exposure {
     buffer.contains(e),
     buffer' = buffer.exclude(Set(e)),
     ledger' = ledger.union(Set(e)),
-    snap' = snap, counter' = counter, pending' = pending,
+    snap' = snap, counter' = counter, pending' = pending, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -124,7 +130,7 @@ module exposure {
     counter' = if (HANDOFF == "byEvent") counter.exclude(ledger)
                else if (HANDOFF == "reset") Set()
                else counter,
-    pending' = pending, buffer' = buffer, ledger' = ledger,
+    pending' = pending, buffer' = buffer, ledger' = ledger, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
   action valkeyDown: bool = all {
@@ -140,7 +146,7 @@ module exposure {
     counter' = counter.union(pending),
     pending' = Set(),
     slots' = if (REACQUIRE) running else Set(),
-    snap' = snap, buffer' = buffer, ledger' = ledger,
+    snap' = snap, buffer' = buffer, ledger' = ledger, views' = views,
     keepCalls, keepGhosts,
   }
 
@@ -152,7 +158,7 @@ module exposure {
       counter' = counter.intersect(snap.events),
       uncounted' = uncounted + sum(lost),
     },
-    snap' = snap, pending' = pending, buffer' = buffer, ledger' = ledger,
+    snap' = snap, pending' = pending, buffer' = buffer, ledger' = ledger, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp,
     observed' = observed, waived' = waived, overAdmit' = overAdmit,
   }
