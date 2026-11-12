@@ -23,7 +23,7 @@ graph_holds() {
   if [[ $scope == *"state bound"* ]]; then
     echo "${c:-design}: the search hit its state bound before depth $d: lower the depth or raise STATES"; fail=1
   elif [[ $graph_rc == 0 && -z $extra ]]; then
-    echo "${c:-design} holds in every run of up to $d steps ($(grep -m1 -oE '[0-9]+ states' <<<"$graph_out"))"
+    echo "${c:-design} holds in every run of up to $d steps ($(grep -E '^  graph' <<<"$graph_out" | grep -oE '[0-9]+ states' | head -1))"
   else
     echo "${c:-design}: NOT held (exit $graph_rc${extra:+; dead:$extra})"; grep -E '^  (FAIL|never)' <<<"$graph_out" | cut -c1-200; fail=1
   fi
@@ -34,7 +34,10 @@ graph_holds() {
 graph_breaks() {
   graph_run "$1" "$2" "$3"
   if [[ $graph_rc == 1 ]] && grep -qE "^  FAIL +$4:" <<<"$graph_out"; then
-    echo "$3 breaks $4 within $2 steps: $(grep -m1 -E '^    replay:' <<<"$graph_out" | sed -E 's/^ +replay: run r = //' | cut -c1-140)"
+    # the replay of this invariant's counterexample, from init's first step on
+    local r; r=$(awk -v inv="$4" '$1=="FAIL" && $2==inv":" {f=1} f && /^    replay:/ {print; exit}' <<<"$graph_out")
+    r=${r#*run r = }; r=${r#init.}; r=${r#all \{*\}.}
+    echo "$3 breaks $4 within $2 steps: $(sed -E 's/^.*\}\)\.then/then/' <<<"$r" | cut -c1-150)"
   else
     echo "$3: does not break $4 within $2 steps (exit $graph_rc)"; fail=1
   fi
