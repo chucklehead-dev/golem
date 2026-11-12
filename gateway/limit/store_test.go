@@ -49,17 +49,19 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 	t.Run("counter", func(t *testing.T) {
 		ctx, st := t.Context(), newStore(t)
-		st.Add(ctx, "s", Event{"e1", 3}, Event{"e2", 5})
-		st.Add(ctx, "s", Event{"e1", 3}) // twice is once
-		st.Add(ctx, "other", Event{"e9", 100})
-		es, err := st.Events(ctx, "s")
-		sortEvents(es)
-		if err != nil || !slices.Equal(es, []Event{{"e1", 3}, {"e2", 5}}) {
-			t.Fatalf("events %v %v", es, err)
+		for _, tc := range []struct {
+			e    Event
+			want int64
+		}{{Event{"e1", 3}, 1}, {Event{"e2", 5}, 2}, {Event{"e1", 3}, 1}} { // twice is once
+			if seq, err := st.Add(ctx, "s", tc.e); err != nil || seq != tc.want {
+				t.Fatalf("Add(%v) = %d, %v; want %d", tc.e, seq, err, tc.want)
+			}
 		}
-		st.Forget(ctx, "s", []string{"e1"})
-		if es, _ := st.Events(ctx, "s"); !slices.Equal(es, []Event{{"e2", 5}}) {
-			t.Fatalf("after forget: %v", es)
+		st.Add(ctx, "other", Event{"e9", 100})
+		for w, want := range map[int64]int64{0: 8, 1: 5, 2: 0, 7: 0} {
+			if got, over, err := st.After(ctx, "s", w); err != nil || over || got != want {
+				t.Errorf("After(%d) = %d, %v, %v; want %d", w, got, over, err, want)
+			}
 		}
 	})
 }
@@ -143,14 +145,18 @@ func TestValkeyStore(t *testing.T) {
 		}
 		t.Fatal("b's slot never expired")
 	})
-	t.Run("the counter forgets old events", func(t *testing.T) {
+	t.Run("trimmed history over-counts, never under-counts", func(t *testing.T) {
 		ctx, st := t.Context(), newValkey(t, addr)
 		st.Retain = 100 * time.Millisecond
 		st.Add(ctx, "s", Event{"old", 1})
+		st.Add(ctx, "s", Event{"mid", 2})
 		time.Sleep(250 * time.Millisecond)
-		st.Add(ctx, "s", Event{"new", 2})
-		if es, _ := st.Events(ctx, "s"); !slices.Equal(es, []Event{{"new", 2}}) {
-			t.Fatalf("events %v: past Retain an event is reconciliation's", es)
+		st.Add(ctx, "s", Event{"new", 4}) // trims numbers 1 and 2
+		if got, over, _ := st.After(ctx, "s", 1); !over || got != 7 {
+			t.Fatalf("After(1) = %d, over %v; want the whole total (7), flagged", got, over)
+		}
+		if got, over, _ := st.After(ctx, "s", 3); over || got != 0 {
+			t.Fatalf("After(3) = %d, %v", got, over)
 		}
 	})
 	t.Run("an unreachable server is ErrUnavailable", func(t *testing.T) {

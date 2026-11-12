@@ -1,8 +1,11 @@
 // Package limit is the gateway's admission check (ADR 0031, 0038, 0041
-// §7.3 and §7.6): known spend against a budget, and in-flight limits per
-// principal and per scope, over the site's shared store (Valkey in
+// §7.3 and §7.6, 0042): known spend against a budget, and in-flight limits
+// per principal and per scope, over the site's shared store (Valkey in
 // production). Its rules are the ones model/exposure.md shows necessary,
 // and its connect test checks it against that model.
+//
+// Known spend is the snapshot's spend plus the site counter's total after
+// the snapshot's watermark (ADR 0042): one O(1) read, whatever the traffic.
 package limit
 
 import (
@@ -14,7 +17,7 @@ import (
 )
 
 // Event is a spend event: a call's cost as the gateway knows it, keyed by
-// the call so that counting it twice is impossible (a set, by event ID).
+// the call, so counting it twice is impossible.
 type Event struct {
 	ID   string
 	Cost int64
@@ -42,38 +45,47 @@ type Store interface {
 	// their TTLs lapsed. It does not check limits: the calls are already
 	// running.
 	Reacquire(ctx context.Context, slots []Slot) error
-	// Add records spend events for a scope; adding one twice is harmless.
-	Add(ctx context.Context, scope string, es ...Event) error
-	// Events returns a scope's counter.
-	Events(ctx context.Context, scope string) ([]Event, error)
-	// Forget drops events a snapshot now includes (garbage collection;
-	// known spend ignores them either way).
-	Forget(ctx context.Context, scope string, ids []string) error
+	// Add records a spend event and returns its number in the scope's
+	// counter: the next one, or the one it already has (a replay).
+	Add(ctx context.Context, scope string, e Event) (seq int64, err error)
+	// After returns the total of the scope's events numbered above w. If
+	// the counter no longer holds its total as of w (trimmed: older than
+	// any live snapshot should be), it returns the whole total and
+	// over is true: counting too much, never too little.
+	After(ctx context.Context, scope string, w int64) (total int64, over bool, err error)
 }
 
 // Mem is an in-memory Store: the standalone gateway's, and the tests'. Its
-// faults model Valkey's: Down makes it unreachable (and, as an outage
-// longer than the slots' TTL would, loses every slot); Failover loses
-// counter events.
+// faults model Valkey's: SetDown makes it unreachable (and, as an outage
+// longer than the slots' TTL would, loses every slot); Failover loses the
+// counter's tail.
 type Mem struct {
 	mu      sync.Mutex
 	down    bool
 	slots   map[string]Slot
-	counter map[string]map[string]memEvent // scope -> event ID -> event
-	// Retain is how long the counter keeps an event, as Valkey's (default
-	// 15 minutes); Now is its clock.
+	counter map[string]*memCounter
+	// Retain is how long the counter keeps its history, as Valkey's: at
+	// least the longest authorization lease a live gateway can hold
+	// (ADR 0042: five hours). Now is its clock.
 	Retain time.Duration
 	Now    func() time.Time
 }
 
+type memCounter struct {
+	events []memEvent // numbered from 1
+	cum    []int64    // cum[i]: the total of events 1..i (cum[0] = 0)
+	byID   map[string]int64
+	base   int64 // numbers up to base have been trimmed
+}
+
 type memEvent struct {
-	cost int64
-	at   time.Time
+	Event
+	at time.Time
 }
 
 // NewMem returns an empty store.
 func NewMem() *Mem {
-	return &Mem{slots: map[string]Slot{}, counter: map[string]map[string]memEvent{}, Retain: 15 * time.Minute, Now: time.Now}
+	return &Mem{slots: map[string]Slot{}, counter: map[string]*memCounter{}, Retain: 5 * time.Hour, Now: time.Now}
 }
 
 func (m *Mem) Acquire(_ context.Context, s Slot, principalLimit, scopeLimit int) (bool, error) {
@@ -120,57 +132,53 @@ func (m *Mem) Reacquire(_ context.Context, slots []Slot) error {
 	return nil
 }
 
-func (m *Mem) Add(_ context.Context, scope string, es ...Event) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.down {
-		return ErrUnavailable
-	}
+func (m *Mem) scope(scope string) *memCounter {
 	c := m.counter[scope]
 	if c == nil {
-		c = map[string]memEvent{}
+		c = &memCounter{cum: []int64{0}, byID: map[string]int64{}}
 		m.counter[scope] = c
 	}
-	now := m.Now()
-	for _, e := range es {
-		at := now
-		if old, ok := c[e.ID]; ok {
-			at = old.at // the first time, as Valkey's ZADD NX keeps
-		}
-		c[e.ID] = memEvent{e.Cost, at}
-	}
-	return nil
+	return c
 }
 
-func (m *Mem) Events(_ context.Context, scope string) ([]Event, error) {
+func (m *Mem) Add(_ context.Context, scope string, e Event) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
-		return nil, ErrUnavailable
+		return 0, ErrUnavailable
 	}
-	var es []Event
+	c := m.scope(scope)
+	if seq, ok := c.byID[e.ID]; ok {
+		return seq, nil
+	}
+	c.events = append(c.events, memEvent{e, m.Now()})
+	c.cum = append(c.cum, c.cum[len(c.cum)-1]+e.Cost)
+	seq := int64(len(c.events))
+	c.byID[e.ID] = seq
+	// Trim history past retention, oldest first.
 	cutoff := m.Now().Add(-m.Retain)
-	for id, e := range m.counter[scope] {
-		if e.at.Before(cutoff) {
-			delete(m.counter[scope], id) // past retention: reconciliation's
-			continue
-		}
-		es = append(es, Event{id, e.cost})
+	for c.base < seq-1 && c.events[c.base].at.Before(cutoff) {
+		delete(c.byID, c.events[c.base].ID)
+		c.base++
 	}
-	slices.SortFunc(es, func(a, b Event) int { return compare(a.ID, b.ID) })
-	return es, nil
+	return seq, nil
 }
 
-func (m *Mem) Forget(_ context.Context, scope string, ids []string) error {
+func (m *Mem) After(_ context.Context, scope string, w int64) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
-		return ErrUnavailable
+		return 0, false, ErrUnavailable
 	}
-	for _, id := range ids {
-		delete(m.counter[scope], id)
+	c := m.scope(scope)
+	total := c.cum[len(c.cum)-1]
+	switch {
+	case w >= int64(len(c.events)):
+		return 0, false, nil // nothing after w (or the counter lost its tail)
+	case w < c.base:
+		return total, true, nil
 	}
-	return nil
+	return total - c.cum[w], false, nil
 }
 
 // SetDown makes the store unreachable (true) or reachable again. Going down
@@ -184,15 +192,32 @@ func (m *Mem) SetDown(down bool) {
 	}
 }
 
-// Failover loses a scope's counter events except those kept.
-func (m *Mem) Failover(scope string, keep func(id string) bool) {
+// Failover loses a scope's counter after its first keep events: an
+// asynchronous replica promoted without the latest writes. Their numbers
+// will be given again.
+func (m *Mem) Failover(scope string, keep int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for id := range m.counter[scope] {
-		if !keep(id) {
-			delete(m.counter[scope], id)
-		}
+	c := m.scope(scope)
+	if keep >= len(c.events) {
+		return
 	}
+	for _, e := range c.events[keep:] {
+		delete(c.byID, e.ID)
+	}
+	c.events, c.cum = c.events[:keep], c.cum[:keep+1]
+	c.base = min(c.base, int64(keep))
+}
+
+// Counter lists a scope's events in number order (tests).
+func (m *Mem) Counter(scope string) []Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Event
+	for _, e := range m.scope(scope).events {
+		out = append(out, e.Event)
+	}
+	return out
 }
 
 // Slots lists the slots held, sorted by call (tests).

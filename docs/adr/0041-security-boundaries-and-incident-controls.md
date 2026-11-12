@@ -269,7 +269,7 @@ necessary by a mutant:
 - **A scope in-flight limit** alongside the principal's: without it a
   scope's exposure is the sum of its active principals' limits. The bound a
   scope can be told is `scope limit × W` over its budget (soft), on one site.
-- **Counter handoff by event**: the site counter is keyed by event ID and
+- **Counter handoff by event** (superseded by ADR 0042, the hand-off by counter sequence and watermark): the site counter is keyed by event ID and
   known spend is the snapshot plus the counter's events the snapshot does
   not include (the snapshot names its ingested events by a ledger
   watermark). A counter that restarts with each snapshot loses increments

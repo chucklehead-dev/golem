@@ -57,10 +57,12 @@ type Scope struct {
 	Strict            bool     `json:"strict,omitempty"`
 	PrincipalInFlight int      `json:"principalInFlight"`
 	ScopeInFlight     int      `json:"scopeInFlight"`
-	// KnownSpend is the ledger's balance for the period, and Included the
-	// events it counts that site counters may still hold (ADR 0041 §7.6).
-	KnownSpend int64    `json:"knownSpend,omitempty"`
-	Included   []string `json:"included,omitempty"`
+	// KnownSpend is the ledger's balance for the period with this pool's
+	// site's events numbered above Watermark left out; Watermark is the
+	// site counter's number up to which every event is in the ledger
+	// (ADR 0042).
+	KnownSpend int64 `json:"knownSpend,omitempty"`
+	Watermark  int64 `json:"watermark,omitempty"`
 }
 
 // Key is a key's entitlement: by hash, never the key itself.

@@ -13,7 +13,7 @@ constants:
   LIMIT: '1'
   SCOPE_LIMIT: '1'
   SCOPE_LIMIT_ON: 'true'
-  HANDOFF: '"byEvent"'
+  HANDOFF: '"watermark"'
   HOLD_ON_CANCEL: 'true'
   REACQUIRE: 'true'
 actions: {}

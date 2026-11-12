@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS golem.spend (
     request_id            UUID,
     attempt_id            UUID,
     event_id              UUID,
+    counter_seq           UInt64,
     provider_request_id   String,
     started_at            DateTime64(3, 'UTC'),
     ended_at              DateTime64(3, 'UTC'),

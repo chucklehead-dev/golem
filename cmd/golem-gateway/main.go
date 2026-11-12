@@ -44,11 +44,7 @@ func main() {
 	limiter := limit.New(limit.NewMem())
 	holder := &snapshot.Holder{Env: key.Dev, OnApply: func(c *snapshot.Compiled) {
 		for _, s := range c.Snapshot.Entitlements.Scopes {
-			inc := map[string]bool{}
-			for _, id := range s.Included {
-				inc[id] = true
-			}
-			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Spend: s.KnownSpend, Included: inc})
+			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Spend: s.KnownSpend, Watermark: s.Watermark})
 		}
 	}}
 	dir := &snapshot.Dir{Path: *standalone, Holder: holder, Secrets: snapshot.EnvSecrets{Getenv: os.Getenv}}

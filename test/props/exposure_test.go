@@ -15,9 +15,10 @@ import (
 
 // Hegel drives the real limiter (one per gateway over one shared store),
 // a provider that bills cancelled calls up to the worst case, a ledger that
-// ingests late and in any order, snapshots, Valkey outages and failovers;
-// model/exposure.md judges every run. The connect test in gateway/limit
-// covers the other direction.
+// ingests late and in any order, golem-control publishing watermarked
+// snapshots that each gateway applies on its own, Valkey outages with
+// per-gateway recovery and grace, and failovers; model/exposure.md judges
+// every run. The connect test in gateway/limit covers the other direction.
 
 var (
 	requests = []string{"a1", "a2", "b1", "b2", "c1"}
@@ -32,27 +33,39 @@ const (
 	noScopeLimit                // per-principal limits only
 )
 
+type row struct {
+	id   string
+	cost int64
+	seq  int64
+}
+
 type limMachine struct {
-	ctx      context.Context
-	mut      limitMutation
-	store    *limit.Mem
-	gws      map[string]*limit.Limiter
-	phase    map[string]string // idle, inflight, cancelled, done
-	tickets  map[string]*limit.Ticket
-	seen     map[string]int64
-	observed []limit.Event // emitted, in order
-	ledger   map[string]int64
-	snap     map[string]bool
-	down     bool
+	ctx       context.Context
+	mut       limitMutation
+	store     *limit.Mem
+	gws       map[string]*limit.Limiter
+	phase     map[string]string // idle, inflight, cancelled, done
+	tickets   map[string]*limit.Ticket
+	seen      map[string]int64
+	rows      []row // numbered, not yet ingested
+	ledger    []row
+	latest    limit.Known
+	applied   map[string]limit.Known
+	down      bool
+	recovered map[string]bool // since the last outage; grace may end once all have
+	graced    map[string]bool
 }
 
 func newLimMachine(ctx context.Context, mut limitMutation) *limMachine {
 	st := limit.NewMem()
 	m := &limMachine{ctx: ctx, mut: mut, store: st, gws: map[string]*limit.Limiter{},
 		phase: map[string]string{}, tickets: map[string]*limit.Ticket{}, seen: map[string]int64{},
-		ledger: map[string]int64{}, snap: map[string]bool{}}
+		recovered: map[string]bool{}, graced: map[string]bool{}, applied: map[string]limit.Known{}}
 	for _, g := range limitGws {
-		m.gws[g] = limit.New(st)
+		l := limit.New(st)
+		l.OnNumbered = func(_ string, e limit.Event, seq int64) { m.rows = append(m.rows, row{e.ID, e.Cost, seq}) }
+		m.gws[g] = l
+		m.recovered[g] = true
 	}
 	for _, r := range requests {
 		m.phase[r] = "idle"
@@ -73,6 +86,10 @@ func (m *limMachine) inPhase(p string) []string {
 func (m *limMachine) RuleAdmit(tc hegel.TestCase) {
 	r := hegel.Draw(tc, hegel.SampledFrom(requests))
 	g := hegel.Draw(tc, hegel.SampledFrom(limitGws))
+	m.admit(r, g)
+}
+
+func (m *limMachine) admit(r, g string) {
 	if m.phase[r] != "idle" {
 		return // one call per request id
 	}
@@ -93,11 +110,12 @@ func (m *limMachine) RuleComplete(tc hegel.TestCase) {
 	if len(rs) == 0 {
 		return
 	}
-	r := hegel.Draw(tc, hegel.SampledFrom(rs))
-	cost := int64(hegel.Draw(tc, hegel.Integers(1, 3)))
+	m.complete(hegel.Draw(tc, hegel.SampledFrom(rs)), int64(hegel.Draw(tc, hegel.Integers(1, 3))))
+}
+
+func (m *limMachine) complete(r string, cost int64) {
 	m.tickets[r].Complete(m.ctx, cost)
 	m.phase[r] = "done"
-	m.observed = append(m.observed, limit.Event{ID: r, Cost: cost})
 	qobs.Record(m.ctx, "complete", nil, "request", r, "cost", cost)
 }
 
@@ -110,7 +128,6 @@ func (m *limMachine) RuleCancel(tc hegel.TestCase) {
 	seen := int64(hegel.Draw(tc, hegel.Integers(1, 3)))
 	m.tickets[r].Cancel(m.ctx, seen)
 	m.phase[r], m.seen[r] = "cancelled", seen
-	m.observed = append(m.observed, limit.Event{ID: r, Cost: seen})
 	qobs.Record(m.ctx, "cancel", nil, "request", r, "seen", seen)
 }
 
@@ -128,34 +145,47 @@ func (m *limMachine) RuleProviderEnds(tc hegel.TestCase) {
 	qobs.Record(m.ctx, "providerEnds", nil, "request", r, "cost", cost)
 }
 
-// RuleDeliver: the ledger ingests an event, late and in any order.
+// RuleDeliver: the ledger ingests a numbered row, late and in any order.
 func (m *limMachine) RuleDeliver(tc hegel.TestCase) {
-	var todo []limit.Event
-	for _, e := range m.observed {
-		if _, ok := m.ledger[e.ID]; !ok {
-			todo = append(todo, e)
-		}
-	}
-	if len(todo) == 0 {
+	if len(m.rows) == 0 {
 		return
 	}
-	e := todo[hegel.Draw(tc, hegel.Integers(0, len(todo)-1))]
-	m.ledger[e.ID] = e.Cost
-	qobs.Record(m.ctx, "deliver", nil, "id", e.ID, "cost", e.Cost)
+	i := hegel.Draw(tc, hegel.Integers(0, len(m.rows)-1))
+	r := m.rows[i]
+	m.rows = slices.Delete(m.rows, i, i+1)
+	m.ledger = append(m.ledger, r)
+	qobs.Record(m.ctx, "deliver", nil, "id", r.id, "cost", r.cost, "seq", r.seq)
 }
 
-// RulePublish: golem-control's renewal carries the ledger's balance.
+// RulePublish: golem-control's snapshot: the ledger's contiguous
+// watermark and the spend of the rows up to it (ADR 0042).
 func (m *limMachine) RulePublish(hegel.TestCase) {
-	k := limit.Known{Included: map[string]bool{}}
-	for id, c := range m.ledger {
-		k.Spend += c
-		k.Included[id] = true
+	have := map[int64]bool{}
+	for _, r := range m.ledger {
+		have[r.seq] = true
 	}
-	m.snap = k.Included
-	for _, g := range limitGws {
-		m.gws[g].ApplySnapshot(m.ctx, "s", k)
+	var w int64
+	for have[w+1] {
+		w++
 	}
+	k := limit.Known{Watermark: w}
+	for _, r := range m.ledger {
+		if r.seq <= w {
+			k.Spend += r.cost
+		}
+	}
+	m.latest = k
 	qobs.Record(m.ctx, "publishSnapshot", nil)
+}
+
+func (m *limMachine) RuleApply(tc hegel.TestCase) {
+	g := hegel.Draw(tc, hegel.SampledFrom(limitGws))
+	if m.applied[g] == m.latest {
+		return // nothing new to apply
+	}
+	m.applied[g] = m.latest
+	m.gws[g].ApplySnapshot(m.ctx, "s", m.latest)
+	qobs.Record(m.ctx, "applySnapshot", nil, "gateway", g)
 }
 
 func (m *limMachine) RuleValkeyDown(hegel.TestCase) {
@@ -164,33 +194,66 @@ func (m *limMachine) RuleValkeyDown(hegel.TestCase) {
 	}
 	m.down = true
 	m.store.SetDown(true)
+	for _, g := range limitGws {
+		m.gws[g].Renew(m.ctx) // fails: each gateway notices
+		m.recovered[g] = false
+	}
 	qobs.Record(m.ctx, "valkeyDown", nil)
 }
 
-func (m *limMachine) RuleValkeyBack(tc hegel.TestCase) {
+func (m *limMachine) RuleValkeyBack(hegel.TestCase) {
 	if !m.down {
 		return
 	}
 	m.down = false
 	m.store.SetDown(false)
-	for _, g := range limitGws {
-		if err := m.gws[g].Recover(m.ctx); err != nil {
-			tc.Errorf("recover %s: %v", g, err) // aborts the case (Hegel)
-		}
-	}
 	qobs.Record(m.ctx, "valkeyBack", nil)
 }
 
-func (m *limMachine) RuleFailover(hegel.TestCase) {
-	if m.down {
+// RuleRecover: a gateway notices Valkey is back, replays what it held one
+// increment at a time, and recovers.
+func (m *limMachine) RuleRecover(tc hegel.TestCase) {
+	g := hegel.Draw(tc, hegel.SampledFrom(limitGws))
+	if m.down || m.recovered[g] {
 		return
 	}
-	es, _ := m.store.Events(m.ctx, "s")
-	if !slices.ContainsFunc(es, func(e limit.Event) bool { return !m.snap[e.ID] }) {
-		return // nothing to lose: the model's failover is not enabled
+	for {
+		e, ok, err := m.gws[g].ReplayOne(m.ctx)
+		if err != nil {
+			tc.Errorf("replay at %s: %v", g, err) // aborts the case (Hegel)
+		}
+		if !ok {
+			break
+		}
+		qobs.Record(m.ctx, "replayOne", nil, "gateway", g, "id", e.ID, "cost", e.Cost)
 	}
-	m.store.Failover("s", func(id string) bool { return m.snap[id] })
-	qobs.Record(m.ctx, "failover", nil)
+	if err := m.gws[g].Recover(m.ctx); err != nil {
+		tc.Errorf("recover %s: %v", g, err)
+	}
+	m.recovered[g], m.graced[g] = true, true
+	qobs.Record(m.ctx, "recover", nil, "gateway", g)
+}
+
+// RuleGraceEnds: a gateway's grace ends, once every gateway has recovered.
+func (m *limMachine) RuleGraceEnds(tc hegel.TestCase) {
+	g := hegel.Draw(tc, hegel.SampledFrom(limitGws))
+	if !m.graced[g] || slices.ContainsFunc(limitGws, func(h string) bool { return !m.recovered[h] }) {
+		return
+	}
+	m.gws[g].EndGrace()
+	m.graced[g] = false
+	qobs.Record(m.ctx, "graceEnds", nil, "gateway", g)
+}
+
+// RuleFailover: Valkey loses its counter's tail.
+func (m *limMachine) RuleFailover(tc hegel.TestCase) {
+	n := len(m.store.Counter("s"))
+	if m.down || n == 0 {
+		return
+	}
+	keep := hegel.Draw(tc, hegel.Integers(0, n-1))
+	m.store.Failover("s", keep)
+	qobs.Record(m.ctx, "failover", nil, "keep", keep)
 }
 
 func limBody(mut limitMutation) func(hegel.TestCase, *qhegel.Case) {
@@ -217,19 +280,5 @@ func TestNoScopeLimitCaught(t *testing.T) {
 
 // admitScripted and completeScripted are RuleAdmit and RuleComplete with
 // their draws given (scripted regressions).
-func (m *limMachine) admitScripted(r, g string) {
-	c := limit.Call{ID: r, Principal: owners[r], Scope: "s", Budget: 4, PrincipalLimit: 1, ScopeLimit: 2}
-	t, err := m.gws[g].Admit(m.ctx, c)
-	if err != nil {
-		return
-	}
-	m.phase[r], m.tickets[r] = "inflight", t
-	qobs.Record(m.ctx, "admit", nil, "request", r, "gateway", g)
-}
-
-func (m *limMachine) completeScripted(r string, cost int64) {
-	m.tickets[r].Complete(m.ctx, cost)
-	m.phase[r] = "done"
-	m.observed = append(m.observed, limit.Event{ID: r, Cost: cost})
-	qobs.Record(m.ctx, "complete", nil, "request", r, "cost", cost)
-}
+func (m *limMachine) admitScripted(r, g string)             { m.admit(r, g) }
+func (m *limMachine) completeScripted(r string, cost int64) { m.complete(r, cost) }

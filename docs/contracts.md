@@ -73,6 +73,7 @@ prevent double counting.
 | `schema_version` | UInt16 | this table's contract version |
 | `row_kind` | Enum: `attempt`, `adjustment` | attempt: one per upstream attempt, at its end (`estimated_fraction` > 0 when a cut stream was counted from deltas); adjustment: from provider reconciliation (ADR 0031) |
 | `request_id`, `attempt_id`, `event_id` | UUID | logical request, upstream attempt, stable accounting-event identity (ADR 0029) |
+| `counter_seq` | UInt64 | the event's number in its site's counter for the scope (ADR 0042); golem-control's watermark is the contiguous prefix of these per site and scope |
 | `provider_request_id` | String | the provider's own ID, for disputes |
 | `started_at`, `ended_at` | DateTime64(3, UTC) | |
 | `period` | Date | the **start** time's period in the period time zone: a stream crossing a period boundary is charged to the period it started in |

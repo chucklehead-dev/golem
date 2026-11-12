@@ -6,8 +6,9 @@ STATES=${STATES:-300000}
 
 # graph_run MODEL DEPTH [CONST]: the report, its exit status in $graph_rc.
 graph_run() {
-  graph_out=$("$GOTOGETHER" simulate -binding "$1.small.yaml" -graph -depth "$2" -states "$STATES" ${3:+-const "$3"} 2>&1)
-  graph_rc=$?
+  # The scripts run under set -e: keep a failing search from ending them.
+  graph_rc=0
+  graph_out=$("$GOTOGETHER" simulate -binding "$1.small.yaml" -graph -depth "$2" -states "$STATES" ${3:+-const "$3"} 2>&1) || graph_rc=$?
 }
 
 # graph_holds MODEL DEPTH CONST [ALLOWED_DEAD...]: the instance holds every
@@ -16,16 +17,16 @@ graph_run() {
 graph_holds() {
   local m=$1 d=$2 c=$3; shift 3
   graph_run "$m" "$d" "$c"
-  local dead; dead=$(grep -E '^  never' <<<"$graph_out" | sed -E 's/^  never +//; s/: .*//; s/,//g')
+  local dead; dead=$( { grep -E '^  never' <<<"$graph_out" || true; } | sed -E 's/^  never +//; s/: .*//; s/,//g')
   local extra=""
   for a in $dead; do [[ " $* " == *" $a "* ]] || extra+=" $a"; done
-  local scope; scope=$(grep -E '^  graph' <<<"$graph_out" | sed -E 's/^  graph +//; s/: .*//')
+  local scope; scope=$( { grep -E '^  graph' <<<"$graph_out" || true; } | sed -E 's/^  graph +//; s/: .*//')
   if [[ $scope == *"state bound"* ]]; then
     echo "${c:-design}: the search hit its state bound before depth $d: lower the depth or raise STATES"; fail=1
   elif [[ $graph_rc == 0 && -z $extra ]]; then
-    echo "${c:-design} holds in every run of up to $d steps ($(grep -E '^  graph' <<<"$graph_out" | grep -oE '[0-9]+ states' | head -1))"
+    echo "${c:-design} holds in every run of up to $d steps ($( { grep -E '^  graph' <<<"$graph_out" || true; } | { grep -oE '[0-9]+ states' || true; } | head -1))"
   else
-    echo "${c:-design}: NOT held (exit $graph_rc${extra:+; dead:$extra})"; grep -E '^  (FAIL|never)' <<<"$graph_out" | cut -c1-200; fail=1
+    echo "${c:-design}: NOT held (exit $graph_rc${extra:+; dead:$extra})"; { grep -E '^  (FAIL|never)' <<<"$graph_out" || true; } | cut -c1-200; fail=1
   fi
 }
 
@@ -33,9 +34,9 @@ graph_holds() {
 # found by the search (and so with a shortest counterexample).
 graph_breaks() {
   graph_run "$1" "$2" "$3"
-  if [[ $graph_rc == 1 ]] && grep -qE "^  FAIL +$4:" <<<"$graph_out"; then
+  if [[ $graph_rc == 1 ]] && { grep -qE "^  FAIL +$4:" <<<"$graph_out" || false; }; then
     # the replay of this invariant's counterexample, from init's first step on
-    local r; r=$(awk -v inv="$4" '$1=="FAIL" && $2==inv":" {f=1} f && /^    replay:/ {print; exit}' <<<"$graph_out")
+    local r; r=$(awk -v inv="$4" '$1=="FAIL" && $2==inv":" {f=1} f && /^    replay:/ {print; exit}' <<<"$graph_out" || true)
     r=${r#*run r = }; r=${r#init.}; r=${r#all \{*\}.}
     echo "$3 breaks $4 within $2 steps: $(sed -E 's/^.*\}\)\.then/then/' <<<"$r" | cut -c1-150)"
   else

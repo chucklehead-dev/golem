@@ -51,3 +51,4 @@ baseline one, marked in both.
 | [0040](0040-argo-cd-and-crossplane.md) | Delivery through Argo CD and Argo Rollouts; cloud resources through the platform's Crossplane (`GolemInstallation`, `GolemSite`) |
 
 | [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, the pool capture boundary and a golem-owned capture collector, request feature modes by route class, delivery privileges, composite publication freshness by consistent reads, narrowed budget claims |
+| [0042](0042-known-spend-by-counter-watermark.md) | Known spend by counter sequence and ledger watermark: O(1) admission, exact under snapshot skew; supersedes the hand-off by event |

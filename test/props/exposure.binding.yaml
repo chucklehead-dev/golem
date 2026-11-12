@@ -13,7 +13,7 @@ constants:
   LIMIT: '1'
   SCOPE_LIMIT: '2'
   SCOPE_LIMIT_ON: 'true'
-  HANDOFF: '"byEvent"'
+  HANDOFF: '"watermark"'
   HOLD_ON_CANCEL: 'true'
   REACQUIRE: 'true'
 
@@ -24,10 +24,16 @@ actions:
   providerEnds: {}
   deliver:
     args:
-      e: '({{.id}}, {{.cost}})'
+      r: '({{.id}}, {{.cost}}, {{.seq}})'
   publishSnapshot: {}
+  applySnapshot: {}
   valkeyDown: {}
   valkeyBack: {}
+  replayOne:
+    args:
+      e: '({{.id}}, {{.cost}})'
+  recover: {}
+  graceEnds: {}
   failover: {}
 
 invariants: [safe]

@@ -19,14 +19,14 @@ r=$(run --main=exposureDesign --invariant=safe); echo "exposureDesign safe: $r"
 [[ $r == "[ok]"* ]] || fail=1
 
 echo "== the design can reach every scenario"
-for v in overshoots waiverExceedsLimit cancelledBilledMore handoffInFlight; do
+for v in overshoots waiverExceedsLimit cancelledBilledMore handoffInFlight snapshotSkew; do
   r=$(run --main=exposureDesign --invariant="not($v)"); echo "$v: $r"
   [[ $r == "[violation]"* ]] || { echo "  scenario not reached by simulation"; fail=1; }
 done
 
 echo "== each broken design is caught"
 # resetHandoff breaks withinBound only after several snapshots in a row, too rare for simulation; resetTest and the exhaustive search below find it.
-for pair in noScopeLimit:limitsHonoured resetHandoff:noLostIncrements sumHandoff:knownNeverOver releaseOnCancel:limitsHonoured noReacquire:limitsHonoured; do
+for pair in noScopeLimit:limitsHonoured resetHandoff:noLostIncrements sumHandoff:knownNeverOver maxIngested:noLostIncrements trimAtApply:noLostIncrements releaseOnCancel:limitsHonoured noReacquire:limitsHonoured; do
   m=${pair%%:*}; i=${pair##*:}
   r=$(run --main="$m" --invariant="$i"); echo "$m breaks $i: $r"
   [[ $r == "[violation]"* ]] || { echo "  not caught by simulation"; fail=1; }
@@ -47,6 +47,11 @@ expect releaseOnCancel cancelResendTest pass
 expect exposureDesign cancelResendTest fail
 expect noReacquire forgottenSlotTest pass
 expect exposureDesign forgottenSlotTest fail
+expect maxIngested maxIngestedTest pass
+expect exposureDesign maxIngestedTest fail
+expect trimAtApply trimTest pass
+expect exposureDesign trimTest fail
+expect exposureDesign skewTest pass
 expect exposureDesign waiverTest pass
 
 
@@ -57,6 +62,8 @@ if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
   graph_breaks exposure 8 SCOPE_LIMIT_ON=false limitsHonoured
   graph_breaks exposure 8 'HANDOFF="reset"' withinBound
   graph_breaks exposure 8 'HANDOFF="sum"' knownNeverOver
+  graph_breaks exposure 8 'HANDOFF="maxIngested"' noLostIncrements
+  graph_breaks exposure 8 'HANDOFF="trimAtApply"' noLostIncrements
   graph_breaks exposure 8 HOLD_ON_CANCEL=false limitsHonoured
   graph_breaks exposure 8 REACQUIRE=false limitsHonoured
 else

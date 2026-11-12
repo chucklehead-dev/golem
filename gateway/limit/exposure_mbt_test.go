@@ -11,9 +11,10 @@ import (
 
 // The limiter against model/exposure.md's design: the model's traces drive
 // one Limiter per gateway over one shared store, and after every step the
-// slots, waivers, held increments and (while the store is reachable) each
-// gateway's known spend must be the model's. The ledger (deliver) is the
-// environment; a snapshot's known spend is the model's own.
+// counter (its events in number order), the slots, waivers, held
+// increments and each gateway's known spend (while it uses the store) must
+// be the model's. The ledger and golem-control (deliver, publishSnapshot)
+// are the environment; applySnapshot gives a gateway the model's snapshot.
 
 // The exposureDesign instance's constants.
 var owner = map[string]string{"a1": "p1", "a2": "p1", "b1": "p2", "b2": "p2", "c1": "p3"}
@@ -33,7 +34,8 @@ type event struct {
 type faultyStore interface {
 	Store
 	SetDown(bool)
-	Failover(scope string, keep func(id string) bool)
+	Failover(scope string, keep int)
+	Counter(scope string) []Event
 	Slots() []Slot
 }
 
@@ -45,9 +47,14 @@ type expDriver struct {
 	tickets map[string]*Ticket
 }
 
+type snapRec struct {
+	W, Spend int64
+}
+
 func (d *expDriver) Step(s *connect.Step) error {
 	ctx := d.t.Context()
 	req := func() string { return connect.MustPick[string](s, "request") }
+	gw := func() string { return connect.MustPick[string](s, "gateway") }
 	cost := func() int64 { return connect.MustPick[int64](s, "cost") }
 	return connect.Switch{
 		"init": func(*connect.Step) error {
@@ -57,101 +64,107 @@ func (d *expDriver) Step(s *connect.Step) error {
 			return nil
 		},
 		"admit": func(s *connect.Step) error {
-			t, err := d.gws[connect.MustPick[string](s, "gateway")].Admit(ctx, call(req()))
+			t, err := d.gws[gw()].Admit(ctx, call(req()))
 			d.tickets[req()] = t
 			return err // the model admitted it: so must the gateway
 		},
 		"complete":     func(*connect.Step) error { d.tickets[req()].Complete(ctx, cost()); return nil },
 		"cancel":       func(*connect.Step) error { d.tickets[req()].Cancel(ctx, cost()); return nil },
 		"providerEnds": func(*connect.Step) error { d.tickets[req()].Ended(ctx); return nil },
-		"deliver":      connect.Skip, // the ledger's ingestion: the environment
-		"publishSnapshot": func(s *connect.Step) error {
-			k, err := snapOf(s)
-			for _, g := range d.gws {
-				g.ApplySnapshot(ctx, scope, k)
+		// The ledger and golem-control: the environment.
+		"deliver": connect.Skip, "publishSnapshot": connect.Skip,
+		"applySnapshot": func(s *connect.Step) error {
+			var snaps map[string]snapRec
+			if err := itf.Decode(s.Get("snaps"), &snaps); err != nil {
+				return err
 			}
-			return err
+			sn := snaps[gw()]
+			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Spend: sn.Spend, Watermark: sn.W})
+			return nil
 		},
-		"valkeyDown": func(*connect.Step) error { d.store.SetDown(true); return nil },
-		"valkeyBack": func(*connect.Step) error {
-			d.store.SetDown(false)
+		"valkeyDown": func(*connect.Step) error {
+			d.store.SetDown(true)
 			for _, g := range slices.Sorted(keys(d.gws)) {
-				if err := d.gws[g].Recover(ctx); err != nil {
-					return err
-				}
+				d.gws[g].Renew(ctx) // fails: each gateway notices
 			}
 			return nil
 		},
-		"failover": func(s *connect.Step) error {
-			k, err := snapOf(s)
-			d.store.Failover(scope, func(id string) bool { return k.Included[id] })
-			return err
+		"valkeyBack": func(*connect.Step) error { d.store.SetDown(false); return nil },
+		"replayOne": func(s *connect.Step) error {
+			l := d.gws[gw()]
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			// The model picks which held increment; the gateway replays in
+			// its own order, so bring the model's to the front.
+			e := connect.MustPick[event](s, "e")
+			i := slices.IndexFunc(l.pending, func(h held) bool { return h.e.ID == e.ID })
+			if i < 0 {
+				return errorf("gateway %s holds no increment %s", gw(), e.ID)
+			}
+			l.pending[0], l.pending[i] = l.pending[i], l.pending[0]
+			return l.replayOneLocked(ctx)
 		},
+		"recover":   func(*connect.Step) error { return d.gws[gw()].Recover(ctx) },
+		"graceEnds": func(*connect.Step) error { d.gws[gw()].EndGrace(); return nil },
+		"failover":  func(s *connect.Step) error { d.store.Failover(scope, connect.MustPick[int](s, "keep")); return nil },
 	}.Step(s)
-}
-
-func snapOf(s *connect.Step) (Known, error) {
-	var snap struct {
-		Events []event
-		Spend  int64
-	}
-	if err := itf.Decode(s.Get("snap"), &snap); err != nil {
-		return Known{}, err
-	}
-	k := Known{Spend: snap.Spend, Included: map[string]bool{}}
-	for _, e := range snap.Events {
-		k.Included[e.ID] = true
-	}
-	return k, nil
 }
 
 // expState projects the model's variables the limiter has.
 type expState struct {
+	Counter []event
 	Slots   []string
 	Waived  []string
-	Pending []event
+	Pending map[string][]event
 }
 
 func (d *expDriver) State() (any, error) {
-	st := expState{Slots: []string{}, Waived: []string{}, Pending: []event{}}
+	st := expState{Counter: []event{}, Slots: []string{}, Waived: []string{}, Pending: map[string][]event{}}
+	for _, e := range d.store.Counter(scope) {
+		st.Counter = append(st.Counter, event{e.ID, e.Cost})
+	}
 	for _, s := range d.store.Slots() {
 		st.Slots = append(st.Slots, s.Call)
 	}
 	for _, g := range slices.Sorted(keys(d.gws)) {
 		st.Waived = append(st.Waived, d.gws[g].Waived()...)
+		ps := []event{}
 		for _, e := range d.gws[g].Pending(scope) {
-			st.Pending = append(st.Pending, event{e.ID, e.Cost})
+			ps = append(ps, event{e.ID, e.Cost})
 		}
+		slices.SortFunc(ps, func(a, b event) int { return compare(a.ID, b.ID) })
+		st.Pending[g] = ps
 	}
 	slices.Sort(st.Waived)
 	st.Waived = slices.Compact(st.Waived)
-	slices.SortFunc(st.Pending, func(a, b event) int { return compare(a.ID, b.ID) })
-	st.Pending = slices.Compact(st.Pending)
 	return st, nil
 }
 
-// CheckStep compares known spend, a def of the model's rather than a
-// variable: snapshot plus the counter's events it does not include.
+// CheckStep compares each gateway's known spend (a def of the model's) for
+// the gateways that use the store.
 func (d *expDriver) CheckStep(s *connect.Step) error {
 	var up bool
-	if err := itf.Decode(s.Get("valkeyUp"), &up); err != nil || !up {
-		return err // while the store is down a gateway's known spend is its last view
-	}
-	k, err := snapOf(s)
-	if err != nil {
-		return err
-	}
+	var down []string
+	var snaps map[string]snapRec
 	var counter []event
-	if err := itf.Decode(s.Get("counter"), &counter); err != nil {
-		return err
-	}
-	want := k.Spend
-	for _, e := range counter {
-		if !k.Included[e.ID] {
-			want += e.Cost
+	for _, c := range []struct {
+		path string
+		dst  any
+	}{{"valkeyUp", &up}, {"gwDown", &down}, {"snaps", &snaps}, {"counter", &counter}} {
+		if err := itf.Decode(s.Get(c.path), c.dst); err != nil {
+			return err
 		}
 	}
 	for _, g := range slices.Sorted(keys(d.gws)) {
+		if !up || slices.Contains(down, g) {
+			continue // a gateway not using the store decides from its last view
+		}
+		want := snaps[g].Spend
+		for i, e := range counter {
+			if int64(i) >= snaps[g].W {
+				want += e.Cost
+			}
+		}
 		if got := d.gws[g].Known(d.t.Context(), scope); got != want {
 			return errorf("gateway %s: known spend %d, the model's %d", g, got, want)
 		}

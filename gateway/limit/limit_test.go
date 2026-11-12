@@ -2,6 +2,8 @@ package limit
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -63,6 +65,8 @@ func TestOutage(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()
 	g1, g2 := New(st), New(st)
+	var numbered []int64
+	g1.OnNumbered = func(_ string, _ Event, seq int64) { numbered = append(numbered, seq) }
 	st.SetDown(true)
 	// Each gateway admits against its own counts: p1 has two calls running.
 	a, err1 := g1.Admit(ctx, scopeCall("a", "p1"))
@@ -71,13 +75,31 @@ func TestOutage(t *testing.T) {
 		t.Fatalf("%v %v waived %v %v: both admitted and both recorded as waivers", err1, err2, g1.Waived(), g2.Waived())
 	}
 	a.Complete(ctx, 3)
-	if p := g1.Pending("s"); len(p) != 1 {
-		t.Fatalf("pending %v: the increment is held", p)
+	if p := g1.Pending("s"); len(p) != 1 || len(numbered) != 0 {
+		t.Fatalf("pending %v numbered %v: the increment is held, and has no number yet", p, numbered)
 	}
 	st.SetDown(false)
 	g1.Recover(ctx)
 	g2.Recover(ctx)
-	if g1.Known(ctx, "s") != 3 || len(st.Slots()) != 1 {
-		t.Fatalf("known %d, slots %v: the increment replayed, b's slot re-acquired", g1.Known(ctx, "s"), st.Slots())
+	if g1.Known(ctx, "s") != 3 || len(st.Slots()) != 1 || !slices.Equal(numbered, []int64{1}) {
+		t.Fatalf("known %d, slots %v, numbered %v: the increment replayed and numbered, b's slot re-acquired",
+			g1.Known(ctx, "s"), st.Slots(), numbered)
+	}
+}
+
+// TestWatermark: known spend is the snapshot's plus the counter after its
+// watermark, on each gateway whichever snapshot it holds.
+func TestWatermark(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	g1, g2 := New(st), New(st)
+	for i, c := range []int64{3, 5, 2} {
+		tk, _ := g1.Admit(ctx, scopeCall(fmt.Sprint(i), "p1"))
+		tk.Complete(ctx, c)
+	}
+	// The ledger has events 1 and 2 (8); g1 applies that snapshot, g2 not.
+	g1.ApplySnapshot(ctx, "s", Known{Spend: 8, Watermark: 2})
+	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 10 || b != 10 {
+		t.Fatalf("known %d on the new snapshot, %d on the old: both must be 10", a, b)
 	}
 }
