@@ -95,3 +95,76 @@ type PoolMember struct {
 	Deployment string `json:"deployment"`
 	Weight     int    `json:"weight,omitempty"`
 }
+
+// Kinds added with authentication.
+const (
+	KindLocalIdentity = "LocalIdentity"
+	KindPriceList     = "PriceList"
+)
+
+// LocalIdentity is standalone mode's stand-in for the state document's
+// entitlements (ADR 0023): scopes, their limits, and dev keys, for testing
+// authentication, authorization and budgets on one machine. Refused outside
+// standalone mode.
+type LocalIdentity struct {
+	TypeMeta `json:",inline"`
+	Metadata ObjectMeta        `json:"metadata"`
+	Spec     LocalIdentitySpec `json:"spec"`
+}
+
+// LocalIdentitySpec is a LocalIdentity's scopes and keys.
+type LocalIdentitySpec struct {
+	Scopes []LocalScope `json:"scopes"`
+	Keys   []LocalKey   `json:"keys"`
+}
+
+// LocalScope is a scope: the aliases its members may call and its limits.
+type LocalScope struct {
+	Name   string   `json:"name"`
+	Models []string `json:"models"`
+	// BudgetMicros is the period's budget in micro-units of the currency;
+	// zero is no budget.
+	BudgetMicros int64    `json:"budgetMicros,omitempty"`
+	Strict       bool     `json:"strict,omitempty"`
+	InFlight     InFlight `json:"inFlight,omitzero"`
+}
+
+// InFlight is a scope's in-flight limits (ADR 0031, 0041 §7.6).
+type InFlight struct {
+	Principal int `json:"principal,omitempty"` // per principal, default 4
+	Scope     int `json:"scope,omitempty"`     // for the scope, default 16
+}
+
+// LocalKey is a dev key, given in full (standalone only: production stores
+// hashes).
+type LocalKey struct {
+	Key       string   `json:"key"`
+	Principal string   `json:"principal"`
+	Scope     string   `json:"scope"`
+	Models    []string `json:"models,omitempty"`  // narrows the scope's
+	Expires   string   `json:"expires,omitempty"` // RFC 3339
+	Revoked   bool     `json:"revoked,omitempty"`
+}
+
+// PriceList prices models (contracts.md §4). This first version has the
+// per-token rates; tiers, batch discounts and server-side tool units follow.
+type PriceList struct {
+	TypeMeta `json:",inline"`
+	Metadata ObjectMeta    `json:"metadata"`
+	Spec     PriceListSpec `json:"spec"`
+}
+
+// PriceListSpec is a currency and its prices.
+type PriceListSpec struct {
+	Currency string  `json:"currency"`
+	Prices   []Price `json:"prices"`
+}
+
+// Price is a model's rates in micro-units per million tokens.
+type Price struct {
+	Model             string `json:"model"` // the provider's model name
+	InputPerMTok      int64  `json:"inputPerMTok"`
+	OutputPerMTok     int64  `json:"outputPerMTok"`
+	CacheReadPerMTok  int64  `json:"cacheReadPerMTok,omitempty"`
+	CacheWritePerMTok int64  `json:"cacheWritePerMTok,omitempty"`
+}

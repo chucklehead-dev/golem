@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
+	"github.com/chucklehead-dev/golem/lib/key"
 )
 
 // discard is a ResponseWriter that keeps nothing, with a Flush.
@@ -290,4 +291,32 @@ func inUse() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m.HeapInuse + m.StackInuse
+}
+
+// BenchmarkHandlerAdmitted is the same path with a key authenticated, the
+// alias authorized, and the call admitted, priced and completed by the
+// in-memory limiter.
+func BenchmarkHandlerAdmitted(b *testing.B) {
+	k := key.New(key.Dev)
+	events := anthropicStream(200)
+	s := &stub{events: events}
+	h, _ := standaloneHandler(b, `apiVersion: golem.dev/v1alpha1
+kind: LocalIdentity
+metadata: {name: local}
+spec:
+  scopes: [{name: team-a, models: [claude]}]
+  keys: [{key: `+k+`, principal: alice, scope: team-a}]
+`, s)
+	var br bytes.Reader
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("X-Api-Key", k)
+	w := &discard{h: http.Header{}}
+	b.ReportAllocs()
+	for b.Loop() {
+		br.Reset(smallRequest)
+		req.Body = io.NopCloser(&br)
+		clear(w.h)
+		s.events = slices.Clone(events)
+		h.ServeHTTP(w, req)
+	}
 }

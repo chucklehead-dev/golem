@@ -40,7 +40,7 @@ const nowMillis = `local t = redis.call('TIME'); local now = tonumber(t[1]) * 10
 var acquire = valkey.NewLuaScript(nowMillis + `
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
-if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
+if tonumber(ARGV[2]) > 0 and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
 if tonumber(ARGV[3]) > 0 and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[3]) then return 0 end
 local exp = now + tonumber(ARGV[4])
 redis.call('ZADD', KEYS[1], exp, ARGV[1])

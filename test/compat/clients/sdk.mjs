@@ -4,8 +4,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 
 const [, , kase, base] = process.argv;
-const anthropic = (retries = 0) => new Anthropic({ baseURL: base, apiKey: "glm_dev_test", maxRetries: retries });
-const openai = (retries = 0) => new OpenAI({ baseURL: base + "/v1", apiKey: "glm_dev_test", maxRetries: retries });
+const anthropic = (retries = 0) => new Anthropic({ baseURL: base, apiKey: process.env.GOLEM_KEY ?? "glm_dev_test", maxRetries: retries });
+const openai = (retries = 0) => new OpenAI({ baseURL: base + "/v1", apiKey: process.env.GOLEM_KEY ?? "glm_dev_test", maxRetries: retries });
 const hi = [{ role: "user", content: "hi" }];
 
 async function run() {

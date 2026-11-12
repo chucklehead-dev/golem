@@ -21,9 +21,15 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/proxy"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
+	"github.com/chucklehead-dev/golem/lib/key"
 )
+
+// testKey is the dev key the SDKs authenticate with: Anthropic's send it as
+// x-api-key, OpenAI's as Authorization: Bearer.
+var testKey = key.New(key.Dev)
 
 // provider is a stub that answers as each API documents, checking golem's
 // credential and the rewritten model.
@@ -121,16 +127,25 @@ apiVersion: golem.dev/v1alpha1
 kind: ModelRoute
 metadata: {name: gpt}
 spec: {alias: gpt, pool: [{backend: openai, deployment: gpt}]}
+---
+apiVersion: golem.dev/v1alpha1
+kind: LocalIdentity
+metadata: {name: local}
+spec:
+  scopes: [{name: team-a, models: [claude, gpt]}]
+  keys: [{key: KEY, principal: alice, scope: team-a}]
 `, "URL", providerURL)
+	cfg = strings.ReplaceAll(cfg, "KEY", testKey)
 	os.WriteFile(filepath.Join(dir, "golem.yaml"), []byte(cfg), 0o600)
-	h := &snapshot.Holder{}
+	h := &snapshot.Holder{Env: key.Dev}
 	d := &snapshot.Dir{Path: dir, Holder: h, Secrets: snapshot.EnvSecrets{Getenv: func(string) string { return "provider-key" }}}
 	if err := d.Load(); err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/messages", &proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: h, MaxBody: 1 << 20})
-	mux.Handle("POST /v1/chat/completions", &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: h, MaxBody: 1 << 20})
+	lim := limit.New(limit.NewMem())
+	mux.Handle("POST /v1/messages", &proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: h, Limiter: lim, MaxBody: 1 << 20})
+	mux.Handle("POST /v1/chat/completions", &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: h, Limiter: lim, MaxBody: 1 << 20})
 	return httptest.NewServer(mux)
 }
 
@@ -166,7 +181,7 @@ func clients(t *testing.T) []client {
 func (c client) run(t *testing.T, kase, base string) map[string]any {
 	t.Helper()
 	cmd := c.cmd(kase, base)
-	cmd.Env = append(os.Environ(), "ANTHROPIC_LOG=", "OPENAI_LOG=")
+	cmd.Env = append(os.Environ(), "ANTHROPIC_LOG=", "OPENAI_LOG=", "GOLEM_KEY="+testKey)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", c.name, kase, err, out)
@@ -197,6 +212,14 @@ func TestSDKs(t *testing.T) {
 				}
 			})
 		}
+		t.Run(c.name+"/wrong_key", func(t *testing.T) {
+			cmd := c.cmd("anthropic_unknown_model", gw.URL)
+			cmd.Env = append(os.Environ(), "GOLEM_KEY="+key.New(key.Dev))
+			out, _ := cmd.Output()
+			if !strings.Contains(string(out), "auth.key_unknown") || !strings.Contains(string(out), "401") {
+				t.Fatalf("an unknown key: the client saw %s", out)
+			}
+		})
 		for _, kase := range []string{"anthropic_unknown_model", "openai_unknown_model"} {
 			t.Run(c.name+"/"+kase, func(t *testing.T) {
 				got := c.run(t, kase, gw.URL)

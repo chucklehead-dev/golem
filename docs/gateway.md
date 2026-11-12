@@ -221,8 +221,13 @@ except OTel's API.
 
 Built (M0, first part): `gateway/snapshot` (the holder: floor and lease
 enforced, transports kept across swaps; the directory source through
-`os.Root`), `lib/compile` and `lib/api/v1alpha1` (Backend and ModelRoute so
-far), and `golemctl config validate`. The bucket source, the on-disk
+`os.Root`), `lib/compile` and `lib/api/v1alpha1` (Backend, ModelRoute,
+PriceList, LocalIdentity), golem keys (`lib/key`, `gateway/auth`: by hash
+from the snapshot, Bearer or x-api-key, each refusal its own code), the
+limiter in the request path (402 budgets, 429 concurrency, cancellation
+holding the slot until the upstream closes), `golemctl config validate`
+and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway
+is the implicit local principal; with one, its dev keys are required. The bucket source, the on-disk
 last-good copy, status writes and the denylist are next.
 
 `golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop

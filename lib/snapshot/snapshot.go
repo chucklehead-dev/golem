@@ -32,6 +32,56 @@ type Snapshot struct {
 	Source     Source    `json:"source"`
 	Backends   []Backend `json:"backends"`
 	Routes     []Route   `json:"routes"`
+	// Entitlements are who may call what, within which limits (the state
+	// document's, org-model.md; in standalone, LocalIdentity's).
+	Entitlements Entitlements `json:"entitlements"`
+	Currency     string       `json:"currency,omitempty"`
+	Prices       []Price      `json:"prices,omitempty"`
+}
+
+// Entitlements are a snapshot's principals' rights.
+type Entitlements struct {
+	// Implicit (standalone only, without a LocalIdentity): every request is
+	// the local principal in the local scope, which may call every route
+	// with no limits (ADR 0023).
+	Implicit bool    `json:"implicit,omitempty"`
+	Scopes   []Scope `json:"scopes,omitempty"`
+	Keys     []Key   `json:"keys,omitempty"`
+}
+
+// Scope is a scope's rights and limits for the period.
+type Scope struct {
+	ID                string   `json:"id"`
+	Models            []string `json:"models"` // aliases its members may call
+	BudgetMicros      int64    `json:"budgetMicros,omitempty"`
+	Strict            bool     `json:"strict,omitempty"`
+	PrincipalInFlight int      `json:"principalInFlight"`
+	ScopeInFlight     int      `json:"scopeInFlight"`
+	// KnownSpend is the ledger's balance for the period, and Included the
+	// events it counts that site counters may still hold (ADR 0041 §7.6).
+	KnownSpend int64    `json:"knownSpend,omitempty"`
+	Included   []string `json:"included,omitempty"`
+}
+
+// Key is a key's entitlement: by hash, never the key itself.
+type Key struct {
+	Hash          string    `json:"hash"`    // hex SHA-256
+	Display       string    `json:"display"` // the shown prefix
+	Principal     string    `json:"principal"`
+	PrincipalKind string    `json:"principalKind"` // user or service
+	Scope         string    `json:"scope"`
+	Models        []string  `json:"models,omitempty"` // narrows the scope's
+	ExpiresAt     time.Time `json:"expiresAt,omitzero"`
+	Revoked       bool      `json:"revoked,omitempty"`
+}
+
+// Price is a model's rates in micro-units per million tokens.
+type Price struct {
+	Model             string `json:"model"`
+	InputPerMTok      int64  `json:"inputPerMTok"`
+	OutputPerMTok     int64  `json:"outputPerMTok"`
+	CacheReadPerMTok  int64  `json:"cacheReadPerMTok,omitempty"`
+	CacheWritePerMTok int64  `json:"cacheWritePerMTok,omitempty"`
 }
 
 // Source names the inputs a snapshot was built from (model/freshness.md).

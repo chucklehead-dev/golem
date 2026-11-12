@@ -22,8 +22,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/proxy"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
+	"github.com/chucklehead-dev/golem/lib/key"
 )
 
 func main() {
@@ -38,15 +40,25 @@ func main() {
 		fail("standalone mode listens on a loopback address only (got %q): it is not for shared use (ADR 0023)", *listen)
 	}
 
-	holder := &snapshot.Holder{}
+	// Standalone: dev keys, the in-memory limiter (ADR 0023).
+	limiter := limit.New(limit.NewMem())
+	holder := &snapshot.Holder{Env: key.Dev, OnApply: func(c *snapshot.Compiled) {
+		for _, s := range c.Snapshot.Entitlements.Scopes {
+			inc := map[string]bool{}
+			for _, id := range s.Included {
+				inc[id] = true
+			}
+			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Spend: s.KnownSpend, Included: inc})
+		}
+	}}
 	dir := &snapshot.Dir{Path: *standalone, Holder: holder, Secrets: snapshot.EnvSecrets{Getenv: os.Getenv}}
 	if err := dir.Load(); err != nil {
 		fail("%v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/messages", &proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: *maxBody})
-	mux.Handle("POST /v1/chat/completions", &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, MaxBody: *maxBody})
+	mux.Handle("POST /v1/messages", &proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody})
+	mux.Handle("POST /v1/chat/completions", &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody})
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if _, err := holder.Current(); err != nil {
@@ -70,6 +82,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go dir.Run(ctx)
+	go renew(ctx, limiter)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -80,6 +93,29 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("golem-gateway", "err", err)
 		os.Exit(1)
+	}
+}
+
+// renew keeps running calls' slots alive (ADR 0038: every 30 seconds) and,
+// after an outage, replays held increments and re-acquires slots.
+func renew(ctx context.Context, l *limit.Limiter) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if l.Down() {
+			if err := l.Recover(ctx); err != nil {
+				slog.Warn("limiter store still unreachable; admitting on local counts, recorded as waivers", "err", err)
+			}
+			continue
+		}
+		if err := l.Renew(ctx); err != nil {
+			slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
+		}
 	}
 }
 

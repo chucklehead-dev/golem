@@ -7,14 +7,18 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"sync"
 
+	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
 	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
+	"github.com/chucklehead-dev/golem/gateway/limit"
+	"github.com/chucklehead-dev/golem/gateway/price"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/sse"
@@ -48,18 +52,25 @@ type Snapshots interface {
 // counters and the access log (gateway.md §3 step 9).
 type Result struct {
 	RequestID id.UUID
+	Principal *auth.Principal
 	Target    *route.Target
-	Status    int
-	Usage     canon.Usage
-	Err       error // a malformed usage report or a cut stream
+	Cost      int64 // micro-units, from the usage and the snapshot's price
+	// CallerGone: the caller went away mid-response (a cancellation).
+	CallerGone bool
+	Status     int
+	Usage      canon.Usage
+	Err        error // a malformed usage report or a cut stream
 }
 
 // Handler serves one dialect's endpoint.
 type Handler struct {
 	Dialect   Dialect
 	Snapshots Snapshots
-	MaxBody   int64 // request body cap in bytes
-	Record    func(*http.Request, Result)
+	// Limiter admits calls against budgets and in-flight limits; nil admits
+	// everything.
+	Limiter *limit.Limiter
+	MaxBody int64 // request body cap in bytes
+	Record  func(*http.Request, Result)
 }
 
 // Request headers a caller may pass to the provider, and response headers
@@ -77,14 +88,15 @@ const copyBuffer = 8 << 10 // events are mostly under 1 KB; a burst takes more r
 // sent, so a long stream holds about the copy buffer and the parser's
 // buffers, not a 200 KB agent request (PRD §7: under 64 KiB per stream).
 type exchange struct {
-	buf       []byte
-	msg       messages.Request
-	msgUsage  messages.StreamUsage
-	chat      chat.Request
-	chatUsage chat.StreamUsage
-	parser    sse.Parser
-	tail      []byte // a non-streamed response, for its usage
-	events    []byte // a filtered stream's next bytes to the caller
+	buf        []byte
+	msg        messages.Request
+	msgUsage   messages.StreamUsage
+	chat       chat.Request
+	chatUsage  chat.StreamUsage
+	parser     sse.Parser
+	tail       []byte // a non-streamed response, for its usage
+	events     []byte // a filtered stream's next bytes to the caller
+	callerGone bool   // a write to the caller failed
 }
 
 // forwardChat is the OpenAI stream's event handler when golem injected
@@ -144,7 +156,8 @@ func (u *upstreamBody) Close() error {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqID := id.New()
 	var idBuf [36]byte
-	w.Header()[contract.HeaderRequestID] = []string{string(reqID.AppendString(idBuf[:0]))}
+	reqIDs := string(reqID.AppendString(idBuf[:0]))
+	w.Header()[contract.HeaderRequestID] = []string{reqIDs}
 
 	snap, err := h.Snapshots.Current()
 	switch err {
@@ -158,7 +171,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	principal := auth.Anyone
+	if snap.Auth != nil {
+		p, refused := snap.Auth.Authenticate(r.Header)
+		if refused != nil {
+			h.fail(w, refused.Code, refused.Msg)
+			return
+		}
+		principal = p
+	}
+
 	ex := exchanges.Get().(*exchange)
+	ex.callerGone = false
 	defer func() {
 		if cap(ex.tail) <= maxRetained {
 			exchanges.Put(ex)
@@ -186,14 +210,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Scan and route. (Authentication, hooks and limits go here.)
+	// Scan and route. (Hooks go here.)
 	var alias []byte
-	var stream bool
+	var stream, hasMax bool
+	var maxTokens int64
 	switch h.Dialect {
 	case AnthropicMessages:
 		err, alias, stream = ex.msg.Scan(body), ex.msg.Model, ex.msg.Stream
+		maxTokens, hasMax = ex.msg.MaxTokens, ex.msg.HasMaxTokens
 	case OpenAIChat:
 		err, alias, stream = ex.chat.Scan(body), ex.chat.Model, ex.chat.Stream
+		maxTokens, hasMax = ex.chat.MaxTokens, ex.chat.HasMaxTokens
 	}
 	if err != nil {
 		h.fail(w, contract.RequestInvalid, err.Error())
@@ -209,7 +236,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"this model speaks "+rt.Dialect+", not "+h.Dialect.Name()+": call it at that API's endpoint (golem converts only where a route says so)")
 		return
 	}
+	if !principal.Allows(alias) {
+		h.fail(w, contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows")
+		return
+	}
 	target := rt.Pick()
+	pr := snap.Prices[target.Model]
+
+	// Admission (ADR 0031): known spend against the budget, and the slots.
+	var ticket *limit.Ticket
+	if h.Limiter != nil {
+		lim := principal.Limits
+		if lim.Strict && !hasMax {
+			h.fail(w, contract.RequestInvalid, "this scope is strict: set max_tokens, so the call's worst case can be checked against the budget")
+			return
+		}
+		ticket, err = h.Limiter.Admit(r.Context(), limit.Call{ID: reqIDs, Principal: principal.ID, Scope: principal.Scope,
+			Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
+			Strict: lim.Strict, Worst: price.Worst(int64(len(body)), maxTokens, pr)})
+		switch {
+		case errors.Is(err, limit.ErrBudget):
+			h.fail(w, contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it")
+			return
+		case errors.Is(err, limit.ErrConcurrency):
+			h.fail(w, contract.LimitConcurrency, "too many calls in flight for this key's principal or scope; retry when one finishes")
+			return
+		case err != nil:
+			h.fail(w, contract.GatewayInternal, "the limiter failed")
+			return
+		}
+	}
 	out := getBody()
 	if cap(*out) < len(body)+len(target.Model)+64 {
 		*out = make([]byte, 0, len(body)+len(target.Model)+64)
@@ -248,6 +304,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
+		if ticket != nil {
+			ticket.Complete(r.Context(), 0) // no upstream work: nothing billed
+		}
 		h.fail(w, contract.UpstreamUnavailable, "the provider could not be reached; retry shortly")
 		return
 	}
@@ -260,11 +319,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	res := Result{RequestID: reqID, Target: target, Status: resp.StatusCode}
+	res := Result{RequestID: reqID, Principal: principal, Target: target, Status: resp.StatusCode}
 	if stream && resp.StatusCode == http.StatusOK {
 		res.Usage, res.Err = h.stream(w, resp.Body, ex)
 	} else {
 		res.Usage, res.Err = h.whole(w, resp.Body, ex)
+	}
+	res.Cost, res.CallerGone = price.Cost(res.Usage, pr), ex.callerGone
+	if ticket != nil {
+		// The request's context may be done: the accounting must not be.
+		ctx := context.WithoutCancel(r.Context())
+		if res.CallerGone {
+			// The caller went away: what was seen is charged, and the slot
+			// is held until the upstream has ended (ADR 0041 §7.6), here the
+			// connection's close.
+			ticket.Cancel(ctx, res.Cost)
+			resp.Body.Close()
+			ticket.Ended(ctx)
+		} else {
+			ticket.Complete(ctx, res.Cost)
+		}
 	}
 	if h.Record != nil {
 		h.Record(r, res)
@@ -301,14 +375,14 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 			ex.parser.Write(ex.buf[:n])
 			if len(ex.events) > 0 {
 				if _, werr := w.Write(ex.events); werr != nil {
-					cut = werr
+					cut, ex.callerGone = werr, true
 					break
 				}
 				rc.Flush()
 			}
 		} else if n > 0 {
 			if _, werr := w.Write(ex.buf[:n]); werr != nil {
-				cut = werr // the caller went away (cancellation: ADR 0041 §7.6)
+				cut, ex.callerGone = werr, true // the caller went away (ADR 0041 §7.6)
 				break
 			}
 			rc.Flush()
@@ -334,7 +408,7 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 		n, err := body.Read(ex.buf)
 		if n > 0 {
 			if _, werr := w.Write(ex.buf[:n]); werr != nil {
-				cut = werr
+				cut, ex.callerGone = werr, true
 				break
 			}
 			if len(ex.tail)+n <= maxRetained {

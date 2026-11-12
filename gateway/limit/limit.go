@@ -17,9 +17,9 @@ var (
 // snapshot gives them.
 type Call struct {
 	ID, Principal, Scope string
-	Budget               int64 // the scope's budget in micro-units
-	PrincipalLimit       int   // in-flight calls per principal
-	ScopeLimit           int   // in-flight calls per scope (ADR 0041 §7.6)
+	Budget               int64 // the scope's budget in micro-units; 0: none
+	PrincipalLimit       int   // in-flight calls per principal; 0: none
+	ScopeLimit           int   // in-flight calls per scope (ADR 0041 §7.6); 0: none
 	// Strict (a scope option): admit only if known spend plus Worst fits
 	// (ADR 0031); else the soft check, known spend below the budget.
 	Strict bool
@@ -73,11 +73,11 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 		}
 	}
 	known := l.knownLocked(c.Scope)
-	if c.Strict {
-		if known+c.Worst > c.Budget {
-			return nil, ErrBudget
-		}
-	} else if known >= c.Budget {
+	switch {
+	case c.Budget == 0:
+	case c.Strict && known+c.Worst > c.Budget:
+		return nil, ErrBudget
+	case !c.Strict && known >= c.Budget:
 		return nil, ErrBudget
 	}
 	scopeLimit := c.ScopeLimit
@@ -100,7 +100,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 			byScope++
 		}
 	}
-	if byPrincipal >= c.PrincipalLimit || (scopeLimit > 0 && byScope >= scopeLimit) {
+	if (c.PrincipalLimit > 0 && byPrincipal >= c.PrincipalLimit) || (scopeLimit > 0 && byScope >= scopeLimit) {
 		return nil, ErrConcurrency
 	}
 	l.waived[c.ID] = true
@@ -165,24 +165,17 @@ func (l *Limiter) release(ctx context.Context, t *Ticket) {
 	}
 }
 
-// ApplySnapshot takes a snapshot's known spend for a scope, and drops the
-// events it includes from the counter (best effort: known spend ignores
-// them either way).
-func (l *Limiter) ApplySnapshot(ctx context.Context, scope string, k Known) {
+// ApplySnapshot takes a snapshot's known spend for a scope.
+//
+// It does not delete the events the snapshot includes from the counter:
+// gateways apply snapshots independently, and one still on the previous
+// snapshot would lose those events from its known spend (they would be in
+// neither its snapshot nor the counter). The counter's retention window
+// trims them instead, once every gateway's snapshot must include them.
+func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.known[scope] = k
-	if !l.down {
-		var ids []string
-		for _, e := range l.cache[scope] {
-			if k.Included[e.ID] {
-				ids = append(ids, e.ID)
-			}
-		}
-		if len(ids) > 0 && l.store.Forget(ctx, scope, ids) != nil {
-			l.down = true
-		}
-	}
 }
 
 // Renew re-registers the slots of this gateway's running calls; the

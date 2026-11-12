@@ -14,8 +14,10 @@ import (
 // Objects is a config set: every Backend and ModelRoute read, with where
 // each came from.
 type Objects struct {
-	Backends []Source[Backend]
-	Routes   []Source[ModelRoute]
+	Backends   []Source[Backend]
+	Routes     []Source[ModelRoute]
+	Identities []Source[LocalIdentity]
+	Prices     []Source[PriceList]
 }
 
 // Source is an object and the file and document it was read from.
@@ -88,8 +90,20 @@ func (objs *Objects) decode(file string, b []byte) error {
 				return fmt.Errorf("%s#%d: ModelRoute: %w", file, i+1, err)
 			}
 			objs.Routes = append(objs.Routes, Source[ModelRoute]{o, file, i + 1})
+		case KindLocalIdentity:
+			var o LocalIdentity
+			if err := yaml.UnmarshalStrict(doc, &o); err != nil {
+				return fmt.Errorf("%s#%d: LocalIdentity: %w", file, i+1, err)
+			}
+			objs.Identities = append(objs.Identities, Source[LocalIdentity]{o, file, i + 1})
+		case KindPriceList:
+			var o PriceList
+			if err := yaml.UnmarshalStrict(doc, &o); err != nil {
+				return fmt.Errorf("%s#%d: PriceList: %w", file, i+1, err)
+			}
+			objs.Prices = append(objs.Prices, Source[PriceList]{o, file, i + 1})
 		default:
-			return fmt.Errorf("%s#%d: kind %q is not a golem config kind (Backend, ModelRoute)", file, i+1, tm.Kind)
+			return fmt.Errorf("%s#%d: kind %q is not a golem config kind (Backend, ModelRoute, PriceList, LocalIdentity)", file, i+1, tm.Kind)
 		}
 	}
 	return nil

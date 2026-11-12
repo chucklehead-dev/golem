@@ -10,6 +10,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"time"
 )
 
 // Event is a spend event: a call's cost as the gateway knows it, keyed by
@@ -31,8 +32,8 @@ var ErrUnavailable = errors.New("limit: the site store is unreachable")
 // counter. Each method is one atomic operation (one Valkey script).
 type Store interface {
 	// Acquire takes a slot for s if the principal holds fewer than
-	// principalLimit and the scope fewer than scopeLimit (0: no scope
-	// limit). It reports whether it did.
+	// principalLimit and the scope fewer than scopeLimit (0: no limit). It
+	// reports whether it did.
 	Acquire(ctx context.Context, s Slot, principalLimit, scopeLimit int) (bool, error)
 	// Release frees a call's slot.
 	Release(ctx context.Context, s Slot) error
@@ -58,11 +59,22 @@ type Mem struct {
 	mu      sync.Mutex
 	down    bool
 	slots   map[string]Slot
-	counter map[string]map[string]int64 // scope -> event ID -> cost
+	counter map[string]map[string]memEvent // scope -> event ID -> event
+	// Retain is how long the counter keeps an event, as Valkey's (default
+	// 15 minutes); Now is its clock.
+	Retain time.Duration
+	Now    func() time.Time
+}
+
+type memEvent struct {
+	cost int64
+	at   time.Time
 }
 
 // NewMem returns an empty store.
-func NewMem() *Mem { return &Mem{slots: map[string]Slot{}, counter: map[string]map[string]int64{}} }
+func NewMem() *Mem {
+	return &Mem{slots: map[string]Slot{}, counter: map[string]map[string]memEvent{}, Retain: 15 * time.Minute, Now: time.Now}
+}
 
 func (m *Mem) Acquire(_ context.Context, s Slot, principalLimit, scopeLimit int) (bool, error) {
 	m.mu.Lock()
@@ -79,7 +91,7 @@ func (m *Mem) Acquire(_ context.Context, s Slot, principalLimit, scopeLimit int)
 			byScope++
 		}
 	}
-	if byPrincipal >= principalLimit || (scopeLimit > 0 && byScope >= scopeLimit) {
+	if (principalLimit > 0 && byPrincipal >= principalLimit) || (scopeLimit > 0 && byScope >= scopeLimit) {
 		return false, nil
 	}
 	m.slots[s.Call] = s
@@ -116,11 +128,16 @@ func (m *Mem) Add(_ context.Context, scope string, es ...Event) error {
 	}
 	c := m.counter[scope]
 	if c == nil {
-		c = map[string]int64{}
+		c = map[string]memEvent{}
 		m.counter[scope] = c
 	}
+	now := m.Now()
 	for _, e := range es {
-		c[e.ID] = e.Cost
+		at := now
+		if old, ok := c[e.ID]; ok {
+			at = old.at // the first time, as Valkey's ZADD NX keeps
+		}
+		c[e.ID] = memEvent{e.Cost, at}
 	}
 	return nil
 }
@@ -132,8 +149,13 @@ func (m *Mem) Events(_ context.Context, scope string) ([]Event, error) {
 		return nil, ErrUnavailable
 	}
 	var es []Event
-	for id, c := range m.counter[scope] {
-		es = append(es, Event{id, c})
+	cutoff := m.Now().Add(-m.Retain)
+	for id, e := range m.counter[scope] {
+		if e.at.Before(cutoff) {
+			delete(m.counter[scope], id) // past retention: reconciliation's
+			continue
+		}
+		es = append(es, Event{id, e.cost})
 	}
 	slices.SortFunc(es, func(a, b Event) int { return compare(a.ID, b.ID) })
 	return es, nil

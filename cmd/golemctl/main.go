@@ -17,15 +17,21 @@ import (
 
 	v1 "github.com/chucklehead-dev/golem/lib/api/v1alpha1"
 	"github.com/chucklehead-dev/golem/lib/compile"
+	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-const usage = `usage: golemctl config validate [--standalone] <dir>
-
-  Checks the golem CRD YAML in <dir> (recursively) as golem-control would,
-  and prints every problem with its file, object and field.`
+const usage = `usage:
+  golemctl config validate [--standalone] <dir>
+      Checks the golem CRD YAML in <dir> (recursively) as golem-control would,
+      and prints every problem with its file, object and field.
+  golemctl keys mint --dev
+      Prints a new glm_dev_ key, for a standalone gateway's LocalIdentity.`
 
 func main() {
+	if len(os.Args) >= 3 && os.Args[1] == "keys" && os.Args[2] == "mint" {
+		os.Exit(mint(os.Args[3:]))
+	}
 	if len(os.Args) < 3 || os.Args[1] != "config" || os.Args[2] != "validate" {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -38,6 +44,20 @@ func main() {
 		os.Exit(2)
 	}
 	os.Exit(validate(fs.Arg(0), *standalone))
+}
+
+// mint prints a new dev key. Live keys are minted by golem-control, which
+// stores only their hash (control-plane.md §5).
+func mint(args []string) int {
+	fs := flag.NewFlagSet("mint", flag.ExitOnError)
+	dev := fs.Bool("dev", false, "a glm_dev_ key for a standalone gateway")
+	fs.Parse(args)
+	if !*dev {
+		fmt.Fprintln(os.Stderr, "golemctl: live keys are minted by golem-control (not built yet); for a standalone gateway, golemctl keys mint --dev")
+		return 2
+	}
+	fmt.Println(key.New(key.Dev))
+	return 0
 }
 
 func validate(dir string, standalone bool) int {

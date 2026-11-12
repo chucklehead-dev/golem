@@ -38,9 +38,12 @@ var (
 	BudgetMemberCap     = Code{"budget.member_cap", 402, OriginPolicy}
 	BudgetKeyCap        = Code{"budget.key_cap", 402, OriginPolicy}
 
-	AuthMissing      = Code{"auth.missing", 401, OriginClient}
-	AuthKeyRevoked   = Code{"auth.key_revoked", 401, OriginClient}
-	AuthTokenExpired = Code{"auth.token_expired", 401, OriginClient}
+	AuthMissing              = Code{"auth.missing", 401, OriginClient}
+	AuthKeyUnknown           = Code{"auth.key_unknown", 401, OriginClient}
+	AuthKeyExpired           = Code{"auth.key_expired", 401, OriginClient}
+	AuthKeyRevoked           = Code{"auth.key_revoked", 401, OriginClient}
+	AuthKeyWrongInstallation = Code{"auth.key_wrong_installation", 401, OriginClient}
+	AuthTokenExpired         = Code{"auth.token_expired", 401, OriginClient}
 
 	AuthzModelNotAllowed          = Code{"authz.model_not_allowed", 403, OriginPolicy}
 	AuthzScopeNotMember           = Code{"authz.scope_not_member", 403, OriginPolicy}
@@ -67,7 +70,7 @@ var (
 var Codes = []Code{
 	LimitRate, LimitConcurrency, LimitProviderQuota,
 	BudgetPoolExhausted, BudgetMemberCap, BudgetKeyCap,
-	AuthMissing, AuthKeyRevoked, AuthTokenExpired,
+	AuthMissing, AuthKeyUnknown, AuthKeyExpired, AuthKeyRevoked, AuthKeyWrongInstallation, AuthTokenExpired,
 	AuthzModelNotAllowed, AuthzScopeNotMember, AuthzProviderStorageForbidden,
 	RequestInvalid, RequestTooLarge, RequestUnreadable,
 	RouteUnknownModel, RouteNoCapableDeployment, RouteWrongFrontend, TranslateUnsupportedField,

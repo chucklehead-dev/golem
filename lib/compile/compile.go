@@ -170,6 +170,38 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 		}
 		routes = append(routes, sr)
 	}
+	ents := entitlements(objs, o, aliases, add)
+	currency, prices := priceList(objs, add)
+	// A scope with a budget is charged by price: every model it can reach
+	// needs one, or its budget could never be spent (contracts.md §4).
+	priced := map[string]bool{}
+	for _, p := range prices {
+		priced[p.Model] = true
+	}
+	modelsOf := map[string][]string{} // alias -> provider models
+	for _, r := range routes {
+		for _, m := range r.Pool {
+			for _, b := range out {
+				for _, d := range b.Deployments {
+					if b.Name == m.Backend && d.Name == m.Deployment {
+						modelsOf[r.Alias] = append(modelsOf[r.Alias], d.Model)
+					}
+				}
+			}
+		}
+	}
+	for _, sc := range ents.Scopes {
+		if sc.BudgetMicros == 0 {
+			continue
+		}
+		for _, a := range sc.Models {
+			for _, m := range modelsOf[a] {
+				if !priced[m] {
+					add("scope "+sc.ID, "models", "alias %q reaches model %q, which no PriceList prices: the scope's budget could not be charged", a, m)
+				}
+			}
+		}
+	}
 	if len(ps) > 0 {
 		return nil, ps
 	}
@@ -177,7 +209,7 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 	slices.SortFunc(out, func(x, y snapshot.Backend) int { return cmp.Compare(x.Name, y.Name) })
 	slices.SortFunc(routes, func(x, y snapshot.Route) int { return cmp.Compare(x.Alias, y.Alias) })
 	s := &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: o.PublishSeq, IssuedAt: o.Now.UTC(),
-		Backends: out, Routes: routes}
+		Backends: out, Routes: routes, Entitlements: ents, Currency: currency, Prices: prices}
 	if o.Lease > 0 {
 		s.ValidUntil = o.Now.Add(o.Lease).UTC()
 	}

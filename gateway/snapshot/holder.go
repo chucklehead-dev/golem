@@ -21,7 +21,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/route"
+	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
@@ -30,6 +32,10 @@ type Compiled struct {
 	Snapshot *snapshot.Snapshot
 	Hash     string
 	Routes   *route.Table
+	// Auth authenticates against the snapshot's entitlements; nil (tests)
+	// lets everyone call everything.
+	Auth   *auth.Keys
+	Prices map[string]snapshot.Price // by the provider's model name
 }
 
 // Errors the request path reports as 503s.
@@ -50,6 +56,11 @@ type Holder struct {
 	cur atomic.Pointer[Compiled]
 	// Now is the clock (tests set it).
 	Now func() time.Time
+	// Env is the key prefix this gateway accepts: Live, or Dev standalone.
+	Env key.Env
+	// OnApply, if set, is called with each snapshot applied (the limiter
+	// takes its known spend).
+	OnApply func(*Compiled)
 
 	mu    sync.Mutex
 	floor uint64
@@ -110,6 +121,9 @@ func (h *Holder) Apply(s *snapshot.Snapshot, hash string, secrets Secrets) error
 	}
 	h.floor = s.PublishSeq
 	h.cur.Store(c)
+	if h.OnApply != nil {
+		h.OnApply(c)
+	}
 	return nil
 }
 
@@ -124,8 +138,8 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 	if h.transports == nil {
 		h.transports = map[string]*http.Transport{}
 	}
-	type key struct{ backend, deployment string }
-	targets := map[key]*route.Target{}
+	type depKey struct{ backend, deployment string }
+	targets := map[depKey]*route.Target{}
 	used := map[string]bool{}
 	for _, b := range s.Backends {
 		secret, err := secrets.Secret(b.Auth.SecretRef, b.Auth.Env)
@@ -150,7 +164,7 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 				h.transports[id] = t
 			}
 			used[id] = true
-			targets[key{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
+			targets[depKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
 				URL: u, Transport: t, Header: header}
 		}
 	}
@@ -158,7 +172,7 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 	for _, r := range s.Routes {
 		rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect}
 		for _, m := range r.Pool {
-			t := targets[key{m.Backend, m.Deployment}]
+			t := targets[depKey{m.Backend, m.Deployment}]
 			if t == nil {
 				return nil, fmt.Errorf("route %s: no deployment %s/%s in the snapshot", r.Alias, m.Backend, m.Deployment)
 			}
@@ -178,7 +192,16 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 			delete(h.transports, id)
 		}
 	}
-	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...)}, nil
+	env := h.Env
+	if env == "" {
+		env = key.Live
+	}
+	prices := map[string]snapshot.Price{}
+	for _, p := range s.Prices {
+		prices[p.Model] = p
+	}
+	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...),
+		Auth: auth.Compile(s.Entitlements, env, h.now), Prices: prices}, nil
 }
 
 // Static is a Holder with one compiled snapshot and no lease: for tests.

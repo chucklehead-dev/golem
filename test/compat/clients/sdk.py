@@ -4,6 +4,7 @@ usage: sdk.py <case> <base_url>; prints one JSON object describing what the
 client saw. Kept free of golem knowledge: it is what a user's code does.
 """
 import json
+import os
 import sys
 
 import anthropic
@@ -11,11 +12,11 @@ import openai
 
 
 def anthropic_client(base, retries=0):
-    return anthropic.Anthropic(base_url=base, api_key="glm_dev_test", max_retries=retries)
+    return anthropic.Anthropic(base_url=base, api_key=os.environ.get("GOLEM_KEY", "glm_dev_test"), max_retries=retries)
 
 
 def openai_client(base, retries=0):
-    return openai.OpenAI(base_url=base + "/v1", api_key="glm_dev_test", max_retries=retries)
+    return openai.OpenAI(base_url=base + "/v1", api_key=os.environ.get("GOLEM_KEY", "glm_dev_test"), max_retries=retries)
 
 
 def run(case, base):
