@@ -554,7 +554,7 @@ The model ends here:
 |---|---|---|
 | `exposureDesign` | none | nothing (`safe` holds) |
 | `noScopeLimit` | `SCOPE_LIMIT_ON` | `limitsHonoured` |
-| `resetHandoff` | `HANDOFF = "reset"` | `noLostIncrements`, and `withinBound` (by its story: too rare for simulation) |
+| `resetHandoff` | `HANDOFF = "reset"` | `noLostIncrements`, and `withinBound` (too rare for simulation; found by the exhaustive search of the small instance, and by its story) |
 | `sumHandoff` | `HANDOFF = "sum"` | `knownNeverOver` |
 | `releaseOnCancel` | `HOLD_ON_CANCEL` | `limitsHonoured` |
 | `noReacquire` | `REACQUIRE` | `limitsHonoured` |

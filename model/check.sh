@@ -40,4 +40,18 @@ for pair in leaseFromSigning:staleLeaderTest noFencing:pausedLeaderTest naiveRes
   if "$QUINT" test --backend="$BACKEND" --main=design --match="^$t\$" publication.qnt >/dev/null 2>&1; then echo "$t in design: PASSES (should fail)"; fail=1; else echo "$t in design: impossible, as it should be"; fi
 done
 
+
+echo "== exhaustive: publication.small.yaml, every run up to a depth (not a sample)"
+if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
+  . ./graph.sh
+  graph_holds publication 8 ""
+  graph_breaks publication 8 FENCE=false publicationsOrdered
+  graph_breaks publication 8 LEASE_FROM_SOURCE=false revocationBounded
+  graph_breaks publication 8 TRUSTED_FLOOR=false noRollbackBelowCheckpoint
+  graph_breaks publication 8 PRESERVE_ON_RESTORE=false revocationsSurviveRestore
+  graph_breaks publication 8 CHECK_EXPIRY=false noExpiredServe
+else
+  echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
+fi
+
 exit $fail

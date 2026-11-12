@@ -12,4 +12,11 @@ be run without lmt; `make verify-tangled` checks they match.
 | [accounting.md](accounting.md) | With soft budgets (ADR 0031), is the overshoot within the stated bound, is anything counted twice, and do the books match the provider's bill after a crash? |
 | [exposure.md](exposure.md) | For a scope shared by several principals on several gateways, with late ingestion, Valkey outages and cancelled calls, does the scope stay within a stated bound, and is the rest of the exposure recorded (ADR 0041 §6)? |
 
+Each model is checked two ways (`make check`): random simulation of a
+mid-sized instance, and an exhaustive search of a small one
+(`<model>.small.yaml`, gotogether's `simulate -graph`, which `make check`
+runs when gotogether is installed): every run up to a depth, each broken
+design's shortest counterexample, and dead actions reported. The
+exhaustive search is a proof for its instance and depth only.
+
 Planned (testing.md §3): approvals and grants.

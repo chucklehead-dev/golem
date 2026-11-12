@@ -20,8 +20,10 @@ graph_holds() {
   local extra=""
   for a in $dead; do [[ " $* " == *" $a "* ]] || extra+=" $a"; done
   local scope; scope=$(grep -E '^  graph' <<<"$graph_out" | sed -E 's/^  graph +//; s/: .*//')
-  if [[ $graph_rc == 0 && -z $extra ]]; then
-    echo "${c:-design} holds in every run of up to $d steps ($scope)"
+  if [[ $scope == *"state bound"* ]]; then
+    echo "${c:-design}: the search hit its state bound before depth $d: lower the depth or raise STATES"; fail=1
+  elif [[ $graph_rc == 0 && -z $extra ]]; then
+    echo "${c:-design} holds in every run of up to $d steps ($(grep -m1 -oE '[0-9]+ states' <<<"$graph_out"))"
   else
     echo "${c:-design}: NOT held (exit $graph_rc${extra:+; dead:$extra})"; grep -E '^  (FAIL|never)' <<<"$graph_out" | cut -c1-200; fail=1
   fi

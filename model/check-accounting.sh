@@ -52,4 +52,18 @@ expect softDesign duplicateCountedTest fail
 expect noSlotRenewal slotExpiryTest pass
 expect softDesign slotExpiryTest fail
 
+
+echo "== exhaustive: accounting.small.yaml, every run up to a depth (not a sample)"
+if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
+  . ./graph.sh
+  graph_holds accounting 12 "" expireSlot
+  graph_holds accounting 12 "STRICT=true,BUDGET=4" expireSlot
+  graph_breaks accounting 12 LIMIT_ON=false withinBound
+  graph_breaks accounting 12 RENEW_SLOTS=false withinBound
+  graph_breaks accounting 12 DEDUP=false noDoubleCount
+  graph_breaks accounting 12 RECONCILE=false booksMatch
+else
+  echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
+fi
+
 exit $fail

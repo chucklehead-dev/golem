@@ -475,8 +475,11 @@ story passes in every soft design and is impossible in the strict ones.
 And the concurrency bugs (`noLimit`, `noSlotRenewal`) have the rare kind
 of counterexample: several calls must be admitted, or slots expire, before
 any call completes, which random simulation did not find in tens of
-thousands of runs. Their stories are the witnesses; a guided search would
-find them directly (the gotogether feedback on issue #144).
+thousands of runs. A search of every run does: on the small instance
+(`accounting.small.yaml`: three requests, a budget of 2, one call in
+flight), `check-accounting.sh` explores every run of up to 12 steps, finds
+each bug's shortest counterexample (which are these stories, step for
+step), and shows the soft and strict designs hold in all of them.
 
 ```quint accounting.qnt +=
 

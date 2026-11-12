@@ -25,7 +25,7 @@ for v in overshoots waiverExceedsLimit cancelledBilledMore handoffInFlight; do
 done
 
 echo "== each broken design is caught"
-# resetHandoff breaks withinBound only after several snapshots in a row, too rare for simulation; resetTest is its witness.
+# resetHandoff breaks withinBound only after several snapshots in a row, too rare for simulation; resetTest and the exhaustive search below find it.
 for pair in noScopeLimit:limitsHonoured resetHandoff:noLostIncrements sumHandoff:knownNeverOver releaseOnCancel:limitsHonoured noReacquire:limitsHonoured; do
   m=${pair%%:*}; i=${pair##*:}
   r=$(run --main="$m" --invariant="$i"); echo "$m breaks $i: $r"
@@ -48,5 +48,19 @@ expect exposureDesign cancelResendTest fail
 expect noReacquire forgottenSlotTest pass
 expect exposureDesign forgottenSlotTest fail
 expect exposureDesign waiverTest pass
+
+
+echo "== exhaustive: exposure.small.yaml, every run up to a depth (not a sample)"
+if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
+  . ./graph.sh
+  graph_holds exposure 8 ""
+  graph_breaks exposure 8 SCOPE_LIMIT_ON=false limitsHonoured
+  graph_breaks exposure 8 'HANDOFF="reset"' withinBound
+  graph_breaks exposure 8 'HANDOFF="sum"' knownNeverOver
+  graph_breaks exposure 8 HOLD_ON_CANCEL=false limitsHonoured
+  graph_breaks exposure 8 REACQUIRE=false limitsHonoured
+else
+  echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
+fi
 
 exit $fail

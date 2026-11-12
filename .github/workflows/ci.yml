@@ -52,10 +52,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: install quint and lmt
+      - name: install quint, lmt and gotogether
         run: |
           npm install --global @informalsystems/quint@0.33.1
           go install github.com/driusan/lmt@v0.0.0-20210421124901-62fe18f2f6a6
+          go install github.com/chucklehead-dev/gotogether/cmd/gotogether@v0.0.0-20261112171447-7707ddf5f585
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: the generated models match the markdown
         run: make -C model verify-tangled

@@ -47,4 +47,17 @@ expect naiveRestore restoreWidensTest pass
 expect freshDesign restoreWidensTest fail
 expect freshDesign compositeGapTest pass
 
+
+echo "== exhaustive: freshness.small.yaml, every run up to a depth (not a sample)"
+if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
+  . ./graph.sh
+  graph_holds freshness 7 "" watchSync
+  # CONFIG_FRESH=false needs 8 steps the search cannot exhaust here; staleCacheTest is its witness.
+  graph_breaks freshness 8 ANCHOR_EARLIEST=false restrictionsBounded
+  graph_breaks freshness 8 FENCE_BOTH=false noConfigRollback
+  graph_breaks freshness 8 PRESERVE_ON_RESTORE=false restoreNeverWidens
+else
+  echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
+fi
+
 exit $fail

@@ -42,7 +42,12 @@ you can turn one off and watch the bound break.
   replays a bug's story (§8).
 - Simulation samples behaviours; it is not a proof. The sizes are small
   (two replicas, two gateways, two keys, a short clock) because the
-  interesting interleavings are already there. `check.sh` uses a fixed
+  interesting interleavings are already there. Each model also has a
+  smaller instance (`<model>.small.yaml`) that the check script explores
+  exhaustively with gotogether's state-graph search: every run up to a
+  depth, the design holding in all of them and each broken design's
+  shortest counterexample found. That is a proof for that instance and
+  depth, and still not for every size. `check.sh` uses a fixed
   seed so CI is deterministic; `SEED=random SAMPLES=50000 ./check.sh`
   searches wider. It uses Quint's TypeScript backend by default
   (`QUINT_BACKEND=rust` for the faster one, where it is installed).
