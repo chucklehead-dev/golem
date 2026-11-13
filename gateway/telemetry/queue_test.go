@@ -3,7 +3,11 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	otellog "go.opentelemetry.io/otel/log"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,3 +158,138 @@ func TestLedgerQueueRetries(t *testing.T) {
 		t.Fatalf("delivered %d of 25, failed %d, retried %d", exp.got, q.Failed.Load(), q.Retried.Load())
 	}
 }
+
+// partial takes every batch it is given but reports the first as failed:
+// a collector that wrote it and lost its answer.
+type partial struct {
+	mu     sync.Mutex
+	failed bool
+	seen   map[string]int // event_id -> deliveries
+}
+
+func (p *partial) Export(_ context.Context, rs []sdklog.Record) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, r := range rs {
+		r.WalkAttributes(func(kv attribute.KeyValue) bool {
+			if kv.Key == "event_id" {
+				p.seen[kv.Value.AsString()]++
+			}
+			return true
+		})
+	}
+	if !p.failed {
+		p.failed = true
+		return errors.New("timeout reading the collector's answer")
+	}
+	return nil
+}
+func (p *partial) Shutdown(context.Context) error   { return nil }
+func (p *partial) ForceFlush(context.Context) error { return nil }
+
+// TestLedgerQueuePartialDelivery: a batch the collector took but did not
+// acknowledge is sent again, whole, each row with its own event_id, so the
+// ledger's deduplication by event (golem.spend_dedup; the watermark job's
+// rows by event, TestAgainstBruteForce's duplicates) counts it once
+// (golem#4).
+func TestLedgerQueuePartialDelivery(t *testing.T) {
+	exp := &partial{seen: map[string]int{}}
+	q := NewLedgerQueue(exp, 100, 10, time.Hour)
+	q.SetBackoff(time.Millisecond)
+	// Rows come as production's do, through a provider (a bare record
+	// keeps no attributes).
+	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(q), sdklog.WithAllowKeyDuplication())
+	logger := lp.Logger("test")
+	for i := range 10 {
+		var r otellog.Record
+		r.AddAttributes(attribute.String("event_id", fmt.Sprint("e", i)))
+		logger.Emit(t.Context(), r)
+	}
+	lp.Shutdown(t.Context())
+	if len(exp.seen) != 10 || q.Failed.Load() != 0 || q.Retried.Load() != 1 {
+		t.Fatalf("%d distinct rows, failed %d, retried %d", len(exp.seen), q.Failed.Load(), q.Retried.Load())
+	}
+	for id, n := range exp.seen {
+		if n != 2 {
+			t.Fatalf("%s delivered %d times: once with the lost answer, once on retry, same event_id", id, n)
+		}
+	}
+}
+
+// TestLedgerQueueShutdownRaces: rows emitted from many goroutines while
+// shutdown runs, with exports failing and retrying, or blocked in flight:
+// shutdown keeps to its deadline, and every row is delivered, failed or
+// dropped, none unaccounted (run with -race).
+func TestLedgerQueueShutdownRaces(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		exp  interface {
+			sdklog.Exporter
+			delivered() int
+		}
+	}{
+		{"exports failing, retrying", &counting{fail: true}},
+		{"an export blocked in flight", &counting{block: make(chan struct{})}},
+		{"exports succeeding", &counting{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := NewLedgerQueue(tc.exp, 64, 8, time.Millisecond)
+			q.SetBackoff(5 * time.Millisecond)
+			var emitted atomic.Int64
+			var wg sync.WaitGroup
+			for range 8 {
+				wg.Go(func() {
+					var r sdklog.Record
+					for range 200 {
+						q.OnEmit(context.Background(), &r)
+						emitted.Add(1)
+					}
+				})
+			}
+			time.Sleep(2 * time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			q.Shutdown(ctx)
+			took := time.Since(start)
+			wg.Wait()
+			if took > 2*time.Second {
+				t.Fatalf("shutdown took %v past its 200 ms deadline", took)
+			}
+			got := int64(tc.exp.delivered()) + q.Failed.Load() + q.Dropped.Load()
+			if got != emitted.Load() {
+				t.Fatalf("emitted %d; delivered %d + failed %d + dropped %d = %d", emitted.Load(), tc.exp.delivered(),
+					q.Failed.Load(), q.Dropped.Load(), got)
+			}
+		})
+	}
+}
+
+// counting counts the rows it took; it may fail every export, or block
+// each until its context ends.
+type counting struct {
+	mu    sync.Mutex
+	got   int
+	fail  bool
+	block chan struct{}
+}
+
+func (c *counting) Export(ctx context.Context, rs []sdklog.Record) error {
+	if c.block != nil {
+		select {
+		case <-c.block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if c.fail {
+		return errors.New("collector down")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.got += len(rs)
+	return nil
+}
+func (c *counting) delivered() int                   { c.mu.Lock(); defer c.mu.Unlock(); return c.got }
+func (c *counting) Shutdown(context.Context) error   { return nil }
+func (c *counting) ForceFlush(context.Context) error { return nil }
