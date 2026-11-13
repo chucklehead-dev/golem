@@ -40,8 +40,10 @@ type Valkey struct {
 	Retain time.Duration
 	// ReplicaAcks, if positive, makes each add wait for that many replicas
 	// to acknowledge it (WAIT), so a failover cannot lose it and hand its
-	// number to another event (ADR 0042). Adds are off the request's
-	// critical path: at completion.
+	// number to another event (ADR 0042). An add is at completion, after
+	// the response's last byte but before its handler returns, so the
+	// caller's end of stream (HTTP/2's END_STREAM, the last chunk) waits
+	// for it: a round trip, and with ReplicaAcks up to WAIT's 100 ms.
 	ReplicaAcks int
 	// Unreplicated counts adds that fewer than ReplicaAcks replicas
 	// acknowledged in time: the exposure a failover could still lose.

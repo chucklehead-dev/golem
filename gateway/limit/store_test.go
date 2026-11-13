@@ -170,7 +170,8 @@ func startServer(t testing.TB, args ...string) string {
 	}
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
-	cmd := exec.Command(bin, append([]string{"--port", fmt.Sprint(port), "--save", "", "--appendonly", "no"}, args...)...)
+	// Its own directory: a replica writes its synced copy there (dump.rdb).
+	cmd := exec.Command(bin, append([]string{"--port", fmt.Sprint(port), "--save", "", "--appendonly", "no", "--dir", t.TempDir()}, args...)...)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

@@ -256,9 +256,10 @@ func (ex *exchange) release() {
 	ex.watchMu.Lock()
 	ex.w, ex.rc = nil, nil // the pool must not keep a finished response
 	ex.watchMu.Unlock()
-	if cap(ex.tail) <= maxRetained {
-		exchanges.Put(ex)
+	if cap(ex.tail) > maxRetained {
+		ex.tail = nil // a large response's copy is let go, not the exchange
 	}
+	exchanges.Put(ex)
 }
 
 // bodies pools request body buffers. maxRetained bounds what an idle entry

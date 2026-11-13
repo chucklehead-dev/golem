@@ -30,7 +30,7 @@ func (d Dialect) Name() string {
 
 // scanned is what routing and admission need of a request body.
 type scanned struct {
-	alias     []byte // valid while the body is
+	alias     []byte // valid until the exchange's next scan
 	stream    bool
 	maxTokens int64
 	hasMax    bool

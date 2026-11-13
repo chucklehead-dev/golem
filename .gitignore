@@ -1,3 +1,4 @@
 test/compat/clients/node_modules/
 __pycache__/
 *.test
+dump.rdb

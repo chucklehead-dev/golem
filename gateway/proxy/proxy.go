@@ -169,6 +169,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		call.Ended, call.Status, call.Outcome = time.Now(), c.Status, "failed"
 		call.ErrorOrigin, call.ErrorCode = string(c.Origin), c.Name
+		if r.Context().Err() != nil { // the caller left before the headers: theirs, not the provider's
+			call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
+		}
 		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
 		if ticket != nil {
 			ticket.Complete(acct, 0) // no upstream work: nothing billed

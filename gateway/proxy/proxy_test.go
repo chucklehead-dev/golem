@@ -17,6 +17,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
+	"github.com/chucklehead-dev/golem/gateway/telemetry"
 )
 
 var upstreamURL, _ = url.Parse("https://provider.example/v1/messages")
@@ -449,5 +450,25 @@ func TestRouteBounds(t *testing.T) {
 				t.Fatal("the call was not cut")
 			}
 		})
+	}
+}
+
+// TestCallerGoneBeforeHeaders: a caller that leaves while the provider is
+// still to answer is the caller's cancellation, not the provider's failure.
+func TestCallerGoneBeforeHeaders(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		<-r.Context().Done()
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	var rows bytes.Buffer
+	tel, _ := telemetry.New(telemetry.Stdout(&rows), "local", "standalone")
+	h := &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, Snapshots: routes(OpenAIChat, u, up.Client().Transport), Telemetry: tel}
+	ctx, cancel := context.WithCancel(t.Context())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, "POST", "/v1/chat/completions", strings.NewReader(streamReq)))
+	if !strings.Contains(rows.String(), `"outcome":"cancelled"`) || !strings.Contains(rows.String(), `"error_origin":"client"`) {
+		t.Fatalf("row %s: the caller's cancellation", rows.String())
 	}
 }

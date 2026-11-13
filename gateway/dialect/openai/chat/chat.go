@@ -232,6 +232,9 @@ var usageKey = []byte(`"usage"`)
 // cannot occur inside a JSON string (it is escaped), so each match is a
 // key, or a string value equal to "usage", never followed by a colon.
 func mayHaveUsage(data []byte) bool {
+	if bytes.Contains(data, []byte(`\u`)) {
+		return true // a key may be spelled with escapes ("\u0075sage"): scan
+	}
 	for rest := data; ; {
 		i := bytes.Index(rest, usageKey)
 		if i < 0 {

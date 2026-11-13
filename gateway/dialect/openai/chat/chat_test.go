@@ -121,6 +121,7 @@ func TestMayHaveUsage(t *testing.T) {
 		`{"choices":[{"delta":{"content":"\"usage\":{}"}}]}`:                          false,
 		`{"choices":[{"delta":{"content":"usage"}}],"usage":{"completion_tokens":2}}`: true,
 		`{"choices":[]}`: false,
+		`{"choices":[],"\u0075sage":{"prompt_tokens":1}}`: true, // escaped: to the scan
 	} {
 		if got := mayHaveUsage([]byte(in)); got != want {
 			t.Errorf("mayHaveUsage(%s) = %v, want %v", in, got, want)

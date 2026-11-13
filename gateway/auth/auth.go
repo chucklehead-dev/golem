@@ -45,6 +45,7 @@ func (p *Principal) Allows(alias []byte) bool { return p.models == nil || p.mode
 type Keys struct {
 	env      key.Env
 	byHash   map[[32]byte]*entry
+	prefix   string // "glm_live_": the installation's keys
 	implicit *Principal
 	now      func() time.Time
 	entra    *Entra
@@ -78,7 +79,7 @@ type rights struct {
 // scope the snapshot lacks is refused, never given a zero (unlimited)
 // budget.
 func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *Entra) *Keys {
-	k := &Keys{env: env, byHash: map[[32]byte]*entry{}, now: now, entra: entra, byEntra: map[string]map[string]*Principal{}}
+	k := &Keys{env: env, prefix: "glm_" + string(env) + "_", byHash: map[[32]byte]*entry{}, now: now, entra: entra, byEntra: map[string]map[string]*Principal{}}
 	if e.Implicit {
 		k.implicit = &Principal{ID: "local", Kind: "user", Scope: "local",
 			Limits: Limits{PrincipalInFlight: implicitInFlight}}
@@ -168,10 +169,15 @@ func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
 	if looksLikeJWS(cred) {
 		return k.token(cred, h.Get(contract.HeaderScope))
 	}
-	// A known hash is a valid key of this installation (the snapshot holds
-	// only those): parsing it (base62 through math/big) is needed only to
-	// say why an unknown one is refused.
-	e := k.byHash[key.Hash(cred)]
+	// A known hash is a valid key: parsing it (base62 through math/big) is
+	// needed only to say why an unknown one is refused. The installation's
+	// prefix is checked first all the same, cheaply: the snapshot's keys
+	// carry no environment, and a publisher's mistake must not let another
+	// installation's key in.
+	var e *entry
+	if strings.HasPrefix(cred, k.prefix) {
+		e = k.byHash[key.Hash(cred)]
+	}
 	if e == nil {
 		env, err := key.Parse(cred)
 		switch {

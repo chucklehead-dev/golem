@@ -21,6 +21,7 @@ func TestAuthenticate(t *testing.T) {
 	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	good, narrow, revoked, expired, unknown := key.New(key.Live), key.New(key.Live), key.New(key.Live), key.New(key.Live), key.New(key.Live)
 	orphan, departed := key.New(key.Live), key.New(key.Live)
+	devListed := key.New(key.Dev)
 	e := ent(
 		snapshot.Key{Hash: hashOf(good), Principal: "alice", Scope: "team-a"},
 		snapshot.Key{Hash: hashOf(narrow), Principal: "bob", Scope: "team-a", Models: []string{"claude"}},
@@ -28,6 +29,7 @@ func TestAuthenticate(t *testing.T) {
 		snapshot.Key{Hash: hashOf(expired), Principal: "dan", Scope: "team-a", ExpiresAt: now},
 		snapshot.Key{Hash: hashOf(orphan), Principal: "erin", Scope: "team-gone"},
 		snapshot.Key{Hash: hashOf(departed), Principal: "frank", Scope: "team-a"},
+		snapshot.Key{Hash: hashOf(devListed), Principal: "gina", Scope: "team-a"},
 	)
 	e.Users = []snapshot.Member{{ID: "frank", Entra: "f-oid", Scopes: []string{"team-b"}, Default: "team-b"}}
 	k := Compile(e, key.Live, func() time.Time { return now }, nil)
@@ -46,6 +48,9 @@ func TestAuthenticate(t *testing.T) {
 		{"revoked", http.Header{"X-Api-Key": {revoked}}, contract.AuthKeyRevoked.Name},
 		{"expired", http.Header{"X-Api-Key": {expired}}, contract.AuthKeyExpired.Name},
 		{"dev key in production", http.Header{"X-Api-Key": {key.New(key.Dev)}}, contract.AuthKeyWrongInstallation.Name},
+		// A dev key in a production snapshot (a publisher's mistake) is
+		// still refused: the prefix is checked before the hash.
+		{"a dev key the snapshot lists", http.Header{"X-Api-Key": {devListed}}, contract.AuthKeyWrongInstallation.Name},
 		// Fail closed: never a zero (unlimited) budget for a missing scope.
 		{"its scope is gone", http.Header{"X-Api-Key": {orphan}}, contract.AuthzScopeNotMember.Name},
 		{"its principal left the scope", http.Header{"X-Api-Key": {departed}}, contract.AuthzScopeNotMember.Name},
