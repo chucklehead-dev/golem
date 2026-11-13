@@ -34,16 +34,32 @@ type scanned struct {
 	stream    bool
 	maxTokens int64
 	hasMax    bool
+	// What the scope's policy weighs (contracts.md §8).
+	n           int64 // completions asked for
+	store       bool  // OpenAI's store: true (rewritten off where forbidden)
+	state       bool  // provider-side state with no off switch (an Anthropic container)
+	serverTools bool  // tools the provider runs: egress, and no cost bound
 }
 
-// scan reads the routing fields of a request body.
+// scan reads the routing and policy fields of a request body.
 func (ex *exchange) scan(d Dialect, body []byte) (scanned, error) {
 	if d == AnthropicMessages {
 		err := ex.msg.Scan(body)
-		return scanned{ex.msg.Model, ex.msg.Stream, ex.msg.MaxTokens, ex.msg.HasMaxTokens}, err
+		f := ex.msg.Flags
+		return scanned{alias: ex.msg.Model, stream: ex.msg.Stream, maxTokens: ex.msg.MaxTokens, hasMax: ex.msg.HasMaxTokens,
+			n: 1, state: f&messages.FlagContainer != 0, serverTools: f&(messages.FlagServerTools|messages.FlagMCPServers) != 0}, err
 	}
 	err := ex.chat.Scan(body)
-	return scanned{ex.chat.Model, ex.chat.Stream, ex.chat.MaxTokens, ex.chat.HasMaxTokens}, err
+	return scanned{alias: ex.chat.Model, stream: ex.chat.Stream, maxTokens: ex.chat.MaxTokens, hasMax: ex.chat.HasMaxTokens,
+		n: ex.chat.N, store: ex.chat.Store, serverTools: ex.chat.Flags&chat.FlagWebSearch != 0}, err
+}
+
+// forbidStorage turns the request's provider-side storage off (OpenAI's
+// store: true becomes false, ADR 0027).
+func (ex *exchange) forbidStorage(d Dialect) {
+	if d == OpenAIChat {
+		ex.chat.ForbidStorage()
+	}
 }
 
 // rewrite appends the scanned body to dst for the provider: its model

@@ -4,6 +4,7 @@
 package messages
 
 import (
+	"bytes"
 	"errors"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -14,9 +15,14 @@ import (
 type Flags uint32
 
 const (
-	FlagMCPServers Flags = 1 << iota // mcp_servers: egress from the provider
-	FlagContainer                    // container: provider-side state
+	FlagMCPServers  Flags = 1 << iota // mcp_servers: egress from the provider
+	FlagContainer                     // container: provider-side state
+	FlagServerTools                   // a server tool (web search or fetch, code execution): egress, unbounded cost
 )
+
+// serverTools are the tool types the provider runs itself, by prefix of
+// their versioned type names ("web_search_20250305").
+var serverTools = []string{`"type":"web_search`, `"type":"web_fetch`, `"type":"code_execution`}
 
 // known lists the request members golem forwards without comment; others
 // are forwarded and counted (and logged by name, ADR 0037).
@@ -83,6 +89,16 @@ func (r *Request) Scan(body []byte) error {
 				return ErrField
 			}
 			r.MaxTokens, r.HasMaxTokens = n, true
+		case "tools":
+			v, _, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			for _, t := range serverTools {
+				if bytes.Contains(v, []byte(t)) {
+					r.Flags |= FlagServerTools
+				}
+			}
 		default:
 			switch string(name) {
 			case "mcp_servers":

@@ -21,8 +21,8 @@ retry pointlessly and users wait through backoff before seeing why.
 | Rate or concurrency limit; provider quota share full | 429 + `Retry-After` | `limit.rate`, `limit.concurrency`, `limit.provider_quota` | yes, after the delay |
 | Budget or cap reached by known spend (in `enforce` mode) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
 | Not authenticated (missing, unknown, expired, revoked key or token; a key of the other installation) | 401 | `auth.missing`, `auth.key_unknown`, `auth.key_expired`, `auth.key_revoked`, `auth.key_wrong_installation`, `auth.token_invalid`, `auth.token_expired` | no |
-| Authenticated, not allowed (model, scope, dialect, capture policy, provider storage); a standalone gateway reached from a web page or by a non-loopback host name | 403 | `authz.model_not_allowed`, `authz.scope_not_member`, `authz.provider_storage_forbidden`, `authz.origin_forbidden` | no |
-| A malformed request (not one JSON object, duplicate members, a routing field of the wrong type, unreadable) or one over the size limit | 400 or 413 | `request.invalid`, `request.unreadable`, `request.too_large` | no |
+| Authenticated, not allowed (model, scope, dialect, capture policy, provider storage); a standalone gateway reached from a web page or by a non-loopback host name | 403 | `authz.model_not_allowed`, `authz.scope_not_member`, `authz.provider_storage_forbidden`, `authz.origin_forbidden`, `authz.feature_forbidden` | no |
+| A malformed request (not one JSON object, duplicate members, a routing field of the wrong type, unreadable) or one over the size limit; one over its scope's ceilings (output tokens asked for, input size) | 400 or 413 | `request.invalid`, `request.unreadable`, `request.too_large`, `request.over_ceiling` | no |
 | Request golem cannot route (no deployment with the capabilities used, unknown alias, frontend that cannot reach the model) | 400 or 404 | `route.unknown_model`, `route.no_capable_deployment`, `route.wrong_frontend` | no |
 | A feature the translation cannot express | 400 | `translate.unsupported_feature` | no |
 | Every deployment failed before the first byte | 503 + `Retry-After` | `upstream.unavailable` | yes |
@@ -202,10 +202,10 @@ wherever they appear, and the list grows with the nightly review:
 
 | Field or family | Policy |
 |---|---|
-| `store`, `previous_response_id`, `background`, conversation identifiers | provider-side storage (ADR 0027; M1 refuses stateful use) |
+| `store`, `previous_response_id`, `background`, conversation identifiers | provider-side storage (ADR 0027; M1 refuses stateful use). Enforced: where a scope forbids storage (the default), `store: true` reaches the provider as `false`, and an Anthropic `container` is refused (`authz.provider_storage_forbidden`) |
 | file, container and upload identifiers | provider-side storage |
-| `mcp_servers`, server-side tools with network access (web search, fetch, code execution) | egress and data movement; billing units |
-| `n`, `max_tokens` above the scope's ceiling, input above the scope's size ceiling | cost (ADR 0038) |
+| `mcp_servers`, server-side tools with network access (web search, fetch, code execution) | egress and data movement; billing units. Enforced: refused in strict scopes, whose calls' cost must be bounded (`authz.feature_forbidden`, ADR 0031) |
+| `n`, `max_tokens` above the scope's ceiling, input above the scope's size ceiling | cost (ADR 0038). Enforced: `max_tokens` × `n` over the scope's `maxOutputTokens`, a missing `max_tokens` under it, or a body over `maxInputBytes` is refused (`request.over_ceiling`); the strict worst case counts `n` completions |
 | `metadata.user_id`, `user`, session fields | attribution only, never identity |
 
 ## 9. Reconciliation (ADR 0038)

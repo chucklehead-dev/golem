@@ -41,6 +41,11 @@ type Request struct {
 	HasMaxTokens bool
 	Flags        Flags
 	Unknown      int
+	N            int64 // completions asked for (n), 1 if absent
+	Store        bool  // store: true, provider-side retention asked for
+
+	storeSpan jsonscan.Span // the store value, to rewrite to false
+	noStore   bool          // Rewrite sets store to false (ADR 0027)
 
 	streamOptions jsonscan.Span // the stream_options value, if present
 	optionsNull   bool          // stream_options is null: replaced whole
@@ -55,7 +60,7 @@ var (
 
 // Scan reads the routing fields of body.
 func (r *Request) Scan(body []byte) error {
-	*r = Request{Model: r.Model[:0]}
+	*r = Request{Model: r.Model[:0], N: 1}
 	hasModel, hasCompletionTokens := false, false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
 		switch string(name) {
@@ -129,8 +134,27 @@ func (r *Request) Scan(body []byte) error {
 			switch string(name) {
 			case "store":
 				r.Flags |= FlagStore
+				v, span, err := d.ReadValue()
+				if err != nil {
+					return err
+				}
+				r.Store, r.storeSpan = v.Kind() == 't', span
+				return nil
 			case "n":
 				r.Flags |= FlagN
+				v, _, err := d.ReadValue()
+				if err != nil {
+					return err
+				}
+				if v.Kind() == 'n' {
+					return nil // null: the default, one
+				}
+				n, ok := jsonscan.Int(v)
+				if !ok || n < 1 {
+					return ErrField
+				}
+				r.N = n
+				return nil
 			case "web_search_options":
 				r.Flags |= FlagWebSearch
 			case "audio":
@@ -187,30 +211,38 @@ func UsageOnly(data []byte) bool {
 	return err == nil && emptyChoices && usage
 }
 
+// ForbidStorage makes Rewrite turn a store: true into false: provider-side
+// retention the scope forbids (ADR 0027).
+func (r *Request) ForbidStorage() { r.noStore = r.Store }
+
 // Rewrite appends body to dst with the model replaced and, for a stream,
 // usage requested.
 func (r *Request) Rewrite(dst, body []byte, model string) []byte {
 	var quoted [128]byte
-	edits := [2]jsonscan.Edit{{Span: r.ModelSpan, With: jsonscan.Quote(quoted[:0], model)}}
+	edits := [3]jsonscan.Edit{{Span: r.ModelSpan, With: jsonscan.Quote(quoted[:0], model)}}
 	n := 1
+	if r.noStore {
+		edits[n] = jsonscan.Edit{Span: r.storeSpan, With: []byte("false")}
+		n++
+	}
 	if r.Stream && !r.usageOn {
 		switch {
 		case r.optionsNull: // "stream_options": null
-			edits[1] = jsonscan.Edit{Span: r.streamOptions, With: []byte(`{"include_usage":true}`)}
+			edits[n] = jsonscan.Edit{Span: r.streamOptions, With: []byte(`{"include_usage":true}`)}
 		case r.includeUsage.End > 0: // "include_usage": false
-			edits[1] = jsonscan.Edit{Span: r.includeUsage, With: []byte("true")}
+			edits[n] = jsonscan.Edit{Span: r.includeUsage, With: []byte("true")}
 		case r.streamOptions.End > 0: // stream_options without it
 			at := r.streamOptions.Start + 1
 			with := []byte(`"include_usage":true,`)
 			if len(bytes.TrimSpace(body[at:r.streamOptions.End-1])) == 0 { // {}
 				with = with[:len(with)-1]
 			}
-			edits[1] = jsonscan.Edit{Span: jsonscan.Span{Start: at, End: at}, With: with}
+			edits[n] = jsonscan.Edit{Span: jsonscan.Span{Start: at, End: at}, With: with}
 		default: // no stream_options: add one after the model
-			edits[1] = jsonscan.Edit{Span: jsonscan.Span{Start: r.ModelSpan.End, End: r.ModelSpan.End},
+			edits[n] = jsonscan.Edit{Span: jsonscan.Span{Start: r.ModelSpan.End, End: r.ModelSpan.End},
 				With: []byte(`,"stream_options":{"include_usage":true}`)}
 		}
-		n = 2
+		n++
 	}
 	return jsonscan.Apply(dst, body, edits[:n]...)
 }

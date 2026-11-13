@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -141,4 +142,22 @@ func FuzzMayHaveUsage(f *testing.F) {
 			t.Fatalf("%q has usage %+v, but the pre-check skips it", chunk, u.Usage)
 		}
 	})
+}
+
+func TestScanPolicyFields(t *testing.T) {
+	var r Request
+	body := []byte(`{"model":"gpt","n":3,"store":true,"web_search_options":{},"messages":[]}`)
+	if err := r.Scan(body); err != nil || r.N != 3 || !r.Store || r.Flags&FlagWebSearch == 0 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	r.ForbidStorage()
+	if out := string(r.Rewrite(nil, body, "gpt-5")); !strings.Contains(out, `"store":false`) || !strings.Contains(out, `"model":"gpt-5"`) {
+		t.Fatalf("rewritten %s", out)
+	}
+	if err := r.Scan([]byte(`{"model":"gpt","n":0,"messages":[]}`)); err == nil {
+		t.Fatal("n of 0 must be refused")
+	}
+	if r.Scan([]byte(`{"model":"gpt","messages":[]}`)); r.N != 1 {
+		t.Fatalf("n defaults to 1, got %d", r.N)
+	}
 }

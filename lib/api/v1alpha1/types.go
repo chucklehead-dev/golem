@@ -154,6 +154,13 @@ type LocalScope struct {
 	BudgetMicros int64    `json:"budgetMicros,omitempty"`
 	Strict       bool     `json:"strict,omitempty"`
 	InFlight     InFlight `json:"inFlight,omitzero"`
+	// ProviderStorage is "forbidden" (the default: golem turns store off and
+	// refuses provider-side state) or "allowed" (ADR 0027).
+	ProviderStorage string `json:"providerStorage,omitempty"`
+	// Ceilings on a request (ADR 0038): output tokens asked for (max_tokens
+	// times n) and the body's size. Zero is none.
+	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
+	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
 }
 
 // InFlight is a scope's in-flight limits (ADR 0031, 0041 §7.6).

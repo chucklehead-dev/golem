@@ -9,6 +9,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -123,13 +124,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, no)
 		return
 	}
+	if no := h.policy(ex, principal, req, requestBytes); no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
 	target := rt.Pick()
 	pr := snap.Prices[target.Model]
 	var deadline time.Time // the call's end at the latest: renewals stop there
 	if rt.MaxDuration > 0 {
 		deadline = started.Add(rt.MaxDuration)
 	}
-	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, price.Worst(int64(len(body)), req.maxTokens, pr))
+	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, price.Worst(int64(len(body)), req.maxTokens*req.n, pr))
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
@@ -294,6 +299,38 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 		return nil, &refusal{contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows"}
 	}
 	return rt, nil
+}
+
+// policy applies the scope's request policy (contracts.md §8): its
+// ceilings on output asked for and on input size (ADR 0038), provider-side
+// storage (ADR 0027: turned off where it can be, refused where it cannot),
+// and server-side tools, refused in a strict scope, where a call's cost
+// must have a bound (ADR 0031).
+func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
+	lim := p.Limits
+	if c := lim.MaxInputBytes; c > 0 && requestBytes > c {
+		return &refusal{contract.RequestOverCeiling, fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}
+	}
+	if c := lim.MaxOutputTokens; c > 0 {
+		switch {
+		case !req.hasMax:
+			return &refusal{contract.RequestOverCeiling, fmt.Sprintf("this scope caps output at %d tokens a request: set max_tokens, at most that", c)}
+		case req.maxTokens > c/req.n:
+			return &refusal{contract.RequestOverCeiling, fmt.Sprintf("max_tokens %d for %d completions is over this scope's ceiling of %d tokens a request", req.maxTokens, req.n, c)}
+		}
+	}
+	if !lim.StorageAllowed {
+		if req.state {
+			return &refusal{contract.AuthzProviderStorageForbidden, "this scope forbids provider-side storage, which a container keeps; its managers can allow it (ADR 0027)"}
+		}
+		if req.store {
+			ex.forbidStorage(h.Dialect)
+		}
+	}
+	if lim.Strict && req.serverTools {
+		return &refusal{contract.AuthzFeatureForbidden, "this scope is strict, and server-side tools (web search or fetch, code execution, MCP servers) have no cost bound: use client-side tools, or a scope that is not strict"}
+	}
+	return nil
 }
 
 // admit checks the call against the scope's budget and in-flight limits

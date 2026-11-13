@@ -56,6 +56,10 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 			add(obj, at+".budgetMicros", "must not be negative")
 		case sc.InFlight.Principal < 0 || sc.InFlight.Scope < 0:
 			add(obj, at+".inFlight", "limits must not be negative")
+		case sc.MaxOutputTokens < 0 || sc.MaxInputBytes < 0:
+			add(obj, at, "ceilings must not be negative")
+		case sc.ProviderStorage != "" && sc.ProviderStorage != "forbidden" && sc.ProviderStorage != "allowed":
+			add(obj, at+".providerStorage", "%q: forbidden (the default) or allowed", sc.ProviderStorage)
 		}
 		for j, m := range sc.Models {
 			if _, ok := aliases[m]; !ok {
@@ -64,7 +68,8 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 		}
 		s := snapshot.Scope{ID: sc.Name, Models: slices.Sorted(slices.Values(sc.Models)), BudgetMicros: sc.BudgetMicros,
 			Strict: sc.Strict, PrincipalInFlight: cmp.Or(sc.InFlight.Principal, DefaultPrincipalInFlight),
-			ScopeInFlight: cmp.Or(sc.InFlight.Scope, DefaultScopeInFlight)}
+			ScopeInFlight: cmp.Or(sc.InFlight.Scope, DefaultScopeInFlight), StorageAllowed: sc.ProviderStorage == "allowed",
+			MaxOutputTokens: sc.MaxOutputTokens, MaxInputBytes: sc.MaxInputBytes}
 		scopes[sc.Name] = &s
 	}
 	hashes := map[string]bool{}

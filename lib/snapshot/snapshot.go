@@ -69,6 +69,12 @@ type Scope struct {
 	Strict            bool     `json:"strict,omitempty"`
 	PrincipalInFlight int      `json:"principalInFlight"`
 	ScopeInFlight     int      `json:"scopeInFlight"`
+	// The scope's request policy: provider-side storage allowed (ADR 0027),
+	// and ceilings on output tokens asked for and on input size (ADR 0038;
+	// zero is none).
+	StorageAllowed  bool  `json:"storageAllowed,omitempty"`
+	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
+	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
 	// KnownSpend is the ledger's balance for Period (a calendar month,
 	// "2026-11") with this site's events numbered above Watermark left out;
 	// Watermark is the site counter's number for the period up to which
