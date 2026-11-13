@@ -51,6 +51,18 @@ type Entitlements struct {
 	// its object ID, a service by its app (client) ID (ADR 0009).
 	Users    []Member `json:"users,omitempty"`
 	Services []Member `json:"services,omitempty"`
+	// KeyOwners are the principals that hold keys but no Entra identity
+	// (a standalone LocalIdentity's). A key is honoured only for a listed
+	// owner (a user, a service or one of these) of its kind, a member of
+	// its scope (golem#5).
+	KeyOwners []Owner `json:"keyOwners,omitempty"`
+}
+
+// Owner is a principal that holds keys: its kind and memberships.
+type Owner struct {
+	ID     string   `json:"id"`
+	Kind   string   `json:"kind"` // user or service
+	Scopes []string `json:"scopes"`
 }
 
 // Member is a principal and the scopes it may act in.

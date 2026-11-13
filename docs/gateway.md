@@ -237,7 +237,12 @@ from the snapshot; `-entra-tenant`), the
 limiter in the request path (402 budgets, 429 concurrency, cancellation
 holding the slot until the upstream closes), `golemctl config validate`
 and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway
-is the implicit local principal; with one, its dev keys are required. The bucket source, the on-disk
+has one implicit local principal, which takes only the gateway's own local
+key (a dev key generated on first start into a file only its user may
+read, printed as an export line; `-local-key`): the browser guard keeps web
+pages out, the key keeps out the machine's other programs and users. With
+a LocalIdentity, its dev keys are required, each honoured only for a
+listed owner of its kind in its scope. The bucket source, the on-disk
 last-good copy, status writes and the denylist are next.
 
 `golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -73,6 +74,7 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 		scopes[sc.Name] = &s
 	}
 	hashes := map[string]bool{}
+	owners := map[string][]string{}
 	for i, k := range src.Object.Spec.Keys {
 		at := fmt.Sprintf("spec.keys[%d]", i)
 		env, err := key.Parse(k.Key)
@@ -113,6 +115,12 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 			sk.ExpiresAt = t.UTC()
 		}
 		e.Keys = append(e.Keys, sk)
+		owners[k.Principal] = append(owners[k.Principal], k.Scope)
+	}
+	// A LocalIdentity's keys name their principals: each is listed as a
+	// key owner, a member of the scopes of its keys.
+	for _, id := range slices.Sorted(maps.Keys(owners)) {
+		e.KeyOwners = append(e.KeyOwners, snapshot.Owner{ID: id, Kind: "user", Scopes: slices.Compact(slices.Sorted(slices.Values(owners[id])))})
 	}
 	// One namespace for users and services: gateway/auth finds both by
 	// their Entra ID, so the same ID twice would shadow one of them.

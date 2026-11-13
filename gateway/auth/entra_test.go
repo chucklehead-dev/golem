@@ -217,3 +217,20 @@ func FuzzAuthenticate(f *testing.F) {
 		}
 	})
 }
+
+// TestStaleKeys: past MaxKeyAge without a refresh, tokens are refused, not
+// trusted on a key set Entra may have revoked since.
+func TestStaleKeys(t *testing.T) {
+	k, e := entraKeys()
+	clock := now
+	e.Now = func() time.Time { return clock }
+	tok := sign(t, signingKey, "k1", userClaims())
+	if p, r := k.Authenticate(bearer(tok, "")); p == nil {
+		t.Fatalf("fresh keys: %v", r)
+	}
+	clock = now.Add(25 * time.Hour)
+	stale := sign(t, signingKey, "k1", with(userClaims(), "exp", clock.Add(time.Hour).Unix(), "nbf", clock.Unix(), "iat", clock.Unix()))
+	if _, r := k.Authenticate(bearer(stale, "")); r == nil || r.Code != contract.AuthTokenInvalid {
+		t.Fatalf("%+v: keys not refreshed for 25 hours must not be trusted", r)
+	}
+}

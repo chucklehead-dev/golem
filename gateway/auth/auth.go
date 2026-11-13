@@ -5,6 +5,8 @@
 package auth
 
 import (
+	"cmp"
+	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"slices"
@@ -51,6 +53,7 @@ type Keys struct {
 	byHash   map[[32]byte]*entry
 	prefix   string // "glm_live_": the installation's keys
 	implicit *Principal
+	local    [32]byte // the implicit principal's key, hashed (RequireLocalKey)
 	now      func() time.Time
 	entra    *Entra
 	// byEntra: a user's oid or a service's app ID, then a scope, to the
@@ -84,7 +87,7 @@ type rights struct {
 // budget.
 func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *Entra) *Keys {
 	k := &Keys{env: env, prefix: "glm_" + string(env) + "_", byHash: map[[32]byte]*entry{}, now: now, entra: entra, byEntra: map[string]map[string]*Principal{}}
-	if e.Implicit {
+	if e.Implicit && env == key.Dev { // never for a live installation (golem#5)
 		k.implicit = &Principal{ID: "local", Kind: "user", Scope: "local",
 			Limits: Limits{PrincipalInFlight: implicitInFlight}}
 	}
@@ -98,11 +101,19 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *
 		}
 		scopes[s.ID] = r
 	}
-	// memberOf: a listed user's or service's scopes, by its golem ID.
-	memberOf := map[string][]string{}
+	// ownerOf: every listed principal's kind and scopes, by its golem ID.
+	type owner struct {
+		kind   string
+		scopes []string
+	}
+	ownerOf := map[string]owner{}
+	for _, o := range e.KeyOwners {
+		ownerOf[o.ID] = owner{o.Kind, o.Scopes}
+	}
 	member := func(kind string, ms []snapshot.Member) {
 		for _, m := range ms {
-			memberOf[m.ID] = m.Scopes
+			o := ownerOf[m.ID]
+			ownerOf[m.ID] = owner{kind, append(slices.Clone(o.scopes), m.Scopes...)}
 			byScope := map[string]*Principal{}
 			for _, id := range m.Scopes {
 				if r := scopes[id]; r != nil {
@@ -128,12 +139,17 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *
 			expires: sk.ExpiresAt, revoked: sk.Revoked}
 		k.byHash[h] = en
 		r := scopes[sk.Scope]
-		ms, listed := memberOf[sk.Principal]
+		o, listed := ownerOf[sk.Principal]
 		switch {
 		case r == nil:
 			en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's scope " + sk.Scope + " no longer exists: mint a key for a scope you are in"}
 			continue
-		case listed && !slices.Contains(ms, sk.Scope):
+		case !listed || o.kind != cmp.Or(sk.PrincipalKind, "user"):
+			// Fail closed (golem#5): a key whose owner is gone, or is of
+			// another kind than the key says, is no key.
+			en.refused = &Refusal{contract.AuthKeyRevoked, "this key's principal is no longer known to golem: mint a new key"}
+			continue
+		case !slices.Contains(o.scopes, sk.Scope):
 			en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's principal is no longer a member of scope " + sk.Scope + ": its managers can add it back, or mint a key for a scope it is in"}
 			continue
 		}
@@ -164,9 +180,19 @@ type Refusal struct {
 // Authenticate finds the request's principal. The credential is a golem key
 // in Authorization: Bearer (OpenAI's SDKs) or x-api-key (Anthropic's).
 func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
-	cred := credential(h)
-	if k.implicit != nil && (cred == "" || !strings.HasPrefix(cred, "glm_")) {
-		return k.implicit, nil // standalone: whatever the SDK sends (ADR 0023)
+	cred, conflict := credential(h)
+	if conflict {
+		return nil, &Refusal{contract.AuthMissing, "two different credentials (Authorization and x-api-key): send one"}
+	}
+	if k.implicit != nil {
+		// Standalone without a LocalIdentity: the one local principal, for
+		// the gateway's own generated key alone (ADR 0023; golem#5). Its
+		// browser guard keeps web pages out; the key keeps out other
+		// programs and users of the machine.
+		if h := key.Hash(cred); k.local != ([32]byte{}) && subtle.ConstantTimeCompare(h[:], k.local[:]) == 1 {
+			return k.implicit, nil
+		}
+		return nil, &Refusal{contract.AuthKeyUnknown, "this standalone gateway takes its own local key: the one it printed at start, in the file it named"}
 	}
 	if cred == "" {
 		return nil, &Refusal{contract.AuthMissing, "no credential: send a golem key as Authorization: Bearer or x-api-key (golemctl keys mint), or an Entra token (golemctl token)"}
@@ -232,9 +258,21 @@ func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 	return p, nil
 }
 
-func credential(h http.Header) string {
+// credential is the request's credential, from Authorization: Bearer or
+// x-api-key; conflict reports both present and different, which is
+// refused rather than one silently preferred (golem#5).
+func credential(h http.Header) (cred string, conflict bool) {
+	var bearer string
 	if a := h.Get("Authorization"); len(a) > 7 && strings.EqualFold(a[:7], "bearer ") {
-		return strings.TrimSpace(a[7:])
+		bearer = strings.TrimSpace(a[7:])
 	}
-	return strings.TrimSpace(h.Get("X-Api-Key"))
+	apiKey := strings.TrimSpace(h.Get("X-Api-Key"))
+	if bearer != "" && apiKey != "" && bearer != apiKey {
+		return "", true
+	}
+	return cmp.Or(bearer, apiKey), false
 }
+
+// RequireLocalKey sets the standalone implicit principal's key: without
+// one the implicit principal admits no one.
+func (k *Keys) RequireLocalKey(local string) { k.local = key.Hash(local) }

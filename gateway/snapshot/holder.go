@@ -61,6 +61,9 @@ type Holder struct {
 	Env key.Env
 	// Entra verifies Entra tokens; nil: the gateway takes golem keys only.
 	Entra *auth.Entra
+	// LocalKey is the standalone gateway's generated key, the one credential
+	// its implicit principal takes (golem#5).
+	LocalKey string
 	// OnApply, if set, is called with each snapshot applied (the limiter
 	// takes its known spend).
 	OnApply func(*Compiled)
@@ -204,7 +207,7 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 		prices[p.Model] = p
 	}
 	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...),
-		Auth: auth.Compile(s.Entitlements, env, h.now, h.Entra), Prices: prices}, nil
+		Auth: h.compileAuth(s.Entitlements, env), Prices: prices}, nil
 }
 
 // Static is a Holder with one compiled snapshot and no lease: for tests.
@@ -255,4 +258,14 @@ func upstreamTransport() *http.Transport {
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
+}
+
+// compileAuth indexes the snapshot's entitlements, with the standalone
+// gateway's local key for an implicit principal.
+func (h *Holder) compileAuth(e snapshot.Entitlements, env key.Env) *auth.Keys {
+	k := auth.Compile(e, env, h.now, h.Entra)
+	if h.LocalKey != "" {
+		k.RequireLocalKey(h.LocalKey)
+	}
+	return k
 }
