@@ -161,6 +161,9 @@ func (r *Request) InjectedUsage() bool { return r.Stream && !r.usageOn }
 // UsageOnly reports whether a stream chunk is the usage report alone: an
 // empty choices array and a usage object.
 func UsageOnly(data []byte) bool {
+	if !bytes.Contains(data, usageKey) {
+		return false // most chunks: no scan
+	}
 	emptyChoices, usage := false, false
 	err := jsonscan.Object(data, func(name []byte, d *jsonscan.Decoder) error {
 		switch string(name) {

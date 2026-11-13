@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -32,7 +33,8 @@ type Entra struct {
 	Audiences []string
 	// JWKS is the tenant's key set URL; default
 	// https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys.
-	JWKS   string
+	JWKS string
+	// Client fetches the key set; default a client with a 10-second timeout.
 	Client *http.Client
 	Now    func() time.Time
 
@@ -92,6 +94,9 @@ func (e *Entra) Verify(raw string) (Identity, *Refusal) {
 	if err := tok.Claims(key, &std, &c); err != nil {
 		return invalid("its signature does not verify")
 	}
+	if std.Expiry == nil {
+		return invalid("it has no expiry (exp)") // Entra's always do: one without never expires
+	}
 	err = std.ValidateWithLeeway(jwt.Expected{
 		Issuer:      "https://login.microsoftonline.com/" + e.Tenant + "/v2.0",
 		AnyAudience: jwt.Audience(e.Audiences),
@@ -144,6 +149,13 @@ func (e *Entra) SetKeys(set jose.JSONWebKeySet) {
 	e.keys.Store(&m)
 }
 
+// keysClient fetches key sets when Entra.Client is nil (read-only): a hung
+// endpoint must not hold a gateway's start, nor its refresh loop.
+var keysClient = &http.Client{Timeout: 10 * time.Second}
+
+// maxKeySet bounds a key set's body: Entra's is a few kilobytes.
+const maxKeySet = 1 << 20
+
 // Refresh fetches the tenant's key set.
 func (e *Entra) Refresh(ctx context.Context) error {
 	url := e.JWKS
@@ -156,7 +168,7 @@ func (e *Entra) Refresh(ctx context.Context) error {
 	}
 	client := e.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = keysClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -167,7 +179,7 @@ func (e *Entra) Refresh(ctx context.Context) error {
 		return fmt.Errorf("entra keys: %s from %s", resp.Status, url)
 	}
 	var set jose.JSONWebKeySet
-	if err := json.NewDecoder(resp.Body).Decode(&set); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxKeySet)).Decode(&set); err != nil {
 		return fmt.Errorf("entra keys: %w", err)
 	}
 	e.SetKeys(set)
@@ -195,11 +207,11 @@ func (e *Entra) Run(ctx context.Context) {
 			return
 		case <-hourly.C:
 		case <-e.wake:
-			if time.Since(last) < time.Minute {
+			if e.now().Sub(last) < time.Minute {
 				continue
 			}
 		}
-		last = time.Now()
+		last = e.now()
 		if err := e.Refresh(ctx); err != nil {
 			slog.Warn("could not refresh Entra's signing keys; using the cached ones", "err", err)
 		}

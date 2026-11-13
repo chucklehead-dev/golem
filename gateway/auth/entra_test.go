@@ -110,6 +110,7 @@ func TestEntra(t *testing.T) {
 		{"the other audience form", sign(t, signingKey, "k1", with(userClaims(), "aud", "golem-api-client-id")), "", "alice@team-a"},
 		{"expired", sign(t, signingKey, "k1", with(userClaims(), "exp", now.Add(-2*time.Minute).Unix())), "", contract.AuthTokenExpired.Name},
 		{"expired within the leeway", sign(t, signingKey, "k1", with(userClaims(), "exp", now.Add(-30*time.Second).Unix())), "", "alice@team-a"},
+		{"no expiry", sign(t, signingKey, "k1", with(userClaims(), "exp", nil)), "", contract.AuthTokenInvalid.Name},
 		{"not yet valid", sign(t, signingKey, "k1", with(userClaims(), "nbf", now.Add(10*time.Minute).Unix())), "", contract.AuthTokenInvalid.Name},
 		{"another tenant", sign(t, signingKey, "k1", with(userClaims(), "iss", "https://login.microsoftonline.com/other/v2.0", "tid", "other")), "", contract.AuthTokenInvalid.Name},
 		{"tid not the issuer's", sign(t, signingKey, "k1", with(userClaims(), "tid", "other")), "", contract.AuthTokenInvalid.Name},

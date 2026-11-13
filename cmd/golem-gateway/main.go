@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8080", "address to serve on")
 	maxBody := flag.Int64("max-body", 32<<20, "largest request body accepted, in bytes")
 	tenant := flag.String("entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
+	drainFor := flag.Duration("drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
 	if *standalone == "" {
@@ -89,22 +91,33 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go dir.Run(ctx)
-	go renew(ctx, limiter)
+	// Every goroutine is owned here and ends with ctx; main returns only
+	// when all have, the server's drain included.
+	var wg sync.WaitGroup
+	wg.Go(func() { dir.Run(ctx) })
+	wg.Go(func() { renew(ctx, limiter) })
 	if entra != nil {
-		go entra.Run(ctx)
+		wg.Go(func() { entra.Run(ctx) })
 	}
-	go func() {
+	wg.Go(func() {
 		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Shutdown stops accepting and waits for calls in flight, streams
+		// included, up to the deadline; ListenAndServe returns at once, so
+		// main waits for this.
+		drain, cancel := context.WithTimeout(context.Background(), *drainFor)
 		defer cancel()
-		srv.Shutdown(shutdown) // drains streams in flight, up to the deadline
-	}()
+		if err := srv.Shutdown(drain); err != nil {
+			slog.Warn("golem-gateway: calls still in flight at the drain deadline were cut", "err", err)
+		}
+	})
 	fmt.Fprintf(os.Stderr, "golem-gateway standalone: %s on http://%s — for this machine only, not for shared use\n", *standalone, *listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("golem-gateway", "err", err)
+		stop() // end the other goroutines
+		wg.Wait()
 		os.Exit(1)
 	}
+	wg.Wait()
 }
 
 // renew keeps running calls' slots alive (ADR 0038: every 30 seconds) and,

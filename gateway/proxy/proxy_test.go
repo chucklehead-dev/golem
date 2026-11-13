@@ -106,6 +106,7 @@ func TestOpenAIStreamRequestsUsage(t *testing.T) {
 // as sent. A caller that asked gets it.
 func TestInjectedUsageWithheld(t *testing.T) {
 	events := [][]byte{
+		[]byte(": keep-alive\n\n"),
 		[]byte(`data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}` + "\n\n"),
 		[]byte(`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}` + "\n\ndata: [DONE]\n\n"),
 	}
@@ -121,7 +122,8 @@ func TestInjectedUsageWithheld(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(tc.body)))
 		got := w.Body.String()
-		if strings.Contains(got, `"choices":[]`) != tc.wantUsage || !strings.Contains(got, `"content":"hi"`) || !strings.HasSuffix(got, "data: [DONE]\n\n") {
+		if strings.Contains(got, `"choices":[]`) != tc.wantUsage || !strings.HasPrefix(got, ": keep-alive\n\n") ||
+			!strings.Contains(got, `"content":"hi"`) || !strings.HasSuffix(got, "data: [DONE]\n\n") {
 			t.Errorf("%s: the caller got %q", tc.body, got)
 		}
 		if res.Usage.Input != 10 {
@@ -224,5 +226,55 @@ func TestLeaseExpired(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(smallRequest)))
 	if w.Code != 503 || !strings.Contains(w.Body.String(), "gateway.authorization_expired") || s.got != nil {
 		t.Fatalf("%d %s; want a 503 and nothing sent upstream", w.Code, w.Body)
+	}
+}
+
+// TestUpstreamCut: a provider response that ends early must not reach the
+// caller as a clean, shorter one. A stream gets upstream.stream_failed as an
+// event, and the response is aborted, streamed or not; the call is still
+// accounted for.
+func TestUpstreamCut(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		d          Dialect
+		event      bool
+	}{
+		{"an Anthropic stream", string(smallRequest), AnthropicMessages, true},
+		{"an OpenAI stream", `{"model":"claude","stream":true,"messages":[]}`, OpenAIChat, true},
+		{"a whole response", `{"model":"claude","messages":[]}`, OpenAIChat, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.event {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Write(anthropicStream(0)[0])
+				} else {
+					w.Write([]byte(`{"choices":[{"message":`))
+				}
+				w.(http.Flusher).Flush()
+				panic(http.ErrAbortHandler) // the provider's connection drops
+			}))
+			defer up.Close()
+			u, _ := url.Parse(up.URL)
+			results := make(chan Result, 1)
+			h := &Handler{Dialect: tc.d, MaxBody: 1 << 20, Record: func(_ *http.Request, r Result) { results <- r },
+				Snapshots: routes(tc.d, u, up.Client().Transport)}
+			gw := httptest.NewServer(h)
+			defer gw.Close()
+			var got []byte
+			resp, err := gw.Client().Post(gw.URL, "application/json", strings.NewReader(tc.body))
+			if err == nil { // else aborted before the headers: nothing flushed yet
+				got, err = io.ReadAll(resp.Body)
+			}
+			if err == nil {
+				t.Fatalf("the caller read %q to a clean end: a cut response must not look whole", got)
+			}
+			if strings.Contains(string(got), "upstream.stream_failed") != tc.event {
+				t.Fatalf("the caller got %q; an error event: %v", got, tc.event)
+			}
+			if r := <-results; r.Err == nil || r.CallerGone {
+				t.Fatalf("result %+v: the cut is the provider's", r)
+			}
+		})
 	}
 }

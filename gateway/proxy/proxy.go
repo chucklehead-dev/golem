@@ -94,27 +94,14 @@ type exchange struct {
 	chat       chat.Request
 	chatUsage  chat.StreamUsage
 	parser     sse.Parser
-	tail       []byte // a non-streamed response, for its usage
-	events     []byte // a filtered stream's next bytes to the caller
-	callerGone bool   // a write to the caller failed
+	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
+	tail       []byte     // a non-streamed response, for its usage
+	callerGone bool       // a write to the caller failed
 }
 
-// forwardChat is the OpenAI stream's event handler when golem injected
-// include_usage: usage is read from every event, and every event but the
-// usage-only one is re-serialised to the caller. OpenAI streams carry only
-// data lines, so this is exact.
-func (ex *exchange) forwardChat(event, data []byte) {
-	ex.chatUsage.OnEvent(event, data)
-	if chat.UsageOnly(data) {
-		return
-	}
-	for line := range bytes.SplitSeq(data, []byte("\n")) {
-		ex.events = append(ex.events, "data: "...)
-		ex.events = append(ex.events, line...)
-		ex.events = append(ex.events, '\n')
-	}
-	ex.events = append(ex.events, '\n')
-}
+// dropUsageOnly withholds the usage-only chunk golem asked for: the caller
+// did not, and some SDKs fail on a chunk with no choices.
+func dropUsageOnly(_, data []byte) bool { return chat.UsageOnly(data) }
 
 var exchanges = sync.Pool{New: func() any { return &exchange{buf: make([]byte, copyBuffer)} }}
 
@@ -134,22 +121,42 @@ func putBody(b *[]byte) {
 }
 
 // upstreamBody is the rewritten request as the transport reads it; its
-// buffer returns to the pool when the transport closes it, once sent.
+// buffer returns to the pool when the transport closes it, once sent. The
+// HTTP/2 transport may close it from another goroutine while a write is
+// still reading it (a stream reset), so the two are serialised: a buffer is
+// never pooled while a read copies from it.
 type upstreamBody struct {
-	bytes.Reader
-	buf  *[]byte
-	once sync.Once
+	mu  sync.Mutex
+	r   bytes.Reader
+	buf *[]byte
+}
+
+func newUpstreamBody(buf *[]byte) *upstreamBody {
+	u := &upstreamBody{buf: buf}
+	u.r.Reset(*buf)
+	return u
+}
+
+func (u *upstreamBody) Read(p []byte) (int, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.buf == nil {
+		return 0, http.ErrBodyReadAfterClose
+	}
+	return u.r.Read(p)
 }
 
 // Close returns the buffer and drops every reference to it: the transport
 // keeps the request, and so this body, for the whole response, and a
 // reference left here would pin a 200 KB agent request per open stream.
 func (u *upstreamBody) Close() error {
-	u.once.Do(func() {
-		u.Reader.Reset(nil)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.buf != nil {
+		u.r.Reset(nil)
 		putBody(u.buf)
 		u.buf = nil
-	})
+	}
 	return nil
 }
 
@@ -281,8 +288,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// One attempt. (Retries and failover before the first byte go here; a
 	// retry needs the rewritten body kept until the attempt is committed.)
-	ub := &upstreamBody{buf: out}
-	ub.Reset(*out)
+	ub := newUpstreamBody(out)
 	up := &http.Request{
 		Method:        http.MethodPost,
 		URL:           target.URL,
@@ -343,6 +349,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Record != nil {
 		h.Record(r, res)
 	}
+	if _, cut := errors.AsType[errUpstreamCut](res.Err); cut && !res.CallerGone {
+		// The provider's response ended early. A clean end would read as a
+		// complete (and shorter) answer: a stream gets the contract's error
+		// event, and then the response is aborted (a reset, not an end), so
+		// no client can take it for whole (contracts.md §1).
+		if stream && resp.StatusCode == http.StatusOK {
+			w.Write(streamError(h.Dialect, reqIDs))
+			http.NewResponseController(w).Flush()
+		}
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// streamError is upstream.stream_failed as an event in a dialect's stream.
+func streamError(d Dialect, reqID string) []byte {
+	const msg = "the provider's response was cut off before it completed; retry the request"
+	var b []byte
+	switch d {
+	case AnthropicMessages:
+		b = append(b, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\""...)
+		b = append(b, contract.UpstreamStreamFailed.Name...)
+	default:
+		b = append(b, "data: {\"error\":{\"code\":\""...)
+		b = append(b, contract.UpstreamStreamFailed.Name...)
+		b = append(b, "\",\"type\":\""...)
+		b = append(b, contract.UpstreamStreamFailed.Origin...)
+	}
+	b = append(b, "\",\"message\":\""+msg+"\",\"request_id\":\""...)
+	b = append(b, reqID...)
+	return append(b, "\"}}\n\n"...)
 }
 
 var (
@@ -365,39 +401,61 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 	}
 	filter := h.Dialect == OpenAIChat && ex.chat.InjectedUsage()
 	if filter {
-		ex.parser.OnEvent = ex.forwardChat
+		ex.filter = sse.Filter{Parser: ex.parser, Drop: dropUsageOnly}
+	}
+	// send forwards bytes to the caller as they come; a failed write is the
+	// caller gone (ADR 0041 §7.6).
+	send := func(b []byte) bool {
+		if len(b) == 0 {
+			return true
+		}
+		if _, err := w.Write(b); err != nil {
+			ex.callerGone = true
+			return false
+		}
+		rc.Flush()
+		return true
 	}
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
-		if n > 0 && filter {
-			ex.events = ex.events[:0]
-			ex.parser.Write(ex.buf[:n])
-			if len(ex.events) > 0 {
-				if _, werr := w.Write(ex.events); werr != nil {
-					cut, ex.callerGone = werr, true
-					break
-				}
-				rc.Flush()
+		if n > 0 {
+			var ok bool
+			if filter {
+				ok = send(ex.filter.Pass(ex.buf[:n]))
+			} else {
+				ok = send(ex.buf[:n])
+				ex.parser.Write(ex.buf[:n])
 			}
-		} else if n > 0 {
-			if _, werr := w.Write(ex.buf[:n]); werr != nil {
-				cut, ex.callerGone = werr, true // the caller went away (ADR 0041 §7.6)
+			if !ok {
+				cut = errCallerGone
 				break
 			}
-			rc.Flush()
-			ex.parser.Write(ex.buf[:n])
 		}
 		if err == io.EOF {
+			if filter && !send(ex.filter.End()) {
+				cut = errCallerGone
+			}
 			break
 		}
 		if err != nil {
-			cut = err
+			cut = errUpstreamCut{err}
 			break
 		}
 	}
 	return h.usage(ex, cut)
 }
+
+// errCallerGone is a write to the caller that failed.
+var errCallerGone = errors.New("proxy: the caller went away")
+
+// errUpstreamCut is the provider's response ending before it was complete.
+type errUpstreamCut struct{ err error }
+
+func (e errUpstreamCut) Error() string {
+	return "proxy: the provider's response was cut: " + e.err.Error()
+}
+func (e errUpstreamCut) Unwrap() error { return e.err }
 
 // whole copies a non-streamed response, keeping a copy of up to maxRetained
 // bytes to read its usage from.
@@ -408,7 +466,7 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 		n, err := body.Read(ex.buf)
 		if n > 0 {
 			if _, werr := w.Write(ex.buf[:n]); werr != nil {
-				cut, ex.callerGone = werr, true
+				cut, ex.callerGone = errCallerGone, true
 				break
 			}
 			if len(ex.tail)+n <= maxRetained {
@@ -419,7 +477,7 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 			break
 		}
 		if err != nil {
-			cut = err
+			cut = errUpstreamCut{err}
 			break
 		}
 	}
