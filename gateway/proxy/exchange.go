@@ -43,12 +43,15 @@ type exchange struct {
 	rc         *http.ResponseController
 	stall      time.Duration
 	noDeadline bool // the writer has none (a test's recorder)
+
+	lim bounds // the route's limits over the upstream call, timers reused
 }
 
 var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
 	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
 	ex.filter.Drop = dropUsageOnly
+	ex.lim = newBounds()
 	return ex
 }}
 

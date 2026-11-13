@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/route"
@@ -18,46 +19,97 @@ var (
 
 // bounds are a call's route limits over its upstream request, in the
 // usual forms (as nginx's proxy_read_timeout, Envoy's stream_idle_timeout
-// and max_stream_duration): a deadline for the whole call, a timer for the
-// headers, and an idle timer reset by every read. Each cancels the
-// upstream context with its cause. A zero limit is none.
+// and max_stream_duration): an alarm for the whole call, one for the
+// headers, and an idle alarm reset by every read. Each cancels the upstream
+// context with its cause. A zero limit is none.
+//
+// The bounds live in the pooled exchange and their timers are reused from
+// call to call, so a call allocates only its context.
 type bounds struct {
-	cancel  context.CancelCauseFunc
-	release context.CancelFunc // the deadline's
-	headers *time.Timer
-	idle    *time.Timer
-	idleFor time.Duration
+	cancel              context.CancelCauseFunc
+	call, headers, idle *alarm
+	idleFor             time.Duration
+	body                idleReader
 }
 
-// bound derives the upstream's context from the request's.
-func bound(ctx context.Context, started time.Time, rt *route.Route) (context.Context, *bounds) {
-	ctx, cancel := context.WithCancelCause(ctx)
-	b := &bounds{cancel: cancel, release: func() {}, idleFor: rt.Idle}
+// alarm is a reusable timer that cancels the call it is armed for. One
+// that fired is never armed again: its callback may still be running, and
+// would cancel the next call. disarm says so, and it is replaced (the one
+// allocation, and only after a timeout).
+type alarm struct {
+	t      *time.Timer
+	cause  error
+	mu     sync.Mutex
+	cancel context.CancelCauseFunc // nil: not armed
+}
+
+func newAlarm(cause error) *alarm {
+	a := &alarm{cause: cause}
+	a.t = time.AfterFunc(time.Hour, a.fire)
+	a.t.Stop()
+	return a
+}
+
+func (a *alarm) fire() {
+	a.mu.Lock()
+	cancel := a.cancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel(a.cause)
+	}
+}
+
+func (a *alarm) arm(cancel context.CancelCauseFunc, d time.Duration) {
+	a.mu.Lock()
+	a.cancel = cancel
+	a.mu.Unlock()
+	a.t.Reset(d)
+}
+
+// disarm stops the alarm; it reports false if the alarm fired.
+func (a *alarm) disarm() (reusable bool) {
+	a.mu.Lock()
+	armed := a.cancel != nil
+	a.cancel = nil
+	a.mu.Unlock()
+	return a.t.Stop() || !armed
+}
+
+func newBounds() bounds {
+	return bounds{call: newAlarm(errMaxDuration), headers: newAlarm(errHeadersTimeout), idle: newAlarm(errIdle)}
+}
+
+// bound derives the upstream's context from the request's and arms the
+// call's and the headers' alarms.
+func (b *bounds) bound(ctx context.Context, started time.Time, rt *route.Route) context.Context {
+	ctx, b.cancel = context.WithCancelCause(ctx)
+	b.idleFor = rt.Idle
 	if rt.MaxDuration > 0 {
-		ctx, b.release = context.WithDeadlineCause(ctx, started.Add(rt.MaxDuration), errMaxDuration)
+		b.call.arm(b.cancel, time.Until(started.Add(rt.MaxDuration)))
 	}
-	if rt.Headers > 0 && (rt.MaxDuration == 0 || rt.Headers < rt.MaxDuration) { // else the deadline is the bound
-		b.headers = time.AfterFunc(rt.Headers, func() { cancel(errHeadersTimeout) })
+	if rt.Headers > 0 && (rt.MaxDuration == 0 || rt.Headers < rt.MaxDuration) { // else the call's alarm is the bound
+		b.headers.arm(b.cancel, rt.Headers)
 	}
-	return ctx, b
+	return ctx
 }
 
-// gotHeaders ends the wait for headers and starts the idle bound.
+// gotHeaders ends the wait for headers and arms the idle alarm.
 func (b *bounds) gotHeaders() {
-	if b.headers != nil {
-		b.headers.Stop()
+	if !b.headers.disarm() {
+		b.headers = newAlarm(errHeadersTimeout)
 	}
 	if b.idleFor > 0 {
-		b.idle = time.AfterFunc(b.idleFor, func() { b.cancel(errIdle) })
+		b.idle.arm(b.cancel, b.idleFor)
 	}
 }
 
-// body is the response body, each read resetting the idle bound.
-func (b *bounds) body(r io.Reader) io.Reader {
-	if b.idle == nil {
+// bodyOf is the response body, each read resetting the idle alarm.
+func (b *bounds) bodyOf(r io.Reader) io.Reader {
+	if b.idleFor <= 0 {
 		return r
 	}
-	return idleReader{r, b}
+	b.body = idleReader{r, b}
+	return &b.body
 }
 
 type idleReader struct {
@@ -65,22 +117,23 @@ type idleReader struct {
 	b *bounds
 }
 
-func (ir idleReader) Read(p []byte) (int, error) {
+func (ir *idleReader) Read(p []byte) (int, error) {
 	n, err := ir.r.Read(p)
 	if n > 0 {
-		ir.b.idle.Reset(ir.b.idleFor)
+		ir.b.idle.t.Reset(ir.b.idleFor)
 	}
 	return n, err
 }
 
-// end stops the timers and releases the upstream context.
+// end disarms the alarms (replacing any that fired) and releases the
+// upstream context.
 func (b *bounds) end() {
-	if b.headers != nil {
-		b.headers.Stop()
+	for _, a := range []**alarm{&b.call, &b.headers, &b.idle} {
+		if !(*a).disarm() {
+			*a = newAlarm((*a).cause)
+		}
 	}
-	if b.idle != nil {
-		b.idle.Stop()
-	}
-	b.release()
+	b.body = idleReader{}
 	b.cancel(nil)
+	b.cancel = nil
 }

@@ -155,7 +155,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// One attempt. (Retries and failover before the first byte go here; a
 	// retry needs the rewritten body kept until the attempt is committed.)
 	// The route's bounds: the caller's going away still cancels it too.
-	upCtx, lim := bound(ctx, started, rt)
+	lim := &ex.lim
+	upCtx := lim.bound(ctx, started, rt)
 	defer lim.end()
 	up, ub := upstreamRequest(upCtx, r, target, out)
 	resp, err := target.Transport.RoundTrip(up)
@@ -189,9 +190,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	streamed := req.stream && resp.StatusCode == http.StatusOK
 	res := Result{RequestID: reqID, Principal: principal, Target: target, Status: resp.StatusCode}
 	if streamed {
-		res.Usage, res.Err = h.stream(w, lim.body(resp.Body), ex)
+		res.Usage, res.Err = h.stream(w, lim.bodyOf(resp.Body), ex)
 	} else {
-		res.Usage, res.Err = h.whole(w, lim.body(resp.Body), ex)
+		res.Usage, res.Err = h.whole(w, lim.bodyOf(resp.Body), ex)
 	}
 	// The caller is gone if a write to it failed, or if its request ended
 	// first (the upstream read then fails with its context).
