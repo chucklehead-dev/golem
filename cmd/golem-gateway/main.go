@@ -93,6 +93,17 @@ func main() {
 		Handler:           mux,
 		Protocols:         &protocols,
 		ReadHeaderTimeout: 10 * time.Second,
+		// A keep-alive connection idle this long is closed: idle ones held
+		// for ever are memory and file descriptors under load.
+		IdleTimeout: 2 * time.Minute,
+		// Headers carry a key or an Entra token (a few KB): 64 KiB, not the
+		// default 1 MiB a client could make every connection hold.
+		MaxHeaderBytes: 64 << 10,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams: 256,              // per connection: an agent's parallel calls, not a flood
+			SendPingTimeout:      30 * time.Second, // find dead connections under long streams
+			PingTimeout:          15 * time.Second,
+		},
 		// No WriteTimeout: streams are long (gateway.md §3 step 1).
 	}
 

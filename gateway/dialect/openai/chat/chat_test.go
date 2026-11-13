@@ -110,3 +110,34 @@ func TestStreamUsage(t *testing.T) {
 		t.Fatalf("usage = %+v, %v; want %+v", u.Usage, u.Err, want)
 	}
 }
+
+func TestMayHaveUsage(t *testing.T) {
+	for in, want := range map[string]bool{
+		`{"choices":[{"delta":{"content":"hi"}}],"usage":null}`:                       false,
+		`{"choices":[],"usage":{"prompt_tokens":1}}`:                                  true,
+		`{"usage" : null ,"x":1}`:                                                     false,
+		"{\"usage\"\n:\n{}}":                                                          true,
+		`{"choices":[{"delta":{"content":"usage"}}],"usage":null}`:                    false,
+		`{"choices":[{"delta":{"content":"\"usage\":{}"}}]}`:                          false,
+		`{"choices":[{"delta":{"content":"usage"}}],"usage":{"completion_tokens":2}}`: true,
+		`{"choices":[]}`: false,
+	} {
+		if got := mayHaveUsage([]byte(in)); got != want {
+			t.Errorf("mayHaveUsage(%s) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// FuzzMayHaveUsage: the pre-check never hides a usage object the scan
+// would read.
+func FuzzMayHaveUsage(f *testing.F) {
+	f.Add(`{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+	f.Add(`{"usage":null}`)
+	f.Fuzz(func(t *testing.T, chunk string) {
+		var u StreamUsage
+		u.Response([]byte(chunk))
+		if u.Err == nil && u.Usage != (canon.Usage{}) && !mayHaveUsage([]byte(chunk)) {
+			t.Fatalf("%q has usage %+v, but the pre-check skips it", chunk, u.Usage)
+		}
+	})
+}

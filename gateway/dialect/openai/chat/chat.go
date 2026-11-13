@@ -161,8 +161,8 @@ func (r *Request) InjectedUsage() bool { return r.Stream && !r.usageOn }
 // UsageOnly reports whether a stream chunk is the usage report alone: an
 // empty choices array and a usage object.
 func UsageOnly(data []byte) bool {
-	if !bytes.Contains(data, usageKey) {
-		return false // most chunks: no scan
+	if !mayHaveUsage(data) {
+		return false // every chunk but one: no scan
 	}
 	emptyChoices, usage := false, false
 	err := jsonscan.Object(data, func(name []byte, d *jsonscan.Decoder) error {
@@ -224,12 +224,35 @@ type StreamUsage struct {
 
 var usageKey = []byte(`"usage"`)
 
-// OnEvent reads one chunk; only a chunk mentioning usage is scanned.
-func (u *StreamUsage) OnEvent(_, data []byte) {
-	if !bytes.Contains(data, usageKey) {
-		return
+// mayHaveUsage reports whether a chunk may carry a usage object: it has a
+// "usage" member that is not null. A stream golem asked usage of carries
+// "usage":null in every chunk but the last, so a check for the key alone
+// skips nothing, and each chunk was scanned in full, twice (2.3 µs a chunk:
+// a 200-chunk stream cost more than the whole fast path). A raw quote
+// cannot occur inside a JSON string (it is escaped), so each match is a
+// key, or a string value equal to "usage", never followed by a colon.
+func mayHaveUsage(data []byte) bool {
+	for rest := data; ; {
+		i := bytes.Index(rest, usageKey)
+		if i < 0 {
+			return false
+		}
+		rest = bytes.TrimLeft(rest[i+len(usageKey):], " \t\r\n")
+		if len(rest) == 0 || rest[0] != ':' {
+			continue // a value, not a key
+		}
+		rest = bytes.TrimLeft(rest[1:], " \t\r\n")
+		if !bytes.HasPrefix(rest, []byte("null")) {
+			return true
+		}
 	}
-	u.Response(data)
+}
+
+// OnEvent reads one chunk; only a chunk that may carry usage is scanned.
+func (u *StreamUsage) OnEvent(_, data []byte) {
+	if mayHaveUsage(data) {
+		u.Response(data)
+	}
 }
 
 // Response reads usage from a JSON object (a chunk or a whole response).

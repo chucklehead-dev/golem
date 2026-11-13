@@ -28,9 +28,23 @@ type exchange struct {
 	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
 	tail       []byte     // a non-streamed response, for its usage
 	callerGone bool       // a write to the caller failed
+
+	// The usage readers' methods, bound once: a method value allocates
+	// each time it is taken, and the readers stay at these addresses.
+	msgWant       func([]byte) bool
+	msgOn, chatOn func(event, data []byte)
 }
 
-var exchanges = sync.Pool{New: func() any { return &exchange{buf: make([]byte, copyBuffer)} }}
+var exchanges = sync.Pool{New: func() any {
+	ex := &exchange{buf: make([]byte, copyBuffer)}
+	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
+	ex.filter.Drop = dropUsageOnly
+	return ex
+}}
+
+// dropUsageOnly withholds the usage-only chunk golem asked for: the caller
+// did not, and some SDKs fail on a chunk with no choices.
+func dropUsageOnly(_, data []byte) bool { return chat.UsageOnly(data) }
 
 func getExchange() *exchange {
 	ex := exchanges.Get().(*exchange)
@@ -38,9 +52,8 @@ func getExchange() *exchange {
 	return ex
 }
 
-// release returns the exchange to the pool. tail is the one buffer an
-// exchange grows and keeps (the parser and the filter are new for each
-// stream), so a large one is let go.
+// release returns the exchange to the pool. The parser and filter keep
+// bounded buffers (their Reset); tail is let go if a response grew it large.
 func (ex *exchange) release() {
 	if cap(ex.tail) <= maxRetained {
 		exchanges.Put(ex)

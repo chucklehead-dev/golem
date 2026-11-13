@@ -35,6 +35,24 @@ type Parser struct {
 	f       *Filter // if filtering: told where each event's bytes end
 }
 
+// keepBuffer bounds the buffers a Reset keeps: a stream's usual events,
+// not the largest one it ever saw (MaxEvent).
+const keepBuffer = 16 << 10
+
+// Reset readies the parser for a new stream, keeping its callbacks and its
+// buffers up to keepBuffer: a pooled parser then allocates nothing for an
+// ordinary stream.
+func (p *Parser) Reset() {
+	*p = Parser{Want: p.Want, OnEvent: p.OnEvent, line: keep(p.line), event: keep(p.event), data: keep(p.data)}
+}
+
+func keep(b []byte) []byte {
+	if cap(b) > keepBuffer {
+		return nil
+	}
+	return b[:0]
+}
+
 // Write consumes the next bytes of the stream. It never fails: the stream
 // belongs to the caller, and a malformed one is only less informative.
 func (p *Parser) Write(b []byte) (int, error) {
@@ -183,6 +201,14 @@ type Filter struct {
 	passing  bool   // the current event outgrew MaxEvent: passed through
 	drop     bool
 	lastDrop bool // the last event ended was dropped
+}
+
+// Reset readies the filter for a new stream, keeping its callbacks and
+// bounded buffers, as Parser.Reset.
+func (f *Filter) Reset() {
+	f.Parser.Reset()
+	f.out, f.block = keep(f.out), keep(f.block)
+	f.passing, f.drop, f.lastDrop = false, false, false
 }
 
 // Pass consumes the next bytes of the stream and returns those to forward,

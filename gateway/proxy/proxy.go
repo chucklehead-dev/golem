@@ -11,6 +11,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 	"uuid"
 
@@ -55,8 +57,76 @@ type Handler struct {
 	// Telemetry records each request's span, metrics and ledger row; nil
 	// records nothing.
 	Telemetry *telemetry.Telemetry
+	// WriteStall bounds how long one write to the caller may block (default
+	// 30 s): a client that stops reading would otherwise hold its slot and
+	// its upstream connection for as long as the provider streams.
+	WriteStall time.Duration
 	// Record, if set, is told each call's result (tests).
 	Record func(*http.Request, Result)
+}
+
+// writeTo is the caller's side of a response: no write may block longer
+// than the handler's WriteStall, so a stalled client is a caller gone. The
+// deadline is moved only when half of it has passed, not at every chunk.
+type writeTo struct {
+	w        http.ResponseWriter
+	rc       *http.ResponseController
+	stall    time.Duration
+	deadline time.Time // zero: none set
+	none     bool      // the writer has no deadlines (a test's recorder)
+}
+
+func (h *Handler) writeTo(w http.ResponseWriter) writeTo {
+	return writeTo{w: w, rc: http.NewResponseController(w), stall: cmp.Or(h.WriteStall, 30*time.Second)}
+}
+
+func (o *writeTo) write(b []byte) error {
+	if !o.none && o.deadline.UnixNano()-coarseNow() < int64(o.stall/2) {
+		o.deadline = time.Now().Add(o.stall)
+		o.none = o.rc.SetWriteDeadline(o.deadline) != nil
+	}
+	_, err := o.w.Write(b)
+	return err
+}
+
+// coarseNow is the Unix time in nanoseconds to within coarseTick, read
+// without a clock call: time.Now costs about 60 ns, and a stream checks the
+// time at every chunk. One goroutine for the process keeps it, from the
+// first use on.
+func coarseNow() int64 { return coarse().Load() }
+
+const coarseTick = 500 * time.Millisecond
+
+var coarse = sync.OnceValue(func() *atomic.Int64 {
+	var now atomic.Int64
+	now.Store(time.Now().UnixNano())
+	go func() { // for the life of the process; it does nothing but this
+		for t := range time.Tick(coarseTick) {
+			now.Store(t.UnixNano())
+		}
+	}()
+	return &now
+})
+
+// send forwards a stream's bytes to the caller as they come; a failed or
+// stalled write is the caller gone (ADR 0041 §7.6).
+func (o *writeTo) send(b []byte, ex *exchange) bool {
+	if len(b) == 0 {
+		return true
+	}
+	if err := o.write(b); err != nil {
+		ex.callerGone = true
+		return false
+	}
+	o.rc.Flush()
+	return true
+}
+
+// done clears the deadline: the connection may serve another request.
+func (o *writeTo) done() {
+	if !o.none && !o.deadline.IsZero() {
+		o.rc.SetWriteDeadline(time.Time{})
+	}
 }
 
 // Request headers a caller may pass to the provider, and response headers
@@ -328,21 +398,10 @@ func outcome(res Result, cut bool) (outcome, origin, code string) {
 // stream copies the response as it arrives, flushing each read, and feeds
 // the same bytes to the dialect's usage reader.
 func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (canon.Usage, error) {
-	rc := http.NewResponseController(w)
+	out := h.writeTo(w)
+	defer out.done()
 	filter := ex.startStream(h.Dialect)
-	// send forwards bytes to the caller as they come; a failed write is the
-	// caller gone (ADR 0041 §7.6).
-	send := func(b []byte) bool {
-		if len(b) == 0 {
-			return true
-		}
-		if _, err := w.Write(b); err != nil {
-			ex.callerGone = true
-			return false
-		}
-		rc.Flush()
-		return true
-	}
+	send := func(b []byte) bool { return out.send(b, ex) }
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
@@ -376,12 +435,14 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 // whole copies a non-streamed response, keeping a copy of up to maxRetained
 // bytes to read its usage from.
 func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (canon.Usage, error) {
+	out := h.writeTo(w)
+	defer out.done()
 	ex.tail = ex.tail[:0]
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
 		if n > 0 {
-			if _, werr := w.Write(ex.buf[:n]); werr != nil {
+			if werr := out.write(ex.buf[:n]); werr != nil {
 				cut, ex.callerGone = errCallerGone, true
 				break
 			}

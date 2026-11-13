@@ -14,6 +14,7 @@ package snapshot
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -161,8 +162,7 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 			id := b.Name + "/" + d.Name + " " + u.Scheme + "://" + u.Host
 			t := h.transports[id]
 			if t == nil {
-				t = http.DefaultTransport.(*http.Transport).Clone()
-				t.MaxIdleConnsPerHost = 256
+				t = upstreamTransport()
 				h.transports[id] = t
 			}
 			used[id] = true
@@ -229,4 +229,29 @@ func (e EnvSecrets) Secret(ref, env string) (string, error) {
 		return "", fmt.Errorf("environment variable %s is not set", env)
 	}
 	return strings.TrimSpace(v), nil
+}
+
+// upstreamTransport is a deployment's connection pool, every setting chosen
+// rather than inherited from http.DefaultTransport:
+//   - no proxy: egress goes through the mesh (ADR 0004), and a stray
+//     HTTPS_PROXY in a pod must not redirect calls carrying provider keys;
+//   - idle connections bounded per host only: DefaultTransport's
+//     MaxIdleConns of 100 is a total over all hosts, so above 100
+//     concurrent streams connections were closed and re-handshaken;
+//   - HTTP/2 pings on a connection silent for 30 seconds, so a dead one is
+//     found under a long stream rather than at the next request;
+//   - no response-header timeout here: a non-streamed answer's headers come
+//     when the model has finished, which for a long answer is minutes; that
+//     bound is the route's (a maximum duration, roadmap).
+func upstreamTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:               nil,
+		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:   true,
+		HTTP2:               &http.HTTP2Config{SendPingTimeout: 30 * time.Second, PingTimeout: 15 * time.Second},
+		MaxIdleConns:        0,
+		MaxIdleConnsPerHost: 256,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
 }

@@ -6,7 +6,6 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
 	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
-	"github.com/chucklehead-dev/golem/gateway/sse"
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
@@ -61,18 +60,20 @@ func (ex *exchange) rewrite(d Dialect, dst, body []byte, model string) []byte {
 // provider for usage the caller did not, and the usage-only chunk must be
 // withheld (some SDKs fail on a chunk with no choices).
 func (ex *exchange) startStream(d Dialect) (filter bool) {
-	ex.parser = sse.Parser{}
 	if d == AnthropicMessages {
 		ex.msgUsage = messages.StreamUsage{}
-		ex.parser.Want, ex.parser.OnEvent = ex.msgUsage.Want, ex.msgUsage.OnEvent
+		ex.parser.Want, ex.parser.OnEvent = ex.msgWant, ex.msgOn
+		ex.parser.Reset()
 		return false
 	}
 	ex.chatUsage = chat.StreamUsage{}
-	ex.parser.OnEvent = ex.chatUsage.OnEvent
 	if !ex.chat.InjectedUsage() {
+		ex.parser.Want, ex.parser.OnEvent = nil, ex.chatOn
+		ex.parser.Reset()
 		return false
 	}
-	ex.filter = sse.Filter{Parser: ex.parser, Drop: func(_, data []byte) bool { return chat.UsageOnly(data) }}
+	ex.filter.Want, ex.filter.OnEvent = nil, ex.chatOn
+	ex.filter.Reset()
 	return true
 }
 

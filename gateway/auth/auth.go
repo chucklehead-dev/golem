@@ -168,17 +168,21 @@ func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
 	if looksLikeJWS(cred) {
 		return k.token(cred, h.Get(contract.HeaderScope))
 	}
-	env, err := key.Parse(cred)
-	if err != nil {
-		if !strings.HasPrefix(cred, "glm_") {
-			return nil, &Refusal{contract.AuthMissing, "this credential is neither a golem key nor an Entra token: golemctl keys mint, or golemctl token"}
-		}
-		return nil, &Refusal{contract.AuthKeyUnknown, "this golem key is malformed (a mistyped or truncated key): copy it again"}
-	}
-	if env != k.env {
-		return nil, &Refusal{contract.AuthKeyWrongInstallation, "a glm_" + string(env) + "_ key, but this gateway takes glm_" + string(k.env) + "_ keys: use a key of this installation"}
-	}
+	// A known hash is a valid key of this installation (the snapshot holds
+	// only those): parsing it (base62 through math/big) is needed only to
+	// say why an unknown one is refused.
 	e := k.byHash[key.Hash(cred)]
+	if e == nil {
+		env, err := key.Parse(cred)
+		switch {
+		case err != nil && !strings.HasPrefix(cred, "glm_"):
+			return nil, &Refusal{contract.AuthMissing, "this credential is neither a golem key nor an Entra token: golemctl keys mint, or golemctl token"}
+		case err != nil:
+			return nil, &Refusal{contract.AuthKeyUnknown, "this golem key is malformed (a mistyped or truncated key): copy it again"}
+		case env != k.env:
+			return nil, &Refusal{contract.AuthKeyWrongInstallation, "a glm_" + string(env) + "_ key, but this gateway takes glm_" + string(k.env) + "_ keys: use a key of this installation"}
+		}
+	}
 	switch {
 	case e == nil:
 		return nil, &Refusal{contract.AuthKeyUnknown, "this key is not known to golem (it may never have been minted here); golemctl keys list shows yours"}

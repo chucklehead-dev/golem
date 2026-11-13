@@ -62,10 +62,14 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
 ## 3. The request path
 
 1. **Accept.** `net/http.Server` with `Protocols` set for HTTP/1.1 and
-   HTTP/2 (h2c behind a mesh). Header limits including
-   `Server.MaxHeaderValueCount` (1.27). `ReadHeaderTimeout` set; no
-   `WriteTimeout` (streams are long), instead per-phase deadlines through
-   `ResponseController.SetWriteDeadline`, renewed per chunk.
+   HTTP/2 (h2c behind a mesh). Headers bounded to 64 KiB (keys and tokens
+   are a few KB) and the default `MaxHeaderValueCount`; `ReadHeaderTimeout`
+   10 s, idle keep-alives closed after two minutes, HTTP/2 at most 256
+   streams per connection with pings after 30 s of silence. No
+   `WriteTimeout` (streams are long): instead no write to the caller may
+   block longer than `WriteStall` (30 s; `ResponseController.SetWriteDeadline`,
+   moved when half of it has passed, on a coarse clock), so a client that
+   stops reading is a caller gone.
 2. **Frontend.** `ServeMux` method-and-path patterns select the dialect
    (`POST /v1/chat/completions`, `POST /v1/messages`, ...). The body is read
    into a pooled buffer with a size cap (`http.MaxBytesReader`). A
@@ -257,8 +261,12 @@ without a preflight it never gets. SDKs and curl pass all three.
 - The fast path allocates per request: the pooled body buffer (returned),
   the Principal (cached), one span pair, one access-log record. Target
   well under 50 allocations; tracked by `testing.B.Loop` benchmarks in CI.
-- Transports are per deployment with `MaxIdleConnsPerHost` sized to the
-  deployment's expected concurrency; HTTP/2 to providers that support it.
+- Transports are per deployment, every setting explicit
+  (`snapshot.upstreamTransport`): idle connections bounded per host only
+  (DefaultTransport's total of 100 re-handshook connections above 100
+  streams), HTTP/2 with pings, no proxy (egress is the mesh's), and no
+  response-header timeout (a long non-streamed answer's headers come at its
+  end; that bound is the route's maximum duration).
 - Upstream TLS sessions resumed; DNS cached by the resolver, not golem.
 - SSE scanning reads lines from the tee without copying the payload when
   it is not a usage-bearing event (look for the event type first).

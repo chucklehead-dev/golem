@@ -278,3 +278,40 @@ func TestUpstreamCut(t *testing.T) {
 		})
 	}
 }
+
+// TestStalledClient: a client that stops reading a stream is a caller gone
+// once a write has blocked for WriteStall, so it cannot hold its slot and
+// its upstream connection for as long as the provider streams.
+func TestStalledClient(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := []byte("data: " + strings.Repeat("x", 64<<10) + "\n\n")
+		for r.Context().Err() == nil {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+	results := make(chan Result, 1)
+	h := &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, WriteStall: 200 * time.Millisecond,
+		Record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
+	gw := httptest.NewServer(h)
+	defer gw.Close()
+	resp, err := gw.Client().Post(gw.URL, "application/json",
+		strings.NewReader(`{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() // and never read: the socket buffers fill, and the gateway's write blocks
+	select {
+	case r := <-results:
+		if !r.CallerGone {
+			t.Fatalf("result %+v: a stalled client is a caller gone", r)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the gateway kept writing to a client that stopped reading")
+	}
+}

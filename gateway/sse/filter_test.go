@@ -74,3 +74,18 @@ func abs(n int) int {
 	}
 	return n
 }
+
+// TestReset: a reset parser or filter carries nothing of the last stream
+// into the next: not a partial line, an event's data, a pending "\r", or an
+// event being withheld.
+func TestReset(t *testing.T) {
+	var got []string
+	f := Filter{Drop: func(_, d []byte) bool { return string(d) == "drop" }}
+	f.OnEvent = func(_, d []byte) { got = append(got, string(d)) }
+	f.Pass([]byte("data: drop\ndata: half\r"))
+	f.Reset()
+	out := string(f.Pass([]byte("\ndata: x\n\n"))) + string(f.End())
+	if out != "\ndata: x\n\n" || len(got) != 1 || got[0] != "x" {
+		t.Fatalf("after Reset: forwarded %q, events %q", out, got)
+	}
+}

@@ -129,3 +129,19 @@ spec: {alias: local, pool: [{backend: local, deployment: qwen}]}
 		t.Fatal("the fixed config was not applied")
 	}
 }
+
+// TestUpstreamTransport: the settings the pool depends on under load, so a
+// change to them is a decision, not an accident.
+func TestUpstreamTransport(t *testing.T) {
+	tr := upstreamTransport()
+	switch {
+	case tr.Proxy != nil:
+		t.Error("a proxy from the environment: egress is the mesh's (ADR 0004)")
+	case tr.MaxIdleConns != 0 || tr.MaxIdleConnsPerHost < 256:
+		t.Errorf("idle connections capped at %d in all (%d per host): concurrent streams would re-handshake", tr.MaxIdleConns, tr.MaxIdleConnsPerHost)
+	case tr.HTTP2 == nil || tr.HTTP2.SendPingTimeout == 0:
+		t.Error("no HTTP/2 pings: a dead connection under a long stream goes unnoticed")
+	case tr.ResponseHeaderTimeout != 0:
+		t.Error("a response-header timeout cuts long non-streamed answers; it is the route's to set")
+	}
+}

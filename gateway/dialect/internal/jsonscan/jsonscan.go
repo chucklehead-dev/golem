@@ -26,8 +26,12 @@ type Visitor func(name []byte, d *Decoder) error
 // Decoder wraps a jsontext.Decoder over one body, so a visitor can record
 // where a value lies.
 type Decoder struct {
-	dec  *jsontext.Decoder
-	rd   bytes.Reader
+	dec *jsontext.Decoder
+	// buf holds the body being scanned. jsontext reads a *bytes.Buffer in
+	// place; from any other reader it copies the body into a buffer of its
+	// own, which the pooled decoder then keeps: an 8 MiB request pinned
+	// 16 MiB per P.
+	buf  bytes.Buffer
 	name []byte
 }
 
@@ -47,7 +51,7 @@ func (d *Decoder) SkipValue() error { return d.dec.SkipValue() }
 
 var pool = sync.Pool{New: func() any {
 	d := &Decoder{name: make([]byte, 0, 64)}
-	d.dec = jsontext.NewDecoder(&d.rd)
+	d.dec = jsontext.NewDecoder(&d.buf)
 	return d
 }}
 
@@ -58,9 +62,13 @@ var pool = sync.Pool{New: func() any {
 // (ADR 0037).
 func Object(body []byte, visit Visitor) error {
 	d := pool.Get().(*Decoder)
-	defer pool.Put(d)
-	d.rd.Reset(body)
-	d.dec.Reset(&d.rd)
+	d.buf = *bytes.NewBuffer(body)
+	d.dec.Reset(&d.buf)
+	defer func() { // the pooled decoder keeps no view of the body
+		d.buf = bytes.Buffer{}
+		d.dec.Reset(&d.buf)
+		pool.Put(d)
+	}()
 
 	if d.dec.PeekKind() != '{' {
 		return ErrNotObject
