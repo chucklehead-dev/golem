@@ -65,6 +65,35 @@ past it. The financial boundary is the provider account's:
   narrows that by a call and refuses calls that declare no worst case; it
   is not a ceiling either.
 
+## Telemetry transport: the trusted hop and its owner
+
+Ledger rows, traces and metrics leave the gateway over OTLP/HTTP. What
+golem's code does, and what it leaves to the deployment:
+
+- **Gateway to a collector in its own pod** (ADR 0043's sidecar
+  variant): a literal loopback address, plaintext. The hop stays inside
+  the pod's network namespace, which only the pod's own containers
+  share. Golem refuses plaintext to any other address, the name
+  `localhost` included.
+- **Gateway to a DaemonSet collector** (ADR 0043's other variant): the
+  node's address, which is not loopback from the pod, so the hop is over
+  TLS, and the collector must present a certificate for that address.
+  Golem has no CA option of its own, so a private CA is trusted through
+  the container's system roots (`SSL_CERT_FILE` or `SSL_CERT_DIR`).
+- **Gateway to any other collector:** server-authenticated TLS. The
+  gateway verifies the collector's certificate against the system roots
+  and **presents no client certificate**.
+- **Collector onward (to the central collector and ClickHouse):** the
+  collector's own configuration. Golem neither sets nor checks it.
+
+**Who authenticates the client is not yet decided** (golem#7). If
+server-authenticated TLS satisfies policy for a hop, the release
+checklist says so. If policy requires client certificates, the
+deployment names who presents them on each non-loopback hop (the
+gateway, the node-local collector or a mesh sidecar) and demonstrates
+it. Until then, mTLS is an assumption about the deployment, not a
+property golem provides.
+
 ## Incident and delivery requirements (ADR 0041)
 
 [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) specifies the denylist lifecycle, reserved restrictive-action

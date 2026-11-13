@@ -224,6 +224,9 @@ func setupTelemetry(where string) (*telemetry.Telemetry, func()) {
 // releaseGate is the production-publication gate (golem#5): until M1's
 // gates pass the gateway runs standalone only (no bucket source exists to
 // serve published snapshots from), and standalone listens on loopback only.
+// Lifting it requires golem#7's deployment evidence first: provider-account
+// spending limits, OTLP TLS against the real collector, the mTLS owner of
+// each hop, and DNS re-resolution between connections.
 func releaseGate(standalone, listen string) error {
 	if standalone == "" {
 		return errors.New("only --standalone <dir> is built so far; the bucket source comes with the publisher (roadmap M1)")
