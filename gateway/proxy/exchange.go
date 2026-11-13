@@ -2,12 +2,9 @@ package proxy
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
@@ -38,192 +35,42 @@ type exchange struct {
 	msgWant       func([]byte) bool
 	msgOn, chatOn func(event, data []byte)
 
-	// The write stall: no write to the caller may stay blocked longer than
-	// stall. A watchdog ticking every half stall counts the writes started
-	// and finished, and cuts one still in flight at three ticks running (by
-	// a deadline in the past). Each write costs two atomic adds; a timer per
-	// write cost a third of the fast path. A deadline left set between
-	// writes would not do: under HTTP/2 it resets the stream when it passes,
-	// written to or not, and a provider may be silent longer than stall.
-	w                 http.ResponseWriter
-	rc                *http.ResponseController
-	stall             time.Duration
-	started, finished atomic.Uint64
-	watchdog          *time.Timer
-	watchMu           sync.Mutex // guards the rest, for the watchdog
-	watching          bool
-	lastStarted       uint64
-	seen              int
-
-	// The upstream's bounds (the route's timeouts): one timer for the wait
-	// for headers and then the whole call, and the idle watchdog, which
-	// counts the reads from the provider. Either cancels the upstream
-	// request with its cause.
-	upMu       sync.Mutex
-	upCancel   context.CancelCauseFunc // nil: no upstream call
-	upHeaders  bool                    // still waiting for the headers
-	upDeadline time.Time               // the whole call's
-	lifeTimer  *time.Timer
-	idle       time.Duration
-	idleTimer  *time.Timer
-	reads      atomic.Uint64
-	lastReads  uint64
-	quietTicks int
+	// The caller's side of the response: each write has a deadline, set
+	// before it and cleared after (net/http's idiom, as nginx's
+	// send_timeout), so a client that stops reading is a caller gone, and
+	// no deadline is armed while the provider is silent.
+	w          http.ResponseWriter
+	rc         *http.ResponseController
+	stall      time.Duration
+	noDeadline bool // the writer has none (a test's recorder)
 }
 
 var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
 	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
 	ex.filter.Drop = dropUsageOnly
-	ex.watchdog = time.AfterFunc(time.Hour, ex.tick)
-	ex.watchdog.Stop()
-	ex.lifeTimer = time.AfterFunc(time.Hour, ex.lifeFired)
-	ex.lifeTimer.Stop()
-	ex.idleTimer = time.AfterFunc(time.Hour, ex.idleTick)
-	ex.idleTimer.Stop()
 	return ex
 }}
 
-// Why an upstream call was cut (context.Cause of its context).
-var (
-	errHeadersTimeout = errors.New("the provider sent no response headers within the route's headers timeout")
-	errMaxDuration    = errors.New("the call reached the route's maximum duration")
-	errIdle           = errors.New("the provider sent nothing for the route's idle timeout")
-)
-
-// startUpstream arms the route's bounds over an upstream call; a zero bound
-// is none.
-func (ex *exchange) startUpstream(cancel context.CancelCauseFunc, started time.Time, maxD, headers, idle time.Duration) {
-	ex.upMu.Lock()
-	defer ex.upMu.Unlock()
-	ex.upCancel, ex.idle, ex.upHeaders = cancel, idle, true
-	ex.upDeadline = time.Time{}
-	if maxD > 0 {
-		ex.upDeadline = started.Add(maxD)
-	}
-	switch first := headers; {
-	case first > 0 && (maxD == 0 || first < maxD):
-		ex.lifeTimer.Reset(first)
-	case maxD > 0:
-		ex.lifeTimer.Reset(time.Until(ex.upDeadline))
-	}
-}
-
-// gotHeaders moves from the headers' bound to the whole call's, and starts
-// the idle watchdog.
-func (ex *exchange) gotHeaders() {
-	ex.upMu.Lock()
-	defer ex.upMu.Unlock()
-	ex.upHeaders = false
-	ex.lifeTimer.Stop()
-	if !ex.upDeadline.IsZero() {
-		ex.lifeTimer.Reset(time.Until(ex.upDeadline))
-	}
-	if ex.idle > 0 {
-		ex.lastReads, ex.quietTicks = ex.reads.Load(), 0
-		ex.idleTimer.Reset(ex.idle / 2)
-	}
-}
-
-// endUpstream disarms the bounds: the upstream call is over.
-func (ex *exchange) endUpstream() {
-	ex.upMu.Lock()
-	defer ex.upMu.Unlock()
-	ex.upCancel = nil
-	ex.lifeTimer.Stop()
-	ex.idleTimer.Stop()
-}
-
-func (ex *exchange) lifeFired() {
-	ex.upMu.Lock()
-	defer ex.upMu.Unlock()
-	switch {
-	case ex.upCancel == nil:
-	case ex.upHeaders && (ex.upDeadline.IsZero() || time.Now().Before(ex.upDeadline)):
-		ex.upCancel(errHeadersTimeout)
-	default:
-		ex.upCancel(errMaxDuration)
-	}
-}
-
-// idleTick: no read from the provider over two ticks half the idle bound
-// apart is a silence of at least the bound.
-func (ex *exchange) idleTick() {
-	ex.upMu.Lock()
-	defer ex.upMu.Unlock()
-	if ex.upCancel == nil {
-		return
-	}
-	if n := ex.reads.Load(); n == ex.lastReads {
-		ex.quietTicks++
-	} else {
-		ex.lastReads, ex.quietTicks = n, 0
-	}
-	if ex.quietTicks >= 2 {
-		ex.upCancel(errIdle)
-		return
-	}
-	ex.idleTimer.Reset(ex.idle / 2)
-}
-
-// read reads the provider's response, counted for the idle watchdog.
-func (ex *exchange) read(body io.Reader) (int, error) {
-	n, err := body.Read(ex.buf)
-	if n > 0 {
-		ex.reads.Add(1)
-	}
-	return n, err
-}
-
-// startWrites readies the exchange to write a response to w, and starts
-// the watchdog; endWrites stops it.
+// startWrites readies the exchange to write a response to w.
 func (ex *exchange) startWrites(w http.ResponseWriter, stall time.Duration) {
-	ex.watchMu.Lock()
-	defer ex.watchMu.Unlock()
-	ex.w, ex.rc, ex.stall = w, http.NewResponseController(w), stall
-	ex.watching, ex.seen = true, 0
-	ex.watchdog.Reset(stall / 2)
+	ex.w, ex.rc, ex.stall, ex.noDeadline = w, http.NewResponseController(w), stall, false
 }
 
-func (ex *exchange) endWrites() {
-	ex.watchMu.Lock()
-	defer ex.watchMu.Unlock()
-	ex.watching = false
-	ex.watchdog.Stop()
-}
-
-// write writes b to the caller (and flushes it, for a stream).
+// write writes b to the caller (and flushes it, for a stream), failing if
+// the caller has not taken it within the stall.
 func (ex *exchange) write(b []byte, flush bool) error {
-	ex.started.Add(1)
+	if !ex.noDeadline {
+		ex.noDeadline = ex.rc.SetWriteDeadline(time.Now().Add(ex.stall)) != nil
+	}
 	_, err := ex.w.Write(b)
 	if err == nil && flush {
 		ex.rc.Flush() // a dead connection fails the next write
 	}
-	ex.finished.Add(1)
+	if !ex.noDeadline {
+		ex.rc.SetWriteDeadline(time.Time{})
+	}
 	return err
-}
-
-// tick is the watchdog: the same write in flight at three ticks half a
-// stall apart has been blocked at least the stall, and is cut.
-func (ex *exchange) tick() {
-	ex.watchMu.Lock()
-	defer ex.watchMu.Unlock()
-	if !ex.watching {
-		return
-	}
-	s := ex.started.Load()
-	if ex.finished.Load() < s && s == ex.lastStarted {
-		ex.seen++
-	} else {
-		ex.seen = 0
-	}
-	ex.lastStarted = s
-	if ex.seen >= 2 {
-		ex.rc.SetWriteDeadline(time.Now()) // the blocked write fails: the caller is gone
-		ex.watching = false
-		return
-	}
-	ex.watchdog.Reset(ex.stall / 2)
 }
 
 // send forwards a stream's bytes to the caller as they come; a failed or
@@ -252,10 +99,7 @@ func getExchange() *exchange {
 // release returns the exchange to the pool. The parser and filter keep
 // bounded buffers (their Reset); tail is let go if a response grew it large.
 func (ex *exchange) release() {
-	ex.endWrites()
-	ex.watchMu.Lock()
 	ex.w, ex.rc = nil, nil // the pool must not keep a finished response
-	ex.watchMu.Unlock()
 	if cap(ex.tail) > maxRetained {
 		ex.tail = nil // a large response's copy is let go, not the exchange
 	}

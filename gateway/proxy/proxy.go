@@ -155,10 +155,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// One attempt. (Retries and failover before the first byte go here; a
 	// retry needs the rewritten body kept until the attempt is committed.)
 	// The route's bounds: the caller's going away still cancels it too.
-	upCtx, cancelUp := context.WithCancelCause(ctx)
-	defer cancelUp(nil)
-	ex.startUpstream(cancelUp, started, rt.MaxDuration, rt.Headers, rt.Idle)
-	defer ex.endUpstream()
+	upCtx, lim := bound(ctx, started, rt)
+	defer lim.end()
 	up, ub := upstreamRequest(upCtx, r, target, out)
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
@@ -180,7 +178,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	ex.gotHeaders()
+	lim.gotHeaders()
 
 	for _, k := range forwardResponse {
 		if v := resp.Header[k]; v != nil {
@@ -191,9 +189,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	streamed := req.stream && resp.StatusCode == http.StatusOK
 	res := Result{RequestID: reqID, Principal: principal, Target: target, Status: resp.StatusCode}
 	if streamed {
-		res.Usage, res.Err = h.stream(w, resp.Body, ex)
+		res.Usage, res.Err = h.stream(w, lim.body(resp.Body), ex)
 	} else {
-		res.Usage, res.Err = h.whole(w, resp.Body, ex)
+		res.Usage, res.Err = h.whole(w, lim.body(resp.Body), ex)
 	}
 	// The caller is gone if a write to it failed, or if its request ended
 	// first (the upstream read then fails with its context).
@@ -352,12 +350,11 @@ func outcome(res Result, cut bool) (outcome, origin, code string) {
 // the same bytes to the dialect's usage reader.
 func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (canon.Usage, error) {
 	ex.startWrites(w, cmp.Or(h.WriteStall, 30*time.Second))
-	defer ex.endWrites()
 	filter := ex.startStream(h.Dialect)
 	send := ex.send
 	var cut error
 	for {
-		n, err := ex.read(body)
+		n, err := body.Read(ex.buf)
 		if n > 0 {
 			var ok bool
 			if filter {
@@ -389,11 +386,10 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 // bytes to read its usage from.
 func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (canon.Usage, error) {
 	ex.startWrites(w, cmp.Or(h.WriteStall, 30*time.Second))
-	defer ex.endWrites()
 	ex.tail = ex.tail[:0]
 	var cut error
 	for {
-		n, err := ex.read(body)
+		n, err := body.Read(ex.buf)
 		if n > 0 {
 			if werr := ex.write(ex.buf[:n], false); werr != nil {
 				cut, ex.callerGone = errCallerGone, true

@@ -66,12 +66,11 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    are a few KB) and the default `MaxHeaderValueCount`; `ReadHeaderTimeout`
    10 s, idle keep-alives closed after two minutes, HTTP/2 at most 256
    streams per connection with pings after 30 s of silence. No
-   `WriteTimeout` (streams are long): instead no write to the caller may
-   stay blocked longer than `WriteStall` (30 s). A watchdog per response,
-   ticking every half stall, cuts a write still in flight at three ticks
-   running; a deadline left set between writes would reset an HTTP/2
-   stream whenever the provider pauses that long. A client that stops
-   reading is a caller gone.
+   `WriteTimeout` (streams are long): instead each write to the caller has
+   a deadline (`WriteStall`, 30 s; `ResponseController.SetWriteDeadline`
+   set before it and cleared after, as nginx's `send_timeout`), so a client
+   that stops reading is a caller gone, and no deadline is armed while the
+   provider is silent (under HTTP/2 an armed one resets the stream).
 2. **Frontend.** `ServeMux` method-and-path patterns select the dialect
    (`POST /v1/chat/completions`, `POST /v1/messages`, ...). The body is read
    into a pooled buffer with a size cap (`http.MaxBytesReader`). A
@@ -274,6 +273,9 @@ without a preflight it never gets. SDKs and curl pass all three.
   whole call (30 min), `headers` for the response's headers (the whole
   call by default: a non-streamed answer's come at its end) and `idle` for
   a provider's silence once it has begun (5 min, past a reasoning pause).
+  They take the usual forms (nginx's `proxy_read_timeout`, Envoy's
+  `stream_idle_timeout` and `max_stream_duration`): a context deadline for
+  the call, a timer for the headers, and an idle timer reset by every read.
   A bound that fires cancels the upstream request with its cause: before
   the headers, a 503 that names it; after, the cut-stream path (accounted,
   `upstream.stream_failed`, aborted). Renewals stop holding a call's slot
