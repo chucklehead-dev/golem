@@ -297,6 +297,31 @@ func TestLedgerQueueEmitDuringShutdown(t *testing.T) {
 	}
 }
 
+// TestLedgerQueueFlushDuringShutdown: a ForceFlush that began before a
+// Shutdown which stopped the worker returns, rather than waiting forever
+// on a worker that is gone. The flush is held before its request until the
+// shutdown has finished.
+func TestLedgerQueueFlushDuringShutdown(t *testing.T) {
+	q := NewLedgerQueue(&counting{}, 64, 8, time.Millisecond)
+	started, release := make(chan struct{}), make(chan struct{})
+	q.flushing = func() { close(started); <-release }
+	flushed := make(chan error, 1)
+	go func() { flushed <- q.ForceFlush(context.Background()) }()
+	<-started
+	if err := q.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("ForceFlush after shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ForceFlush waits on a worker that shut down")
+	}
+}
+
 // counting counts the rows it took; it may fail every export, or block
 // each until its context ends.
 type counting struct {

@@ -15,15 +15,18 @@ failed. Tests run under `go test -race ./...`.
 | A failed ledger batch is retried with bounded backoff, not dropped (collector restart) | `gateway/telemetry` `TestLedgerQueueRetries` | — | ee14c74 |
 | A batch the collector took but did not acknowledge is resent whole, each row keeping its event_id; deduplication by event counts it once | `TestLedgerQueuePartialDelivery`; `control/watermark` `TestAgainstBruteForce` (rows delivered twice) | — | edfadd1 |
 | Shutdown racing emission, retries or an export in flight keeps its deadline and accounts for every row (delivered + failed + dropped = emitted) | `TestLedgerQueueShutdownRaces` (three cases, -race; a stress test, which a logical race between atomics can pass) | yes | edfadd1 |
-| A row past the closed check when Shutdown begins is queued before the worker's last drain, so delivered or counted: emission and shutdown share a lock | `TestLedgerQueueEmitDuringShutdown` (the emission held between its check and its enqueue) | yes | this commit |
+| A row past the closed check when Shutdown begins is queued before the worker's last drain, so delivered or counted: emission and shutdown share a lock | `TestLedgerQueueEmitDuringShutdown` (the emission held between its check and its enqueue) | yes | 2c0d42e |
+| A ForceFlush racing Shutdown returns once the worker has stopped, never waiting on it forever | `TestLedgerQueueFlushDuringShutdown` (the flush held until the shutdown finished) | yes (hangs) | this commit |
 | Rows emitted after shutdown are counted, never lost silently | `TestLedgerQueueShutdown` | — | 3d20567 |
 
-An estimate depends on reading the content of any valid JSON, whatever
-its layout (PR #6, on its branch): `gateway/dialect/internal/jsonscan`
-`TestStringBytesFormatting` and `FuzzStringBytes` (spaced, escaped
-names, mixed), `gateway/proxy` `TestEstimates` (an OpenAI event spaced,
-escaped, mixed). Ablated: yes, both the compact-only scanner and the
-unescaping. 53090b7 on security/request-accounting-hardening.
+A missing report is charged an upper bound, never an average (golem#3,
+PR #6, on its branch): output every byte of the response received a
+token, at most the request's `max_tokens × n`; input, if unreported,
+every request byte, the caller-cancelled case included. Nothing is
+recognised, so token-dense output, unknown fields and malformed events
+are not undercounted: `gateway/proxy` `TestEstimates`. Ablated: yes (the
+ceiling). f394c10 on security/request-accounting-hardening; it replaces
+53090b7's content scan.
 
 ## golem#5: release gates
 
@@ -37,7 +40,7 @@ unescaping. 53090b7 on security/request-accounting-hardening.
 | A request body must arrive within BodyTimeout | `TestRequestBoundary` (a trickling body) | yes (hangs) | 8165990 |
 | A response past MaxResponse is cut | `TestRequestBoundary` (past the ceiling) | — | 8165990 |
 | Upstream connections to metadata, link-local, unspecified or multicast addresses are refused always; to loopback or private ones unless granted | `gateway/snapshot` `TestCheckDestination` (IPv4-mapped and CGNAT included), `TestDialRefused` (on a real dial) | — | 79e0d0a |
-| OTLP export uses TLS unless the collector is a literal loopback address (a name, localhost included, gets TLS) | `gateway/telemetry` `TestPlaintextOK` (the decision; no live collector) | — | 79e0d0a; names this commit |
+| OTLP export uses TLS unless the collector is a literal loopback address (a name, localhost included, gets TLS) | `gateway/telemetry` `TestPlaintextOK` (the decision; no live collector) | — | 79e0d0a; names 2c0d42e |
 | Production publication stays disabled: the gateway runs standalone only, on loopback | `cmd/golem-gateway` `TestReleaseGate` | — | 434c819 |
 
 ## Not yet shown
