@@ -15,6 +15,9 @@ import (
 // ErrNotObject is returned when the body is not a single JSON object.
 var ErrNotObject = errors.New("jsonscan: the request body must be one JSON object")
 
+// ErrNotArray is a value that should be an array and is not.
+var ErrNotArray = errors.New("jsonscan: expected a JSON array")
+
 // Span is a value's position in the body: body[Start:End] is its raw JSON.
 type Span struct{ Start, End int }
 
@@ -175,4 +178,34 @@ func stringEnd(b []byte) int {
 		}
 	}
 	return len(b)
+}
+
+// Elements calls visit for each element of data, which must be exactly one
+// JSON array.
+func Elements(data []byte, visit func(elem jsontext.Value) error) error {
+	d := pool.Get().(*Decoder)
+	d.buf = *bytes.NewBuffer(data)
+	d.dec.Reset(&d.buf)
+	defer func() {
+		d.buf = bytes.Buffer{}
+		d.dec.Reset(&d.buf)
+		pool.Put(d)
+	}()
+	if d.dec.PeekKind() != '[' {
+		return ErrNotArray
+	}
+	if _, err := d.dec.ReadToken(); err != nil {
+		return err
+	}
+	for d.dec.PeekKind() != ']' {
+		v, err := d.dec.ReadValue()
+		if err != nil {
+			return err
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	_, err := d.dec.ReadToken() // ']'
+	return err
 }

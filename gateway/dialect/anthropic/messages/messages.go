@@ -4,9 +4,9 @@
 package messages
 
 import (
-	"encoding/json"
+	"bytes"
+	"encoding/json/jsontext"
 	"errors"
-	"strings"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
@@ -27,8 +27,39 @@ const (
 // escapes would bypass them.
 var serverTools = []string{"web_search", "web_fetch", "code_execution"}
 
-type tool struct {
-	Type string `json:"type"`
+// serverTool reports whether tools (a request's tools array of objects)
+// has a tool the provider runs itself. Each tool's type is read decoded
+// (whitespace and escapes cannot hide it) and its member name compared
+// without regard to case, as encoding/json would: a policy check fails
+// closed.
+func serverTool(tools []byte) (found bool, err error) {
+	err = jsonscan.Elements(tools, func(t jsontext.Value) error {
+		if t.Kind() != '{' {
+			return ErrField
+		}
+		return jsonscan.Object(t, func(name []byte, d *jsonscan.Decoder) error {
+			if !bytes.EqualFold(name, []byte("type")) {
+				return d.SkipValue()
+			}
+			v, _, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			if v.Kind() != '"' {
+				return ErrField
+			}
+			var buf [64]byte
+			typ, err := jsontext.AppendUnquote(buf[:0], v)
+			if err != nil {
+				return err
+			}
+			for _, prefix := range serverTools {
+				found = found || bytes.HasPrefix(typ, []byte(prefix))
+			}
+			return nil
+		})
+	})
+	return found, err
 }
 
 // known lists the request members golem forwards without comment; others
@@ -101,16 +132,12 @@ func (r *Request) Scan(body []byte) error {
 			if err != nil {
 				return err
 			}
-			var tools []tool
-			if err := json.Unmarshal(v, &tools); err != nil {
-				return ErrField
+			server, err := serverTool(v)
+			if err != nil {
+				return ErrField // a shape the check could not read must not pass as no server tool
 			}
-			for _, candidate := range tools {
-				for _, prefix := range serverTools {
-					if strings.HasPrefix(candidate.Type, prefix) {
-						r.Flags |= FlagServerTools
-					}
-				}
+			if server {
+				r.Flags |= FlagServerTools
 			}
 		default:
 			switch string(name) {

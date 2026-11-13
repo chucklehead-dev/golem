@@ -66,13 +66,21 @@ func TestEstimates(t *testing.T) {
 		h, rows, res := priced(t, OpenAIChat, cutAfter{[][]byte{chunk, chunk, chunk}, 200})
 		body := `{"model":"claude","stream":true,"messages":[{"role":"user","content":"` + strings.Repeat("x", 4000) + `"}]}`
 		serveCut(h, "/v1/chat/completions", body)
-		// Input from the request's size; output conservatively from every
-		// upstream body byte, not merely one token per SSE chunk.
-		if want := (canon.Usage{Input: int64(len(body)) / 4, Output: int64(3*len(chunk)+3) / 4}); res.Usage != want || res.Cost == 0 {
+		// Input from the request's size, output a token an ordinary chunk
+		// (its framing is not output).
+		if want := (canon.Usage{Input: int64(len(body)) / 4, Output: 3}); res.Usage != want || res.Cost == 0 {
 			t.Fatalf("usage %+v cost %d, want %+v", res.Usage, res.Cost, want)
 		}
 		if row := rowOf(t, rows); row["estimated_fraction"] != 1.0 {
 			t.Fatalf("estimated_fraction %v: all of it estimated", row["estimated_fraction"])
+		}
+	})
+	t.Run("an OpenAI stream with one large chunk, cut", func(t *testing.T) {
+		big := []byte(`data: {"choices":[{"delta":{"content":"` + strings.Repeat("y", 4000) + `"}}],"usage":null}` + "\n\n")
+		h, _, res := priced(t, OpenAIChat, cutAfter{[][]byte{big}, 200})
+		serveCut(h, "/v1/chat/completions", `{"model":"claude","stream":true,"messages":[]}`)
+		if res.Usage.Output != 1000 { // its content, at 4 bytes a token, not one token
+			t.Fatalf("usage %+v: a large chunk is charged by its content", res.Usage)
 		}
 	})
 	t.Run("an Anthropic stream cut before its message_delta", func(t *testing.T) {

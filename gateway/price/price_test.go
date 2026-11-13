@@ -22,4 +22,7 @@ func TestCost(t *testing.T) {
 	if _, ok := Worst(1, math.MaxInt64, 2, p); ok {
 		t.Error("Worst accepted maxOutput * completions overflow")
 	}
+	if c := Cost(canon.Usage{Output: 1 << 40}, snapshot.Price{OutputPerMTok: 75_000_000}); c != MaxCost {
+		t.Errorf("an absurd usage report costs %d, want MaxCost: it must saturate, not wrap", c)
+	}
 }

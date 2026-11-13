@@ -411,7 +411,6 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 	for {
 		n, err := body.Read(ex.buf)
 		if n > 0 {
-			ex.responseBytes += int64(n)
 			var ok bool
 			if filter {
 				ok = send(ex.filter.Pass(ex.buf[:n]))
@@ -447,13 +446,14 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 	for {
 		n, err := body.Read(ex.buf)
 		if n > 0 {
-			ex.responseBytes += int64(n)
 			if werr := ex.write(ex.buf[:n], false); werr != nil {
 				cut, ex.callerGone = errCallerGone, true
 				break
 			}
 			if len(ex.tail)+n <= maxRetained {
 				ex.tail = append(ex.tail, ex.buf[:n]...)
+			} else {
+				ex.unkept += int64(n)
 			}
 		}
 		if err == io.EOF {

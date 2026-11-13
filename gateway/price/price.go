@@ -12,9 +12,18 @@ import (
 
 // Cost is usage's cost under p, in micro-units.
 func Cost(u canon.Usage, p snapshot.Price) int64 {
-	n := u.Input*p.InputPerMTok + u.Output*p.OutputPerMTok + u.CacheRead*p.CacheReadPerMTok + u.CacheWrite*p.CacheWritePerMTok
-	return halfEven(n, 1_000_000)
+	n, ok := numerator([2]int64{u.Input, p.InputPerMTok}, [2]int64{u.Output, p.OutputPerMTok},
+		[2]int64{u.CacheRead, p.CacheReadPerMTok}, [2]int64{u.CacheWrite, p.CacheWritePerMTok})
+	if !ok {
+		return MaxCost // an absurd report saturates: never wraps to a small or negative spend
+	}
+	return min(halfEven(n, 1_000_000), MaxCost)
 }
+
+// MaxCost is the most one call is charged (nine billion units of the
+// currency): a provider's absurd usage report is charged this, which ends
+// any budget, and sums of a few such costs cannot overflow the counters.
+const MaxCost = math.MaxInt64 / 1024
 
 // Worst is a strict scope's worst-case cost (ADR 0031, 0038): every input
 // byte a token at the full input rate, and the output cap at the output

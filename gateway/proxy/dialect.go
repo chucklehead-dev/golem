@@ -134,16 +134,18 @@ func (ex *exchange) estimate(d Dialect, requestBytes int64) (total, estimated ca
 		}
 	} else {
 		u, final, content, deltas = ex.chatUsage.Usage, ex.chatUsage.Final, ex.chatUsage.ContentBytes, ex.chatUsage.Deltas
-		// OpenAI chunks are not scanned unless they may contain usage. Count
-		// every body byte so one large chunk cannot be charged as one token;
-		// SSE/JSON framing makes this a conservative estimate.
-		content = max(content, ex.responseBytes)
+		// A whole response's bytes past what was kept count as content: they
+		// were never seen (conservative, and rare).
 	}
 	if final {
 		return u, canon.Usage{}
 	}
 	total = u
-	if out := max((content+bytesPerToken-1)/bytesPerToken, deltas); out > u.Output {
+	out := max((content+bytesPerToken-1)/bytesPerToken, deltas)
+	if d == OpenAIChat { // a token a small chunk, plus the large chunks' content, plus what was not kept
+		out = deltas + (content+ex.unkept+bytesPerToken-1)/bytesPerToken
+	}
+	if out > u.Output {
 		total.Output, estimated.Output = out, out-u.Output
 	}
 	if u.Input == 0 && u.CacheRead == 0 && u.CacheWrite == 0 { // no message_start, or OpenAI's (only at the end)

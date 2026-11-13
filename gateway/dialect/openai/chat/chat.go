@@ -260,6 +260,10 @@ type StreamUsage struct {
 	Deltas       int64
 }
 
+// largeChunk is the size past which a chunk's content is measured rather
+// than counted as a token.
+const largeChunk = 512
+
 // contentKeys hold a chunk's or a response's content: text, reasoning, a
 // refusal and a tool call's arguments.
 var contentKeys = []string{"content", "reasoning_content", "refusal", "arguments"}
@@ -295,7 +299,16 @@ func mayHaveUsage(data []byte) bool {
 
 // OnEvent reads one chunk; only a chunk that may carry usage is scanned.
 func (u *StreamUsage) OnEvent(_, data []byte) {
-	u.Deltas++
+	// An ordinary chunk is a token or two inside about 200 bytes of
+	// framing (id, model, choices): counted as one, not measured, which
+	// would cost a scan per chunk and, by its bytes, charge forty times the
+	// output. A large chunk (a provider batching its output) has its
+	// content measured.
+	if len(data) > largeChunk {
+		u.ContentBytes += int64(jsonscan.StringBytes(data, contentKeys...))
+	} else {
+		u.Deltas++
+	}
 	if mayHaveUsage(data) {
 		u.Response(data)
 	}
@@ -304,7 +317,7 @@ func (u *StreamUsage) OnEvent(_, data []byte) {
 // Response reads usage from a JSON object (a chunk or a whole response).
 // OpenAI's prompt_tokens include the cached ones; canon.Usage.Input does not.
 func (u *StreamUsage) Response(body []byte) {
-	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
+	u.ContentBytes += int64(jsonscan.StringBytes(body, contentKeys...))
 	var got canon.Usage
 	seen, input, output := false, false, false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
