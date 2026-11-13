@@ -67,6 +67,7 @@ func TestLedgerQueue(t *testing.T) {
 
 	failing := &recordingExp{fail: true}
 	q = NewLedgerQueue(failing, 10, 5, time.Hour)
+	q.SetBackoff(time.Millisecond)
 	for range 5 {
 		q.OnEmit(t.Context(), &r)
 	}
@@ -118,5 +119,38 @@ func TestLedgerQueueForceFlush(t *testing.T) {
 	defer exp.mu.Unlock()
 	if exp.got != 7 {
 		t.Fatalf("flushed %d of 7", exp.got)
+	}
+}
+
+// flaky fails its first n exports.
+type flaky struct {
+	recordingExp
+	failures int
+}
+
+func (f *flaky) Export(ctx context.Context, rs []sdklog.Record) error {
+	f.mu.Lock()
+	if f.failures > 0 {
+		f.failures--
+		f.mu.Unlock()
+		return errors.New("collector restarting")
+	}
+	f.mu.Unlock()
+	return f.recordingExp.Export(ctx, rs)
+}
+
+// TestLedgerQueueRetries: a collector that restarts loses no rows: a failed
+// batch is retried, with backoff, until it is taken.
+func TestLedgerQueueRetries(t *testing.T) {
+	exp := &flaky{failures: 3}
+	q := NewLedgerQueue(exp, 100, 10, time.Hour)
+	q.SetBackoff(time.Millisecond)
+	var r sdklog.Record
+	for range 25 {
+		q.OnEmit(t.Context(), &r)
+	}
+	q.Shutdown(t.Context())
+	if exp.got != 25 || q.Failed.Load() != 0 || q.Retried.Load() != 3 {
+		t.Fatalf("delivered %d of 25, failed %d, retried %d", exp.got, q.Failed.Load(), q.Retried.Load())
 	}
 }

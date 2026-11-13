@@ -237,7 +237,12 @@ from the snapshot; `-entra-tenant`), the
 limiter in the request path (402 budgets, 429 concurrency, cancellation
 holding the slot until the upstream closes), `golemctl config validate`
 and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway
-is the implicit local principal; with one, its dev keys are required. The bucket source, the on-disk
+has one implicit local principal, which takes only the gateway's own local
+key (a dev key generated on first start into a file only its user may
+read, printed as an export line; `-local-key`): the browser guard keeps web
+pages out, the key keeps out the machine's other programs and users. With
+a LocalIdentity, its dev keys are required, each honoured only for a
+listed owner of its kind in its scope. The bucket source, the on-disk
 last-good copy, status writes and the denylist are next.
 
 `golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop
@@ -262,6 +267,13 @@ without a preflight it never gets. SDKs and curl pass all three.
 - The fast path allocates per request: the pooled body buffer (returned),
   the Principal (cached), one span pair, one access-log record. Target
   well under 50 allocations; tracked by `testing.B.Loop` benchmarks in CI.
+- Each upstream connection's address is checked as it is made (after the
+  name resolved, so a name that resolves elsewhere later is caught):
+  cloud metadata, link-local, unspecified and multicast addresses are
+  refused always; loopback and private ones (RFC 1918, ULA, CGNAT) unless
+  the Backend grants them (`spec.network.allowPrivateAddresses`, for a
+  self-hosted or local model server). Telemetry, which carries the
+  ledger, goes over TLS unless the collector is on loopback (golem#5).
 - Transports are per deployment, every setting explicit
   (`snapshot.upstreamTransport`): idle connections bounded per host only
   (DefaultTransport's total of 100 re-handshook connections above 100
@@ -280,6 +292,15 @@ without a preflight it never gets. SDKs and curl pass all three.
   the headers, a 503 that names it; after, the cut-stream path (accounted,
   `upstream.stream_failed`, aborted). Renewals stop holding a call's slot
   a minute past its maximum duration.
+- Absent response bytes are not absent work (golem#4). A round trip that
+  failed where the provider cannot have seen it (a name that did not
+  resolve, a connection never made, a TLS handshake that failed) is free.
+  Any other failure before the headers is `uncertain`: charged its worst
+  case as an estimate until reconciliation (or, if the caller left first,
+  its input). After any ambiguous end (that, a cut, an abandoned
+  response) the call's slot is held for the provider's tail
+  (`ProviderTail`, 2 minutes, at most to the call's deadline), since the
+  provider may go on working.
 - Upstream TLS sessions resumed; DNS cached by the resolver, not golem.
 - SSE scanning reads lines from the tee without copying the payload when
   it is not a usage-bearing event (look for the event type first).

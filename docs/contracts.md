@@ -87,7 +87,7 @@ prevent double counting.
 | `cost_micros` | Int64 | in the configured currency's millionths; computed by golem |
 | `currency` | FixedString(3) | |
 | `price_version` | String | the `PriceList` version used |
-| `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away) or `failed`; the failure's §2 origin and §1 code |
+| `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away), `failed`, or `uncertain` (the call failed after the provider may have received it: charged its worst case as an estimate until reconciliation, golem#4); the failure's §2 origin and §1 code |
 | `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), output is counted from what was seen (about 4 bytes a token of content, at least a token a delta; a token per OpenAI chunk) and input, if not reported, from the request's size (4 bytes a token). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
 | `counted` | Bool | the site counter counts this event (a limiter numbered, or will number, it): its number comes in a numbering record. A row with no number is left out of known spend, which the counter covers, until its number arrives or the gap timeout passes (ADR 0043) |
@@ -206,7 +206,11 @@ non-agent applications and sensitive or residency-bound scopes; compatible
 (unknown features forwarded, exposure accepted until remediation) is the
 default for coding-agent routes under one standing approval. Names are bounded/sanitized or keyed-hashed before logging;
 values are never logged. Nightly diffs do not bound remediation time. These are enforced
-wherever they appear, and the list grows with the nightly review:
+wherever they appear, and the list grows with the nightly review. The
+mode is the scope's `features` (unset: restricted, but compatible on routes
+marked `agent`); restricted refuses unknown request members, unapproved
+`anthropic-beta` values (the route's `approvedBetas`) and unapproved
+`anthropic-version`s (`authz.feature_forbidden`):
 
 | Field or family | Policy |
 |---|---|

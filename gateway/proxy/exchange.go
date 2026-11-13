@@ -31,7 +31,8 @@ type exchange struct {
 	callerGone bool       // a write to the caller failed
 	// unkept is a whole response's bytes past tail's retention: an estimate
 	// counts them as content, never having seen them.
-	unkept int64
+	unkept   int64
+	received int64 // the response's bytes so far (MaxResponse)
 
 	// The usage readers' methods, bound once: a method value allocates
 	// each time it is taken, and the readers stay at these addresses.
@@ -102,7 +103,7 @@ func dropUsageOnly(_, data []byte) bool { return chat.UsageOnly(data) }
 
 func getExchange() *exchange {
 	ex := exchanges.Get().(*exchange)
-	ex.callerGone, ex.unkept = false, 0
+	ex.callerGone, ex.unkept, ex.received = false, 0, 0
 	return ex
 }
 

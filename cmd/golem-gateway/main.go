@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,7 +42,8 @@ func main() {
 	tenant := flag.String("entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
 	drainFor := flag.Duration("drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
 	unready := flag.Duration("unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
-	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port")
+	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless on loopback)")
+	localKeyFile := flag.String("local-key", "", "the file holding standalone's local key (generated on first use); default <user config dir>/golem/standalone-key")
 	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
@@ -73,7 +75,11 @@ func main() {
 			fail("Entra's signing keys: %v", err)
 		}
 	}
-	holder := &snapshot.Holder{Env: key.Dev, Entra: entra, OnApply: func(c *snapshot.Compiled) {
+	localKey, keyPath, err := loadLocalKey(*localKeyFile)
+	if err != nil {
+		fail("the local key: %v", err)
+	}
+	holder := &snapshot.Holder{Env: key.Dev, Entra: entra, LocalKey: localKey, OnApply: func(c *snapshot.Compiled) {
 		for _, s := range c.Snapshot.Entitlements.Scopes {
 			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Watermark: s.Watermark})
 		}
@@ -132,6 +138,9 @@ func main() {
 		close(drained)
 	})
 	fmt.Fprintf(os.Stderr, "golem-gateway standalone: %s on http://%s — for this machine only, not for shared use\n", *standalone, *listen)
+	if c, err := holder.Current(); err == nil && c.Snapshot.Entitlements.Implicit {
+		fmt.Fprintf(os.Stderr, "  its local key is in %s: export ANTHROPIC_API_KEY=$(cat %s) OPENAI_API_KEY=$(cat %s)\n", keyPath, keyPath, keyPath)
+	}
 	code := 0
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { // returns as the shutdown begins
 		slog.Error("golem-gateway", "err", err)
@@ -213,6 +222,34 @@ func setupTelemetry(where string) (*telemetry.Telemetry, func()) {
 			slog.Warn("golem-gateway: telemetry not flushed", "err", err)
 		}
 	}
+}
+
+// loadLocalKey reads standalone's local key, or makes one: a dev key in a
+// file only its user may read, kept across restarts so the developer's
+// tools keep working (ADR 0023; golem#5).
+func loadLocalKey(path string) (k, at string, err error) {
+	if path == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", "", err
+		}
+		path = filepath.Join(dir, "golem", "standalone-key")
+	}
+	if b, err := os.ReadFile(path); err == nil {
+		k := strings.TrimSpace(string(b))
+		if env, err := key.Parse(k); err == nil && env == key.Dev {
+			return k, path, nil
+		}
+		return "", "", fmt.Errorf("%s holds no glm_dev_ key: remove it, and a new one is made", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", "", err
+	}
+	k = key.New(key.Dev)
+	if err := os.WriteFile(path, []byte(k+"\n"), 0o600); err != nil {
+		return "", "", err
+	}
+	return k, path, nil
 }
 
 func fail(format string, args ...any) {

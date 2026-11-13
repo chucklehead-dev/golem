@@ -8,10 +8,13 @@ package proxy
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 	"uuid"
 
@@ -56,6 +59,16 @@ type Handler struct {
 	// Telemetry records each request's span, metrics and ledger row; nil
 	// records nothing.
 	Telemetry *telemetry.Telemetry
+	// BodyTimeout bounds reading a request's body (default 30 s);
+	// MaxResponse, the bytes of a provider's response forwarded (default
+	// 64 MiB; past it the response is cut, golem#5).
+	BodyTimeout time.Duration
+	MaxResponse int64
+	// ProviderTail is how long a call's slot is held after an ambiguous
+	// end (a cut, an abandoned response, an upstream failure the provider
+	// may have seen), bounded by the call's deadline: the provider may still
+	// be working (default 2 minutes; golem#4).
+	ProviderTail time.Duration
 	// WriteStall bounds how long one write to the caller may block (default
 	// 30 s): a client that stops reading would otherwise hold its slot and
 	// its upstream connection for as long as the provider streams.
@@ -75,6 +88,36 @@ var (
 	jsonType   = []string{"application/json"} // read-only
 	retryAfter = []string{"5"}                // read-only
 )
+
+// uncertainOutput is the output assumed of an uncertain call that set no
+// max_tokens (OpenAI's is optional): a long answer.
+const uncertainOutput = 8192
+
+// tailEnd is when an ambiguously ended call's slot is freed: the provider's
+// tail from now, but no later than the call's deadline.
+func (h *Handler) tailEnd(deadline time.Time) time.Time {
+	end := time.Now().Add(cmp.Or(h.ProviderTail, 2*time.Minute))
+	if !deadline.IsZero() && deadline.Before(end) {
+		end = deadline
+	}
+	return end
+}
+
+// reachedProvider reports whether a failed round trip may have reached the
+// provider: only a name that did not resolve, a connection that was never
+// made or a TLS handshake that failed certainly did not.
+func reachedProvider(err error) bool {
+	var dns *net.DNSError
+	var cert *tls.CertificateVerificationError
+	var rec tls.RecordHeaderError
+	if errors.As(err, &dns) || errors.As(err, &cert) || errors.As(err, &rec) {
+		return false
+	}
+	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "dial" {
+		return false
+	}
+	return true
+}
 
 // refusal is a request the path will not serve: a contract code and a
 // message that says what to do next.
@@ -121,6 +164,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rt, no := h.route(snap, principal, req.alias)
 	if no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
+	if no := h.features(r.Header, principal, rt, req); no != nil {
 		h.fail(ctx, w, no)
 		return
 	}
@@ -179,12 +226,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		call.Ended, call.Status, call.Outcome = time.Now(), c.Status, "failed"
 		call.ErrorOrigin, call.ErrorCode = string(c.Origin), c.Name
-		if r.Context().Err() != nil { // the caller left before the headers: theirs, not the provider's
+		// Absent response bytes are not absent work (golem#4): only a
+		// failure the provider cannot have seen is free. Else the call is
+		// charged an estimate, which reconciliation corrects, and its slot
+		// held for the provider's tail.
+		var cost int64
+		switch {
+		case !reachedProvider(err):
+		case r.Context().Err() != nil: // the caller left first: its input, at least, was read
 			call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
+			cost = price.Cost(canon.Usage{Input: requestBytes / bytesPerToken}, pr)
+		default: // a timeout or a reset after the request went out: the worst it may have cost
+			call.Outcome = "uncertain"
+			var ok bool
+			if cost, ok = price.Worst(requestBytes, cmp.Or(req.maxTokens, uncertainOutput), req.n, pr); !ok {
+				cost = price.MaxCost // too large to price: the most a call is charged
+			}
+		}
+		if cost > 0 {
+			call.Cost, call.EstimatedFraction = cost, 1
 		}
 		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
 		if ticket != nil {
-			ticket.Complete(acct, 0) // no upstream work: nothing billed
+			if cost == 0 {
+				ticket.Complete(acct, 0) // the provider never had it
+			} else {
+				ticket.Cancel(acct, cost)
+				ticket.EndAt(h.tailEnd(deadline))
+			}
 		}
 		Refuse(w, h.Dialect, c, msg)
 		return
@@ -228,13 +297,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// limiter's OnNumbered writes it with the number.
 	h.Telemetry.Ended(ctx, call)
 	if ticket != nil {
-		if res.CallerGone {
-			// The caller went away: what was seen is charged, and the slot
-			// is held until the upstream has ended (ADR 0041 §7.6), here the
-			// connection's close.
+		if res.CallerGone || cut {
+			// The response was abandoned or cut: what was seen is charged
+			// (estimated where unreported), and the slot is held for the
+			// provider's tail, which may go on working after the connection
+			// closes (ADR 0041 §7.6; golem#4).
 			ticket.Cancel(acct, res.Cost)
 			resp.Body.Close()
-			ticket.Ended(acct)
+			ticket.EndAt(h.tailEnd(deadline))
 		} else {
 			ticket.Complete(acct, res.Cost)
 		}
@@ -280,8 +350,13 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) (
 	if n := r.ContentLength; n > 0 && n <= h.MaxBody && int64(cap(*in)) < n+1 {
 		*in = make([]byte, 0, n+1) // one allocation, not a doubling series
 	}
+	// The body must arrive within BodyTimeout: a client trickling it in
+	// would hold a connection and a buffer before any admission (golem#5).
+	rc := http.NewResponseController(w)
+	rc.SetReadDeadline(time.Now().Add(cmp.Or(h.BodyTimeout, 30*time.Second))) // a test's recorder has none
 	var err error
 	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, h.MaxBody))
+	rc.SetReadDeadline(time.Time{})
 	switch _, tooBig := errors.AsType[*http.MaxBytesError](err); {
 	case tooBig:
 		return nil, &refusal{contract.RequestTooLarge, "the request body is larger than this gateway accepts"}
@@ -304,6 +379,41 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 		return nil, &refusal{contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows"}
 	}
 	return rt, nil
+}
+
+// approvedVersions are the anthropic-version values restricted mode
+// forwards.
+var approvedVersions = map[string]bool{"2023-06-01": true} // read-only
+
+// features applies the request-feature mode (ADR 0037, 0041 §3, §7.1):
+// in restricted mode (the default, but for agent routes) only approved
+// request members, betas and API versions are forwarded; compatible mode
+// forwards unknown ones. Known policy (policy below) applies in both.
+func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, req scanned) *refusal {
+	mode := p.Limits.Features
+	if mode == "" {
+		mode = "restricted"
+		if rt.Agent {
+			mode = "compatible"
+		}
+	}
+	if mode == "compatible" {
+		return nil
+	}
+	if req.unknown > 0 {
+		return &refusal{contract.AuthzFeatureForbidden, fmt.Sprintf("%d request member(s) golem does not know: this route forwards approved features only (restricted mode); its managers can approve them", req.unknown)}
+	}
+	for _, v := range hdr.Values("Anthropic-Beta") {
+		for b := range strings.SplitSeq(v, ",") {
+			if b = strings.TrimSpace(b); b != "" && !rt.Betas[b] {
+				return &refusal{contract.AuthzFeatureForbidden, "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
+			}
+		}
+	}
+	if v := hdr.Get("Anthropic-Version"); v != "" && !approvedVersions[v] {
+		return &refusal{contract.AuthzFeatureForbidden, "anthropic-version " + v + " is not approved (restricted mode)"}
+	}
+	return nil
 }
 
 // policy applies the scope's request policy (contracts.md §8): its
@@ -410,6 +520,10 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
+		if ex.received += int64(n); ex.received > cmp.Or(h.MaxResponse, defaultMaxResponse) {
+			cut = errUpstreamCut{errResponseTooLarge}
+			break
+		}
 		if n > 0 {
 			var ok bool
 			if filter {
@@ -445,6 +559,10 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
+		if ex.received += int64(n); ex.received > cmp.Or(h.MaxResponse, defaultMaxResponse) {
+			cut = errUpstreamCut{errResponseTooLarge}
+			break
+		}
 		if n > 0 {
 			if werr := ex.write(ex.buf[:n], false); werr != nil {
 				cut, ex.callerGone = errCallerGone, true
@@ -467,6 +585,11 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 	ex.readWhole(h.Dialect)
 	return ex.usage(h.Dialect, cut)
 }
+
+// errResponseTooLarge cuts a response past MaxResponse.
+var errResponseTooLarge = errors.New("the provider's response is larger than this gateway forwards")
+
+const defaultMaxResponse = 64 << 20
 
 // errCallerGone is a write to the caller that failed.
 var errCallerGone = errors.New("proxy: the caller went away")

@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -27,17 +30,30 @@ import (
 
 // OTLP sets up OTLP/HTTP exporters for traces, metrics and logs to the
 // collector at endpoint (host:port), installs them globally, and returns
-// the providers and their shutdown.
+// the providers and their shutdown. Telemetry carries the ledger: it goes
+// over TLS unless the collector is on this machine (a node-local agent on
+// loopback, ADR 0043; golem#5).
 func OTLP(ctx context.Context, endpoint string, res *resource.Resource) (Providers, func(context.Context) error, error) {
-	te, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpoint(endpoint), otlptracehttp.WithInsecure())
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return Providers{}, nil, fmt.Errorf("telemetry endpoint %q: want host:port", endpoint)
+	}
+	var traceOpts []otlptracehttp.Option
+	var metricOpts []otlpmetrichttp.Option
+	var logOpts []otlploghttp.Option
+	if plaintextOK(host) {
+		traceOpts, metricOpts, logOpts = []otlptracehttp.Option{otlptracehttp.WithInsecure()},
+			[]otlpmetrichttp.Option{otlpmetrichttp.WithInsecure()}, []otlploghttp.Option{otlploghttp.WithInsecure()}
+	}
+	te, err := otlptracehttp.New(ctx, append(traceOpts, otlptracehttp.WithEndpoint(endpoint))...)
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	me, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpoint(endpoint), otlpmetrichttp.WithInsecure())
+	me, err := otlpmetrichttp.New(ctx, append(metricOpts, otlpmetrichttp.WithEndpoint(endpoint))...)
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	le, err := otlploghttp.New(ctx, otlploghttp.WithEndpoint(endpoint), otlploghttp.WithInsecure())
+	le, err := otlploghttp.New(ctx, append(logOpts, otlploghttp.WithEndpoint(endpoint))...)
 	if err != nil {
 		return Providers{}, nil, err
 	}
@@ -129,4 +145,11 @@ func writeValue(enc *jsontext.Encoder, v attribute.Value) {
 	default:
 		enc.WriteToken(jsontext.String(v.Emit()))
 	}
+}
+
+// plaintextOK reports whether telemetry may go to host unencrypted: only
+// to this machine.
+func plaintextOK(host string) bool {
+	ip, err := netip.ParseAddr(host)
+	return host == "localhost" || err == nil && ip.IsLoopback()
 }

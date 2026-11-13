@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -42,5 +43,23 @@ func TestLocalOnly(t *testing.T) {
 				t.Fatalf("%d %s; want %d %s", w.Code, w.Body, tc.want, tc.code)
 			}
 		})
+	}
+}
+
+func TestLocalKey(t *testing.T) {
+	path := t.TempDir() + "/golem/standalone-key"
+	k, at, err := loadLocalKey(path)
+	if err != nil || at != path || !strings.HasPrefix(k, "glm_dev_") {
+		t.Fatalf("%q %q %v", k, at, err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v: only its user may read it", fi.Mode())
+	}
+	if again, _, _ := loadLocalKey(path); again != k {
+		t.Fatal("a restart must keep the key")
+	}
+	os.WriteFile(path, []byte("not a key"), 0o600)
+	if _, _, err := loadLocalKey(path); err == nil {
+		t.Fatal("a file without a dev key must be refused, not replaced silently")
 	}
 }

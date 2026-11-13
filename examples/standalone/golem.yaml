@@ -26,6 +26,9 @@ spec:
   auth: {header: authorization, scheme: Bearer, env: STUDIO_API_KEY}
   deployments:
   - {name: qwen, url: "http://127.0.0.1:8000/v1/chat/completions", model: Qwen/Qwen3-Coder-30B-A3B-Instruct}
+  # A model server on this machine: loopback and private addresses are
+  # refused unless the backend is granted them.
+  network: {allowPrivateAddresses: true}
 ---
 apiVersion: golem.dev/v1alpha1
 kind: ModelRoute
@@ -33,6 +36,9 @@ metadata: {name: claude}
 spec:
   alias: claude
   pool: [{backend: anthropic, deployment: sonnet}]
+  # A coding agent's route: compatible feature mode (the agent's betas and
+  # new request fields are forwarded), ADR 0041 §7.1.
+  agent: true
 ---
 apiVersion: golem.dev/v1alpha1
 kind: ModelRoute
@@ -40,6 +46,7 @@ metadata: {name: gpt}
 spec:
   alias: gpt
   pool: [{backend: openai, deployment: gpt}]
+  agent: true
 ---
 apiVersion: golem.dev/v1alpha1
 kind: ModelRoute
@@ -47,3 +54,4 @@ metadata: {name: local}
 spec:
   alias: local
   pool: [{backend: studio, deployment: qwen}]
+  agent: true

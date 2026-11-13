@@ -65,6 +65,8 @@ func TestHeaders(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}, "Set-Cookie": {"x"}},
 			Body: io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":1,"output_tokens":2}}`))}, nil
 	}), nil)
+	c, _ := h.Snapshots.Current()
+	c.Routes.Lookup([]byte("claude")).Betas = map[string]bool{"b1": true} // restricted mode forwards approved betas
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude"}`))
 	req.Header.Set("Authorization", "Bearer glm_live_caller")
 	req.Header.Set("Golem-Session", "s1")

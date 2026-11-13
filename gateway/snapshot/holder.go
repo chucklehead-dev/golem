@@ -12,14 +12,17 @@
 package snapshot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
@@ -61,6 +64,9 @@ type Holder struct {
 	Env key.Env
 	// Entra verifies Entra tokens; nil: the gateway takes golem keys only.
 	Entra *auth.Entra
+	// LocalKey is the standalone gateway's generated key, the one credential
+	// its implicit principal takes (golem#5).
+	LocalKey string
 	// OnApply, if set, is called with each snapshot applied (the limiter
 	// takes its known spend).
 	OnApply func(*Compiled)
@@ -159,10 +165,10 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 			if err != nil {
 				return nil, fmt.Errorf("backend %s deployment %s: %w", b.Name, d.Name, err)
 			}
-			id := b.Name + "/" + d.Name + " " + u.Scheme + "://" + u.Host
+			id := fmt.Sprint(b.Name, "/", d.Name, " ", u.Scheme, "://", u.Host, " private:", b.AllowPrivate)
 			t := h.transports[id]
 			if t == nil {
-				t = upstreamTransport()
+				t = upstreamTransport(b.AllowPrivate)
 				h.transports[id] = t
 			}
 			used[id] = true
@@ -173,7 +179,11 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 	routes := make([]*route.Route, 0, len(s.Routes))
 	for _, r := range s.Routes {
 		rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect, MaxDuration: time.Duration(r.MaxDurationMs) * time.Millisecond,
-			Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond}
+			Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond,
+			Agent: r.Agent, Betas: map[string]bool{}}
+		for _, b := range r.ApprovedBetas {
+			rt.Betas[b] = true
+		}
 		for _, m := range r.Pool {
 			t := targets[depKey{m.Backend, m.Deployment}]
 			if t == nil {
@@ -204,7 +214,7 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 		prices[p.Model] = p
 	}
 	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...),
-		Auth: auth.Compile(s.Entitlements, env, h.now, h.Entra), Prices: prices}, nil
+		Auth: h.compileAuth(s.Entitlements, env), Prices: prices}, nil
 }
 
 // Static is a Holder with one compiled snapshot and no lease: for tests.
@@ -244,10 +254,14 @@ func (e EnvSecrets) Secret(ref, env string) (string, error) {
 //   - no response-header timeout here: a non-streamed answer's headers come
 //     when the model has finished, which for a long answer is minutes; that
 //     bound is the route's (ModelRoute spec.timeouts: headers, maxDuration).
-func upstreamTransport() *http.Transport {
+func upstreamTransport(allowPrivate bool) *http.Transport {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second,
+		ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
+			return checkDestination(address, allowPrivate)
+		}}
 	return &http.Transport{
 		Proxy:               nil,
-		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:         d.DialContext,
 		ForceAttemptHTTP2:   true,
 		HTTP2:               &http.HTTP2Config{SendPingTimeout: 30 * time.Second, PingTimeout: 15 * time.Second},
 		MaxIdleConns:        0,
@@ -255,4 +269,48 @@ func upstreamTransport() *http.Transport {
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
+}
+
+// compileAuth indexes the snapshot's entitlements, with the standalone
+// gateway's local key for an implicit principal.
+func (h *Holder) compileAuth(e snapshot.Entitlements, env key.Env) *auth.Keys {
+	k := auth.Compile(e, env, h.now, h.Entra)
+	if h.LocalKey != "" {
+		k.RequireLocalKey(h.LocalKey)
+	}
+	return k
+}
+
+// metadata are cloud instance-metadata addresses outside link-local
+// ranges (Alibaba's); link-local ones (AWS, GCP, Azure: 169.254.169.254,
+// fd00:ec2::254 aside) are refused as link-local.
+var metadata = []netip.Prefix{netip.MustParsePrefix("100.100.100.200/32"), netip.MustParsePrefix("fd00:ec2::254/128")} // read-only
+
+// cgnat is shared address space (RFC 6598), private in effect.
+var cgnat = netip.MustParsePrefix("100.64.0.0/10") // read-only
+
+// checkDestination refuses to connect where a provider cannot be (golem#5):
+// the address a deployment's name resolved to, checked as the connection
+// is made, so a name that resolves somewhere else later is caught too.
+// Cloud metadata, link-local, unspecified and multicast addresses are
+// refused always; loopback and private ones unless the backend allows
+// them.
+func checkDestination(address string, allowPrivate bool) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("golem: refusing to dial %q: not an address", address)
+	}
+	ip := ap.Addr().Unmap()
+	for _, p := range metadata {
+		if p.Contains(ip) {
+			return fmt.Errorf("golem: refusing to dial %s: a cloud metadata address", ip)
+		}
+	}
+	switch {
+	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast(), ip.IsUnspecified(), ip.IsMulticast(), ip.IsInterfaceLocalMulticast():
+		return fmt.Errorf("golem: refusing to dial %s: link-local, unspecified or multicast", ip)
+	case !allowPrivate && (ip.IsLoopback() || ip.IsPrivate() || cgnat.Contains(ip)):
+		return fmt.Errorf("golem: refusing to dial %s: a loopback or private address, which this backend is not granted (spec.network.allowPrivateAddresses)", ip)
+	}
+	return nil
 }

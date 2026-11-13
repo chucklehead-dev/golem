@@ -28,6 +28,10 @@ type Route struct {
 	// A call's bounds on this route: the whole call, the wait for the
 	// response's headers, and a provider's silence once it has begun.
 	MaxDuration, Headers, Idle time.Duration
+	// Agent: a coding-agent route (compatible features by default); Betas,
+	// the anthropic-beta values restricted mode forwards.
+	Agent bool
+	Betas map[string]bool
 }
 
 // Pick chooses the deployment for one request.

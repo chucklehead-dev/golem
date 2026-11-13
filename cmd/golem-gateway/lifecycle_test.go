@@ -45,7 +45,7 @@ func TestShutdownAccounts(t *testing.T) {
 
 	lc := &lifecycle{drain: 200 * time.Millisecond, cut: 5 * time.Second}
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/chat/completions", lc.track(&proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder,
+	mux.Handle("POST /v1/chat/completions", lc.track(&proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, ProviderTail: 50 * time.Millisecond,
 		Limiter: lim, MaxBody: 1 << 20, Telemetry: tel}))
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { return nil }))
 	ts := httptest.NewUnstartedServer(mux)
@@ -87,6 +87,7 @@ func TestShutdownAccounts(t *testing.T) {
 		t.Fatalf("row %v, numbering %v: the cut call is a cancellation, numbered", row, num)
 	}
 	month := time.Now().UTC().Format("2006-01")
+	time.Sleep(100 * time.Millisecond) // the cut call's slot is held for the provider's tail (golem#4)
 	if len(st.Counter("any", month)) != 1 || len(st.Slots()) != 0 {
 		t.Fatalf("counter %v, slots %v: the call is counted and its slot freed", st.Counter("any", month), st.Slots())
 	}

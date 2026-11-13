@@ -45,6 +45,15 @@ type BackendSpec struct {
 	Dialect     string       `json:"dialect"`
 	Auth        Auth         `json:"auth"`
 	Deployments []Deployment `json:"deployments"`
+	Network     Network      `json:"network,omitzero"`
+}
+
+// Network grants a backend addresses golem otherwise refuses to dial.
+type Network struct {
+	// AllowPrivateAddresses lets the backend's deployments be on loopback
+	// or private addresses (a self-hosted model server, a developer's local
+	// one). Cloud metadata and link-local addresses are refused always.
+	AllowPrivateAddresses bool `json:"allowPrivateAddresses,omitempty"`
 }
 
 // Auth is how golem authenticates to a backend: a header carrying a secret.
@@ -88,6 +97,11 @@ type ModelRouteSpec struct {
 	Alias    string         `json:"alias"`
 	Pool     []PoolMember   `json:"pool"`
 	Timeouts *RouteTimeouts `json:"timeouts,omitempty"`
+	// Agent marks a coding-agent route: compatible feature mode by default
+	// (ADR 0041 §7.1), under the platform's standing approval.
+	Agent bool `json:"agent,omitempty"`
+	// ApprovedBetas are the anthropic-beta values restricted mode forwards.
+	ApprovedBetas []string `json:"approvedBetas,omitempty"`
 }
 
 // RouteTimeouts bound a call's life on a route, as Go durations ("30m").
@@ -161,6 +175,10 @@ type LocalScope struct {
 	// times n) and the body's size. Zero is none.
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
+	// Features is the request-feature mode (ADR 0037, 0041 §3): restricted
+	// (approved fields, betas and versions only) or compatible (unknown
+	// features forwarded); unset, restricted except on agent routes.
+	Features string `json:"features,omitempty"`
 }
 
 // InFlight is a scope's in-flight limits (ADR 0031, 0041 §7.6).

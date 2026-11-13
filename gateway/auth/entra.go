@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"cmp"
 	"context"
 	"crypto/rsa"
 	"encoding/json"
@@ -38,7 +39,13 @@ type Entra struct {
 	Client *http.Client
 	Now    func() time.Time
 
+	// MaxKeyAge is how old the cached key set may grow while refreshes
+	// fail before tokens are refused (default 24 hours): a key Entra has
+	// revoked must not be trusted for ever (golem#5).
+	MaxKeyAge time.Duration
+
 	keys    atomic.Pointer[map[string]*rsa.PublicKey]
+	keysAt  atomic.Int64 // when the key set was fetched, Unix nanoseconds
 	wake    chan struct{}
 	wakeOne sync.Once
 }
@@ -83,6 +90,9 @@ func (e *Entra) Verify(raw string) (Identity, *Refusal) {
 	}
 	if len(tok.Headers) != 1 {
 		return invalid("expected one signature")
+	}
+	if at := e.keysAt.Load(); at != 0 && e.now().Sub(time.Unix(0, at)) > cmp.Or(e.MaxKeyAge, 24*time.Hour) {
+		return invalid("golem's copy of Entra's signing keys is too old to trust (they have not been refreshed); the platform team is alerted")
 	}
 	key := e.key(tok.Headers[0].KeyID)
 	if key == nil {
@@ -147,6 +157,7 @@ func (e *Entra) SetKeys(set jose.JSONWebKeySet) {
 		}
 	}
 	e.keys.Store(&m)
+	e.keysAt.Store(e.now().UnixNano())
 }
 
 // keysClient fetches key sets when Entra.Client is nil (read-only): a hung

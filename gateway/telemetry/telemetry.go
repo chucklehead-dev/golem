@@ -135,7 +135,9 @@ func New(p Providers, site, pool string) (*Telemetry, error) {
 			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Dropped.Load()); return nil }))
 		_, err2 = m.Int64ObservableCounter("golem.ledger.failed", metric.WithDescription("Ledger rows the collector did not take"),
 			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Failed.Load()); return nil }))
-		if err := errors.Join(err1, err2); err != nil {
+		_, err3 = m.Int64ObservableCounter("golem.ledger.retried", metric.WithDescription("Ledger exports retried"),
+			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Retried.Load()); return nil }))
+		if err := errors.Join(err1, err2, err3); err != nil {
 			return nil, err
 		}
 	}

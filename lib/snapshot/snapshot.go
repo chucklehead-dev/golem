@@ -51,6 +51,18 @@ type Entitlements struct {
 	// its object ID, a service by its app (client) ID (ADR 0009).
 	Users    []Member `json:"users,omitempty"`
 	Services []Member `json:"services,omitempty"`
+	// KeyOwners are the principals that hold keys but no Entra identity
+	// (a standalone LocalIdentity's). A key is honoured only for a listed
+	// owner (a user, a service or one of these) of its kind, a member of
+	// its scope (golem#5).
+	KeyOwners []Owner `json:"keyOwners,omitempty"`
+}
+
+// Owner is a principal that holds keys: its kind and memberships.
+type Owner struct {
+	ID     string   `json:"id"`
+	Kind   string   `json:"kind"` // user or service
+	Scopes []string `json:"scopes"`
 }
 
 // Member is a principal and the scopes it may act in.
@@ -75,6 +87,8 @@ type Scope struct {
 	StorageAllowed  bool  `json:"storageAllowed,omitempty"`
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
+	// Features: "restricted", "compatible", or "" (by the route's kind).
+	Features string `json:"features,omitempty"`
 	// KnownSpend is the ledger's balance for Period (a calendar month,
 	// "2026-11") with this site's events numbered above Watermark left out;
 	// Watermark is the site counter's number for the period up to which
@@ -120,6 +134,8 @@ type Backend struct {
 	Dialect     string       `json:"dialect"`
 	Auth        Auth         `json:"auth"`
 	Deployments []Deployment `json:"deployments"`
+	// AllowPrivate grants loopback and private addresses (golem#5).
+	AllowPrivate bool `json:"allowPrivate,omitempty"`
 }
 
 // Auth is a header and where its secret comes from.
@@ -144,9 +160,11 @@ type Route struct {
 	Pool    []Target `json:"pool"`
 	// The call's bounds in milliseconds, the compiler's defaults filled in
 	// (ModelRoute spec.timeouts).
-	MaxDurationMs int64 `json:"maxDurationMs"`
-	HeadersMs     int64 `json:"headersMs"`
-	IdleMs        int64 `json:"idleMs"`
+	Agent         bool     `json:"agent,omitempty"`
+	ApprovedBetas []string `json:"approvedBetas,omitempty"`
+	MaxDurationMs int64    `json:"maxDurationMs"`
+	HeadersMs     int64    `json:"headersMs"`
+	IdleMs        int64    `json:"idleMs"`
 }
 
 // Target is a pool member.

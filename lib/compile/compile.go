@@ -82,7 +82,7 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 			add(obj, "spec.dialect", "%q is not a dialect golem serves (%s)", b.Spec.Dialect, strings.Join(Dialects, ", "))
 		}
 		a := b.Spec.Auth
-		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect,
+		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect, AllowPrivate: b.Spec.Network.AllowPrivateAddresses,
 			Auth: snapshot.Auth{Header: strings.ToLower(a.Header), Scheme: a.Scheme, Env: a.Env}}
 		switch {
 		case a.Header == "":
@@ -140,7 +140,7 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 		if len(r.Spec.Pool) == 0 {
 			add(obj, "spec.pool", "a route needs at least one deployment")
 		}
-		sr := snapshot.Route{Alias: r.Spec.Alias}
+		sr := snapshot.Route{Alias: r.Spec.Alias, Agent: r.Spec.Agent, ApprovedBetas: slices.Clone(r.Spec.ApprovedBetas)}
 		sr.MaxDurationMs, sr.HeadersMs, sr.IdleMs = timeouts(r.Spec.Timeouts, func(field, msg string) { add(obj, "spec.timeouts."+field, "%s", msg) })
 		for i, m := range r.Spec.Pool {
 			at := fmt.Sprintf("spec.pool[%d]", i)
