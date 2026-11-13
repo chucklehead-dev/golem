@@ -65,7 +65,7 @@ jobs:
         env:
           QUINT_BACKEND: typescript
       - name: the gateway against its models (connect: the model drives)
-        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/...   # TestExposureModelValkey too
+        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/... ./control/...   # TestExposureModelValkey too; the watermark job
         env:
           QUINT_BACKEND: typescript
       - name: the gateway against its models (qhegel: Hegel drives, the model judges; planted bugs caught)
