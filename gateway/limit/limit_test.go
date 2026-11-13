@@ -72,9 +72,9 @@ func TestOutage(t *testing.T) {
 	st.SetDown(true)
 	// Each gateway admits against its own counts: p1 has two calls running.
 	a, err1 := g1.Admit(ctx, scopeCall("a", "p1"))
-	_, err2 := g2.Admit(ctx, scopeCall("b", "p1"))
-	if err1 != nil || err2 != nil || len(g1.Waived()) != 1 || len(g2.Waived()) != 1 {
-		t.Fatalf("%v %v waived %v %v: both admitted and both recorded as waivers", err1, err2, g1.Waived(), g2.Waived())
+	b, err2 := g2.Admit(ctx, scopeCall("b", "p1"))
+	if err1 != nil || err2 != nil || !a.Waived() || !b.Waived() {
+		t.Fatalf("%v %v: both admitted and both waivers", err1, err2)
 	}
 	a.Complete(ctx, 3)
 	if p := g1.Pending("s"); len(p) != 1 || len(numbered) != 0 {
@@ -123,13 +123,13 @@ func TestCallerCancelIsNoOutage(t *testing.T) {
 	if _, err := l.Admit(ctx, scopeCall("a", "p1")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Admit = %v, want the caller's context.Canceled", err)
 	}
-	if l.Down() || len(l.Waived()) != 0 {
+	if l.Down() {
 		t.Fatal("a caller's cancellation was taken for an outage")
 	}
 	// A store that does not answer within StoreTimeout is one.
 	l.StoreTimeout = 10 * time.Millisecond
-	if _, err := l.Admit(t.Context(), scopeCall("b", "p1")); err != nil || !l.Down() {
-		t.Fatalf("Admit = %v, down %v: a hung store is an outage, admitted on local counts", err, l.Down())
+	if tk, err := l.Admit(t.Context(), scopeCall("b", "p1")); err != nil || !l.Down() || !tk.Waived() {
+		t.Fatalf("Admit = %v, down %v: a hung store is an outage, admitted on local counts as a waiver", err, l.Down())
 	}
 }
 

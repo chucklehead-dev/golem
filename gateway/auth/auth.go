@@ -1,12 +1,13 @@
 // Package auth turns a request's credential into a Principal: who is
 // calling, in which scope, with which rights (ADR 0009, org-model.md §3).
-// Everything is decided from the snapshot, with no network call. This first
-// version authenticates golem keys; Entra tokens are next.
+// Everything is decided from the snapshot, with no network call: golem keys
+// by their hash, Entra tokens by the tenant's cached signing keys.
 package auth
 
 import (
 	"encoding/hex"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -56,39 +57,55 @@ type entry struct {
 	p       Principal
 	expires time.Time
 	revoked bool
+	// refused, if set, is why the key cannot be used whatever its state:
+	// its scope is gone from the snapshot, or its principal left it.
+	refused *Refusal
 }
 
 // The standalone implicit principal's in-flight limit: generous, since one
 // developer's agents may run many calls at once.
 const implicitInFlight = 16
 
+// rights are a scope's, shared by every principal acting in it.
+type rights struct {
+	models map[string]bool
+	limits Limits
+}
+
 // Compile indexes a snapshot's entitlements for an installation: env is the
 // key prefix this gateway accepts (Live in production, Dev standalone), and
-// entra verifies Entra tokens (nil: they are refused).
+// entra verifies Entra tokens (nil: they are refused). Whatever names a
+// scope the snapshot lacks is refused, never given a zero (unlimited)
+// budget.
 func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *Entra) *Keys {
 	k := &Keys{env: env, byHash: map[[32]byte]*entry{}, now: now, entra: entra, byEntra: map[string]map[string]*Principal{}}
 	if e.Implicit {
 		k.implicit = &Principal{ID: "local", Kind: "user", Scope: "local",
 			Limits: Limits{PrincipalInFlight: implicitInFlight}}
 	}
-	scopes := map[string]snapshot.Scope{}
+	scopes := make(map[string]*rights, len(e.Scopes))
 	for _, s := range e.Scopes {
-		scopes[s.ID] = s
+		r := &rights{models: make(map[string]bool, len(s.Models)), limits: Limits{BudgetMicros: s.BudgetMicros, Strict: s.Strict,
+			PrincipalInFlight: s.PrincipalInFlight, ScopeInFlight: s.ScopeInFlight}}
+		for _, a := range s.Models {
+			r.models[a] = true
+		}
+		scopes[s.ID] = r
 	}
+	// memberOf: a listed user's or service's scopes, by its golem ID.
+	memberOf := map[string][]string{}
 	member := func(kind string, ms []snapshot.Member) {
 		for _, m := range ms {
+			memberOf[m.ID] = m.Scopes
 			byScope := map[string]*Principal{}
 			for _, id := range m.Scopes {
-				sc := scopes[id]
-				models := map[string]bool{}
-				for _, a := range sc.Models {
-					models[a] = true
+				if r := scopes[id]; r != nil {
+					byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: r.models, Limits: r.limits}
 				}
-				byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: models,
-					Limits: Limits{BudgetMicros: sc.BudgetMicros, Strict: sc.Strict,
-						PrincipalInFlight: sc.PrincipalInFlight, ScopeInFlight: sc.ScopeInFlight}}
 			}
-			byScope[""] = byScope[m.Default]
+			if p := byScope[m.Default]; p != nil {
+				byScope[""] = p
+			}
 			k.byEntra[m.Entra] = byScope
 		}
 	}
@@ -101,30 +118,30 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *
 		} else {
 			copy(h[:], b)
 		}
-		sc := scopes[sk.Scope]
-		models := map[string]bool{}
-		for _, m := range sc.Models {
-			if len(sk.Models) == 0 || contains(sk.Models, m) {
-				models[m] = true
-			}
+		en := &entry{p: Principal{ID: sk.Principal, Kind: sk.PrincipalKind, Scope: sk.Scope, Key: sk.Display},
+			expires: sk.ExpiresAt, revoked: sk.Revoked}
+		k.byHash[h] = en
+		r := scopes[sk.Scope]
+		ms, listed := memberOf[sk.Principal]
+		switch {
+		case r == nil:
+			en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's scope " + sk.Scope + " no longer exists: mint a key for a scope you are in"}
+			continue
+		case listed && !slices.Contains(ms, sk.Scope):
+			en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's principal is no longer a member of scope " + sk.Scope + ": its managers can add it back, or mint a key for a scope it is in"}
+			continue
 		}
-		k.byHash[h] = &entry{
-			p: Principal{ID: sk.Principal, Kind: sk.PrincipalKind, Scope: sk.Scope, Key: sk.Display, models: models,
-				Limits: Limits{BudgetMicros: sc.BudgetMicros, Strict: sc.Strict,
-					PrincipalInFlight: sc.PrincipalInFlight, ScopeInFlight: sc.ScopeInFlight}},
-			expires: sk.ExpiresAt, revoked: sk.Revoked,
+		en.p.Limits, en.p.models = r.limits, r.models
+		if len(sk.Models) > 0 { // the key narrows its scope's models
+			en.p.models = make(map[string]bool, len(sk.Models))
+			for _, m := range sk.Models {
+				if r.models[m] {
+					en.p.models[m] = true
+				}
+			}
 		}
 	}
 	return k
-}
-
-func contains(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // Anyone is the principal of a snapshot with no entitlements to check
@@ -169,6 +186,8 @@ func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
 		return nil, &Refusal{contract.AuthKeyRevoked, "this key was revoked: mint a new one (golemctl keys mint)"}
 	case !e.expires.IsZero() && !k.now().Before(e.expires):
 		return nil, &Refusal{contract.AuthKeyExpired, "this key expired at " + e.expires.Format(time.RFC3339) + ": mint a new one (golemctl keys mint)"}
+	case e.refused != nil:
+		return nil, e.refused
 	}
 	return &e.p, nil
 }

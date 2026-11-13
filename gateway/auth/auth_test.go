@@ -20,12 +20,17 @@ func hashOf(k string) string { h := key.Hash(k); return hex.EncodeToString(h[:])
 func TestAuthenticate(t *testing.T) {
 	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	good, narrow, revoked, expired, unknown := key.New(key.Live), key.New(key.Live), key.New(key.Live), key.New(key.Live), key.New(key.Live)
-	k := Compile(ent(
+	orphan, departed := key.New(key.Live), key.New(key.Live)
+	e := ent(
 		snapshot.Key{Hash: hashOf(good), Principal: "alice", Scope: "team-a"},
 		snapshot.Key{Hash: hashOf(narrow), Principal: "bob", Scope: "team-a", Models: []string{"claude"}},
 		snapshot.Key{Hash: hashOf(revoked), Principal: "carol", Scope: "team-a", Revoked: true},
 		snapshot.Key{Hash: hashOf(expired), Principal: "dan", Scope: "team-a", ExpiresAt: now},
-	), key.Live, func() time.Time { return now }, nil)
+		snapshot.Key{Hash: hashOf(orphan), Principal: "erin", Scope: "team-gone"},
+		snapshot.Key{Hash: hashOf(departed), Principal: "frank", Scope: "team-a"},
+	)
+	e.Users = []snapshot.Member{{ID: "frank", Entra: "f-oid", Scopes: []string{"team-b"}, Default: "team-b"}}
+	k := Compile(e, key.Live, func() time.Time { return now }, nil)
 
 	for _, tc := range []struct {
 		name   string
@@ -41,6 +46,9 @@ func TestAuthenticate(t *testing.T) {
 		{"revoked", http.Header{"X-Api-Key": {revoked}}, contract.AuthKeyRevoked.Name},
 		{"expired", http.Header{"X-Api-Key": {expired}}, contract.AuthKeyExpired.Name},
 		{"dev key in production", http.Header{"X-Api-Key": {key.New(key.Dev)}}, contract.AuthKeyWrongInstallation.Name},
+		// Fail closed: never a zero (unlimited) budget for a missing scope.
+		{"its scope is gone", http.Header{"X-Api-Key": {orphan}}, contract.AuthzScopeNotMember.Name},
+		{"its principal left the scope", http.Header{"X-Api-Key": {departed}}, contract.AuthzScopeNotMember.Name},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, r := k.Authenticate(tc.header)

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"maps"
-	"slices"
 	"sync"
 	"time"
 )
@@ -69,7 +67,6 @@ type Limiter struct {
 	pending    []held             // increments held while the store is down, in order
 	down       bool
 	graceUntil time.Time
-	waived     map[string]bool // calls admitted while the store was down, or in grace
 }
 
 type held struct {
@@ -80,8 +77,8 @@ type held struct {
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{}, last: map[string]int64{},
-		running: map[string]*Ticket{}, waived: map[string]bool{},
-		Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
+		running: map[string]*Ticket{},
+		Grace:   60 * time.Second, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
 }
 
 // Ticket is an admitted call. Exactly one of Complete or Cancel is called;
@@ -90,8 +87,14 @@ type Ticket struct {
 	l      *Limiter
 	call   Call
 	period string
+	waived bool
 	done   bool
 }
+
+// Waived reports whether the call was admitted outside the bound: while the
+// store was unreachable, or in the grace after a recovery. Its ledger row
+// says so, the exposure ADR 0041 §7.3 reports.
+func (t *Ticket) Waived() bool { return t.waived }
 
 func (l *Limiter) now() time.Time {
 	if l.Now != nil {
@@ -144,10 +147,8 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 			case OverConcurrency:
 				return nil, ErrConcurrency
 			}
-			if l.now().Before(l.graceUntil) {
-				l.waived[c.ID] = true // peers may still hold calls Valkey lacks
-			}
-			return l.track(c, period), nil
+			// In grace, peers may still hold calls Valkey lacks.
+			return l.track(c, period, l.now().Before(l.graceUntil)), nil
 		case ctx.Err() != nil:
 			return nil, ctx.Err() // the caller went away: no outage
 		}
@@ -174,8 +175,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	if (c.PrincipalLimit > 0 && byPrincipal >= c.PrincipalLimit) || (c.ScopeLimit > 0 && byScope >= c.ScopeLimit) {
 		return nil, ErrConcurrency
 	}
-	l.waived[c.ID] = true
-	return l.track(c, period), nil
+	return l.track(c, period, true), nil
 }
 
 // storeContext bounds a store call: Valkey answers a site's gateways in a
@@ -203,8 +203,8 @@ func (l *Limiter) markDown(err error) {
 }
 
 // track records a running call; mu is held.
-func (l *Limiter) track(c Call, period string) *Ticket {
-	t := &Ticket{l: l, call: c, period: period}
+func (l *Limiter) track(c Call, period string, waived bool) *Ticket {
+	t := &Ticket{l: l, call: c, period: period, waived: waived}
 	l.running[c.ID] = t
 	return t
 }
@@ -412,25 +412,6 @@ func (l *Limiter) Known(ctx context.Context, scope string) int64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.last[scope+"|"+period]
-}
-
-// Waived lists the calls admitted while the store was unreachable or in
-// grace: the exposure the bound does not cover, to be reported (ADR 0041
-// §7.3). DrainWaived empties it.
-func (l *Limiter) Waived() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return slices.Sorted(maps.Keys(l.waived))
-}
-
-// DrainWaived returns the waived calls and forgets them: the telemetry
-// reports each once.
-func (l *Limiter) DrainWaived() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := slices.Sorted(maps.Keys(l.waived))
-	clear(l.waived)
-	return out
 }
 
 // Pending lists the increments held for replay, for a scope.

@@ -1,9 +1,11 @@
 package limit
 
 import (
+	"fmt"
 	"maps"
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +61,7 @@ type expDriver struct {
 	store   faultyStore
 	gws     map[string]*Limiter
 	tickets map[string]*Ticket
+	waived  map[string]bool // the model's ghost: every call ever waived
 }
 
 type snapRec struct {
@@ -74,13 +77,19 @@ func (d *expDriver) Step(s *connect.Step) error {
 		"init": func(*connect.Step) error {
 			d.store = d.newSt(d.t)
 			d.gws = map[string]*Limiter{"g1": newLimiter(d.store), "g2": newLimiter(d.store)}
-			d.tickets = map[string]*Ticket{}
+			d.tickets, d.waived = map[string]*Ticket{}, map[string]bool{}
 			return nil
 		},
 		"admit": func(s *connect.Step) error {
 			t, err := d.gws[gw()].Admit(ctx, call(req()))
+			if err != nil {
+				return err // the model admitted it: so must the gateway
+			}
 			d.tickets[req()] = t
-			return err // the model admitted it: so must the gateway
+			if t.Waived() {
+				d.waived[req()] = true
+			}
+			return nil
 		},
 		"complete":     func(*connect.Step) error { d.tickets[req()].Complete(ctx, cost()); return nil },
 		"cancel":       func(*connect.Step) error { d.tickets[req()].Cancel(ctx, cost()); return nil },
@@ -116,7 +125,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 			}
 			l.mu.Unlock()
 			if i < 0 {
-				return errorf("gateway %s holds no increment %s", gw(), e.ID)
+				return fmt.Errorf("gateway %s holds no increment %s", gw(), e.ID)
 			}
 			_, _, err := l.ReplayOne(ctx)
 			return err
@@ -139,7 +148,10 @@ type expState struct {
 }
 
 func (d *expDriver) State() (any, error) {
-	st := expState{Counter: []event{}, Slots: []string{}, Waived: []string{}, Pending: map[string][]event{}}
+	st := expState{Counter: []event{}, Slots: []string{}, Waived: slices.Sorted(maps.Keys(d.waived)), Pending: map[string][]event{}}
+	if st.Waived == nil {
+		st.Waived = []string{}
+	}
 	for _, e := range d.store.Counter(scope, period) {
 		st.Counter = append(st.Counter, event{e.ID, e.Cost})
 	}
@@ -147,16 +159,13 @@ func (d *expDriver) State() (any, error) {
 		st.Slots = append(st.Slots, s.Call)
 	}
 	for _, g := range slices.Sorted(maps.Keys(d.gws)) {
-		st.Waived = append(st.Waived, d.gws[g].Waived()...)
 		ps := []event{}
 		for _, e := range d.gws[g].Pending(scope) {
 			ps = append(ps, event{e.ID, e.Cost})
 		}
-		slices.SortFunc(ps, func(a, b event) int { return compare(a.ID, b.ID) })
+		slices.SortFunc(ps, func(a, b event) int { return strings.Compare(a.ID, b.ID) })
 		st.Pending[g] = ps
 	}
-	slices.Sort(st.Waived)
-	st.Waived = slices.Compact(st.Waived)
 	return st, nil
 }
 
@@ -186,7 +195,7 @@ func (d *expDriver) CheckStep(s *connect.Step) error {
 			}
 		}
 		if got := d.gws[g].Known(d.t.Context(), scope); got != want {
-			return errorf("gateway %s: known spend %d, the model's %d", g, got, want)
+			return fmt.Errorf("gateway %s: known spend %d, the model's %d", g, got, want)
 		}
 	}
 	return nil

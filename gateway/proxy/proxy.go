@@ -1,8 +1,8 @@
-// Package proxy is the request path (gateway.md §3). In this spike it is
-// the fast path alone: read and scan the body, route by alias, splice the
-// model, send upstream, and stream the response back through a tee that
-// reads usage. Authentication, limits, hooks, retries and telemetry are
-// later steps at the marked places.
+// Package proxy is the request path (gateway.md §3): authenticate, read and
+// scan the body, route by alias, admit against the scope's budget and
+// in-flight limits, splice the model, send upstream, and stream the
+// response back through a tee that reads usage, then account for the call.
+// Hooks, retries and failover are later steps at the marked places.
 package proxy
 
 import (
@@ -191,6 +191,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ex := exchanges.Get().(*exchange)
 	ex.callerGone = false
 	defer func() {
+		// tail is the one buffer an exchange grows and keeps: the parser
+		// and the filter are new for each stream.
 		if cap(ex.tail) <= maxRetained {
 			exchanges.Put(ex)
 		}
@@ -208,8 +210,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, h.MaxBody))
 	body := *in
 	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
+		if _, tooBig := errors.AsType[*http.MaxBytesError](err); tooBig {
 			h.fail(w, contract.RequestTooLarge, "the request body is larger than this gateway accepts")
 			return
 		}

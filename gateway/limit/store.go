@@ -11,7 +11,9 @@ package limit
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -287,20 +289,5 @@ func (m *Mem) Counter(scope, period string) []Event {
 func (m *Mem) Slots() []Slot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []Slot
-	for _, s := range m.slots {
-		out = append(out, s)
-	}
-	slices.SortFunc(out, func(a, b Slot) int { return compare(a.Call, b.Call) })
-	return out
-}
-
-func compare(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
+	return slices.SortedFunc(maps.Values(m.slots), func(a, b Slot) int { return strings.Compare(a.Call, b.Call) })
 }
