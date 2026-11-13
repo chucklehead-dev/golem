@@ -8,9 +8,11 @@ package proxy
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 	"uuid"
@@ -56,6 +58,11 @@ type Handler struct {
 	// Telemetry records each request's span, metrics and ledger row; nil
 	// records nothing.
 	Telemetry *telemetry.Telemetry
+	// ProviderTail is how long a call's slot is held after an ambiguous
+	// end (a cut, an abandoned response, an upstream failure the provider
+	// may have seen), bounded by the call's deadline: the provider may still
+	// be working (default 2 minutes; golem#4).
+	ProviderTail time.Duration
 	// WriteStall bounds how long one write to the caller may block (default
 	// 30 s): a client that stops reading would otherwise hold its slot and
 	// its upstream connection for as long as the provider streams.
@@ -75,6 +82,36 @@ var (
 	jsonType   = []string{"application/json"} // read-only
 	retryAfter = []string{"5"}                // read-only
 )
+
+// uncertainOutput is the output assumed of an uncertain call that set no
+// max_tokens (OpenAI's is optional): a long answer.
+const uncertainOutput = 8192
+
+// tailEnd is when an ambiguously ended call's slot is freed: the provider's
+// tail from now, but no later than the call's deadline.
+func (h *Handler) tailEnd(deadline time.Time) time.Time {
+	end := time.Now().Add(cmp.Or(h.ProviderTail, 2*time.Minute))
+	if !deadline.IsZero() && deadline.Before(end) {
+		end = deadline
+	}
+	return end
+}
+
+// reachedProvider reports whether a failed round trip may have reached the
+// provider: only a name that did not resolve, a connection that was never
+// made or a TLS handshake that failed certainly did not.
+func reachedProvider(err error) bool {
+	var dns *net.DNSError
+	var cert *tls.CertificateVerificationError
+	var rec tls.RecordHeaderError
+	if errors.As(err, &dns) || errors.As(err, &cert) || errors.As(err, &rec) {
+		return false
+	}
+	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "dial" {
+		return false
+	}
+	return true
+}
 
 // refusal is a request the path will not serve: a contract code and a
 // message that says what to do next.
@@ -174,12 +211,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		call.Ended, call.Status, call.Outcome = time.Now(), c.Status, "failed"
 		call.ErrorOrigin, call.ErrorCode = string(c.Origin), c.Name
-		if r.Context().Err() != nil { // the caller left before the headers: theirs, not the provider's
+		// Absent response bytes are not absent work (golem#4): only a
+		// failure the provider cannot have seen is free. Else the call is
+		// charged an estimate, which reconciliation corrects, and its slot
+		// held for the provider's tail.
+		var cost int64
+		switch {
+		case !reachedProvider(err):
+		case r.Context().Err() != nil: // the caller left first: its input, at least, was read
 			call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
+			cost = price.Cost(canon.Usage{Input: requestBytes / bytesPerToken}, pr)
+		default: // a timeout or a reset after the request went out: the worst it may have cost
+			call.Outcome = "uncertain"
+			cost = price.Worst(requestBytes, cmp.Or(req.maxTokens, uncertainOutput)*req.n, pr)
+		}
+		if cost > 0 {
+			call.Cost, call.EstimatedFraction = cost, 1
 		}
 		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
 		if ticket != nil {
-			ticket.Complete(acct, 0) // no upstream work: nothing billed
+			if cost == 0 {
+				ticket.Complete(acct, 0) // the provider never had it
+			} else {
+				ticket.Cancel(acct, cost)
+				ticket.EndAt(h.tailEnd(deadline))
+			}
 		}
 		Refuse(w, h.Dialect, c, msg)
 		return
@@ -223,13 +279,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// limiter's OnNumbered writes it with the number.
 	h.Telemetry.Ended(ctx, call)
 	if ticket != nil {
-		if res.CallerGone {
-			// The caller went away: what was seen is charged, and the slot
-			// is held until the upstream has ended (ADR 0041 §7.6), here the
-			// connection's close.
+		if res.CallerGone || cut {
+			// The response was abandoned or cut: what was seen is charged
+			// (estimated where unreported), and the slot is held for the
+			// provider's tail, which may go on working after the connection
+			// closes (ADR 0041 §7.6; golem#4).
 			ticket.Cancel(acct, res.Cost)
 			resp.Body.Close()
-			ticket.Ended(acct)
+			ticket.EndAt(h.tailEnd(deadline))
 		} else {
 			ticket.Complete(acct, res.Cost)
 		}

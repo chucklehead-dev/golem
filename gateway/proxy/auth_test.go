@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
@@ -145,6 +146,7 @@ spec:
   keys:
   - {key: `+alice+`, principal: alice, scope: team-a}
 `, slow)
+	h.ProviderTail = 100 * time.Millisecond
 	gw := httptest.NewServer(h)
 	defer gw.Close()
 	body := `{"model":"haiku","max_tokens":10,"stream":true,"messages":[]}`
@@ -175,7 +177,12 @@ spec:
 		t.Fatal("the cancelled call's usage so far was not charged")
 	}
 	close(release)
+	// Its slot is held for the provider's tail (golem#4), then freed.
+	if w := send(h, alice, body); w.Code != 429 {
+		t.Fatalf("during the provider's tail the slot is held: %d %s", w.Code, w.Body)
+	}
+	time.Sleep(h.ProviderTail + 50*time.Millisecond) // the tail's timer: real time
 	if w := send(h, alice, body); w.Code == 429 {
-		t.Fatalf("after the cancelled call ended its slot is free: %d %s", w.Code, w.Body)
+		t.Fatalf("after the provider's tail the slot is free: %d %s", w.Code, w.Body)
 	}
 }

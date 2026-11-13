@@ -31,9 +31,10 @@ type LedgerQueue struct {
 	base       context.Context
 	cancelBase context.CancelFunc
 	// Dropped counts rows refused (the queue was full, or shut down);
-	// Failed, rows the exporter did not take, or the shutdown's deadline
-	// left undelivered.
-	Dropped, Failed atomic.Int64
+	// Failed, rows the exporter did not take after its retries, or the
+	// shutdown's deadline left undelivered; Retried, the exports retried.
+	Dropped, Failed, Retried atomic.Int64
+	backoff                  atomic.Int64 // the first retry's wait (SetBackoff)
 }
 
 // exportTimeout bounds one export while running; a shutdown's deadline
@@ -46,6 +47,7 @@ func NewLedgerQueue(exp sdklog.Exporter, size, batch int, every time.Duration) *
 	q := &LedgerQueue{exp: exp, q: make(chan sdklog.Record, size), batch: batch, every: every,
 		flush: make(chan chan error), stop: make(chan context.Context, 1)}
 	q.base, q.cancelBase = context.WithCancel(context.Background())
+	q.backoff.Store(int64(time.Second))
 	q.stopped.Go(q.run)
 	return q
 }
@@ -115,19 +117,47 @@ func (q *LedgerQueue) drain(ctx context.Context, buf []sdklog.Record) []sdklog.R
 	return buf
 }
 
+// export delivers a batch, retrying a failure with backoff: a collector
+// restarting is a few seconds, and its rows must not be dropped for it
+// (golem#4). A batch the collector may have partly taken is sent whole
+// again; the ledger deduplicates by event (golem.spend_dedup,
+// golem.spend_seq's ReplacingMergeTree). After the last attempt, or at the
+// shutdown's deadline, its rows are counted as failed.
 func (q *LedgerQueue) export(ctx context.Context, buf []sdklog.Record) []sdklog.Record {
 	if len(buf) == 0 {
 		return buf
 	}
-	ctx, cancel := context.WithTimeout(ctx, exportTimeout)
-	defer cancel()
-	if err := q.exp.Export(ctx, buf); err != nil {
-		q.Failed.Add(int64(len(buf)))
-		slog.Error("telemetry: ledger rows not delivered (golem.ledger.failed)", "rows", len(buf), "err", err)
+	backoff := time.Duration(q.backoff.Load())
+	for attempt := 1; ; attempt++ {
+		ectx, cancel := context.WithTimeout(ctx, exportTimeout)
+		err := q.exp.Export(ectx, buf)
+		cancel()
+		if err == nil {
+			break
+		}
+		if attempt == exportAttempts || ctx.Err() != nil {
+			q.Failed.Add(int64(len(buf)))
+			slog.Error("telemetry: ledger rows not delivered (golem.ledger.failed)", "rows", len(buf), "attempts", attempt, "err", err)
+			break
+		}
+		q.Retried.Add(1)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+		}
+		backoff = min(2*backoff, 30*time.Second)
 	}
 	clear(buf) // drop the records' references
 	return buf[:0]
 }
+
+// exportAttempts bounds a batch's retries: with the backoff, about four
+// minutes of a collector down before its rows are given up.
+const exportAttempts = 8
+
+// SetBackoff sets the first retry's wait (default 1 s); it doubles, to at
+// most 30 s.
+func (q *LedgerQueue) SetBackoff(d time.Duration) { q.backoff.Store(int64(d)) }
 
 // Shutdown refuses further rows (counting them), exports what is queued
 // while ctx lasts, counts the rest as failed, and stops.

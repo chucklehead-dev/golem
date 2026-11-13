@@ -339,6 +339,13 @@ func (t *Ticket) Cancel(ctx context.Context, seen int64) {
 	l.hold(t.call.Scope, t.period, e)
 }
 
+// EndAt frees a cancelled call's slot at a time to come: the provider may
+// go on working (and billing) after its response was cut or abandoned, so
+// the slot is held a while longer (ADR 0041 §7.6; golem#4).
+func (t *Ticket) EndAt(at time.Time) {
+	time.AfterFunc(time.Until(at), func() { t.Ended(context.Background()) })
+}
+
 // Ended frees a cancelled call's slot once its upstream has ended (the
 // connection closed, or the deployment's maximum duration passed).
 func (t *Ticket) Ended(ctx context.Context) {

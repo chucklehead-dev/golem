@@ -280,6 +280,15 @@ without a preflight it never gets. SDKs and curl pass all three.
   the headers, a 503 that names it; after, the cut-stream path (accounted,
   `upstream.stream_failed`, aborted). Renewals stop holding a call's slot
   a minute past its maximum duration.
+- Absent response bytes are not absent work (golem#4). A round trip that
+  failed where the provider cannot have seen it (a name that did not
+  resolve, a connection never made, a TLS handshake that failed) is free.
+  Any other failure before the headers is `uncertain`: charged its worst
+  case as an estimate until reconciliation (or, if the caller left first,
+  its input). After any ambiguous end (that, a cut, an abandoned
+  response) the call's slot is held for the provider's tail
+  (`ProviderTail`, 2 minutes, at most to the call's deadline), since the
+  provider may go on working.
 - Upstream TLS sessions resumed; DNS cached by the resolver, not golem.
 - SSE scanning reads lines from the tee without copying the payload when
   it is not a usage-bearing event (look for the event type first).
