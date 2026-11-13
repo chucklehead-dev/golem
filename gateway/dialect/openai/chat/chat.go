@@ -43,6 +43,7 @@ type Request struct {
 	Unknown      int
 
 	streamOptions jsonscan.Span // the stream_options value, if present
+	optionsNull   bool          // stream_options is null: replaced whole
 	includeUsage  jsonscan.Span // its include_usage value, if present (absolute)
 	usageOn       bool
 }
@@ -103,6 +104,9 @@ func (r *Request) Scan(body []byte) error {
 				return err
 			}
 			if v.Kind() == 'n' {
+				// Recorded, so Rewrite replaces it rather than adding a
+				// second stream_options member (a duplicate, ADR 0037).
+				r.streamOptions, r.optionsNull = span, true
 				return nil
 			}
 			if v.Kind() != '{' {
@@ -188,6 +192,8 @@ func (r *Request) Rewrite(dst, body []byte, model string) []byte {
 	n := 1
 	if r.Stream && !r.usageOn {
 		switch {
+		case r.optionsNull: // "stream_options": null
+			edits[1] = jsonscan.Edit{Span: r.streamOptions, With: []byte(`{"include_usage":true}`)}
 		case r.includeUsage.End > 0: // "include_usage": false
 			edits[1] = jsonscan.Edit{Span: r.includeUsage, With: []byte("true")}
 		case r.streamOptions.End > 0: // stream_options without it

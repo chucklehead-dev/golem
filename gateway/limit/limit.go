@@ -49,7 +49,10 @@ type Limiter struct {
 	// Valkey lacks. Two renewal intervals by default (each peer renews, and
 	// so notices, within one). Now is the clock.
 	Grace time.Duration
-	Now   func() time.Time
+	// StoreTimeout bounds each store call (default 250 ms).
+	StoreTimeout time.Duration
+	// Now is the clock (tests set it).
+	Now func() time.Time
 
 	mu         sync.Mutex
 	known      map[string]Known   // by scope, from the snapshot
@@ -69,7 +72,7 @@ type held struct {
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{}, last: map[string]int64{},
-		running: map[string]*Ticket{}, waived: map[string]bool{}, Grace: 60 * time.Second, Now: time.Now}
+		running: map[string]*Ticket{}, waived: map[string]bool{}, Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Now: time.Now}
 }
 
 // Ticket is an admitted call. Exactly one of Complete or Cancel is called;
@@ -85,16 +88,22 @@ type Ticket struct {
 // while it is not, this gateway's own counts and its last known spend, and
 // the call is a waiver of the bound (ADR 0041 §7.3).
 func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.down {
-		if k, err := l.read(ctx, c.Scope); err != nil {
-			l.down = true
-		} else {
+	if !l.isDown() {
+		k, err := l.read(ctx, c.Scope)
+		switch {
+		case err == nil:
+			l.mu.Lock()
 			l.last[c.Scope] = k
+			l.mu.Unlock()
+		case ctx.Err() != nil:
+			return nil, ctx.Err() // the caller went away: no outage
+		default:
+			l.markDown(err)
 		}
 	}
+	l.mu.Lock()
 	known := l.last[c.Scope]
+	l.mu.Unlock()
 	switch {
 	case c.Budget == 0:
 	case c.Strict && known+c.Worst > c.Budget:
@@ -102,19 +111,29 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	case !c.Strict && known >= c.Budget:
 		return nil, ErrBudget
 	}
-	if !l.down {
-		ok, err := l.store.Acquire(ctx, Slot{c.ID, c.Principal, c.Scope}, c.PrincipalLimit, c.ScopeLimit)
+	if !l.isDown() {
+		sctx, cancel := l.storeContext(ctx)
+		ok, err := l.store.Acquire(sctx, Slot{c.ID, c.Principal, c.Scope}, c.PrincipalLimit, c.ScopeLimit)
+		cancel()
 		switch {
 		case err == nil && !ok:
 			return nil, ErrConcurrency
 		case err == nil:
-			if l.Now().Before(l.graceUntil) {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			if l.now().Before(l.graceUntil) {
 				l.waived[c.ID] = true // peers may still hold calls Valkey lacks
 			}
 			return l.track(c), nil
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
 		}
-		l.down = true // and fall through to the local check
+		l.markDown(err) // and fall through to the local check
 	}
+	// The local check and the tracking are one step under the lock: no
+	// store call between them.
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	byPrincipal, byScope := 0, 0
 	for _, t := range l.running {
 		if t.call.Principal == c.Principal {
@@ -131,11 +150,39 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	return l.track(c), nil
 }
 
+// storeContext bounds a store call: Valkey answers a site's gateways in a
+// millisecond or two, and one that hangs must not hold a request (or, under
+// context.WithoutCancel, a completion) for ever.
+func (l *Limiter) storeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, l.StoreTimeout)
+}
+
+func (l *Limiter) isDown() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.down
+}
+
+// markDown records an outage: the store failed and the caller is still
+// there. The gateway admits on its own counts until Recover.
+func (l *Limiter) markDown(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.down {
+		slog.Warn("limit: the site store is unreachable; admitting on local counts, recorded as waivers", "err", err)
+	}
+	l.down = true
+}
+
 // read is known spend from the store: the snapshot's, plus the counter's
 // total after its watermark.
 func (l *Limiter) read(ctx context.Context, scope string) (int64, error) {
+	l.mu.Lock()
 	k := l.known[scope]
-	after, over, err := l.store.After(ctx, scope, k.Watermark)
+	l.mu.Unlock()
+	sctx, cancel := l.storeContext(ctx)
+	defer cancel()
+	after, over, err := l.store.After(sctx, scope, k.Watermark)
 	if err != nil {
 		return 0, err
 	}
@@ -146,6 +193,7 @@ func (l *Limiter) read(ctx context.Context, scope string) (int64, error) {
 	return k.Spend + after, nil
 }
 
+// track records a running call; mu is held.
 func (l *Limiter) track(c Call) *Ticket {
 	t := &Ticket{l: l, call: c}
 	l.running[c.ID] = t
@@ -154,11 +202,8 @@ func (l *Limiter) track(c Call) *Ticket {
 
 // Complete records the call's cost and frees its slot.
 func (t *Ticket) Complete(ctx context.Context, cost int64) {
-	l := t.l
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.emit(ctx, t.call.Scope, Event{t.call.ID, cost})
-	l.release(ctx, t)
+	t.l.emit(ctx, t.call.Scope, Event{t.call.ID, cost})
+	t.l.release(ctx, t)
 }
 
 // Cancel records what the gateway saw of a call the client abandoned. The
@@ -166,29 +211,26 @@ func (t *Ticket) Complete(ctx context.Context, cost int64) {
 // on it, and freeing the slot would let cancel-and-resend escape the
 // in-flight limit (ADR 0041 §7.6).
 func (t *Ticket) Cancel(ctx context.Context, seen int64) {
-	l := t.l
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.emit(ctx, t.call.Scope, Event{t.call.ID, seen})
+	t.l.emit(ctx, t.call.Scope, Event{t.call.ID, seen})
 }
 
 // Ended frees a cancelled call's slot once its upstream has ended (the
 // connection closed, or the deployment's maximum duration passed).
-func (t *Ticket) Ended(ctx context.Context) {
-	l := t.l
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.release(ctx, t)
-}
+func (t *Ticket) Ended(ctx context.Context) { t.l.release(ctx, t) }
 
 func (l *Limiter) emit(ctx context.Context, scope string, e Event) {
-	if !l.down {
-		if seq, err := l.store.Add(ctx, scope, e); err == nil {
+	if !l.isDown() {
+		sctx, cancel := l.storeContext(ctx)
+		seq, err := l.store.Add(sctx, scope, e)
+		cancel()
+		if err == nil {
 			l.numbered(scope, e, seq)
 			return
 		}
-		l.down = true
+		l.markDown(err) // completions run detached from the caller: an error is the store's
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.pending = append(l.pending, held{scope, e}) // replayed by Recover
 }
 
@@ -199,14 +241,21 @@ func (l *Limiter) numbered(scope string, e Event, seq int64) {
 }
 
 func (l *Limiter) release(ctx context.Context, t *Ticket) {
+	l.mu.Lock()
 	if t.done {
+		l.mu.Unlock()
 		return
 	}
 	t.done = true
 	delete(l.running, t.call.ID)
-	if !l.down {
-		if err := l.store.Release(ctx, Slot{t.call.ID, t.call.Principal, t.call.Scope}); err != nil {
-			l.down = true // the slot's TTL frees it
+	down := l.down
+	l.mu.Unlock()
+	if !down {
+		sctx, cancel := l.storeContext(ctx)
+		err := l.store.Release(sctx, Slot{t.call.ID, t.call.Principal, t.call.Scope})
+		cancel()
+		if err != nil {
+			l.markDown(err) // the slot's TTL frees it
 		}
 	}
 }
@@ -225,17 +274,22 @@ func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
 // outage: the gateway admits on its own counts until Recover (ADR 0041 §7.3).
 func (l *Limiter) Renew(ctx context.Context) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.down {
+		l.mu.Unlock()
 		return ErrUnavailable
 	}
-	if err := l.store.Reacquire(ctx, l.slots()); err != nil {
-		l.down = true
+	slots := l.slots()
+	l.mu.Unlock()
+	sctx, cancel := l.storeContext(ctx)
+	defer cancel()
+	if err := l.store.Reacquire(sctx, slots); err != nil {
+		l.markDown(err)
 		return err
 	}
 	return nil
 }
 
+// slots lists this gateway's running calls' slots; mu is held.
 func (l *Limiter) slots() []Slot {
 	var slots []Slot
 	for _, t := range l.running {
@@ -247,21 +301,67 @@ func (l *Limiter) slots() []Slot {
 // Recover is called when the store answers again: the held increments are
 // replayed in order, each numbered (harmless if repeated), and every call
 // still running re-registers its slot, so calls that streamed through the
-// outage still count.
+// outage still count. No lock is held across a store call: completions may
+// add to the held increments meanwhile, and Recover goes on until none is
+// left.
 func (l *Limiter) Recover(ctx context.Context) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for len(l.pending) > 0 {
-		if err := l.replayOneLocked(ctx); err != nil {
+	for {
+		_, ok, err := l.ReplayOne(ctx)
+		if err != nil {
 			return err
 		}
+		if !ok {
+			break
+		}
 	}
-	if err := l.store.Reacquire(ctx, l.slots()); err != nil {
+	l.mu.Lock()
+	slots := l.slots()
+	l.mu.Unlock()
+	sctx, cancel := l.storeContext(ctx)
+	defer cancel()
+	if err := l.store.Reacquire(sctx, slots); err != nil {
 		return err
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.pending) > 0 {
+		return ErrUnavailable // more were held meanwhile: the next Recover replays them
+	}
 	l.down = false
-	l.graceUntil = l.Now().Add(l.Grace)
+	l.graceUntil = l.now().Add(l.Grace)
 	return nil
+}
+
+// ReplayOne replays the oldest increment held during an outage and reports
+// it; Recover replays them all. ok is false when none is held.
+func (l *Limiter) ReplayOne(ctx context.Context) (e Event, ok bool, err error) {
+	l.mu.Lock()
+	if len(l.pending) == 0 {
+		l.mu.Unlock()
+		return Event{}, false, nil
+	}
+	h := l.pending[0]
+	l.mu.Unlock()
+	sctx, cancel := l.storeContext(ctx)
+	seq, err := l.store.Add(sctx, h.scope, h.e)
+	cancel()
+	if err != nil {
+		return h.e, false, err
+	}
+	l.mu.Lock()
+	if len(l.pending) > 0 && l.pending[0] == h {
+		l.pending = l.pending[1:]
+	}
+	l.mu.Unlock()
+	l.numbered(h.scope, h.e, seq)
+	return h.e, true, nil
+}
+
+func (l *Limiter) now() time.Time {
+	if l.Now != nil {
+		return l.Now()
+	}
+	return time.Now()
 }
 
 // EndGrace ends the grace after a recovery at once: for an operator who
@@ -272,40 +372,17 @@ func (l *Limiter) EndGrace() {
 	l.graceUntil = time.Time{}
 }
 
-// ReplayOne replays the oldest increment held during an outage and reports
-// it; Recover replays them all. ok is false when none is held.
-func (l *Limiter) ReplayOne(ctx context.Context) (e Event, ok bool, err error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.pending) == 0 {
-		return Event{}, false, nil
-	}
-	e = l.pending[0].e
-	return e, true, l.replayOneLocked(ctx)
-}
-
-func (l *Limiter) replayOneLocked(ctx context.Context) error {
-	h := l.pending[0]
-	seq, err := l.store.Add(ctx, h.scope, h.e)
-	if err != nil {
-		return err
-	}
-	l.pending = l.pending[1:]
-	l.numbered(h.scope, h.e, seq)
-	return nil
-}
-
 // Known is a scope's known spend now, read afresh when the store answers
 // (else the last computed). It does not change what admission decides
 // from: only an admission's own read does, as in model/exposure.md.
 func (l *Limiter) Known(ctx context.Context, scope string) int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.down {
+	if !l.isDown() {
 		if k, err := l.read(ctx, scope); err == nil {
 			return k
 		}
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.last[scope]
 }
 

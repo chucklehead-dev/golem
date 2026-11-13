@@ -19,6 +19,8 @@ func TestRewriteRequestsUsage(t *testing.T) {
 			`{"model":"gpt","stream":true,"stream_options":{"include_usage":true}}`},
 		{"usage already on", `{"model":"a","stream":true,"stream_options":{"include_usage":true}}`,
 			`{"model":"gpt","stream":true,"stream_options":{"include_usage":true}}`},
+		{"null stream_options", `{"model":"a","stream":true,"stream_options":null}`,
+			`{"model":"gpt","stream":true,"stream_options":{"include_usage":true}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var r Request
@@ -62,6 +64,7 @@ func TestScanMaxTokens(t *testing.T) {
 func FuzzRewrite(f *testing.F) {
 	f.Add([]byte(`{"model":"a","stream":true,"stream_options":{"x":1},"messages":[]}`), "gpt")
 	f.Add([]byte(`{"stream":true,"model":"a"}`), "m")
+	f.Add([]byte(`{"model":"a","stream":true,"stream_options":null}`), "m") // once a duplicate member
 	f.Fuzz(func(t *testing.T, body []byte, model string) {
 		var r Request
 		if r.Scan(body) != nil {

@@ -92,17 +92,20 @@ func (d *expDriver) Step(s *connect.Step) error {
 		"valkeyBack": func(*connect.Step) error { d.store.SetDown(false); return nil },
 		"replayOne": func(s *connect.Step) error {
 			l := d.gws[gw()]
-			l.mu.Lock()
-			defer l.mu.Unlock()
 			// The model picks which held increment; the gateway replays in
 			// its own order, so bring the model's to the front.
 			e := connect.MustPick[event](s, "e")
+			l.mu.Lock()
 			i := slices.IndexFunc(l.pending, func(h held) bool { return h.e.ID == e.ID })
+			if i >= 0 {
+				l.pending[0], l.pending[i] = l.pending[i], l.pending[0]
+			}
+			l.mu.Unlock()
 			if i < 0 {
 				return errorf("gateway %s holds no increment %s", gw(), e.ID)
 			}
-			l.pending[0], l.pending[i] = l.pending[i], l.pending[0]
-			return l.replayOneLocked(ctx)
+			_, _, err := l.ReplayOne(ctx)
+			return err
 		},
 		"recover":   func(*connect.Step) error { return d.gws[gw()].Recover(ctx) },
 		"graceEnds": func(*connect.Step) error { d.gws[gw()].EndGrace(); return nil },
