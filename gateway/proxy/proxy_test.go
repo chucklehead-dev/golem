@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -279,39 +280,100 @@ func TestUpstreamCut(t *testing.T) {
 	}
 }
 
+// serve starts h as a test server speaking HTTP/1.1, or h2c as
+// golem-gateway does behind the mesh, and returns its URL and a client
+// speaking the same.
+func serve(t *testing.T, h http.Handler, h2c bool) (string, *http.Client) {
+	srv := httptest.NewUnstartedServer(h)
+	var p http.Protocols
+	if h2c {
+		p.SetUnencryptedHTTP2(true)
+	} else {
+		p.SetHTTP1(true)
+	}
+	srv.Config.Protocols = &p
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv.URL, &http.Client{Transport: &http.Transport{Protocols: &p}}
+}
+
+func protocols(t *testing.T, f func(t *testing.T, h2c bool)) {
+	t.Run("http1", func(t *testing.T) { f(t, false) })
+	t.Run("h2c", func(t *testing.T) { f(t, true) })
+}
+
 // TestStalledClient: a client that stops reading a stream is a caller gone
 // once a write has blocked for WriteStall, so it cannot hold its slot and
 // its upstream connection for as long as the provider streams.
 func TestStalledClient(t *testing.T) {
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		chunk := []byte("data: " + strings.Repeat("x", 64<<10) + "\n\n")
-		for r.Context().Err() == nil {
-			if _, err := w.Write(chunk); err != nil {
-				return
+	protocols(t, func(t *testing.T, h2c bool) {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			chunk := []byte("data: " + strings.Repeat("x", 64<<10) + "\n\n")
+			for r.Context().Err() == nil {
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
 			}
-			w.(http.Flusher).Flush()
+		}))
+		defer up.Close()
+		u, _ := url.Parse(up.URL)
+		results := make(chan Result, 1)
+		h := &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, WriteStall: 200 * time.Millisecond,
+			Record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
+		gw, client := serve(t, h, h2c)
+		resp, err := client.Post(gw, "application/json",
+			strings.NewReader(`{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}))
-	defer up.Close()
-	u, _ := url.Parse(up.URL)
-	results := make(chan Result, 1)
-	h := &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, WriteStall: 200 * time.Millisecond,
-		Record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
-	gw := httptest.NewServer(h)
-	defer gw.Close()
-	resp, err := gw.Client().Post(gw.URL, "application/json",
-		strings.NewReader(`{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close() // and never read: the socket buffers fill, and the gateway's write blocks
-	select {
-	case r := <-results:
-		if !r.CallerGone {
-			t.Fatalf("result %+v: a stalled client is a caller gone", r)
+		defer resp.Body.Close() // and never read: the buffers fill, and the gateway's write blocks
+		select {
+		case r := <-results:
+			if !r.CallerGone {
+				t.Fatalf("result %+v: a stalled client is a caller gone", r)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("the gateway kept writing to a client that stopped reading")
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("the gateway kept writing to a client that stopped reading")
-	}
+	})
+}
+
+// TestSilentProviderKeepsClient: a provider silent for longer than the
+// stall (a reasoning pause, a slow tool) must not cut a client that reads.
+// Under HTTP/2 a write deadline left set between writes resets the stream
+// when it passes, so the stall is armed only while a write is in flight.
+func TestSilentProviderKeepsClient(t *testing.T) {
+	protocols(t, func(t *testing.T, h2c bool) {
+		const stall = 150 * time.Millisecond
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			for i := range 3 {
+				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"%d\"}}]}\n\n", i)
+				w.(http.Flusher).Flush()
+				time.Sleep(3 * stall) // the provider thinks
+			}
+			io.WriteString(w, "data: [DONE]\n\n")
+		}))
+		defer up.Close()
+		u, _ := url.Parse(up.URL)
+		results := make(chan Result, 1)
+		h := &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, WriteStall: stall,
+			Record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
+		gw, client := serve(t, h, h2c)
+		resp, err := client.Post(gw, "application/json",
+			strings.NewReader(`{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || !strings.HasSuffix(string(body), "data: [DONE]\n\n") {
+			t.Fatalf("the client got %q, %v: the whole stream, however long the provider paused", body, err)
+		}
+		if r := <-results; r.CallerGone || r.Err != nil {
+			t.Fatalf("result %+v: a reading client is not gone", r)
+		}
+	})
 }

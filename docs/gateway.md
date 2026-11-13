@@ -67,9 +67,11 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    10 s, idle keep-alives closed after two minutes, HTTP/2 at most 256
    streams per connection with pings after 30 s of silence. No
    `WriteTimeout` (streams are long): instead no write to the caller may
-   block longer than `WriteStall` (30 s; `ResponseController.SetWriteDeadline`,
-   moved when half of it has passed, on a coarse clock), so a client that
-   stops reading is a caller gone.
+   stay blocked longer than `WriteStall` (30 s). A watchdog per response,
+   ticking every half stall, cuts a write still in flight at three ticks
+   running; a deadline left set between writes would reset an HTTP/2
+   stream whenever the provider pauses that long. A client that stops
+   reading is a caller gone.
 2. **Frontend.** `ServeMux` method-and-path patterns select the dialect
    (`POST /v1/chat/completions`, `POST /v1/messages`, ...). The body is read
    into a pooled buffer with a size cap (`http.MaxBytesReader`). A

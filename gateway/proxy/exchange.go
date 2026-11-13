@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
 	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
@@ -33,14 +35,97 @@ type exchange struct {
 	// each time it is taken, and the readers stay at these addresses.
 	msgWant       func([]byte) bool
 	msgOn, chatOn func(event, data []byte)
+
+	// The write stall: no write to the caller may stay blocked longer than
+	// stall. A watchdog ticking every half stall counts the writes started
+	// and finished, and cuts one still in flight at three ticks running (by
+	// a deadline in the past). Each write costs two atomic adds; a timer per
+	// write cost a third of the fast path. A deadline left set between
+	// writes would not do: under HTTP/2 it resets the stream when it passes,
+	// written to or not, and a provider may be silent longer than stall.
+	w                 http.ResponseWriter
+	rc                *http.ResponseController
+	stall             time.Duration
+	started, finished atomic.Uint64
+	watchdog          *time.Timer
+	watchMu           sync.Mutex // guards the rest, for the watchdog
+	watching          bool
+	lastStarted       uint64
+	seen              int
 }
 
 var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
 	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
 	ex.filter.Drop = dropUsageOnly
+	ex.watchdog = time.AfterFunc(time.Hour, ex.tick)
+	ex.watchdog.Stop()
 	return ex
 }}
+
+// startWrites readies the exchange to write a response to w, and starts
+// the watchdog; endWrites stops it.
+func (ex *exchange) startWrites(w http.ResponseWriter, stall time.Duration) {
+	ex.watchMu.Lock()
+	defer ex.watchMu.Unlock()
+	ex.w, ex.rc, ex.stall = w, http.NewResponseController(w), stall
+	ex.watching, ex.seen = true, 0
+	ex.watchdog.Reset(stall / 2)
+}
+
+func (ex *exchange) endWrites() {
+	ex.watchMu.Lock()
+	defer ex.watchMu.Unlock()
+	ex.watching = false
+	ex.watchdog.Stop()
+}
+
+// write writes b to the caller (and flushes it, for a stream).
+func (ex *exchange) write(b []byte, flush bool) error {
+	ex.started.Add(1)
+	_, err := ex.w.Write(b)
+	if err == nil && flush {
+		ex.rc.Flush() // a dead connection fails the next write
+	}
+	ex.finished.Add(1)
+	return err
+}
+
+// tick is the watchdog: the same write in flight at three ticks half a
+// stall apart has been blocked at least the stall, and is cut.
+func (ex *exchange) tick() {
+	ex.watchMu.Lock()
+	defer ex.watchMu.Unlock()
+	if !ex.watching {
+		return
+	}
+	s := ex.started.Load()
+	if ex.finished.Load() < s && s == ex.lastStarted {
+		ex.seen++
+	} else {
+		ex.seen = 0
+	}
+	ex.lastStarted = s
+	if ex.seen >= 2 {
+		ex.rc.SetWriteDeadline(time.Now()) // the blocked write fails: the caller is gone
+		ex.watching = false
+		return
+	}
+	ex.watchdog.Reset(ex.stall / 2)
+}
+
+// send forwards a stream's bytes to the caller as they come; a failed or
+// stalled write is the caller gone (ADR 0041 §7.6).
+func (ex *exchange) send(b []byte) bool {
+	if len(b) == 0 {
+		return true
+	}
+	if err := ex.write(b, true); err != nil {
+		ex.callerGone = true
+		return false
+	}
+	return true
+}
 
 // dropUsageOnly withholds the usage-only chunk golem asked for: the caller
 // did not, and some SDKs fail on a chunk with no choices.
@@ -55,6 +140,10 @@ func getExchange() *exchange {
 // release returns the exchange to the pool. The parser and filter keep
 // bounded buffers (their Reset); tail is let go if a response grew it large.
 func (ex *exchange) release() {
+	ex.endWrites()
+	ex.watchMu.Lock()
+	ex.w, ex.rc = nil, nil // the pool must not keep a finished response
+	ex.watchMu.Unlock()
 	if cap(ex.tail) <= maxRetained {
 		exchanges.Put(ex)
 	}
