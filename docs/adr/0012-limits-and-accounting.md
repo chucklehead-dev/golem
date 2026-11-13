@@ -22,8 +22,9 @@ Status: Accepted (v1 baseline). Accounting parts superseded by [ADR 0031](0031-s
   recent p95 for the model; a scope may choose worst case. Decision models
   bill input only, so theirs is exact.
 - **Long streams** renew their reservation every minute (TTL 5 minutes).
-- **Cut streams** are charged a bound on what was produced (every byte
-  received a token, at most the request's output ceiling; golem#3) and
+- **Cut streams** are charged a conservative estimate of what was produced
+  (every byte received a token, at most the request's output ceiling;
+  golem#3; an estimate, not a guarantee: ADR 0044) and
   flagged `usage_estimated`. A client disconnect closes the
   upstream at once, except for requests a scope marks
   `complete_on_disconnect`.

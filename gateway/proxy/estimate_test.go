@@ -58,7 +58,7 @@ func serveCut(h *Handler, path, body string) {
 }
 
 // TestEstimates: a response the provider never finished reporting is
-// charged a bound on what was produced, never an average and never zero:
+// charged by rules that err high, never an average and never zero:
 // every byte received a token, whatever its fields or framing, at most the
 // request's output ceiling; input, if unreported, every request byte. Its
 // row says which share of its cost is estimated (ADR 0012; golem#3).

@@ -115,14 +115,16 @@ func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
 }
 
 // estimate completes a response's usage when the provider's report is
-// missing (a stream cut, or a response without its usage) with bounds, not
-// averages: no text tokenizer golem serves makes a token of less than a
-// byte, and every output token the provider sent is in the response's
-// bytes, so output is every byte received, whatever its framing or fields,
-// and at most the request's output ceiling (max_tokens × n), which the
-// provider enforces; input, if the provider gave none, every byte of the
-// request (as price.Worst). An estimate replaces no count the provider
-// gave; reconciliation corrects it (ADR 0031). It returns the usage to
+// missing (a stream cut, or a response without its usage), by rules chosen
+// to err high rather than to average: no text tokenizer golem serves makes
+// a token of less than a byte, and every output token the provider sent is
+// in the response's bytes, so output is every byte received, whatever its
+// framing or fields, at most the request's output ceiling (max_tokens × n);
+// input, if the provider gave none, every byte of the request (as
+// price.Worst). It can still be low (a provider's work past a cut, input
+// that bytes do not bound): an estimate, not a guarantee (ADR 0044). It
+// replaces no count the provider gave; reconciliation corrects it (ADR
+// 0031). It returns the usage to
 // charge and the estimated part of it (zero when the report was whole).
 func (ex *exchange) estimate(d Dialect, requestBytes, ceiling int64) (total, estimated canon.Usage) {
 	u, final := ex.chatUsage.Usage, ex.chatUsage.Final
