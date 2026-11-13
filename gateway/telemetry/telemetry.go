@@ -60,8 +60,8 @@ type Call struct {
 	// Waived: admitted outside the budget's bound, while the site store was
 	// unreachable or in the grace after a recovery (ADR 0041 §7.3).
 	Waived bool
-	// Counted: the limiter numbers this call's event, and its ledger row
-	// waits for the number (Numbered). Else the row is written at once.
+	// Counted: the limiter counts this call's event, so a numbering record
+	// follows the row (golem.spend_seq, ADR 0043).
 	Counted bool
 }
 
@@ -212,19 +212,9 @@ func (t *Telemetry) Refused(ctx context.Context, code contract.Code) {
 	t.refusals.Add(ctx, 1, v.([]metric.AddOption)...) // a 429 storm costs no allocation here
 }
 
-// Numbered is the limiter's OnNumbered: the ledger writes the event's row
-// with its counter number.
-func (t *Telemetry) Numbered(eventID string, seq int64) {
+// Numbered is the limiter's OnNumbered: the event's numbering record.
+func (t *Telemetry) Numbered(scope, period, eventID string, seq int64) {
 	if t != nil {
-		t.Ledger.Numbered("", eventID, seq)
+		t.Ledger.Numbered(scope, period, eventID, seq)
 	}
-}
-
-// FlushWaiting writes the ledger rows still waiting for their counter
-// numbers without them (at shutdown), and says how many.
-func (t *Telemetry) FlushWaiting(ctx context.Context) int {
-	if t == nil {
-		return 0
-	}
-	return t.Ledger.FlushWaiting(ctx)
 }

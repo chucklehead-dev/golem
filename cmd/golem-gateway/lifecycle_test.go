@@ -41,7 +41,7 @@ func TestShutdownAccounts(t *testing.T) {
 	}
 	st := limit.NewMem()
 	lim := limit.New(st)
-	lim.OnNumbered = func(_ string, e limit.Event, seq int64) { tel.Numbered(e.ID, seq) }
+	lim.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
 
 	lc := &lifecycle{drain: 200 * time.Millisecond, cut: 5 * time.Second}
 	mux := http.NewServeMux()
@@ -74,14 +74,17 @@ func TestShutdownAccounts(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("shutdown did not finish")
 	}
-	finish(lim, tel)
+	finish(lim)
 
-	var row map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(rows.Bytes()), &row); err != nil {
-		t.Fatalf("one ledger row expected, got %q: %v", rows.String(), err)
+	lines := strings.Split(strings.TrimSpace(rows.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("a row and its numbering record expected, got %q", rows.String())
 	}
-	if row["outcome"] != "cancelled" || row["counter_seq"] != 1.0 {
-		t.Fatalf("row %v: the cut call is a cancellation, numbered", row)
+	var row, num map[string]any
+	json.Unmarshal([]byte(lines[0]), &row)
+	json.Unmarshal([]byte(lines[1]), &num)
+	if row["outcome"] != "cancelled" || num["counter_seq"] != 1.0 || num["event_id"] != row["event_id"] {
+		t.Fatalf("row %v, numbering %v: the cut call is a cancellation, numbered", row, num)
 	}
 	month := time.Now().UTC().Format("2006-01")
 	if len(st.Counter("any", month)) != 1 || len(st.Slots()) != 0 {

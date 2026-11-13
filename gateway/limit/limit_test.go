@@ -68,7 +68,7 @@ func TestOutage(t *testing.T) {
 	st := NewMem()
 	g1, g2 := New(st), New(st)
 	var numbered []int64
-	g1.OnNumbered = func(_ string, _ Event, seq int64) { numbered = append(numbered, seq) }
+	g1.OnNumbered = func(n Numbered) { numbered = append(numbered, n.Seq) }
 	st.SetDown(true)
 	// Each gateway admits against its own counts: p1 has two calls running.
 	a, err1 := g1.Admit(ctx, scopeCall("a", "p1"))
@@ -144,7 +144,7 @@ func TestPeriodRollover(t *testing.T) {
 	now := time.Date(2026, 11, 30, 23, 59, 0, 0, time.UTC)
 	l.Now = func() time.Time { return now }
 	var seqs []int64
-	l.OnNumbered = func(_ string, _ Event, seq int64) { seqs = append(seqs, seq) }
+	l.OnNumbered = func(n Numbered) { seqs = append(seqs, n.Seq) }
 	for i := range 3 {
 		tk, err := l.Admit(ctx, scopeCall(fmt.Sprint("nov", i), "p1"))
 		if err != nil {
@@ -272,7 +272,7 @@ func TestRecoverBatches(t *testing.T) {
 	l := New(st)
 	l.MaxPending = 600
 	var numbered []int64
-	l.OnNumbered = func(_ string, _ Event, seq int64) { numbered = append(numbered, seq) }
+	l.OnNumbered = func(n Numbered) { numbered = append(numbered, n.Seq) }
 	st.SetDown(true)
 	for i := range 700 {
 		c := scopeCall(fmt.Sprint(i), fmt.Sprint("p", i))

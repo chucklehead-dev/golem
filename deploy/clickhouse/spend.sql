@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS golem.spend (
     request_id            UUID,
     attempt_id            UUID,
     event_id              UUID,
-    counter_seq           UInt64,
     provider_request_id   String,
     started_at            DateTime64(3, 'UTC'),
     ended_at              DateTime64(3, 'UTC'),
@@ -44,7 +43,8 @@ CREATE TABLE IF NOT EXISTS golem.spend (
     error_origin          LowCardinality(String),
     error_code            LowCardinality(String),
     estimated_fraction    Float32,
-    waived                Bool
+    waived                Bool,
+    counted               Bool
 )
 ENGINE = MergeTree
 PARTITION BY period
@@ -57,3 +57,20 @@ CREATE VIEW IF NOT EXISTS golem.spend_dedup AS
 SELECT * FROM golem.spend
 ORDER BY event_id, ended_at
 LIMIT 1 BY event_id;
+
+-- Numbering records (ADR 0043): an event's number in its site's counter for
+-- the scope and period, written when the limiter numbers it, apart from its
+-- row (which never waits for it). golem-control's watermark joins them to
+-- golem.spend by event_id. counter_seq 0: the event never reached the
+-- counter. Deduplicate by (site, event_id) before use.
+CREATE TABLE IF NOT EXISTS golem.spend_seq (
+    schema_version        UInt16,
+    event_id              UUID,
+    site                  LowCardinality(String),
+    scope_id              String,
+    period                Date,
+    counter_seq           UInt64
+)
+ENGINE = ReplacingMergeTree
+PARTITION BY period
+ORDER BY (site, scope_id, period, counter_seq, event_id);

@@ -2,8 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -12,84 +10,62 @@ import (
 	budget "github.com/chucklehead-dev/golem/lib/period"
 )
 
-// SchemaVersion is golem.spend's contract version (contracts.md §3).
-const SchemaVersion = 1
+// SchemaVersion is golem.spend's contract version (contracts.md §3): 2,
+// rows written at their call's end, their counter numbers in
+// golem.spend_seq (ADR 0043).
+const SchemaVersion = 2
 
-// DefaultMaxWaiting bounds the rows waiting for their counter number.
-const DefaultMaxWaiting = 100_000
-
-// Ledger writes the access-log records that are golem.spend's rows: one per
-// upstream attempt, as OTel log records whose attributes are the table's
-// columns, which the collector writes to ClickHouse.
+// Ledger writes the access-log records that are golem.spend's rows, one per
+// upstream attempt, and golem.spend_seq's numbering records, as OTel log
+// records whose attributes are the tables' columns; the collector writes
+// them to ClickHouse. A row is written when its call ends, never held for
+// its number: the number follows in its own record (ADR 0043), so an
+// outage of the counter keeps no billing rows in memory.
 type Ledger struct {
 	logger     otellog.Logger
 	site, pool string
 	// Period is the time zone of budget periods (default UTC).
 	Period *time.Location
-	// MaxWaiting bounds the rows waiting for their counter number: during a
-	// long Valkey outage the oldest are written without one (counter_seq
-	// 0), which golem-control treats as never numbered (ADR 0042's gaps).
-	MaxWaiting int
-
-	mu      sync.Mutex
-	waiting map[string]Call // by event ID, until numbered
-	order   []string
-	// Unnumbered counts rows written without a number (MaxWaiting).
-	Unnumbered atomic.Int64
 }
 
 // NewLedger writes rows through logger.
 func NewLedger(logger otellog.Logger, site, pool string) *Ledger {
-	return &Ledger{logger: logger, site: site, pool: pool, Period: time.UTC, MaxWaiting: DefaultMaxWaiting, waiting: map[string]Call{}}
+	return &Ledger{logger: logger, site: site, pool: pool, Period: time.UTC}
 }
 
-// Ended takes a finished call's row: written now, or, if the limiter counts
-// it, when the limiter numbers its event.
+// Ended writes a finished call's row.
 func (l *Ledger) Ended(ctx context.Context, c Call) {
-	if !c.Counted {
-		l.write(ctx, c, 0)
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.waiting[c.RequestID] = c
-	l.order = append(l.order, c.RequestID)
-	// Drop the front's entries already numbered, so order stays as long as
-	// waiting (plus the numbered ones behind a waiting one).
-	for len(l.order) > 0 {
-		if _, ok := l.waiting[l.order[0]]; ok {
-			break
-		}
-		l.order = l.order[1:]
-	}
-	for len(l.waiting) > l.MaxWaiting {
-		id := l.order[0]
-		l.order = l.order[1:]
-		if old, ok := l.waiting[id]; ok {
-			delete(l.waiting, id)
-			l.Unnumbered.Add(1)
-			l.write(ctx, old, 0)
-		}
-	}
+	var row [ledgerColumns]attribute.KeyValue
+	l.row(&row, &c)
+	l.emit(ctx, c.Ended, "golem.spend", row[:])
 }
 
-// Numbered is the limiter's OnNumbered: the event's row is written with
-// its counter number. The event's ID is the call's request ID; its cost is
-// the call's (a cancelled call's, what the gateway saw).
-func (l *Ledger) Numbered(_ string, eventID string, seq int64) {
-	l.mu.Lock()
-	c, ok := l.waiting[eventID]
-	delete(l.waiting, eventID)
-	l.mu.Unlock()
-	if ok {
-		l.write(context.Background(), c, seq)
-	}
-	// Its order entry is dropped by a later Ended.
+// Numbered writes an event's numbering record: its number in the site
+// counter of its scope and period, 0 if it never reached the counter.
+func (l *Ledger) Numbered(scope, period, eventID string, seq int64) {
+	s := attribute.String
+	l.emit(context.Background(), time.Now(), "golem.spend_seq", []attribute.KeyValue{
+		attribute.Int64("schema_version", SchemaVersion),
+		s("event_id", eventID),
+		s("site", l.site),
+		s("scope_id", scope),
+		s("period", budget.FirstDay(period)),
+		attribute.Int64("counter_seq", seq),
+	})
+}
+
+func (l *Ledger) emit(ctx context.Context, at time.Time, name string, attrs []attribute.KeyValue) {
+	var r otellog.Record
+	r.SetTimestamp(at)
+	r.SetEventName(name)
+	r.SetBody(attribute.StringValue(name))
+	r.AddAttributes(attrs...)
+	l.logger.Emit(ctx, r)
 }
 
 // columns are golem.spend's, in the DDL's order; a test checks them
 // against deploy/clickhouse/spend.sql.
-func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call, seq int64) {
+func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 	p := c.Period
 	if p == "" {
 		p = budget.Of(c.Started, l.Period)
@@ -102,7 +78,6 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call, seq int64)
 		s("request_id", c.RequestID),
 		s("attempt_id", c.RequestID), // one attempt per request until the attempt loop
 		s("event_id", c.RequestID),
-		i("counter_seq", seq),
 		s("provider_request_id", c.ProviderRequestID),
 		s("started_at", c.Started.UTC().Format(time.RFC3339Nano)),
 		s("ended_at", c.Ended.UTC().Format(time.RFC3339Nano)),
@@ -137,41 +112,10 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call, seq int64)
 		s("error_code", c.ErrorCode),
 		f("estimated_fraction", c.EstimatedFraction),
 		attribute.Bool("waived", c.Waived),
+		attribute.Bool("counted", c.Counted),
 	}
 }
 
 // ledgerColumns is golem.spend's column count; the row is built in an
 // array of this size, on the stack, not a slice the record copies again.
 const ledgerColumns = 40
-
-func (l *Ledger) write(ctx context.Context, c Call, seq int64) {
-	var row [ledgerColumns]attribute.KeyValue
-	l.row(&row, &c, seq)
-	var r otellog.Record
-	r.SetTimestamp(c.Ended)
-	r.SetEventName("golem.spend")
-	r.SetBody(attribute.StringValue("golem.spend"))
-	r.AddAttributes(row[:]...)
-	l.logger.Emit(ctx, r)
-}
-
-// FlushWaiting writes every row still waiting for its counter number,
-// unnumbered: at shutdown, a row is worth more than its number (which
-// golem-control treats as never numbered, ADR 0042).
-func (l *Ledger) FlushWaiting(ctx context.Context) int {
-	l.mu.Lock()
-	rows := make([]Call, 0, len(l.waiting))
-	for _, id := range l.order {
-		if c, ok := l.waiting[id]; ok {
-			rows = append(rows, c)
-		}
-	}
-	clear(l.waiting)
-	l.order = nil
-	l.mu.Unlock()
-	for _, c := range rows {
-		l.Unnumbered.Add(1)
-		l.write(ctx, c, 0)
-	}
-	return len(rows)
-}

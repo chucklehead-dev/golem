@@ -59,7 +59,7 @@ spec:
 				b.Fatal(err)
 			}
 			h.Telemetry = tel
-			lim.OnNumbered = func(_ string, e limit.Event, seq int64) { tel.Numbered(e.ID, seq) }
+			lim.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
 			var br bytes.Reader
 			req := httptest.NewRequest("POST", "/v1/messages", nil)
 			req.Header.Set("X-Api-Key", k)

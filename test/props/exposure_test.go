@@ -70,7 +70,7 @@ func newLimMachine(ctx context.Context, mut limitMutation) *limMachine {
 	for _, g := range limitGws {
 		l := limit.New(st)
 		l.Now = func() time.Time { return inPeriod } // the model has one budget period
-		l.OnNumbered = func(_ string, e limit.Event, seq int64) { m.rows = append(m.rows, row{e.ID, e.Cost, seq}) }
+		l.OnNumbered = func(n limit.Numbered) { m.rows = append(m.rows, row{n.ID, n.Cost, n.Seq}) }
 		m.gws[g] = l
 		m.recovered[g] = true
 		m.applied[g] = limit.Known{Period: period} // the model's initial snapshot: nothing, in its one period

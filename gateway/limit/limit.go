@@ -56,8 +56,9 @@ type Limiter struct {
 	store Store
 	// OnNumbered, if set, is told each event's counter number once it has
 	// one: at completion, or when an increment held during an outage is
-	// replayed. The event's ledger row carries the number (ADR 0042).
-	OnNumbered func(scope string, e Event, seq int64)
+	// replayed (or 0, when it never will be). The ledger writes it as the
+	// event's numbering record (ADR 0043).
+	OnNumbered func(Numbered)
 	// Grace is how long after its own recovery a gateway records its
 	// admissions as waivers: peers that have not recovered yet hold calls
 	// Valkey lacks. Two renewal intervals by default (each peer renews, and
@@ -118,6 +119,16 @@ func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{}, last: map[keyOf]int64{}, overLogged: map[keyOf]bool{},
 		running: map[string]*Ticket{}, byPrincipal: map[string]int{}, byScope: map[string]int{}, MaxPending: 100_000,
 		Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
+}
+
+// Numbered is an event's number in its scope's counter for a period: the
+// ledger's numbering record (ADR 0043). Seq 0: the event never reached the
+// counter (an increment dropped during an outage), so its row counts as
+// it is.
+type Numbered struct {
+	Scope, Period string
+	Event
+	Seq int64
 }
 
 // Ticket is an admitted call. Exactly one of Complete or Cancel is called;
@@ -301,7 +312,7 @@ func (t *Ticket) Complete(ctx context.Context, cost int64) {
 		seq, err := l.store.Complete(sctx, t.period, t.slot(), e)
 		cancel()
 		if err == nil {
-			l.numbered(t.call.Scope, e, seq)
+			l.numbered(t.call.Scope, t.period, e, seq)
 			return
 		}
 		l.markDown(err) // completions run detached from the caller: an error is the store's
@@ -320,7 +331,7 @@ func (t *Ticket) Cancel(ctx context.Context, seen int64) {
 		seq, err := l.store.Add(sctx, t.call.Scope, t.period, e)
 		cancel()
 		if err == nil {
-			l.numbered(t.call.Scope, e, seq)
+			l.numbered(t.call.Scope, t.period, e, seq)
 			return
 		}
 		l.markDown(err)
@@ -354,13 +365,13 @@ func (l *Limiter) hold(scope, period string, e Event) {
 	if over {
 		// The oldest goes to the ledger unnumbered: its row still counts
 		// once ingested; only the counter (this site's fast view) loses it.
-		l.numbered(dropped.scope, dropped.e, 0)
+		l.numbered(dropped.scope, dropped.period, dropped.e, 0)
 	}
 }
 
-func (l *Limiter) numbered(scope string, e Event, seq int64) {
+func (l *Limiter) numbered(scope, period string, e Event, seq int64) {
 	if l.OnNumbered != nil {
-		l.OnNumbered(scope, e, seq)
+		l.OnNumbered(Numbered{scope, period, e, seq})
 	}
 }
 
@@ -489,7 +500,7 @@ func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
 	}
 	l.mu.Unlock()
 	for i, h := range batch {
-		l.numbered(h.scope, h.e, seqs[i])
+		l.numbered(h.scope, h.period, h.e, seqs[i])
 	}
 	return len(batch), nil
 }
@@ -517,8 +528,22 @@ func (l *Limiter) ReplayOne(ctx context.Context) (e Event, ok bool, err error) {
 		l.pending = l.pending[1:]
 	}
 	l.mu.Unlock()
-	l.numbered(h.scope, h.e, seq)
+	l.numbered(h.scope, h.period, h.e, seq)
 	return h.e, true, nil
+}
+
+// Abandon gives up the increments still held (a gateway leaving with its
+// store unreachable): each is told to OnNumbered with number 0, so its row
+// counts as it is, the counter never having had it.
+func (l *Limiter) Abandon() int {
+	l.mu.Lock()
+	held := l.pending
+	l.pending = nil
+	l.mu.Unlock()
+	for _, h := range held {
+		l.numbered(h.scope, h.period, h.e, 0)
+	}
+	return len(held)
 }
 
 // EndGrace ends the grace after a recovery at once: for an operator who

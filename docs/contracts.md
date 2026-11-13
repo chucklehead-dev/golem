@@ -73,7 +73,6 @@ prevent double counting.
 | `schema_version` | UInt16 | this table's contract version |
 | `row_kind` | Enum: `attempt`, `adjustment` | attempt: one per upstream attempt, at its end (`estimated_fraction` > 0 when a cut stream was counted from deltas); adjustment: from provider reconciliation (ADR 0031) |
 | `request_id`, `attempt_id`, `event_id` | UUID | logical request, upstream attempt, stable accounting-event identity (ADR 0029) |
-| `counter_seq` | UInt64 | the event's number in its site's counter for the scope and period, from 1 each period (ADR 0042); golem-control's watermark is the contiguous prefix of these per site, scope and period |
 | `provider_request_id` | String | the provider's own ID, for disputes |
 | `started_at`, `ended_at` | DateTime64(3, UTC) | |
 | `period` | Date | the **start** time's period in the period time zone: a stream crossing a period boundary is charged to the period it started in |
@@ -91,7 +90,16 @@ prevent double counting.
 | `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away) or `failed`; the failure's §2 origin and §1 code |
 | `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), output is counted from what was seen (about 4 bytes a token of content, at least a token a delta; a token per OpenAI chunk) and input, if not reported, from the request's size (4 bytes a token). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
+| `counted` | Bool | the site counter counts this event (a limiter numbered, or will number, it): its number comes in a numbering record. A row with no number is left out of known spend, which the counter covers, until its number arrives or the gap timeout passes (ADR 0043) |
 
+- Numbering records (`golem.spend_seq`, ADR 0043) carry an event's number
+  in its site's counter for the scope and period: `schema_version`,
+  `event_id`, `site`, `scope_id`, `period`, `counter_seq` (from 1 each
+  period; 0 when the event never reached the counter). A row is written
+  when its call ends; its numbering record follows when the limiter
+  numbers it, even long after (an outage's replay). golem-control's
+  watermark is the contiguous prefix of the numbers whose rows it holds,
+  per site, scope and period (ADR 0042).
 - Rounding: per row, cost is computed in micro-units from integer token
   counts and prices in micro-units per million tokens, rounded half-even
   once, at the end.

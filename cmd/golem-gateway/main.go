@@ -65,7 +65,7 @@ func main() {
 	}
 	limiter := limit.New(limit.NewMem())
 	limiter.Location = zone
-	limiter.OnNumbered = func(_ string, e limit.Event, seq int64) { tel.Numbered(e.ID, seq) }
+	limiter.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
 	var entra *auth.Entra
 	if *tenant != "" {
 		entra = &auth.Entra{Tenant: *tenant, Audiences: strings.Split(*audience, ",")}
@@ -141,15 +141,15 @@ func main() {
 	<-drained
 	stopBg()
 	wg.Wait()
-	finish(limiter, tel)
+	finish(limiter)
 	shutdownTelemetry() // last: it delivers the rows the calls wrote
 	os.Exit(code)
 }
 
 // finish is the last accounting, once every call has ended: increments
-// held through an outage replayed if the store answers, then every ledger
-// row still waiting for its number written without one.
-func finish(l *limit.Limiter, tel *telemetry.Telemetry) {
+// held through an outage replayed if the store answers, else abandoned
+// (numbered 0: their rows, already written, count as they are).
+func finish(l *limit.Limiter) {
 	if l.Down() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if err := l.Recover(ctx); err != nil {
@@ -157,8 +157,8 @@ func finish(l *limit.Limiter, tel *telemetry.Telemetry) {
 		}
 		cancel()
 	}
-	if n := tel.FlushWaiting(context.Background()); n > 0 {
-		slog.Warn("golem-gateway: ledger rows written without their counter numbers", "rows", n)
+	if n := l.Abandon(); n > 0 { // their rows count as they are, never numbered
+		slog.Warn("golem-gateway: increments held through the outage abandoned; numbered 0", "increments", n)
 	}
 }
 
