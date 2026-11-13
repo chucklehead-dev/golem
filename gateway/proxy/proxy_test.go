@@ -377,3 +377,77 @@ func TestSilentProviderKeepsClient(t *testing.T) {
 		}
 	})
 }
+
+// bounded is a handler over one OpenAI route with the given bounds.
+func bounded(t *testing.T, up *httptest.Server, maxD, headers, idle time.Duration, results chan Result) *Handler {
+	u, _ := url.Parse(up.URL)
+	h := routes(OpenAIChat, u, up.Client().Transport)
+	c, _ := h.Current()
+	rt := c.Routes.Lookup([]byte("claude"))
+	rt.MaxDuration, rt.Headers, rt.Idle = maxD, headers, idle
+	return &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, Snapshots: h, Record: func(_ *http.Request, r Result) { results <- r }}
+}
+
+const streamReq = `{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`
+
+// TestRouteBounds: a provider that never answers, falls silent mid-stream,
+// or streams for ever is cut at its route's bound, the call accounted as
+// the provider's failure, not held (with its slot) for ever.
+func TestRouteBounds(t *testing.T) {
+	t.Run("headers", func(t *testing.T) {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.ReadAll(r.Body) // the server notices the client leave only once the body is read
+			<-r.Context().Done()
+		}))
+		defer up.Close()
+		h := bounded(t, up, time.Minute, 100*time.Millisecond, time.Minute, make(chan Result, 1))
+		w := httptest.NewRecorder()
+		start := time.Now()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(streamReq)))
+		if w.Code != 503 || !strings.Contains(w.Body.String(), "headers timeout") || time.Since(start) > 5*time.Second {
+			t.Fatalf("%d %s after %v", w.Code, w.Body, time.Since(start))
+		}
+	})
+	for _, tc := range []struct {
+		name            string
+		maxD, idle      time.Duration
+		silentAfterOnce bool
+	}{
+		{"idle", time.Minute, 150 * time.Millisecond, true},
+		{"max duration", 300 * time.Millisecond, time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				for r.Context().Err() == nil {
+					w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"))
+					w.(http.Flusher).Flush()
+					if tc.silentAfterOnce {
+						<-r.Context().Done()
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}))
+			defer up.Close()
+			results := make(chan Result, 1)
+			gw, client := serve(t, bounded(t, up, tc.maxD, time.Minute, tc.idle, results), false)
+			resp, err := client.Post(gw, "application/json", strings.NewReader(streamReq))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err == nil || !strings.Contains(string(body), "upstream.stream_failed") {
+				t.Fatalf("the caller read %q, %v: a cut stream ends with the error event and an abort", body, err)
+			}
+			select {
+			case r := <-results:
+				if r.CallerGone || r.Err == nil {
+					t.Fatalf("result %+v: the provider's failure, not the caller's", r)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the call was not cut")
+			}
+		})
+	}
+}

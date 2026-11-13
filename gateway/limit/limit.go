@@ -34,6 +34,9 @@ type Call struct {
 	// budget period the call belongs to, the one its ledger row names. Zero
 	// means now.
 	Started time.Time
+	// Deadline is the call's end at the latest (its route's maximum
+	// duration); renewals stop holding its slot past it. Zero: none.
+	Deadline time.Time
 }
 
 // Known is a snapshot's known spend for one scope on this site (ADR 0042),
@@ -413,10 +416,18 @@ func (l *Limiter) reacquire(ctx context.Context) error {
 	return err
 }
 
+// renewalGrace is how long past its deadline a call's slot is still
+// renewed: time for its cut and its accounting.
+const renewalGrace = time.Minute
+
 // slots lists this gateway's running calls' slots; mu is held.
 func (l *Limiter) slots() []Slot {
 	var slots []Slot
+	now := l.now()
 	for _, t := range l.running {
+		if d := t.call.Deadline; !d.IsZero() && now.After(d.Add(renewalGrace)) {
+			continue // a call past its deadline holds no slot: its TTL ends it
+		}
 		slots = append(slots, t.slot())
 	}
 	return slots

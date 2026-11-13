@@ -141,6 +141,7 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 			add(obj, "spec.pool", "a route needs at least one deployment")
 		}
 		sr := snapshot.Route{Alias: r.Spec.Alias}
+		sr.MaxDurationMs, sr.HeadersMs, sr.IdleMs = timeouts(r.Spec.Timeouts, func(field, msg string) { add(obj, "spec.timeouts."+field, "%s", msg) })
 		for i, m := range r.Spec.Pool {
 			at := fmt.Sprintf("spec.pool[%d]", i)
 			dialect, ok := dialectOf[m.Backend]
@@ -243,4 +244,41 @@ func checkURL(raw string, standalone bool) string {
 		}
 	}
 	return ""
+}
+
+// The default call bounds: half an hour for a whole call (a long agent
+// turn), five minutes of a provider's silence (a reasoning pause is
+// seconds to a minute or two).
+const (
+	DefaultMaxDuration = 30 * time.Minute
+	DefaultIdle        = 5 * time.Minute
+)
+
+// timeouts reads a route's call bounds, with the defaults, in milliseconds.
+func timeouts(t *v1.RouteTimeouts, bad func(field, msg string)) (maxMs, headersMs, idleMs int64) {
+	var spec v1.RouteTimeouts
+	if t != nil {
+		spec = *t
+	}
+	parse := func(field, v string, def time.Duration) time.Duration {
+		if v == "" {
+			return def
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			bad(field, fmt.Sprintf("%q is not a positive duration (e.g. \"30m\", \"90s\")", v))
+			return def
+		}
+		return d
+	}
+	maxD := parse("maxDuration", spec.MaxDuration, DefaultMaxDuration)
+	headers := parse("headers", spec.Headers, maxD)
+	idle := parse("idle", spec.Idle, min(DefaultIdle, maxD))
+	if headers > maxD {
+		bad("headers", "longer than maxDuration, which bounds the whole call")
+	}
+	if idle > maxD {
+		bad("idle", "longer than maxDuration, which bounds the whole call")
+	}
+	return maxD.Milliseconds(), headers.Milliseconds(), idle.Milliseconds()
 }

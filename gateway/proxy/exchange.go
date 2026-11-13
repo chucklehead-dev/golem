@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -52,6 +54,21 @@ type exchange struct {
 	watching          bool
 	lastStarted       uint64
 	seen              int
+
+	// The upstream's bounds (the route's timeouts): one timer for the wait
+	// for headers and then the whole call, and the idle watchdog, which
+	// counts the reads from the provider. Either cancels the upstream
+	// request with its cause.
+	upMu       sync.Mutex
+	upCancel   context.CancelCauseFunc // nil: no upstream call
+	upHeaders  bool                    // still waiting for the headers
+	upDeadline time.Time               // the whole call's
+	lifeTimer  *time.Timer
+	idle       time.Duration
+	idleTimer  *time.Timer
+	reads      atomic.Uint64
+	lastReads  uint64
+	quietTicks int
 }
 
 var exchanges = sync.Pool{New: func() any {
@@ -60,8 +77,103 @@ var exchanges = sync.Pool{New: func() any {
 	ex.filter.Drop = dropUsageOnly
 	ex.watchdog = time.AfterFunc(time.Hour, ex.tick)
 	ex.watchdog.Stop()
+	ex.lifeTimer = time.AfterFunc(time.Hour, ex.lifeFired)
+	ex.lifeTimer.Stop()
+	ex.idleTimer = time.AfterFunc(time.Hour, ex.idleTick)
+	ex.idleTimer.Stop()
 	return ex
 }}
+
+// Why an upstream call was cut (context.Cause of its context).
+var (
+	errHeadersTimeout = errors.New("the provider sent no response headers within the route's headers timeout")
+	errMaxDuration    = errors.New("the call reached the route's maximum duration")
+	errIdle           = errors.New("the provider sent nothing for the route's idle timeout")
+)
+
+// startUpstream arms the route's bounds over an upstream call; a zero bound
+// is none.
+func (ex *exchange) startUpstream(cancel context.CancelCauseFunc, started time.Time, maxD, headers, idle time.Duration) {
+	ex.upMu.Lock()
+	defer ex.upMu.Unlock()
+	ex.upCancel, ex.idle, ex.upHeaders = cancel, idle, true
+	ex.upDeadline = time.Time{}
+	if maxD > 0 {
+		ex.upDeadline = started.Add(maxD)
+	}
+	switch first := headers; {
+	case first > 0 && (maxD == 0 || first < maxD):
+		ex.lifeTimer.Reset(first)
+	case maxD > 0:
+		ex.lifeTimer.Reset(time.Until(ex.upDeadline))
+	}
+}
+
+// gotHeaders moves from the headers' bound to the whole call's, and starts
+// the idle watchdog.
+func (ex *exchange) gotHeaders() {
+	ex.upMu.Lock()
+	defer ex.upMu.Unlock()
+	ex.upHeaders = false
+	ex.lifeTimer.Stop()
+	if !ex.upDeadline.IsZero() {
+		ex.lifeTimer.Reset(time.Until(ex.upDeadline))
+	}
+	if ex.idle > 0 {
+		ex.lastReads, ex.quietTicks = ex.reads.Load(), 0
+		ex.idleTimer.Reset(ex.idle / 2)
+	}
+}
+
+// endUpstream disarms the bounds: the upstream call is over.
+func (ex *exchange) endUpstream() {
+	ex.upMu.Lock()
+	defer ex.upMu.Unlock()
+	ex.upCancel = nil
+	ex.lifeTimer.Stop()
+	ex.idleTimer.Stop()
+}
+
+func (ex *exchange) lifeFired() {
+	ex.upMu.Lock()
+	defer ex.upMu.Unlock()
+	switch {
+	case ex.upCancel == nil:
+	case ex.upHeaders && (ex.upDeadline.IsZero() || time.Now().Before(ex.upDeadline)):
+		ex.upCancel(errHeadersTimeout)
+	default:
+		ex.upCancel(errMaxDuration)
+	}
+}
+
+// idleTick: no read from the provider over two ticks half the idle bound
+// apart is a silence of at least the bound.
+func (ex *exchange) idleTick() {
+	ex.upMu.Lock()
+	defer ex.upMu.Unlock()
+	if ex.upCancel == nil {
+		return
+	}
+	if n := ex.reads.Load(); n == ex.lastReads {
+		ex.quietTicks++
+	} else {
+		ex.lastReads, ex.quietTicks = n, 0
+	}
+	if ex.quietTicks >= 2 {
+		ex.upCancel(errIdle)
+		return
+	}
+	ex.idleTimer.Reset(ex.idle / 2)
+}
+
+// read reads the provider's response, counted for the idle watchdog.
+func (ex *exchange) read(body io.Reader) (int, error) {
+	n, err := body.Read(ex.buf)
+	if n > 0 {
+		ex.reads.Add(1)
+	}
+	return n, err
+}
 
 // startWrites readies the exchange to write a response to w, and starts
 // the watchdog; endWrites stops it.

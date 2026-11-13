@@ -85,8 +85,24 @@ type ModelRoute struct {
 
 // ModelRouteSpec is a ModelRoute's desired state.
 type ModelRouteSpec struct {
-	Alias string       `json:"alias"`
-	Pool  []PoolMember `json:"pool"`
+	Alias    string         `json:"alias"`
+	Pool     []PoolMember   `json:"pool"`
+	Timeouts *RouteTimeouts `json:"timeouts,omitempty"`
+}
+
+// RouteTimeouts bound a call's life on a route, as Go durations ("30m").
+// Each is optional; the defaults are lib/compile's.
+type RouteTimeouts struct {
+	// MaxDuration bounds the whole call: past it the provider's response is
+	// cut (and its slot freed).
+	MaxDuration string `json:"maxDuration,omitempty"`
+	// Headers bounds the wait for the response's headers. A streamed answer
+	// sends them at once; a non-streamed one when it is finished, so the
+	// default is MaxDuration.
+	Headers string `json:"headers,omitempty"`
+	// Idle bounds a provider's silence once a response has begun: longer
+	// than a model's reasoning pause, shorter than a hung connection.
+	Idle string `json:"idle,omitempty"`
 }
 
 // PoolMember is a deployment in a route's pool.

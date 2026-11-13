@@ -1,6 +1,7 @@
 package compile
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -158,5 +159,20 @@ func TestDecodeStrict(t *testing.T) {
 	_, err = v1.DecodeFS(fstest.MapFS{"x.yaml": {Data: []byte("apiVersion: golem.dev/v1alpha1\nkind: Hook\nmetadata: {name: h}\n")}})
 	if err == nil || !strings.Contains(err.Error(), `kind "Hook"`) {
 		t.Fatalf("an unsupported kind: %v", err)
+	}
+}
+
+func TestRouteTimeouts(t *testing.T) {
+	var bad []string
+	report := func(field, msg string) { bad = append(bad, field) }
+	if m, h, i := timeouts(nil, report); m != DefaultMaxDuration.Milliseconds() || h != m || i != DefaultIdle.Milliseconds() || bad != nil {
+		t.Fatalf("defaults %d %d %d %v: headers default to the whole call", m, h, i, bad)
+	}
+	if m, h, i := timeouts(&v1.RouteTimeouts{MaxDuration: "2m", Idle: "90s"}, report); m != 120000 || h != 120000 || i != 90000 || bad != nil {
+		t.Fatalf("set: %d %d %d %v", m, h, i, bad)
+	}
+	timeouts(&v1.RouteTimeouts{MaxDuration: "1m", Headers: "2m", Idle: "soon"}, report)
+	if !slices.Equal(bad, []string{"idle", "headers"}) {
+		t.Fatalf("refused %v: an unparsable idle, and headers past the whole call", bad)
 	}
 }

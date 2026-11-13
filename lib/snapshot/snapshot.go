@@ -136,6 +136,11 @@ type Route struct {
 	Alias   string   `json:"alias"`
 	Dialect string   `json:"dialect"`
 	Pool    []Target `json:"pool"`
+	// The call's bounds in milliseconds, the compiler's defaults filled in
+	// (ModelRoute spec.timeouts).
+	MaxDurationMs int64 `json:"maxDurationMs"`
+	HeadersMs     int64 `json:"headersMs"`
+	IdleMs        int64 `json:"idleMs"`
 }
 
 // Target is a pool member.

@@ -172,7 +172,8 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 	}
 	routes := make([]*route.Route, 0, len(s.Routes))
 	for _, r := range s.Routes {
-		rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect}
+		rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect, MaxDuration: time.Duration(r.MaxDurationMs) * time.Millisecond,
+			Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond}
 		for _, m := range r.Pool {
 			t := targets[depKey{m.Backend, m.Deployment}]
 			if t == nil {
@@ -242,7 +243,7 @@ func (e EnvSecrets) Secret(ref, env string) (string, error) {
 //     found under a long stream rather than at the next request;
 //   - no response-header timeout here: a non-streamed answer's headers come
 //     when the model has finished, which for a long answer is minutes; that
-//     bound is the route's (a maximum duration, roadmap).
+//     bound is the route's (ModelRoute spec.timeouts: headers, maxDuration).
 func upstreamTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:               nil,

@@ -124,7 +124,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	target := rt.Pick()
 	pr := snap.Prices[target.Model]
-	ticket, no := h.admit(ctx, reqIDs, principal, req, price.Worst(int64(len(body)), req.maxTokens, pr))
+	var deadline time.Time // the call's end at the latest: renewals stop there
+	if rt.MaxDuration > 0 {
+		deadline = started.Add(rt.MaxDuration)
+	}
+	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, price.Worst(int64(len(body)), req.maxTokens, pr))
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
@@ -142,26 +146,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Model: target.Model,
 		Deployment: target.Backend + "/" + target.Deployment, Provider: target.Backend, Started: started,
 		Currency: snap.Snapshot.Currency, Counted: ticket != nil, Waived: ticket != nil && ticket.Waived()}
+	if ticket != nil {
+		call.Period = ticket.Period() // the counter's: one period per call
+	}
 	// The accounting runs to its end whatever the caller does.
 	acct := context.WithoutCancel(ctx)
 
 	// One attempt. (Retries and failover before the first byte go here; a
 	// retry needs the rewritten body kept until the attempt is committed.)
-	up, ub := upstreamRequest(ctx, r, target, out)
+	// The route's bounds: the caller's going away still cancels it too.
+	upCtx, cancelUp := context.WithCancelCause(ctx)
+	defer cancelUp(nil)
+	ex.startUpstream(cancelUp, started, rt.MaxDuration, rt.Headers, rt.Idle)
+	defer ex.endUpstream()
+	up, ub := upstreamRequest(upCtx, r, target, out)
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
-		c := contract.UpstreamUnavailable
+		c, msg := contract.UpstreamUnavailable, "the provider could not be reached; retry shortly"
+		if cause := context.Cause(upCtx); cause == errHeadersTimeout || cause == errMaxDuration {
+			msg = cause.Error() + "; retry, or ask the platform team about this route's timeouts"
+		}
 		call.Ended, call.Status, call.Outcome = time.Now(), c.Status, "failed"
 		call.ErrorOrigin, call.ErrorCode = string(c.Origin), c.Name
 		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
 		if ticket != nil {
 			ticket.Complete(acct, 0) // no upstream work: nothing billed
 		}
-		Refuse(w, h.Dialect, c, "the provider could not be reached; retry shortly")
+		Refuse(w, h.Dialect, c, msg)
 		return
 	}
 	defer resp.Body.Close()
+	ex.gotHeaders()
 
 	for _, k := range forwardResponse {
 		if v := resp.Header[k]; v != nil {
@@ -268,7 +284,7 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 
 // admit checks the call against the scope's budget and in-flight limits
 // (ADR 0031) and takes its slots. A nil ticket with no refusal: no limiter.
-func (h *Handler) admit(ctx context.Context, reqID string, p *auth.Principal, req scanned, worst int64) (*limit.Ticket, *refusal) {
+func (h *Handler) admit(ctx context.Context, reqID string, started, deadline time.Time, p *auth.Principal, req scanned, worst int64) (*limit.Ticket, *refusal) {
 	if h.Limiter == nil {
 		return nil, nil
 	}
@@ -278,7 +294,7 @@ func (h *Handler) admit(ctx context.Context, reqID string, p *auth.Principal, re
 	}
 	t, err := h.Limiter.Admit(ctx, limit.Call{ID: reqID, Principal: p.ID, Scope: p.Scope,
 		Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
-		Strict: lim.Strict, Worst: worst})
+		Strict: lim.Strict, Worst: worst, Started: started, Deadline: deadline})
 	switch {
 	case errors.Is(err, limit.ErrBudget):
 		return nil, &refusal{contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it"}
@@ -338,7 +354,7 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 	send := ex.send
 	var cut error
 	for {
-		n, err := body.Read(ex.buf)
+		n, err := ex.read(body)
 		if n > 0 {
 			var ok bool
 			if filter {
@@ -374,7 +390,7 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 	ex.tail = ex.tail[:0]
 	var cut error
 	for {
-		n, err := body.Read(ex.buf)
+		n, err := ex.read(body)
 		if n > 0 {
 			if werr := ex.write(ex.buf[:n], false); werr != nil {
 				cut, ex.callerGone = errCallerGone, true

@@ -318,3 +318,36 @@ func TestPeriodOfStart(t *testing.T) {
 		t.Fatalf("period %s: the call started in November is counted there", tk.Period())
 	}
 }
+
+// recording records the slots each Reacquire is given.
+type recording struct {
+	*Mem
+	got [][]Slot
+}
+
+func (r *recording) Reacquire(ctx context.Context, slots []Slot) error {
+	r.got = append(r.got, slots)
+	return r.Mem.Reacquire(ctx, slots)
+}
+
+// TestRenewalStopsAtDeadline: a call past its route's maximum duration (and
+// the grace for its cut) is renewed no more: its slot ends with its TTL,
+// whatever became of the call.
+func TestRenewalStopsAtDeadline(t *testing.T) {
+	ctx := t.Context()
+	st := &recording{Mem: NewMem()}
+	l := New(st)
+	now := time.Now()
+	l.Now = func() time.Time { return now }
+	c := scopeCall("long", "p1")
+	c.Deadline = now.Add(time.Minute)
+	if _, err := l.Admit(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	l.Renew(ctx)
+	now = now.Add(time.Minute + renewalGrace + time.Second)
+	l.Renew(ctx)
+	if len(st.got) != 2 || len(st.got[0]) != 1 || len(st.got[1]) != 0 {
+		t.Fatalf("renewed %v: before its deadline, then not", st.got)
+	}
+}

@@ -268,7 +268,16 @@ without a preflight it never gets. SDKs and curl pass all three.
   (DefaultTransport's total of 100 re-handshook connections above 100
   streams), HTTP/2 with pings, no proxy (egress is the mesh's), and no
   response-header timeout (a long non-streamed answer's headers come at its
-  end; that bound is the route's maximum duration).
+  end; that bound is the route's).
+- Every call is bounded by its route (`ModelRoute` `spec.timeouts`, the
+  compiler's defaults written into the snapshot): `maxDuration` for the
+  whole call (30 min), `headers` for the response's headers (the whole
+  call by default: a non-streamed answer's come at its end) and `idle` for
+  a provider's silence once it has begun (5 min, past a reasoning pause).
+  A bound that fires cancels the upstream request with its cause: before
+  the headers, a 503 that names it; after, the cut-stream path (accounted,
+  `upstream.stream_failed`, aborted). Renewals stop holding a call's slot
+  a minute past its maximum duration.
 - Upstream TLS sessions resumed; DNS cached by the resolver, not golem.
 - SSE scanning reads lines from the tee without copying the payload when
   it is not a usage-bearing event (look for the event type first).

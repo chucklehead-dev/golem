@@ -8,6 +8,7 @@ package route
 import (
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // Target is one deployment as the request path uses it.
@@ -24,6 +25,9 @@ type Route struct {
 	Alias   string
 	Dialect string
 	Pool    []*Target
+	// A call's bounds on this route: the whole call, the wait for the
+	// response's headers, and a provider's silence once it has begun.
+	MaxDuration, Headers, Idle time.Duration
 }
 
 // Pick chooses the deployment for one request.
