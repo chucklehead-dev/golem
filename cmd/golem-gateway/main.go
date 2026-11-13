@@ -47,11 +47,8 @@ func main() {
 	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
-	if *standalone == "" {
-		fail("only --standalone <dir> is built so far; the bucket source comes with the publisher (roadmap M1)")
-	}
-	if host, _, err := net.SplitHostPort(*listen); err != nil || !isLoopback(host) {
-		fail("standalone mode listens on a loopback address only (got %q): it is not for shared use (ADR 0023)", *listen)
+	if err := releaseGate(*standalone, *listen); err != nil {
+		fail("%v", err)
 	}
 
 	// Standalone: dev keys, the in-memory limiter (ADR 0023).
@@ -222,6 +219,19 @@ func setupTelemetry(where string) (*telemetry.Telemetry, func()) {
 			slog.Warn("golem-gateway: telemetry not flushed", "err", err)
 		}
 	}
+}
+
+// releaseGate is the production-publication gate (golem#5): until M1's
+// gates pass the gateway runs standalone only (no bucket source exists to
+// serve published snapshots from), and standalone listens on loopback only.
+func releaseGate(standalone, listen string) error {
+	if standalone == "" {
+		return errors.New("only --standalone <dir> is built so far; the bucket source comes with the publisher (roadmap M1)")
+	}
+	if host, _, err := net.SplitHostPort(listen); err != nil || !isLoopback(host) {
+		return fmt.Errorf("standalone mode listens on a loopback address only (got %q): it is not for shared use (ADR 0023)", listen)
+	}
+	return nil
 }
 
 // loadLocalKey reads standalone's local key, or makes one: a dev key in a
