@@ -21,7 +21,7 @@ retry pointlessly and users wait through backoff before seeing why.
 | Rate or concurrency limit; provider quota share full | 429 + `Retry-After` | `limit.rate`, `limit.concurrency`, `limit.provider_quota` | yes, after the delay |
 | Budget or cap reached by known spend (in `enforce` mode) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
 | Not authenticated (missing, unknown, expired, revoked key or token; a key of the other installation) | 401 | `auth.missing`, `auth.key_unknown`, `auth.key_expired`, `auth.key_revoked`, `auth.key_wrong_installation`, `auth.token_invalid`, `auth.token_expired` | no |
-| Authenticated, not allowed (model, scope, dialect, capture policy, provider storage) | 403 | `authz.model_not_allowed`, `authz.scope_not_member`, `authz.provider_storage_forbidden` | no |
+| Authenticated, not allowed (model, scope, dialect, capture policy, provider storage); a standalone gateway reached from a web page or by a non-loopback host name | 403 | `authz.model_not_allowed`, `authz.scope_not_member`, `authz.provider_storage_forbidden`, `authz.origin_forbidden` | no |
 | A malformed request (not one JSON object, duplicate members, a routing field of the wrong type, unreadable) or one over the size limit | 400 or 413 | `request.invalid`, `request.unreadable`, `request.too_large` | no |
 | Request golem cannot route (no deployment with the capabilities used, unknown alias, frontend that cannot reach the model) | 400 or 404 | `route.unknown_model`, `route.no_capable_deployment`, `route.wrong_frontend` | no |
 | A feature the translation cannot express | 400 | `translate.unsupported_feature` | no |

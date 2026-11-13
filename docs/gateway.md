@@ -243,6 +243,15 @@ provider credentials, telemetry to stdout or a local OTLP endpoint, and
 `--explain`. It binds to localhost, refuses edge, site and bucket
 settings, and changes nothing in the request path.
 
+Loopback keeps other machines out but not the developer's browser: a page
+can POST to localhost (a `text/plain` body needs no CORS preflight), and DNS
+rebinding gives a hostile name a loopback address, while the implicit
+principal spends the developer's own provider keys. So standalone answers
+only to a loopback `Host`, refuses cross-origin requests by the browser's
+own headers (`http.CrossOriginProtection`), and requires
+`Content-Type: application/json`, which no page can send cross-origin
+without a preflight it never gets. SDKs and curl pass all three.
+
 ## 7. Performance notes
 
 - The fast path allocates per request: the pooled body buffer (returned),

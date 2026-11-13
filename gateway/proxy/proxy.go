@@ -443,10 +443,14 @@ func (h *Handler) usage(ex *exchange, cut error) (canon.Usage, error) {
 	}
 }
 
-// fail writes a refusal in the caller's dialect, with golem's code, a
-// message that says what to do next, and the request ID (contracts.md §1).
-// Only contract codes can be sent.
 func (h *Handler) fail(w http.ResponseWriter, c contract.Code, msg string) {
+	Refuse(w, h.Dialect, c, msg)
+}
+
+// Refuse writes a refusal in a dialect's error shape, with golem's code, a
+// message that says what to do next, and the request ID if the response has
+// one (contracts.md §1). Only contract codes can be sent.
+func Refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string) {
 	w.Header()["Content-Type"] = jsonType
 	if c.RetryAfter() {
 		w.Header()["Retry-After"] = retryAfter
@@ -457,7 +461,7 @@ func (h *Handler) fail(w http.ResponseWriter, c contract.Code, msg string) {
 		reqID = v[0]
 	}
 	var b []byte
-	switch h.Dialect {
+	switch d {
 	case AnthropicMessages:
 		b = append(b, `{"type":"error","error":{"type":"`...)
 		b = append(b, c.Name...)

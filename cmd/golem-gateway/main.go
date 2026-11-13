@@ -64,8 +64,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/messages", &proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody})
-	mux.Handle("POST /v1/chat/completions", &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody})
+	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
+		mux.Handle(pattern, localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody}))
+	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if _, err := holder.Current(); err != nil {
@@ -127,14 +128,6 @@ func renew(ctx context.Context, l *limit.Limiter) {
 			slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
 		}
 	}
-}
-
-func isLoopback(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func fail(format string, args ...any) {

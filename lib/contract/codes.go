@@ -49,6 +49,7 @@ var (
 	AuthzModelNotAllowed          = Code{"authz.model_not_allowed", 403, OriginPolicy}
 	AuthzScopeNotMember           = Code{"authz.scope_not_member", 403, OriginPolicy}
 	AuthzProviderStorageForbidden = Code{"authz.provider_storage_forbidden", 403, OriginPolicy}
+	AuthzOriginForbidden          = Code{"authz.origin_forbidden", 403, OriginClient}
 
 	RequestInvalid    = Code{"request.invalid", 400, OriginClient}
 	RequestTooLarge   = Code{"request.too_large", 413, OriginClient}
@@ -72,7 +73,7 @@ var Codes = []Code{
 	LimitRate, LimitConcurrency, LimitProviderQuota,
 	BudgetPoolExhausted, BudgetMemberCap, BudgetKeyCap,
 	AuthMissing, AuthKeyUnknown, AuthKeyExpired, AuthKeyRevoked, AuthKeyWrongInstallation, AuthTokenInvalid, AuthTokenExpired,
-	AuthzModelNotAllowed, AuthzScopeNotMember, AuthzProviderStorageForbidden,
+	AuthzModelNotAllowed, AuthzScopeNotMember, AuthzProviderStorageForbidden, AuthzOriginForbidden,
 	RequestInvalid, RequestTooLarge, RequestUnreadable,
 	RouteUnknownModel, RouteNoCapableDeployment, RouteWrongFrontend, TranslateUnsupportedField,
 	UpstreamUnavailable, UpstreamStreamFailed,
