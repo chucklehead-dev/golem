@@ -37,11 +37,13 @@ spec:
 		outcome  string
 		charged  bool
 		heldSlot bool
+		headers  time.Duration // the route's first-byte timeout, if the provider stays silent
 	}{
-		{"the dial failed", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, false, "failed", false, false},
-		{"the name did not resolve", &net.DNSError{Err: "no such host", Name: "provider.example"}, false, "failed", false, false},
-		{"reset after the request went out", errors.New("read: connection reset by peer"), false, "uncertain", true, true},
-		{"the caller left before the headers", context.Canceled, true, "cancelled", true, true},
+		{"the dial failed", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, false, "failed", false, false, 0},
+		{"the name did not resolve", &net.DNSError{Err: "no such host", Name: "provider.example"}, false, "failed", false, false, 0},
+		{"reset after the request went out", errors.New("read: connection reset by peer"), false, "uncertain", true, true, 0},
+		{"the caller left before the headers", context.Canceled, true, "cancelled", true, true, 0},
+		{"the headers timed out", nil, false, "uncertain", true, true, 50 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -50,8 +52,16 @@ spec:
 				if tc.cancel {
 					cancel()
 				}
+				if tc.headers > 0 { // the request went out; the provider says nothing
+					<-r.Context().Done()
+					return nil, r.Context().Err()
+				}
 				return nil, tc.err
 			}))
+			if tc.headers > 0 {
+				c, _ := h.Snapshots.Current()
+				c.Routes.Lookup([]byte("claude")).Headers = tc.headers
+			}
 			h.ProviderTail = 100 * time.Millisecond
 			st := limit.NewMem()
 			h.Limiter = limit.New(st)

@@ -9,14 +9,14 @@ failed. Tests run under `go test -race ./...`.
 | Invariant | Test | Ablated | Commit |
 |---|---|---|---|
 | A round trip the provider cannot have seen (DNS, dial, TLS handshake) is free and frees its slot | `gateway/proxy` `TestUncertainUpstream` (the dial failed; the name did not resolve) | — | ee14c74 |
-| Any other failure before the headers (timeout, reset after the request went out) is `uncertain`, charged its worst case as an estimate, never zero | `TestUncertainUpstream` (reset after the request went out) | — | ee14c74 |
+| Any other failure before the headers (timeout, reset after the request went out) is `uncertain`, charged its worst case as an estimate, never zero | `TestUncertainUpstream` (reset after the request went out; the headers timed out, the provider silent) | yes (the timeout taken as unreached) | ee14c74; timeout case this commit |
 | A caller gone before the headers is `cancelled`, charged its input | `TestUncertainUpstream` (the caller left before the headers) | — | ee14c74 |
 | After an ambiguous end the slot is held for the provider's tail, then freed | `TestUncertainUpstream`; `TestConcurrencyAndCancel` (slot held, then free) | — | ee14c74 |
 | A failed ledger batch is retried with bounded backoff, not dropped (collector restart) | `gateway/telemetry` `TestLedgerQueueRetries` | — | ee14c74 |
 | A batch the collector took but did not acknowledge is resent whole, each row keeping its event_id; deduplication by event counts it once | `TestLedgerQueuePartialDelivery`; `control/watermark` `TestAgainstBruteForce` (rows delivered twice) | — | edfadd1 |
 | Shutdown racing emission, retries or an export in flight keeps its deadline and accounts for every row (delivered + failed + dropped = emitted) | `TestLedgerQueueShutdownRaces` (three cases, -race; a stress test, which a logical race between atomics can pass) | yes | edfadd1 |
 | A row past the closed check when Shutdown begins is queued before the worker's last drain, so delivered or counted: emission and shutdown share a lock | `TestLedgerQueueEmitDuringShutdown` (the emission held between its check and its enqueue) | yes | 2c0d42e |
-| A ForceFlush racing Shutdown returns once the worker has stopped, never waiting on it forever | `TestLedgerQueueFlushDuringShutdown` (the flush held until the shutdown finished) | yes (hangs) | this commit |
+| A ForceFlush racing Shutdown returns once the worker has stopped, never waiting on it forever | `TestLedgerQueueFlushDuringShutdown` (the flush held until the shutdown finished) | yes (hangs) | 54a912b |
 | Rows emitted after shutdown are counted, never lost silently | `TestLedgerQueueShutdown` | — | 3d20567 |
 
 A missing report is charged an upper bound, never an average (golem#3,
@@ -50,3 +50,18 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
   (`ControlContext`), but no test re-resolves a name between dials.
 - Restricted mode's approved lists cover Anthropic's beta header and API
   version; OpenAI has no equivalent header to approve.
+- OTLP export requires TLS to any non-loopback collector; golem does not
+  present a client certificate (mTLS is the collector's or the mesh's).
+- The provider-account spending limits (ADR 0044, operations.md) are a
+  deployment requirement golem cannot verify: evidence is the release
+  checklist's record of each account's limit, not a test.
+
+## Validation of this record
+
+`go test ./...`, `go vet ./...`, race tests of the gateway, telemetry and
+JSON scanning, and the models' sampled checks (`model/check-*.sh`) pass.
+The accounting model's exhaustive search (`check-accounting.sh` with the
+gotogether CLI) explores every run up to 12 steps of the small instance:
+it holds for the soft and declared-worst-case designs and finds each
+broken design's counterexample; it is complete to that depth, not
+beyond.
