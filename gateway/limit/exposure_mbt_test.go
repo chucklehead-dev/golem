@@ -1,9 +1,11 @@
 package limit
 
 import (
+	"maps"
 	"os/exec"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/chucklehead-dev/gotogether/connect"
 	"github.com/chucklehead-dev/gotogether/itf"
@@ -21,6 +23,18 @@ var owner = map[string]string{"a1": "p1", "a2": "p1", "b1": "p2", "b2": "p2", "c
 
 const scope = "s"
 
+// The model has one budget period: the driver's clock stays in it.
+var (
+	inPeriod = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	period   = "2026-11"
+)
+
+func newLimiter(st Store) *Limiter {
+	l := New(st)
+	l.Now = func() time.Time { return inPeriod }
+	return l
+}
+
 func call(request string) Call {
 	return Call{ID: request, Principal: owner[request], Scope: scope, Budget: 4, PrincipalLimit: 1, ScopeLimit: 2}
 }
@@ -34,8 +48,8 @@ type event struct {
 type faultyStore interface {
 	Store
 	SetDown(bool)
-	Failover(scope string, keep int)
-	Counter(scope string) []Event
+	Failover(scope, period string, keep int)
+	Counter(scope, period string) []Event
 	Slots() []Slot
 }
 
@@ -59,7 +73,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 	return connect.Switch{
 		"init": func(*connect.Step) error {
 			d.store = d.newSt(d.t)
-			d.gws = map[string]*Limiter{"g1": New(d.store), "g2": New(d.store)}
+			d.gws = map[string]*Limiter{"g1": newLimiter(d.store), "g2": newLimiter(d.store)}
 			d.tickets = map[string]*Ticket{}
 			return nil
 		},
@@ -79,12 +93,12 @@ func (d *expDriver) Step(s *connect.Step) error {
 				return err
 			}
 			sn := snaps[gw()]
-			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Spend: sn.Spend, Watermark: sn.W})
+			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Period: period, Spend: sn.Spend, Watermark: sn.W})
 			return nil
 		},
 		"valkeyDown": func(*connect.Step) error {
 			d.store.SetDown(true)
-			for _, g := range slices.Sorted(keys(d.gws)) {
+			for _, g := range slices.Sorted(maps.Keys(d.gws)) {
 				d.gws[g].Renew(ctx) // fails: each gateway notices
 			}
 			return nil
@@ -109,7 +123,10 @@ func (d *expDriver) Step(s *connect.Step) error {
 		},
 		"recover":   func(*connect.Step) error { return d.gws[gw()].Recover(ctx) },
 		"graceEnds": func(*connect.Step) error { d.gws[gw()].EndGrace(); return nil },
-		"failover":  func(s *connect.Step) error { d.store.Failover(scope, connect.MustPick[int](s, "keep")); return nil },
+		"failover": func(s *connect.Step) error {
+			d.store.Failover(scope, period, connect.MustPick[int](s, "keep"))
+			return nil
+		},
 	}.Step(s)
 }
 
@@ -123,13 +140,13 @@ type expState struct {
 
 func (d *expDriver) State() (any, error) {
 	st := expState{Counter: []event{}, Slots: []string{}, Waived: []string{}, Pending: map[string][]event{}}
-	for _, e := range d.store.Counter(scope) {
+	for _, e := range d.store.Counter(scope, period) {
 		st.Counter = append(st.Counter, event{e.ID, e.Cost})
 	}
 	for _, s := range d.store.Slots() {
 		st.Slots = append(st.Slots, s.Call)
 	}
-	for _, g := range slices.Sorted(keys(d.gws)) {
+	for _, g := range slices.Sorted(maps.Keys(d.gws)) {
 		st.Waived = append(st.Waived, d.gws[g].Waived()...)
 		ps := []event{}
 		for _, e := range d.gws[g].Pending(scope) {
@@ -158,7 +175,7 @@ func (d *expDriver) CheckStep(s *connect.Step) error {
 			return err
 		}
 	}
-	for _, g := range slices.Sorted(keys(d.gws)) {
+	for _, g := range slices.Sorted(maps.Keys(d.gws)) {
 		if !up || slices.Contains(down, g) {
 			continue // a gateway not using the store decides from its last view
 		}

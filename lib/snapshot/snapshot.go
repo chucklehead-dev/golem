@@ -69,12 +69,14 @@ type Scope struct {
 	Strict            bool     `json:"strict,omitempty"`
 	PrincipalInFlight int      `json:"principalInFlight"`
 	ScopeInFlight     int      `json:"scopeInFlight"`
-	// KnownSpend is the ledger's balance for the period with this pool's
-	// site's events numbered above Watermark left out; Watermark is the
-	// site counter's number up to which every event is in the ledger
-	// (ADR 0042).
-	KnownSpend int64 `json:"knownSpend,omitempty"`
-	Watermark  int64 `json:"watermark,omitempty"`
+	// KnownSpend is the ledger's balance for Period (a calendar month,
+	// "2026-11") with this site's events numbered above Watermark left out;
+	// Watermark is the site counter's number for the period up to which
+	// every event is in the ledger (ADR 0042). A gateway counts a snapshot
+	// of another period as none: a new month starts from nothing.
+	Period     string `json:"period,omitempty"`
+	KnownSpend int64  `json:"knownSpend,omitempty"`
+	Watermark  int64  `json:"watermark,omitempty"`
 }
 
 // Key is a key's entitlement: by hash, never the key itself.

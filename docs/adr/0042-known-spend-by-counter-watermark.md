@@ -26,6 +26,20 @@ snapshot to every gateway in one step. A benchmark found it.
   running total, and records the total as of that number. All three happen
   in one atomic script. Adding an event twice (a replay after an outage) is
   a no-op that returns the same number.
+- **Per budget period.** A counter is per scope *and* period (a calendar
+  month in the period time zone, contracts.md §3), numbered from 1 each
+  period, and so is a snapshot's watermark and spend. A call belongs to
+  the period it started in, wherever it completes. A gateway counts a
+  snapshot of another period as none (spend 0, W 0): without this, every
+  budgeted scope would carry last month's spend, and from the second month
+  be refused. A period's counter keys expire a month plus the retention
+  after their last add.
+- **One round trip each way.** Admission is one script: known spend
+  against the budget, then the principal and scope slots, atomically, so
+  two gateways cannot both pass the check before either takes a slot.
+  Completion is another: the event numbered and the slot freed together.
+  Each store call has a deadline (250 ms); a caller that goes away is not
+  an outage.
 - **The ledger records the number.** Each attempt row carries `counter_seq`
   with its `site` (contracts.md §3).
 - **Each snapshot carries a watermark.** For each site and scope it has W:
@@ -71,8 +85,8 @@ snapshot to every gateway in one step. A benchmark found it.
 
 Admission costs one O(1) script regardless of traffic. The ledger gains a
 column, and golem-control computes a per-site, per-scope contiguous
-watermark (ClickHouse: the largest W with count(seq ≤ W) = W, per site and
-scope, over the period). model/exposure.md models the watermark hand-off
+watermark (ClickHouse: the largest W with count(seq ≤ W) = W, per site,
+scope and period). model/exposure.md models the watermark hand-off
 with snapshots applied per gateway. A watermark that is not contiguous (the
 highest number ingested) and trimming totals a stale gateway still needs
 are its mutants.
@@ -83,5 +97,11 @@ are its mutants.
   per admission. Superseded.
 - **A time watermark** (every event before T is ingested). Not true under
   out-of-order, at-least-once ingestion without a per-source sequence.
+- **Per-gateway sequences** (each gateway numbers its own events; known
+  spend = spend + Σ_g (total_g − cum_g[W_g])). It would decouple the ledger
+  from Valkey's numbering and a failover could not reuse numbers, but
+  admission would read one total per gateway that ever ran at the site,
+  and gateways come and go with autoscaling. Kept as the fallback if
+  failover reuse proves costly.
 - **Resetting the counter at each snapshot.** Loses increments the ledger
   has not ingested: the model's `reset` mutant.

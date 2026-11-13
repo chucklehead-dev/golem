@@ -55,7 +55,7 @@ func main() {
 	}
 	holder := &snapshot.Holder{Env: key.Dev, Entra: entra, OnApply: func(c *snapshot.Compiled) {
 		for _, s := range c.Snapshot.Entitlements.Scopes {
-			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Spend: s.KnownSpend, Watermark: s.Watermark})
+			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Watermark: s.Watermark})
 		}
 	}}
 	dir := &snapshot.Dir{Path: *standalone, Holder: holder, Secrets: snapshot.EnvSecrets{Getenv: os.Getenv}}

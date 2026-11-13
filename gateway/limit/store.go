@@ -31,13 +31,42 @@ type Slot struct {
 // ErrUnavailable is a store that cannot be reached.
 var ErrUnavailable = errors.New("limit: the site store is unreachable")
 
+// Admission is one admission's check, done atomically by the store: known
+// spend (the snapshot's plus the counter's total after the snapshot's
+// watermark) against the budget, then the slots.
+type Admission struct {
+	Slot
+	Period         string // the budget period, e.g. "2026-11": counters are per period
+	Watermark      int64  // the snapshot's, for this period (0 if it is of another)
+	Spend          int64  // the snapshot's known spend for this period
+	Budget         int64  // 0: none
+	Strict         bool
+	Worst          int64
+	PrincipalLimit int // 0: none
+	ScopeLimit     int // 0: none
+}
+
+// Outcome is an admission's result.
+type Outcome int
+
+const (
+	Admitted Outcome = iota
+	OverBudget
+	OverConcurrency
+)
+
 // Store is the site's shared state: concurrency slots and the spend
-// counter. Each method is one atomic operation (one Valkey script).
+// counter, per scope and budget period. Each method is one atomic operation
+// and one round trip (one Valkey script).
 type Store interface {
-	// Acquire takes a slot for s if the principal holds fewer than
-	// principalLimit and the scope fewer than scopeLimit (0: no limit). It
-	// reports whether it did.
-	Acquire(ctx context.Context, s Slot, principalLimit, scopeLimit int) (bool, error)
+	// Admit checks known spend and the limits and, if both allow, takes
+	// the slot. It returns the outcome and the known spend it computed;
+	// over reports that the counter no longer held the total as of the
+	// watermark, so all of it was counted (never too little).
+	Admit(ctx context.Context, a Admission) (o Outcome, known int64, over bool, err error)
+	// Complete records a call's event and frees its slot: Add and Release
+	// in one step.
+	Complete(ctx context.Context, period string, s Slot, e Event) (seq int64, err error)
 	// Release frees a call's slot.
 	Release(ctx context.Context, s Slot) error
 	// Reacquire registers (or renews) slots for calls still running: the
@@ -45,14 +74,13 @@ type Store interface {
 	// their TTLs lapsed. It does not check limits: the calls are already
 	// running.
 	Reacquire(ctx context.Context, slots []Slot) error
-	// Add records a spend event and returns its number in the scope's
-	// counter: the next one, or the one it already has (a replay).
-	Add(ctx context.Context, scope string, e Event) (seq int64, err error)
-	// After returns the total of the scope's events numbered above w. If
-	// the counter no longer holds its total as of w (trimmed: older than
-	// any live snapshot should be), it returns the whole total and
-	// over is true: counting too much, never too little.
-	After(ctx context.Context, scope string, w int64) (total int64, over bool, err error)
+	// Add records a spend event (a cancellation's, or a replay) and returns
+	// its number in the scope's counter for the period: the next one, or
+	// the one it already has.
+	Add(ctx context.Context, scope, period string, e Event) (seq int64, err error)
+	// After returns the total of the period's events numbered above w (for
+	// reports; admission computes it inside Admit).
+	After(ctx context.Context, scope, period string, w int64) (total int64, over bool, err error)
 }
 
 // Mem is an in-memory Store: the standalone gateway's, and the tests'. Its
@@ -88,12 +116,37 @@ func NewMem() *Mem {
 	return &Mem{slots: map[string]Slot{}, counter: map[string]*memCounter{}, Retain: 5 * time.Hour, Now: time.Now}
 }
 
-func (m *Mem) Acquire(_ context.Context, s Slot, principalLimit, scopeLimit int) (bool, error) {
+func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
-		return false, ErrUnavailable
+		return 0, 0, false, ErrUnavailable
 	}
+	after, over := m.after(a.Scope, a.Period, a.Watermark)
+	known := a.Spend + after
+	switch {
+	case a.Budget == 0:
+	case a.Strict && known+a.Worst > a.Budget, !a.Strict && known >= a.Budget:
+		return OverBudget, known, over, nil
+	}
+	if !m.acquire(a.Slot, a.PrincipalLimit, a.ScopeLimit) {
+		return OverConcurrency, known, over, nil
+	}
+	return Admitted, known, over, nil
+}
+
+func (m *Mem) Complete(_ context.Context, period string, s Slot, e Event) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down {
+		return 0, ErrUnavailable
+	}
+	seq := m.add(s.Scope, period, e)
+	delete(m.slots, s.Call)
+	return seq, nil
+}
+
+func (m *Mem) acquire(s Slot, principalLimit, scopeLimit int) bool {
 	byPrincipal, byScope := 0, 0
 	for _, o := range m.slots {
 		if o.Principal == s.Principal {
@@ -104,10 +157,10 @@ func (m *Mem) Acquire(_ context.Context, s Slot, principalLimit, scopeLimit int)
 		}
 	}
 	if (principalLimit > 0 && byPrincipal >= principalLimit) || (scopeLimit > 0 && byScope >= scopeLimit) {
-		return false, nil
+		return false
 	}
 	m.slots[s.Call] = s
-	return true, nil
+	return true
 }
 
 func (m *Mem) Release(_ context.Context, s Slot) error {
@@ -132,24 +185,29 @@ func (m *Mem) Reacquire(_ context.Context, slots []Slot) error {
 	return nil
 }
 
-func (m *Mem) scope(scope string) *memCounter {
-	c := m.counter[scope]
+func (m *Mem) counterOf(scope, period string) *memCounter {
+	k := scope + "|" + period
+	c := m.counter[k]
 	if c == nil {
 		c = &memCounter{cum: []int64{0}, byID: map[string]int64{}}
-		m.counter[scope] = c
+		m.counter[k] = c
 	}
 	return c
 }
 
-func (m *Mem) Add(_ context.Context, scope string, e Event) (int64, error) {
+func (m *Mem) Add(_ context.Context, scope, period string, e Event) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
 		return 0, ErrUnavailable
 	}
-	c := m.scope(scope)
+	return m.add(scope, period, e), nil
+}
+
+func (m *Mem) add(scope, period string, e Event) int64 {
+	c := m.counterOf(scope, period)
 	if seq, ok := c.byID[e.ID]; ok {
-		return seq, nil
+		return seq
 	}
 	c.events = append(c.events, memEvent{e, m.Now()})
 	c.cum = append(c.cum, c.cum[len(c.cum)-1]+e.Cost)
@@ -161,24 +219,29 @@ func (m *Mem) Add(_ context.Context, scope string, e Event) (int64, error) {
 		delete(c.byID, c.events[c.base].ID)
 		c.base++
 	}
-	return seq, nil
+	return seq
 }
 
-func (m *Mem) After(_ context.Context, scope string, w int64) (int64, bool, error) {
+func (m *Mem) After(_ context.Context, scope, period string, w int64) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
 		return 0, false, ErrUnavailable
 	}
-	c := m.scope(scope)
+	after, over := m.after(scope, period, w)
+	return after, over, nil
+}
+
+func (m *Mem) after(scope, period string, w int64) (int64, bool) {
+	c := m.counterOf(scope, period)
 	total := c.cum[len(c.cum)-1]
 	switch {
 	case w >= int64(len(c.events)):
-		return 0, false, nil // nothing after w (or the counter lost its tail)
+		return 0, false // nothing after w (or the counter lost its tail)
 	case w < c.base:
-		return total, true, nil
+		return total, true
 	}
-	return total - c.cum[w], false, nil
+	return total - c.cum[w], false
 }
 
 // SetDown makes the store unreachable (true) or reachable again. Going down
@@ -192,13 +255,13 @@ func (m *Mem) SetDown(down bool) {
 	}
 }
 
-// Failover loses a scope's counter after its first keep events: an
-// asynchronous replica promoted without the latest writes. Their numbers
-// will be given again.
-func (m *Mem) Failover(scope string, keep int) {
+// Failover loses a scope's counter for a period after its first keep
+// events: an asynchronous replica promoted without the latest writes. Their
+// numbers will be given again.
+func (m *Mem) Failover(scope, period string, keep int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	c := m.scope(scope)
+	c := m.counterOf(scope, period)
 	if keep >= len(c.events) {
 		return
 	}
@@ -209,12 +272,12 @@ func (m *Mem) Failover(scope string, keep int) {
 	c.base = min(c.base, int64(keep))
 }
 
-// Counter lists a scope's events in number order (tests).
-func (m *Mem) Counter(scope string) []Event {
+// Counter lists a scope's events for a period in number order (tests).
+func (m *Mem) Counter(scope, period string) []Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []Event
-	for _, e := range m.scope(scope).events {
+	for _, e := range m.counterOf(scope, period).events {
 		out = append(out, e.Event)
 	}
 	return out

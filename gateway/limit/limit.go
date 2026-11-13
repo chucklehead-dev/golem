@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -28,16 +29,19 @@ type Call struct {
 	Worst  int64
 }
 
-// Known is a snapshot's known spend for one scope on this site (ADR 0042):
-// the ledger's balance with this site's events numbered above Watermark
-// left out, and Watermark, the counter number up to which every event of
-// this site and scope is in the ledger.
+// Known is a snapshot's known spend for one scope on this site (ADR 0042),
+// for one budget period: the ledger's balance with this site's events
+// numbered above Watermark left out, and Watermark, the counter number up
+// to which every event of this site, scope and period is in the ledger.
 type Known struct {
+	Period    string
 	Spend     int64
 	Watermark int64
 }
 
-// Limiter is one gateway's admission check over the site store.
+// Limiter is one gateway's admission check over the site store. Its lock
+// guards only local state; store calls run outside it, each bounded by
+// StoreTimeout.
 type Limiter struct {
 	store Store
 	// OnNumbered, if set, is told each event's counter number once it has
@@ -47,16 +51,20 @@ type Limiter struct {
 	// Grace is how long after its own recovery a gateway records its
 	// admissions as waivers: peers that have not recovered yet hold calls
 	// Valkey lacks. Two renewal intervals by default (each peer renews, and
-	// so notices, within one). Now is the clock.
+	// so notices, within one).
 	Grace time.Duration
 	// StoreTimeout bounds each store call (default 250 ms).
 	StoreTimeout time.Duration
+	// Location is the budget periods' time zone (default UTC); a period is
+	// a calendar month there, and a call belongs to the period it starts in
+	// (contracts.md §3).
+	Location *time.Location
 	// Now is the clock (tests set it).
 	Now func() time.Time
 
 	mu         sync.Mutex
 	known      map[string]Known   // by scope, from the snapshot
-	last       map[string]int64   // by scope, known spend as last computed: all an outage leaves
+	last       map[string]int64   // by scope and period, known spend as last computed: all an outage leaves
 	running    map[string]*Ticket // this gateway's calls the provider may still be working on
 	pending    []held             // increments held while the store is down, in order
 	down       bool
@@ -65,75 +73,95 @@ type Limiter struct {
 }
 
 type held struct {
-	scope string
-	e     Event
+	scope, period string
+	e             Event
 }
 
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{}, last: map[string]int64{},
-		running: map[string]*Ticket{}, waived: map[string]bool{}, Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Now: time.Now}
+		running: map[string]*Ticket{}, waived: map[string]bool{},
+		Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
 }
 
 // Ticket is an admitted call. Exactly one of Complete or Cancel is called;
 // after Cancel, Ended when the upstream has ended.
 type Ticket struct {
-	l    *Limiter
-	call Call
-	done bool
+	l      *Limiter
+	call   Call
+	period string
+	done   bool
 }
 
-// Admit checks a call and takes its slots. While the store is reachable the
-// limits are the site's and known spend is read afresh (one O(1) read);
-// while it is not, this gateway's own counts and its last known spend, and
-// the call is a waiver of the bound (ADR 0041 §7.3).
-func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
-	if !l.isDown() {
-		k, err := l.read(ctx, c.Scope)
-		switch {
-		case err == nil:
-			l.mu.Lock()
-			l.last[c.Scope] = k
-			l.mu.Unlock()
-		case ctx.Err() != nil:
-			return nil, ctx.Err() // the caller went away: no outage
-		default:
-			l.markDown(err)
-		}
+func (l *Limiter) now() time.Time {
+	if l.Now != nil {
+		return l.Now()
 	}
+	return time.Now()
+}
+
+// period is the budget period a time falls in.
+func (l *Limiter) period(t time.Time) string { return t.In(l.Location).Format("2006-01") }
+
+// snapshotFor is the snapshot's known spend for a scope in a period: none
+// if the snapshot is of another period (a new month starts from nothing).
+func (l *Limiter) snapshotFor(scope, period string) Known {
 	l.mu.Lock()
-	known := l.last[c.Scope]
-	l.mu.Unlock()
-	switch {
-	case c.Budget == 0:
-	case c.Strict && known+c.Worst > c.Budget:
-		return nil, ErrBudget
-	case !c.Strict && known >= c.Budget:
-		return nil, ErrBudget
+	defer l.mu.Unlock()
+	if k := l.known[scope]; k.Period == period {
+		return k
 	}
+	return Known{Period: period}
+}
+
+// Admit checks a call and takes its slots. While the store is reachable it
+// is one atomic step at the store, one round trip: known spend against the
+// budget, then the slots. While it is not, this gateway's own counts and its
+// last known spend decide, and the call is a waiver of the bound (ADR 0041
+// §7.3).
+func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
+	period := l.period(l.now())
+	lastKey := c.Scope + "|" + period
 	if !l.isDown() {
+		k := l.snapshotFor(c.Scope, period)
 		sctx, cancel := l.storeContext(ctx)
-		ok, err := l.store.Acquire(sctx, Slot{c.ID, c.Principal, c.Scope}, c.PrincipalLimit, c.ScopeLimit)
+		o, known, over, err := l.store.Admit(sctx, Admission{Slot: Slot{c.ID, c.Principal, c.Scope}, Period: period,
+			Watermark: k.Watermark, Spend: k.Spend, Budget: c.Budget, Strict: c.Strict, Worst: c.Worst,
+			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit})
 		cancel()
 		switch {
-		case err == nil && !ok:
-			return nil, ErrConcurrency
 		case err == nil:
+			if over {
+				slog.Warn("limit: the counter no longer holds this snapshot's watermark; counting all of it (over-counting)",
+					"scope", c.Scope, "watermark", k.Watermark)
+			}
 			l.mu.Lock()
 			defer l.mu.Unlock()
+			l.last[lastKey] = known
+			switch o {
+			case OverBudget:
+				return nil, ErrBudget
+			case OverConcurrency:
+				return nil, ErrConcurrency
+			}
 			if l.now().Before(l.graceUntil) {
 				l.waived[c.ID] = true // peers may still hold calls Valkey lacks
 			}
-			return l.track(c), nil
+			return l.track(c, period), nil
 		case ctx.Err() != nil:
-			return nil, ctx.Err()
+			return nil, ctx.Err() // the caller went away: no outage
 		}
 		l.markDown(err) // and fall through to the local check
 	}
-	// The local check and the tracking are one step under the lock: no
-	// store call between them.
+	// The local check and the tracking are one step under the lock.
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	known := l.last[lastKey]
+	switch {
+	case c.Budget == 0:
+	case c.Strict && known+c.Worst > c.Budget, !c.Strict && known >= c.Budget:
+		return nil, ErrBudget
+	}
 	byPrincipal, byScope := 0, 0
 	for _, t := range l.running {
 		if t.call.Principal == c.Principal {
@@ -147,7 +175,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 		return nil, ErrConcurrency
 	}
 	l.waived[c.ID] = true
-	return l.track(c), nil
+	return l.track(c, period), nil
 }
 
 // storeContext bounds a store call: Valkey answers a site's gateways in a
@@ -174,36 +202,45 @@ func (l *Limiter) markDown(err error) {
 	l.down = true
 }
 
-// read is known spend from the store: the snapshot's, plus the counter's
-// total after its watermark.
-func (l *Limiter) read(ctx context.Context, scope string) (int64, error) {
-	l.mu.Lock()
-	k := l.known[scope]
-	l.mu.Unlock()
-	sctx, cancel := l.storeContext(ctx)
-	defer cancel()
-	after, over, err := l.store.After(sctx, scope, k.Watermark)
-	if err != nil {
-		return 0, err
-	}
-	if over {
-		slog.Warn("limit: the counter no longer holds this snapshot's watermark; counting all of it (over-counting)",
-			"scope", scope, "watermark", k.Watermark)
-	}
-	return k.Spend + after, nil
-}
-
 // track records a running call; mu is held.
-func (l *Limiter) track(c Call) *Ticket {
-	t := &Ticket{l: l, call: c}
+func (l *Limiter) track(c Call, period string) *Ticket {
+	t := &Ticket{l: l, call: c, period: period}
 	l.running[c.ID] = t
 	return t
 }
 
-// Complete records the call's cost and frees its slot.
+// finish marks a ticket done and forgets the call; it reports whether it
+// was still running.
+func (l *Limiter) finish(t *Ticket) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t.done {
+		return false
+	}
+	t.done = true
+	delete(l.running, t.call.ID)
+	return true
+}
+
+func (t *Ticket) slot() Slot { return Slot{t.call.ID, t.call.Principal, t.call.Scope} }
+
+// Complete records the call's cost and frees its slot: one round trip.
 func (t *Ticket) Complete(ctx context.Context, cost int64) {
-	t.l.emit(ctx, t.call.Scope, Event{t.call.ID, cost})
-	t.l.release(ctx, t)
+	l, e := t.l, Event{t.call.ID, cost}
+	if !l.finish(t) {
+		return
+	}
+	if !l.isDown() {
+		sctx, cancel := l.storeContext(ctx)
+		seq, err := l.store.Complete(sctx, t.period, t.slot(), e)
+		cancel()
+		if err == nil {
+			l.numbered(t.call.Scope, e, seq)
+			return
+		}
+		l.markDown(err) // completions run detached from the caller: an error is the store's
+	}
+	l.hold(t.call.Scope, t.period, e) // the slot's TTL frees it
 }
 
 // Cancel records what the gateway saw of a call the client abandoned. The
@@ -211,52 +248,43 @@ func (t *Ticket) Complete(ctx context.Context, cost int64) {
 // on it, and freeing the slot would let cancel-and-resend escape the
 // in-flight limit (ADR 0041 §7.6).
 func (t *Ticket) Cancel(ctx context.Context, seen int64) {
-	t.l.emit(ctx, t.call.Scope, Event{t.call.ID, seen})
+	l, e := t.l, Event{t.call.ID, seen}
+	if !l.isDown() {
+		sctx, cancel := l.storeContext(ctx)
+		seq, err := l.store.Add(sctx, t.call.Scope, t.period, e)
+		cancel()
+		if err == nil {
+			l.numbered(t.call.Scope, e, seq)
+			return
+		}
+		l.markDown(err)
+	}
+	l.hold(t.call.Scope, t.period, e)
 }
 
 // Ended frees a cancelled call's slot once its upstream has ended (the
 // connection closed, or the deployment's maximum duration passed).
-func (t *Ticket) Ended(ctx context.Context) { t.l.release(ctx, t) }
-
-func (l *Limiter) emit(ctx context.Context, scope string, e Event) {
-	if !l.isDown() {
-		sctx, cancel := l.storeContext(ctx)
-		seq, err := l.store.Add(sctx, scope, e)
-		cancel()
-		if err == nil {
-			l.numbered(scope, e, seq)
-			return
-		}
-		l.markDown(err) // completions run detached from the caller: an error is the store's
+func (t *Ticket) Ended(ctx context.Context) {
+	l := t.l
+	if !l.finish(t) || l.isDown() {
+		return // when down, the slot's TTL frees it
 	}
+	sctx, cancel := l.storeContext(ctx)
+	defer cancel()
+	if err := l.store.Release(sctx, t.slot()); err != nil {
+		l.markDown(err)
+	}
+}
+
+func (l *Limiter) hold(scope, period string, e Event) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.pending = append(l.pending, held{scope, e}) // replayed by Recover
+	l.pending = append(l.pending, held{scope, period, e}) // replayed by Recover
 }
 
 func (l *Limiter) numbered(scope string, e Event, seq int64) {
 	if l.OnNumbered != nil {
 		l.OnNumbered(scope, e, seq)
-	}
-}
-
-func (l *Limiter) release(ctx context.Context, t *Ticket) {
-	l.mu.Lock()
-	if t.done {
-		l.mu.Unlock()
-		return
-	}
-	t.done = true
-	delete(l.running, t.call.ID)
-	down := l.down
-	l.mu.Unlock()
-	if !down {
-		sctx, cancel := l.storeContext(ctx)
-		err := l.store.Release(sctx, Slot{t.call.ID, t.call.Principal, t.call.Scope})
-		cancel()
-		if err != nil {
-			l.markDown(err) // the slot's TTL frees it
-		}
 	}
 }
 
@@ -270,8 +298,9 @@ func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
 }
 
 // Renew re-registers the slots of this gateway's running calls; the
-// request path calls it every 30 seconds (ADR 0038). A failed renewal is an
-// outage: the gateway admits on its own counts until Recover (ADR 0041 §7.3).
+// gateway's renewal loop calls it every 30 seconds (ADR 0038). A failed
+// renewal is an outage: the gateway admits on its own counts until Recover
+// (ADR 0041 §7.3).
 func (l *Limiter) Renew(ctx context.Context) error {
 	l.mu.Lock()
 	if l.down {
@@ -293,7 +322,7 @@ func (l *Limiter) Renew(ctx context.Context) error {
 func (l *Limiter) slots() []Slot {
 	var slots []Slot
 	for _, t := range l.running {
-		slots = append(slots, Slot{t.call.ID, t.call.Principal, t.call.Scope})
+		slots = append(slots, t.slot())
 	}
 	return slots
 }
@@ -343,7 +372,7 @@ func (l *Limiter) ReplayOne(ctx context.Context) (e Event, ok bool, err error) {
 	h := l.pending[0]
 	l.mu.Unlock()
 	sctx, cancel := l.storeContext(ctx)
-	seq, err := l.store.Add(sctx, h.scope, h.e)
+	seq, err := l.store.Add(sctx, h.scope, h.period, h.e)
 	cancel()
 	if err != nil {
 		return h.e, false, err
@@ -357,13 +386,6 @@ func (l *Limiter) ReplayOne(ctx context.Context) (e Event, ok bool, err error) {
 	return h.e, true, nil
 }
 
-func (l *Limiter) now() time.Time {
-	if l.Now != nil {
-		return l.Now()
-	}
-	return time.Now()
-}
-
 // EndGrace ends the grace after a recovery at once: for an operator who
 // knows every gateway has recovered, and for tests (the model's graceEnds).
 func (l *Limiter) EndGrace() {
@@ -372,26 +394,43 @@ func (l *Limiter) EndGrace() {
 	l.graceUntil = time.Time{}
 }
 
-// Known is a scope's known spend now, read afresh when the store answers
-// (else the last computed). It does not change what admission decides
-// from: only an admission's own read does, as in model/exposure.md.
+// Known is a scope's known spend now, for the current period, read afresh
+// when the store answers (else the last computed). It does not change what
+// admission decides from: only an admission's own read does, as in
+// model/exposure.md.
 func (l *Limiter) Known(ctx context.Context, scope string) int64 {
+	period := l.period(l.now())
 	if !l.isDown() {
-		if k, err := l.read(ctx, scope); err == nil {
-			return k
+		k := l.snapshotFor(scope, period)
+		sctx, cancel := l.storeContext(ctx)
+		after, _, err := l.store.After(sctx, scope, period, k.Watermark)
+		cancel()
+		if err == nil {
+			return k.Spend + after
 		}
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.last[scope]
+	return l.last[scope+"|"+period]
 }
 
-// Waived lists the calls admitted while the store was unreachable: the
-// exposure the bound does not cover, to be reported (ADR 0041 §7.3).
+// Waived lists the calls admitted while the store was unreachable or in
+// grace: the exposure the bound does not cover, to be reported (ADR 0041
+// §7.3). DrainWaived empties it.
 func (l *Limiter) Waived() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return slices.Sorted(keys(l.waived))
+	return slices.Sorted(maps.Keys(l.waived))
+}
+
+// DrainWaived returns the waived calls and forgets them: the telemetry
+// reports each once.
+func (l *Limiter) DrainWaived() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := slices.Sorted(maps.Keys(l.waived))
+	clear(l.waived)
+	return out
 }
 
 // Pending lists the increments held for replay, for a scope.
@@ -408,18 +447,4 @@ func (l *Limiter) Pending(scope string) []Event {
 }
 
 // Down reports whether this gateway believes the store unreachable.
-func (l *Limiter) Down() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.down
-}
-
-func keys[K comparable, V any](m map[K]V) func(func(K) bool) {
-	return func(yield func(K) bool) {
-		for k := range m {
-			if !yield(k) {
-				return
-			}
-		}
-	}
-}
+func (l *Limiter) Down() bool { return l.isDown() }

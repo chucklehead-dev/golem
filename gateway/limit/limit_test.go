@@ -1,10 +1,12 @@
 package limit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 )
 
 func scopeCall(id, principal string) Call {
@@ -101,5 +103,77 @@ func TestWatermark(t *testing.T) {
 	g1.ApplySnapshot(ctx, "s", Known{Spend: 8, Watermark: 2})
 	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 10 || b != 10 {
 		t.Fatalf("known %d on the new snapshot, %d on the old: both must be 10", a, b)
+	}
+}
+
+// blocking is a store whose calls wait for their context.
+type blocking struct{ Store }
+
+func (blocking) Admit(ctx context.Context, _ Admission) (Outcome, int64, bool, error) {
+	<-ctx.Done()
+	return 0, 0, false, ctx.Err()
+}
+
+// TestCallerCancelIsNoOutage: a caller going away mid-admission returns
+// its own error; the gateway does not switch to outage mode.
+func TestCallerCancelIsNoOutage(t *testing.T) {
+	l := New(blocking{NewMem()})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := l.Admit(ctx, scopeCall("a", "p1")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Admit = %v, want the caller's context.Canceled", err)
+	}
+	if l.Down() || len(l.Waived()) != 0 {
+		t.Fatal("a caller's cancellation was taken for an outage")
+	}
+	// A store that does not answer within StoreTimeout is one.
+	l.StoreTimeout = 10 * time.Millisecond
+	if _, err := l.Admit(t.Context(), scopeCall("b", "p1")); err != nil || !l.Down() {
+		t.Fatalf("Admit = %v, down %v: a hung store is an outage, admitted on local counts", err, l.Down())
+	}
+}
+
+// TestPeriodRollover: a new month starts from nothing. The snapshot of the
+// old month is not counted against the new one, and the counter is the
+// new month's (numbered from 1), so last month's watermark cannot make the
+// new month's events disappear or the old month's spend refuse every call.
+func TestPeriodRollover(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	now := time.Date(2026, 11, 30, 23, 59, 0, 0, time.UTC)
+	l.Now = func() time.Time { return now }
+	var seqs []int64
+	l.OnNumbered = func(_ string, _ Event, seq int64) { seqs = append(seqs, seq) }
+	for i := range 3 {
+		tk, err := l.Admit(ctx, scopeCall(fmt.Sprint("nov", i), "p1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tk.Complete(ctx, 4)
+	}
+	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 12, Watermark: 3})
+	if _, err := l.Admit(ctx, scopeCall("late", "p1")); !errors.Is(err, ErrBudget) {
+		t.Fatalf("November is spent (12 of 10): %v", err)
+	}
+	now = now.Add(2 * time.Minute) // December
+	tk, err := l.Admit(ctx, scopeCall("dec0", "p1"))
+	if err != nil {
+		t.Fatalf("a new period: %v", err)
+	}
+	tk.Complete(ctx, 2)
+	if got := l.Known(ctx, "s"); got != 2 {
+		t.Fatalf("December's known spend %d, want 2", got)
+	}
+	if !slices.Equal(seqs, []int64{1, 2, 3, 1}) || len(st.Counter("s", "2026-12")) != 1 {
+		t.Fatalf("numbers %v: each period's counter numbers from 1", seqs)
+	}
+	// A call admitted in November and completed in December is November's.
+	now = time.Date(2027, 1, 31, 23, 59, 0, 0, time.UTC)
+	jan, _ := l.Admit(ctx, scopeCall("jan", "p1"))
+	now = now.Add(time.Hour)
+	jan.Complete(ctx, 1)
+	if len(st.Counter("s", "2027-01")) != 1 || len(st.Counter("s", "2027-02")) != 0 {
+		t.Fatal("a call's cost belongs to the period it started in")
 	}
 }

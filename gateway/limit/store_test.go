@@ -16,35 +16,80 @@ import (
 
 // The store contract, run against every Store.
 
+const nov = "2026-11"
+
+// acquire admits a slot with no budget: the slot half of Admit.
+func acquire(t *testing.T, st Store, s Slot, principalLimit, scopeLimit int) bool {
+	t.Helper()
+	o, _, _, err := st.Admit(t.Context(), Admission{Slot: s, Period: nov, PrincipalLimit: principalLimit, ScopeLimit: scopeLimit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o == Admitted
+}
+
 func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("limits", func(t *testing.T) {
 		ctx, st := t.Context(), newStore(t)
-		ok, err := st.Acquire(ctx, Slot{"a", "p1", "s"}, 1, 2)
-		if !ok || err != nil {
-			t.Fatal(ok, err)
+		if !acquire(t, st, Slot{"a", "p1", "s"}, 1, 2) {
+			t.Fatal("the first slot")
 		}
-		if ok, _ := st.Acquire(ctx, Slot{"b", "p1", "s"}, 1, 2); ok {
+		if acquire(t, st, Slot{"b", "p1", "s"}, 1, 2) {
 			t.Fatal("a second slot for p1 with a principal limit of 1")
 		}
-		if ok, _ := st.Acquire(ctx, Slot{"c", "p2", "s"}, 1, 2); !ok {
+		if !acquire(t, st, Slot{"c", "p2", "s"}, 1, 2) {
 			t.Fatal("p2's first slot")
 		}
-		if ok, _ := st.Acquire(ctx, Slot{"d", "p3", "s"}, 1, 2); ok {
+		if acquire(t, st, Slot{"d", "p3", "s"}, 1, 2) {
 			t.Fatal("a third slot in a scope limited to 2")
 		}
-		if ok, _ := st.Acquire(ctx, Slot{"d", "p3", "s"}, 1, 0); !ok {
+		if !acquire(t, st, Slot{"d", "p3", "s"}, 1, 0) {
 			t.Fatal("no scope limit: p3's first slot")
 		}
 		st.Release(ctx, Slot{"a", "p1", "s"})
-		if ok, _ := st.Acquire(ctx, Slot{"b", "p1", "s"}, 1, 0); !ok {
+		if !acquire(t, st, Slot{"b", "p1", "s"}, 1, 0) {
 			t.Fatal("after release")
 		}
 		// Re-registering ignores limits: the calls are running.
 		if err := st.Reacquire(ctx, []Slot{{"x", "p1", "s"}, {"y", "p1", "s"}}); err != nil {
 			t.Fatal(err)
 		}
-		if ok, _ := st.Acquire(ctx, Slot{"z", "p9", "s"}, 1, 4); ok {
+		if acquire(t, st, Slot{"z", "p9", "s"}, 1, 4) {
 			t.Fatal("the re-registered slots count against the scope")
+		}
+		// Complete frees the slot it records.
+		if _, err := st.Complete(ctx, nov, Slot{"b", "p1", "s"}, Event{"b", 1}); err != nil {
+			t.Fatal(err)
+		}
+		if !acquire(t, st, Slot{"b2", "p1", "s"}, 3, 0) || acquire(t, st, Slot{"b3", "p1", "s"}, 3, 0) {
+			t.Fatal("after Complete, p1 holds x, y and b2: one slot was freed")
+		}
+	})
+	t.Run("budget", func(t *testing.T) {
+		ctx, st := t.Context(), newStore(t)
+		st.Add(ctx, "s", nov, Event{"e1", 3})
+		st.Add(ctx, "s", nov, Event{"e2", 5})
+		for _, tc := range []struct {
+			name string
+			a    Admission
+			want Outcome
+		}{ // known: the snapshot's 2 (as of number 1) plus the 5 after it
+			{"soft, under", Admission{Budget: 8}, Admitted},
+			{"soft, at", Admission{Budget: 7}, OverBudget},
+			{"strict, fits", Admission{Budget: 9, Strict: true, Worst: 2}, Admitted},
+			{"strict, does not", Admission{Budget: 9, Strict: true, Worst: 3}, OverBudget},
+			{"none", Admission{}, Admitted},
+		} {
+			a := tc.a
+			a.Slot, a.Period, a.Watermark, a.Spend = Slot{tc.name, tc.name, "s"}, nov, 1, 2
+			o, known, over, err := st.Admit(ctx, a)
+			if err != nil || o != tc.want || known != 7 || over {
+				t.Errorf("%s: %v %d %v %v; want %v, known 7", tc.name, o, known, over, err, tc.want)
+			}
+		}
+		// Over budget takes no slot.
+		if got := len(slotsOf(t, st)); got != 3 {
+			t.Errorf("%d slots held, want 3 (the admitted)", got)
 		}
 	})
 	t.Run("counter", func(t *testing.T) {
@@ -53,17 +98,41 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			e    Event
 			want int64
 		}{{Event{"e1", 3}, 1}, {Event{"e2", 5}, 2}, {Event{"e1", 3}, 1}} { // twice is once
-			if seq, err := st.Add(ctx, "s", tc.e); err != nil || seq != tc.want {
+			if seq, err := st.Add(ctx, "s", nov, tc.e); err != nil || seq != tc.want {
 				t.Fatalf("Add(%v) = %d, %v; want %d", tc.e, seq, err, tc.want)
 			}
 		}
-		st.Add(ctx, "other", Event{"e9", 100})
+		st.Add(ctx, "other", nov, Event{"e9", 100})
+		st.Add(ctx, "s", "2026-12", Event{"e10", 100})
 		for w, want := range map[int64]int64{0: 8, 1: 5, 2: 0, 7: 0} {
-			if got, over, err := st.After(ctx, "s", w); err != nil || over || got != want {
+			if got, over, err := st.After(ctx, "s", nov, w); err != nil || over || got != want {
 				t.Errorf("After(%d) = %d, %v, %v; want %d", w, got, over, err, want)
 			}
 		}
+		if seq, _ := st.Add(ctx, "s", "2026-12", Event{"e11", 1}); seq != 2 {
+			t.Errorf("December's second event numbered %d", seq)
+		}
 	})
+}
+
+// slotsOf lists the calls holding scope s's slots.
+func slotsOf(t *testing.T, st Store) []string {
+	switch st := st.(type) {
+	case *Mem:
+		var out []string
+		for _, s := range st.Slots() {
+			out = append(out, s.Call)
+		}
+		return out
+	case *Valkey:
+		out, err := st.ScopeSlots(t.Context(), "s")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	t.Fatalf("no slot listing for %T", st)
+	return nil
 }
 
 func sortEvents(es []Event) {
@@ -127,19 +196,19 @@ func TestValkeyStore(t *testing.T) {
 	t.Run("slots expire unless renewed", func(t *testing.T) {
 		ctx, st := t.Context(), newValkey(t, addr)
 		st.TTL = 200 * time.Millisecond
-		st.Acquire(ctx, Slot{"a", "p1", "s"}, 1, 0)
-		st.Acquire(ctx, Slot{"b", "p2", "s"}, 1, 0)
+		acquire(t, st, Slot{"a", "p1", "s"}, 1, 0)
+		acquire(t, st, Slot{"b", "p2", "s"}, 1, 0)
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			st.Reacquire(ctx, []Slot{{"a", "p1", "s"}}) // a's gateway renews; b's crashed
 			if got, _ := st.ScopeSlots(ctx, "s"); slices.Equal(got, []string{"a"}) {
 				// An expired slot is dropped when the next acquire looks.
-				if ok, _ := st.Acquire(ctx, Slot{"c", "p2", "s"}, 1, 0); !ok {
+				if !acquire(t, st, Slot{"c", "p2", "s"}, 1, 0) {
 					t.Fatal("p2's crashed call still holds its slot")
 				}
 				return
 			}
-			st.Acquire(ctx, Slot{"probe", "p-probe", "s"}, 1, 0) // trims expired slots
+			acquire(t, st, Slot{"probe", "p-probe", "s"}, 1, 0) // trims expired slots
 			st.Release(ctx, Slot{"probe", "p-probe", "s"})
 			time.Sleep(50 * time.Millisecond) // TTLs are on the server's clock
 		}
@@ -148,14 +217,14 @@ func TestValkeyStore(t *testing.T) {
 	t.Run("trimmed history over-counts, never under-counts", func(t *testing.T) {
 		ctx, st := t.Context(), newValkey(t, addr)
 		st.Retain = 100 * time.Millisecond
-		st.Add(ctx, "s", Event{"old", 1})
-		st.Add(ctx, "s", Event{"mid", 2})
+		st.Add(ctx, "s", nov, Event{"old", 1})
+		st.Add(ctx, "s", nov, Event{"mid", 2})
 		time.Sleep(250 * time.Millisecond)
-		st.Add(ctx, "s", Event{"new", 4}) // trims numbers 1 and 2
-		if got, over, _ := st.After(ctx, "s", 1); !over || got != 7 {
+		st.Add(ctx, "s", nov, Event{"new", 4}) // trims numbers 1 and 2
+		if got, over, _ := st.After(ctx, "s", nov, 1); !over || got != 7 {
 			t.Fatalf("After(1) = %d, over %v; want the whole total (7), flagged", got, over)
 		}
-		if got, over, _ := st.After(ctx, "s", 3); over || got != 0 {
+		if got, over, _ := st.After(ctx, "s", nov, 3); over || got != 0 {
 			t.Fatalf("After(3) = %d, %v", got, over)
 		}
 	})
@@ -168,7 +237,7 @@ func TestValkeyStore(t *testing.T) {
 		c.Close()
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		if _, err := st.Acquire(ctx, Slot{"a", "p", "s"}, 1, 0); err == nil || !strings.Contains(err.Error(), ErrUnavailable.Error()) {
+		if _, _, _, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov}); err == nil || !strings.Contains(err.Error(), ErrUnavailable.Error()) {
 			t.Fatalf("%v, want ErrUnavailable", err)
 		}
 	})

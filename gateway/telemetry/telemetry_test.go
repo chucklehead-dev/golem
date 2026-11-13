@@ -176,7 +176,7 @@ func TestOrderDoesNotGrow(t *testing.T) {
 	r := newRig(t)
 	for i := range 1000 {
 		c := call
-		c.RequestID = string(rune('a' + i%26)) + strings.Repeat("x", i/26)
+		c.RequestID = string(rune('a'+i%26)) + strings.Repeat("x", i/26)
 		r.t.Ended(t.Context(), c)
 		r.t.Ledger.Numbered("team-a", c.RequestID, int64(i+1))
 	}

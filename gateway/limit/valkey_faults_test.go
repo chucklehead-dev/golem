@@ -17,11 +17,18 @@ type valkeyFaults struct {
 	down atomic.Bool
 }
 
-func (f *valkeyFaults) Acquire(ctx context.Context, s Slot, p, sc int) (bool, error) {
+func (f *valkeyFaults) Admit(ctx context.Context, a Admission) (Outcome, int64, bool, error) {
 	if f.down.Load() {
-		return false, ErrUnavailable
+		return 0, 0, false, ErrUnavailable
 	}
-	return f.Valkey.Acquire(ctx, s, p, sc)
+	return f.Valkey.Admit(ctx, a)
+}
+
+func (f *valkeyFaults) Complete(ctx context.Context, period string, s Slot, e Event) (int64, error) {
+	if f.down.Load() {
+		return 0, ErrUnavailable
+	}
+	return f.Valkey.Complete(ctx, period, s, e)
 }
 
 func (f *valkeyFaults) Release(ctx context.Context, s Slot) error {
@@ -38,18 +45,18 @@ func (f *valkeyFaults) Reacquire(ctx context.Context, ss []Slot) error {
 	return f.Valkey.Reacquire(ctx, ss)
 }
 
-func (f *valkeyFaults) Add(ctx context.Context, scope string, e Event) (int64, error) {
+func (f *valkeyFaults) Add(ctx context.Context, scope, period string, e Event) (int64, error) {
 	if f.down.Load() {
 		return 0, ErrUnavailable
 	}
-	return f.Valkey.Add(ctx, scope, e)
+	return f.Valkey.Add(ctx, scope, period, e)
 }
 
-func (f *valkeyFaults) After(ctx context.Context, scope string, w int64) (int64, bool, error) {
+func (f *valkeyFaults) After(ctx context.Context, scope, period string, w int64) (int64, bool, error) {
 	if f.down.Load() {
 		return 0, false, ErrUnavailable
 	}
-	return f.Valkey.After(ctx, scope, w)
+	return f.Valkey.After(ctx, scope, period, w)
 }
 
 // SetDown: going down, every slot lapses (the outage outlasts the TTL).
@@ -81,14 +88,14 @@ redis.call('SET', KEYS[2], keep == 0 and 0 or (redis.call('HGET', KEYS[3], keep)
 return 1`)
 
 // Failover loses the counter after its first keep events.
-func (f *valkeyFaults) Failover(sc string, keep int) {
-	truncate.Exec(context.Background(), f.c, f.counterKeys(sc), []string{strconv.Itoa(keep)})
+func (f *valkeyFaults) Failover(sc, period string, keep int) {
+	truncate.Exec(context.Background(), f.c, f.counterKeys(sc, period), []string{strconv.Itoa(keep)})
 }
 
 // Counter lists a scope's events in number order.
-func (f *valkeyFaults) Counter(sc string) []Event {
+func (f *valkeyFaults) Counter(sc, period string) []Event {
 	ctx := context.Background()
-	k := f.counterKeys(sc)
+	k := f.counterKeys(sc, period)
 	n, _ := f.c.Do(ctx, f.c.B().Get().Key(k[0]).Build()).AsInt64()
 	var out []Event
 	var prev int64

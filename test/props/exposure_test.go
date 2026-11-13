@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/chucklehead-dev/gotogether/qhegel"
 	"github.com/chucklehead-dev/gotogether/qobs"
@@ -56,16 +57,23 @@ type limMachine struct {
 	graced    map[string]bool
 }
 
+var (
+	inPeriod = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	period   = "2026-11"
+)
+
 func newLimMachine(ctx context.Context, mut limitMutation) *limMachine {
 	st := limit.NewMem()
-	m := &limMachine{ctx: ctx, mut: mut, store: st, gws: map[string]*limit.Limiter{},
+	m := &limMachine{ctx: ctx, mut: mut, store: st, gws: map[string]*limit.Limiter{}, latest: limit.Known{Period: period},
 		phase: map[string]string{}, tickets: map[string]*limit.Ticket{}, seen: map[string]int64{},
 		recovered: map[string]bool{}, graced: map[string]bool{}, applied: map[string]limit.Known{}}
 	for _, g := range limitGws {
 		l := limit.New(st)
+		l.Now = func() time.Time { return inPeriod } // the model has one budget period
 		l.OnNumbered = func(_ string, e limit.Event, seq int64) { m.rows = append(m.rows, row{e.ID, e.Cost, seq}) }
 		m.gws[g] = l
 		m.recovered[g] = true
+		m.applied[g] = limit.Known{Period: period} // the model's initial snapshot: nothing, in its one period
 	}
 	for _, r := range requests {
 		m.phase[r] = "idle"
@@ -168,7 +176,7 @@ func (m *limMachine) RulePublish(hegel.TestCase) {
 	for have[w+1] {
 		w++
 	}
-	k := limit.Known{Watermark: w}
+	k := limit.Known{Period: period, Watermark: w}
 	for _, r := range m.ledger {
 		if r.seq <= w {
 			k.Spend += r.cost
@@ -247,12 +255,12 @@ func (m *limMachine) RuleGraceEnds(tc hegel.TestCase) {
 
 // RuleFailover: Valkey loses its counter's tail.
 func (m *limMachine) RuleFailover(tc hegel.TestCase) {
-	n := len(m.store.Counter("s"))
+	n := len(m.store.Counter("s", period))
 	if m.down || n == 0 {
 		return
 	}
 	keep := hegel.Draw(tc, hegel.Integers(0, n-1))
-	m.store.Failover("s", keep)
+	m.store.Failover("s", period, keep)
 	qobs.Record(m.ctx, "failover", nil, "keep", keep)
 }
 

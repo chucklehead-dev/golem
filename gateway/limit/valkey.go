@@ -18,7 +18,7 @@ import (
 // Slots are sorted sets per principal and per scope, scored by their expiry
 // on the server's clock (TIME), so a gateway's clock cannot extend one.
 //
-// The counter, per scope, numbers its events (ADR 0042): a sequence, a
+// The counter, per scope and budget period, numbers its events (ADR 0042): a sequence, a
 // running total, the total as of each number, and the event of each number
 // (so adding one twice returns its number). Known spend reads two of these,
 // O(1). History older than Retain is trimmed, a little at each add; Retain
@@ -48,17 +48,54 @@ func NewValkey(c valkey.Client, site string) *Valkey {
 const nowMillis = `local t = redis.call('TIME'); local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 `
 
-var acquire = valkey.NewLuaScript(nowMillis + `
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
-if tonumber(ARGV[2]) > 0 and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
-if tonumber(ARGV[3]) > 0 and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[3]) then return 0 end
-local exp = now + tonumber(ARGV[4])
-redis.call('ZADD', KEYS[1], exp, ARGV[1])
-redis.call('ZADD', KEYS[2], exp, ARGV[1])
-redis.call('PEXPIRE', KEYS[1], ARGV[4])
-redis.call('PEXPIRE', KEYS[2], ARGV[4])
-return 1`)
+// slotsTake trims expired slots and, if the limits allow, takes one: KEYS
+// principal and scope slots, ARGV call, principal limit, scope limit, TTL.
+// It is a Lua function shared by the admit script.
+const slotsTake = `
+local function take(pk, sk, call, plimit, slimit, ttl)
+  redis.call('ZREMRANGEBYSCORE', pk, '-inf', now)
+  redis.call('ZREMRANGEBYSCORE', sk, '-inf', now)
+  if plimit > 0 and redis.call('ZCARD', pk) >= plimit then return false end
+  if slimit > 0 and redis.call('ZCARD', sk) >= slimit then return false end
+  redis.call('ZADD', pk, now + ttl, call)
+  redis.call('ZADD', sk, now + ttl, call)
+  redis.call('PEXPIRE', pk, ttl)
+  redis.call('PEXPIRE', sk, ttl)
+  return true
+end
+`
+
+// afterOf is the period counter's total after w: KEYS seq, total, cum.
+// Returns the total and 1 if the total as of w was trimmed (then the whole).
+const afterOf = `
+local function after(seqk, totalk, cumk, w)
+  local n = tonumber(redis.call('GET', seqk) or '0')
+  local total = tonumber(redis.call('GET', totalk) or '0')
+  if w >= n then return 0, 0 end
+  if w == 0 then return total, 0 end
+  local at = redis.call('HGET', cumk, w)
+  if not at then return total, 1 end
+  return total - tonumber(at), 0
+end
+`
+
+// admit: KEYS principal slots, scope slots, seq, total, cum; ARGV call,
+// principal limit, scope limit, TTL, watermark, spend, budget, strict (0 or
+// 1), worst. Returns {outcome, known, over}: the check and the slot in one
+// atomic step, so two gateways cannot both pass the check and then both
+// take the last slot or the last of the budget.
+var admit = valkey.NewLuaScript(nowMillis + slotsTake + afterOf + `
+local a, over = after(KEYS[3], KEYS[4], KEYS[5], tonumber(ARGV[5]))
+local known = tonumber(ARGV[6]) + a
+local budget, worst = tonumber(ARGV[7]), tonumber(ARGV[9])
+if budget > 0 then
+  if ARGV[8] == '1' and known + worst > budget then return {1, known, over} end
+  if ARGV[8] ~= '1' and known >= budget then return {1, known, over} end
+end
+if not take(KEYS[1], KEYS[2], ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])) then
+  return {2, known, over}
+end
+return {0, known, over}`)
 
 // register adds slots without checking limits: KEYS pairs (principal,
 // scope), ARGV[1] the TTL, then the calls.
@@ -72,56 +109,103 @@ for i = 2, #ARGV do
 end
 return 1`)
 
-// add: KEYS seq, total, cum (number -> total), ev (event -> number),
-// ids (number -> event), times (number by time); ARGV event, cost, retain.
-var add = valkey.NewLuaScript(nowMillis + `
-local had = redis.call('HGET', KEYS[4], ARGV[1])
-if had then return tonumber(had) end
-local n = redis.call('INCR', KEYS[1])
-local total = redis.call('INCRBY', KEYS[2], ARGV[2])
-redis.call('HSET', KEYS[3], n, total)
-redis.call('HSET', KEYS[4], ARGV[1], n)
-redis.call('HSET', KEYS[5], n, ARGV[1])
-redis.call('ZADD', KEYS[6], now, n)
--- trim a little history past retention, never the newest number
-local old = redis.call('ZRANGEBYSCORE', KEYS[6], '-inf', now - tonumber(ARGV[3]), 'LIMIT', 0, 8)
-for _, m in ipairs(old) do
-  if tonumber(m) < n then
-    local id = redis.call('HGET', KEYS[5], m)
-    if id then redis.call('HDEL', KEYS[4], id) end
-    redis.call('HDEL', KEYS[5], m)
-    redis.call('HDEL', KEYS[3], m)
-    redis.call('ZREM', KEYS[6], m)
+// addTo numbers an event in a period's counter: KEYS seq, total, cum (number
+// -> total), ev (event -> number), ids (number -> event), times (number by
+// time); the event, its cost, the retention and the keys' life (a period's
+// counter outlives its period by the retention, then goes).
+const addTo = `
+local function add(k, id, cost, retain, life)
+  local had = redis.call('HGET', k[4], id)
+  if had then return tonumber(had) end
+  local n = redis.call('INCR', k[1])
+  local total = redis.call('INCRBY', k[2], cost)
+  redis.call('HSET', k[3], n, total)
+  redis.call('HSET', k[4], id, n)
+  redis.call('HSET', k[5], n, id)
+  redis.call('ZADD', k[6], now, n)
+  for i = 1, 6 do redis.call('PEXPIRE', k[i], life) end
+  -- trim a little history past retention, never the newest number
+  local old = redis.call('ZRANGEBYSCORE', k[6], '-inf', now - retain, 'LIMIT', 0, 8)
+  for _, m in ipairs(old) do
+    if tonumber(m) < n then
+      local was = redis.call('HGET', k[5], m)
+      if was then redis.call('HDEL', k[4], was) end
+      redis.call('HDEL', k[5], m)
+      redis.call('HDEL', k[3], m)
+      redis.call('ZREM', k[6], m)
+    end
   end
+  return n
 end
+`
+
+// add: KEYS the counter's six; ARGV event, cost, retain, life.
+var add = valkey.NewLuaScript(nowMillis + addTo + `
+return add(KEYS, ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4]))`)
+
+// complete: add, then free the slot (KEYS[7], KEYS[8]: principal and scope
+// slots; ARGV[5] the call), in one step.
+var complete = valkey.NewLuaScript(nowMillis + addTo + `
+local n = add(KEYS, ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4]))
+redis.call('ZREM', KEYS[7], ARGV[5])
+redis.call('ZREM', KEYS[8], ARGV[5])
 return n`)
 
-// after: KEYS seq, total, cum; ARGV w. Returns {the total after w, 1 if
-// the total as of w was trimmed (then the whole total)}.
-var after = valkey.NewLuaScript(`
-local n = tonumber(redis.call('GET', KEYS[1]) or '0')
-local total = tonumber(redis.call('GET', KEYS[2]) or '0')
-local w = tonumber(ARGV[1])
-if w >= n then return {0, 0} end
-if w == 0 then return {total, 0} end
-local at = redis.call('HGET', KEYS[3], w)
-if not at then return {total, 1} end
-return {total - tonumber(at), 0}`)
+// after: KEYS seq, total, cum; ARGV w.
+var after = valkey.NewLuaScript(afterOf + `
+local a, over = after(KEYS[1], KEYS[2], KEYS[3], tonumber(ARGV[1]))
+return {a, over}`)
 
 func (v *Valkey) principalKey(p string) string { return v.prefix + "slots:p:" + p }
 func (v *Valkey) scopeKey(s string) string     { return v.prefix + "slots:s:" + s }
-func (v *Valkey) counterKeys(scope string) []string {
-	p := v.prefix + "counter:" + scope + ":"
+func (v *Valkey) counterKeys(scope, period string) []string {
+	p := v.prefix + "counter:" + scope + ":" + period + ":"
 	return []string{p + "seq", p + "total", p + "cum", p + "ev", p + "ids", p + "times"}
 }
 
 func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
 
-func (v *Valkey) Acquire(ctx context.Context, s Slot, principalLimit, scopeLimit int) (bool, error) {
-	n, err := acquire.Exec(ctx, v.c, []string{v.principalKey(s.Principal), v.scopeKey(s.Scope)},
-		[]string{s.Call, strconv.Itoa(principalLimit), strconv.Itoa(scopeLimit), ms(v.TTL)}).AsInt64()
-	return n == 1, wrap(err)
+func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, bool, error) {
+	strict := "0"
+	if a.Strict {
+		strict = "1"
+	}
+	keys := append([]string{v.principalKey(a.Principal), v.scopeKey(a.Scope)}, v.counterKeys(a.Scope, a.Period)[:3]...)
+	r, err := admit.Exec(ctx, v.c, keys, []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), ms(v.TTL),
+		i64(a.Watermark), i64(a.Spend), i64(a.Budget), strict, i64(a.Worst)}).AsIntSlice()
+	if err != nil {
+		return 0, 0, false, wrap(err)
+	}
+	if len(r) != 3 {
+		return 0, 0, false, fmt.Errorf("limit: the admit script returned %d values", len(r))
+	}
+	return Outcome(r[0]), r[1], r[2] == 1, nil
 }
+
+// life is how long a period's counter keys live after their last add: past
+// the longest month, plus retention.
+func (v *Valkey) life() string { return ms(31*24*time.Hour + v.Retain) }
+
+func (v *Valkey) Complete(ctx context.Context, period string, s Slot, e Event) (int64, error) {
+	keys := append(v.counterKeys(s.Scope, period), v.principalKey(s.Principal), v.scopeKey(s.Scope))
+	seq, err := complete.Exec(ctx, v.c, keys, []string{e.ID, i64(e.Cost), ms(v.Retain), v.life(), s.Call}).AsInt64()
+	if err != nil {
+		return 0, wrap(err)
+	}
+	v.wait(ctx)
+	return seq, nil
+}
+
+// wait, if ReplicaAcks is set, waits for replicas to acknowledge an add.
+// The add is done; a replica's acknowledgement only narrows what a failover
+// can lose, so its failure is not the add's.
+func (v *Valkey) wait(ctx context.Context) {
+	if v.ReplicaAcks > 0 {
+		v.c.Do(ctx, v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build())
+	}
+}
+
+func i64(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (v *Valkey) Release(ctx context.Context, s Slot) error {
 	cmds := valkey.Commands{
@@ -149,35 +233,24 @@ func (v *Valkey) Reacquire(ctx context.Context, slots []Slot) error {
 	return wrap(register.Exec(ctx, v.c, keys, args).Error())
 }
 
-func (v *Valkey) Add(ctx context.Context, scope string, e Event) (int64, error) {
-	seq, err := add.Exec(ctx, v.c, v.counterKeys(scope),
-		[]string{e.ID, strconv.FormatInt(e.Cost, 10), ms(v.Retain)}).AsInt64()
+func (v *Valkey) Add(ctx context.Context, scope, period string, e Event) (int64, error) {
+	seq, err := add.Exec(ctx, v.c, v.counterKeys(scope, period), []string{e.ID, i64(e.Cost), ms(v.Retain), v.life()}).AsInt64()
 	if err != nil {
 		return 0, wrap(err)
 	}
-	if v.ReplicaAcks > 0 {
-		// The add is done; a replica's acknowledgement only narrows what a
-		// failover can lose. Its failure is not the add's.
-		v.c.Do(ctx, v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build())
-	}
+	v.wait(ctx)
 	return seq, nil
 }
 
-func (v *Valkey) After(ctx context.Context, scope string, w int64) (int64, bool, error) {
-	k := v.counterKeys(scope)
-	r, err := after.Exec(ctx, v.c, k[:3], []string{strconv.FormatInt(w, 10)}).ToArray()
+func (v *Valkey) After(ctx context.Context, scope, period string, w int64) (int64, bool, error) {
+	r, err := after.Exec(ctx, v.c, v.counterKeys(scope, period)[:3], []string{i64(w)}).AsIntSlice()
 	if err != nil {
 		return 0, false, wrap(err)
 	}
 	if len(r) != 2 {
 		return 0, false, fmt.Errorf("limit: the after script returned %d values", len(r))
 	}
-	total, err := r[0].AsInt64()
-	if err != nil {
-		return 0, false, err
-	}
-	over, err := r[1].AsInt64()
-	return total, over == 1, err
+	return r[0], r[1] == 1, nil
 }
 
 // ScopeSlots lists the calls holding a scope's slots (status, tests).
