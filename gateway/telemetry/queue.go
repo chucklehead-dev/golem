@@ -25,7 +25,16 @@ type LedgerQueue struct {
 	flush   chan chan error
 	stop    chan context.Context
 	stopped sync.WaitGroup
-	closed  atomic.Bool
+	// mu orders rows against the shutdown: OnEmit holds it shared from
+	// its check of closed to its enqueue, Shutdown exclusively to set
+	// closed. Every row OnEmit accepted is then queued before the worker
+	// drains, and every later one is refused and counted: none is queued
+	// with no worker left to deliver or count it (golem#4).
+	mu     sync.RWMutex
+	closed bool
+	// emitting, if set, runs inside OnEmit's critical section (a test's
+	// pause between the check and the enqueue).
+	emitting func()
 	// base is the running exports' context: a shutdown's deadline cancels
 	// it, so an export already blocked on the collector ends with it.
 	base       context.Context
@@ -54,9 +63,14 @@ func NewLedgerQueue(exp sdklog.Exporter, size, batch int, every time.Duration) *
 
 // OnEmit queues a row; it never blocks the request path.
 func (q *LedgerQueue) OnEmit(_ context.Context, r *sdklog.Record) error {
-	if q.closed.Load() {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if q.closed {
 		q.drop("the ledger queue is shut down")
 		return nil
+	}
+	if q.emitting != nil {
+		q.emitting()
 	}
 	select {
 	case q.q <- r.Clone(): // the SDK reuses r after the call
@@ -162,7 +176,11 @@ func (q *LedgerQueue) SetBackoff(d time.Duration) { q.backoff.Store(int64(d)) }
 // Shutdown refuses further rows (counting them), exports what is queued
 // while ctx lasts, counts the rest as failed, and stops.
 func (q *LedgerQueue) Shutdown(ctx context.Context) error {
-	if q.closed.Swap(true) {
+	q.mu.Lock()
+	was := q.closed
+	q.closed = true
+	q.mu.Unlock()
+	if was {
 		return nil
 	}
 	stopCancel := context.AfterFunc(ctx, q.cancelBase)
@@ -175,7 +193,10 @@ func (q *LedgerQueue) Shutdown(ctx context.Context) error {
 
 // ForceFlush exports every row queued now.
 func (q *LedgerQueue) ForceFlush(ctx context.Context) error {
-	if q.closed.Load() {
+	q.mu.RLock()
+	closed := q.closed
+	q.mu.RUnlock()
+	if closed {
 		return nil
 	}
 	reply := make(chan error, 1)

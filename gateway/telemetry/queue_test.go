@@ -265,6 +265,38 @@ func TestLedgerQueueShutdownRaces(t *testing.T) {
 	}
 }
 
+// TestLedgerQueueEmitDuringShutdown: a row whose emission had passed the
+// closed check when Shutdown began is delivered or counted, not queued
+// after the worker's last drain (golem#4). The emission is held between
+// its check and its enqueue while Shutdown runs.
+func TestLedgerQueueEmitDuringShutdown(t *testing.T) {
+	exp := &counting{}
+	q := NewLedgerQueue(exp, 64, 8, time.Millisecond)
+	checked, release := make(chan struct{}), make(chan struct{})
+	q.emitting = func() { close(checked); <-release }
+	emitted := make(chan struct{})
+	go func() {
+		var r sdklog.Record
+		q.OnEmit(context.Background(), &r)
+		close(emitted)
+	}()
+	<-checked
+	q.emitting = nil // the shutdown's own rows, if any, are not held
+	done := make(chan struct{})
+	go func() { q.Shutdown(t.Context()); close(done) }()
+	select {
+	case <-done: // the shutdown did not wait: the row comes too late
+	case <-time.After(100 * time.Millisecond): // waiting for the emission
+	}
+	close(release)
+	<-emitted
+	<-done
+	if got := exp.delivered() + int(q.Failed.Load()+q.Dropped.Load()); got != 1 {
+		t.Fatalf("delivered %d + failed %d + dropped %d: the row emitted during shutdown is lost",
+			exp.delivered(), q.Failed.Load(), q.Dropped.Load())
+	}
+}
+
 // counting counts the rows it took; it may fail every export, or block
 // each until its context ends.
 type counting struct {

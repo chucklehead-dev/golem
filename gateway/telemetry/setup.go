@@ -31,8 +31,8 @@ import (
 // OTLP sets up OTLP/HTTP exporters for traces, metrics and logs to the
 // collector at endpoint (host:port), installs them globally, and returns
 // the providers and their shutdown. Telemetry carries the ledger: it goes
-// over TLS unless the collector is on this machine (a node-local agent on
-// loopback, ADR 0043; golem#5).
+// over TLS unless the collector is on this machine (a node-local agent at
+// a literal loopback address, 127.0.0.1 or [::1]; ADR 0043, golem#5).
 func OTLP(ctx context.Context, endpoint string, res *resource.Resource) (Providers, func(context.Context) error, error) {
 	host, _, err := net.SplitHostPort(endpoint)
 	if err != nil {
@@ -148,8 +148,11 @@ func writeValue(enc *jsontext.Encoder, v attribute.Value) {
 }
 
 // plaintextOK reports whether telemetry may go to host unencrypted: only
-// to this machine.
+// to this machine, named by a literal loopback address. A name, localhost
+// included, is resolved when dialed, by whatever resolver and hosts file
+// the node has, so it would not hold telemetry to this machine: a name
+// gets TLS.
 func plaintextOK(host string) bool {
 	ip, err := netip.ParseAddr(host)
-	return host == "localhost" || err == nil && ip.IsLoopback()
+	return err == nil && ip.IsLoopback()
 }
