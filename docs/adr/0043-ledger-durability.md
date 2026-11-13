@@ -36,8 +36,11 @@ considered.
     and SQLite would add cgo or a large pure-Go port to the hot binary.
 - **The persistent queue is a node-local collector's.** The collector runs
   as a DaemonSet, or in the gateway's pod, with a `file_storage`
-  `sending_queue` on node-local disk. The gateway exports to localhost,
-  compressed. The gateway's queue then only bridges the local agent's
+  `sending_queue` on node-local disk. The gateway exports to it
+  compressed: in the gateway's pod, at a literal loopback address
+  (plaintext, the hop inside the pod's network namespace); as a
+  DaemonSet, at the node's address, which is not loopback from the pod,
+  over TLS (operations.md, "Telemetry transport"; golem#7). The gateway's queue then only bridges the local agent's
   restart, and counts what it cannot deliver (`golem.ledger.dropped`,
   `golem.ledger.failed`, alerted on).
 - **A row does not wait for its number (to build).** The row is written

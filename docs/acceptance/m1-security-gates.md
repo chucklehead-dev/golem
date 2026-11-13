@@ -50,11 +50,19 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
   (`ControlContext`), but no test re-resolves a name between dials.
 - Restricted mode's approved lists cover Anthropic's beta header and API
   version; OpenAI has no equivalent header to approve.
-- OTLP export requires TLS to any non-loopback collector; golem does not
-  present a client certificate (mTLS is the collector's or the mesh's).
+- OTLP export requires server-authenticated TLS to any non-loopback
+  collector, and golem presents no client certificate. Whether that
+  satisfies policy, and who presents client certificates if it does not,
+  is undecided: an assumption, not proof (operations.md, "Telemetry
+  transport"; golem#7).
 - The provider-account spending limits (ADR 0044, operations.md) are a
   deployment requirement golem cannot verify: evidence is the release
   checklist's record of each account's limit, not a test.
+
+Deployment evidence that tests cannot give (provider spending limits,
+OTLP TLS against the real collector, the mTLS owner of each hop, DNS
+re-resolution between connections) is tracked in golem#7, a prerequisite
+for lifting `releaseGate`.
 
 ## Validation of this record
 

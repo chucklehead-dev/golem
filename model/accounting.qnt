@@ -8,6 +8,8 @@ module accounting {
 
   const LIMIT_ON: bool
   const RENEW_SLOTS: bool
+  // The declared-worst-case check (ADR 0044): admission against the
+  // request's declared bound, not a real-world spending bound.
   const WORST_CHECK: bool
   const DEDUP: bool
   const RECONCILE: bool
