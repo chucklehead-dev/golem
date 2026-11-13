@@ -42,6 +42,7 @@ func main() {
 	drainFor := flag.Duration("drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
 	unready := flag.Duration("unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
 	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port")
+	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
 	if *standalone == "" {
@@ -52,8 +53,18 @@ func main() {
 	}
 
 	// Standalone: dev keys, the in-memory limiter (ADR 0023).
+	// One period zone for the counters and the ledger rows: a call near
+	// midnight on the last of the month belongs to one month in both.
+	zone, err := time.LoadLocation(*zoneName)
+	if err != nil {
+		fail("-period-zone: %v", err)
+	}
 	tel, shutdownTelemetry := setupTelemetry(*telem)
+	if tel != nil {
+		tel.Ledger.Period = zone
+	}
 	limiter := limit.New(limit.NewMem())
+	limiter.Location = zone
 	limiter.OnNumbered = func(_ string, e limit.Event, seq int64) { tel.Numbered(e.ID, seq) }
 	var entra *auth.Entra
 	if *tenant != "" {

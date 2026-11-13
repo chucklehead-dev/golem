@@ -39,13 +39,16 @@ const (
 
 // Call is what the request path reports when a call ends.
 type Call struct {
-	RequestID                       string
-	Principal, PrincipalKind, Key   string
-	Scope                           string
-	Frontend, Backend               string // dialects
-	Alias, Model, Deployment        string
-	Provider, ProviderRequestID     string
-	Started, Ended                  time.Time
+	RequestID                     string
+	Principal, PrincipalKind, Key string
+	Scope                         string
+	Frontend, Backend             string // dialects
+	Alias, Model, Deployment      string
+	Provider, ProviderRequestID   string
+	Started, Ended                time.Time
+	// Period is the budget period the call is counted in (the limiter\'s,
+	// lib/period); empty: the ledger names it from Started.
+	Period                          string
 	Usage                           canon.Usage
 	Cost                            int64 // micro-units
 	Currency                        string

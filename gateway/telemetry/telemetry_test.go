@@ -187,3 +187,15 @@ func TestOrderDoesNotGrow(t *testing.T) {
 		t.Fatalf("order holds %d entries after every row was numbered", n)
 	}
 }
+
+// TestRowPeriodIsTheCounters: a row names the period its call was counted
+// in, not one worked out again from its time.
+func TestRowPeriodIsTheCounters(t *testing.T) {
+	r := newRig(t)
+	c := call
+	c.Counted, c.Period = false, "2026-10" // e.g. counted in October's counter
+	r.t.Ended(t.Context(), c)
+	if rows := r.ledgerRows(t); len(rows) != 1 || rows[0]["period"] != "2026-10-01" {
+		t.Fatalf("rows %v", rows)
+	}
+}

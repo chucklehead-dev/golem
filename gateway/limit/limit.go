@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	budget "github.com/chucklehead-dev/golem/lib/period"
 )
 
 // Refusals, mapped to contract codes by the proxy (contracts.md §1).
@@ -28,6 +30,10 @@ type Call struct {
 	// (ADR 0031); else the soft check, known spend below the budget.
 	Strict bool
 	Worst  int64
+	// Started is when the call began (the request's arrival): it fixes the
+	// budget period the call belongs to, the one its ledger row names. Zero
+	// means now.
+	Started time.Time
 }
 
 // Known is a snapshot's known spend for one scope on this site (ADR 0042),
@@ -126,6 +132,9 @@ type Ticket struct {
 // says so, the exposure ADR 0041 §7.3 reports.
 func (t *Ticket) Waived() bool { return t.waived }
 
+// Period is the budget period the call is counted in: its ledger row's.
+func (t *Ticket) Period() string { return t.period }
+
 func (l *Limiter) now() time.Time {
 	if l.Now != nil {
 		return l.Now()
@@ -133,13 +142,14 @@ func (l *Limiter) now() time.Time {
 	return time.Now()
 }
 
-// period is the budget period a time falls in.
+// period is the budget period a time falls in (lib/period's name, cached
+// for the month).
 func (l *Limiter) period(t time.Time) string {
 	y, m, _ := t.In(l.Location).Date()
 	if p := l.periods.Load(); p != nil && p.year == y && p.month == m {
 		return p.name
 	}
-	p := &periodName{y, m, t.In(l.Location).Format("2006-01")}
+	p := &periodName{y, m, budget.Of(t, l.Location)}
 	l.periods.Store(p)
 	return p.name
 }
@@ -161,7 +171,7 @@ func (l *Limiter) snapshotFor(scope, period string) Known {
 // last known spend decide, and the call is a waiver of the bound (ADR 0041
 // §7.3).
 func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
-	period := l.period(l.now())
+	period := l.period(cmp.Or(c.Started, l.now()))
 	lastKey := keyOf{c.Scope, period}
 	if !l.isDown() {
 		k := l.snapshotFor(c.Scope, period)

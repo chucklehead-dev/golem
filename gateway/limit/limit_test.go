@@ -298,3 +298,23 @@ func TestRecoverBatches(t *testing.T) {
 		t.Fatalf("numbers %d..%d, want 1..600 in order", got[0], got[599])
 	}
 }
+
+// TestPeriodOfStart: a call belongs to the period it started in, though
+// admitted after midnight (its body still arriving): the counter it is
+// numbered in is the one its ledger row names.
+func TestPeriodOfStart(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	l.Now = func() time.Time { return time.Date(2026, 12, 1, 0, 0, 0, 2e8, time.UTC) }
+	c := scopeCall("late", "p1")
+	c.Started = time.Date(2026, 11, 30, 23, 59, 59, 9e8, time.UTC)
+	tk, err := l.Admit(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk.Complete(ctx, 1)
+	if tk.Period() != "2026-11" || len(st.Counter("s", "2026-11")) != 1 || len(st.Counter("s", "2026-12")) != 0 {
+		t.Fatalf("period %s: the call started in November is counted there", tk.Period())
+	}
+}

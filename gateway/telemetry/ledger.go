@@ -8,6 +8,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
+
+	budget "github.com/chucklehead-dev/golem/lib/period"
 )
 
 // SchemaVersion is golem.spend's contract version (contracts.md §3).
@@ -88,8 +90,11 @@ func (l *Ledger) Numbered(_ string, eventID string, seq int64) {
 // columns are golem.spend's, in the DDL's order; a test checks them
 // against deploy/clickhouse/spend.sql.
 func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call, seq int64) {
-	start := c.Started.In(l.Period)
-	period := time.Date(start.Year(), start.Month(), 1, 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
+	p := c.Period
+	if p == "" {
+		p = budget.Of(c.Started, l.Period)
+	}
+	period := budget.FirstDay(p)
 	estimated := 0.0
 	if c.Estimated {
 		estimated = 1

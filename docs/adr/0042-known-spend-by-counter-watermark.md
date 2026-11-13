@@ -29,7 +29,12 @@ snapshot to every gateway in one step. A benchmark found it.
 - **Per budget period.** A counter is per scope *and* period (a calendar
   month in the period time zone, contracts.md §3), numbered from 1 each
   period, and so is a snapshot's watermark and spend. A call belongs to
-  the period it started in, wherever it completes. A gateway counts a
+  the period it started in, wherever it completes: the period is worked
+  out once, from the request's arrival, by `lib/period` in the one
+  installation-wide period zone, and carried on the call to both its
+  counter and its ledger row (a call admitted after midnight, its body
+  still arriving, would otherwise be numbered in one month's counter and
+  booked in the other's). A gateway counts a
   snapshot of another period as none (spend 0, W 0): without this, every
   budgeted scope would carry last month's spend, and from the second month
   be refused. A period's counter keys expire a month plus the retention
