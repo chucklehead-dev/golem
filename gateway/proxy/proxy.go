@@ -6,44 +6,23 @@
 package proxy
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/canon"
-	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
-	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/price"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
-	"github.com/chucklehead-dev/golem/gateway/sse"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/contract"
 	"github.com/chucklehead-dev/golem/lib/id"
 )
-
-// Dialect selects the frontend a Handler serves.
-type Dialect int
-
-const (
-	AnthropicMessages Dialect = iota // POST /v1/messages
-	OpenAIChat                       // POST /v1/chat/completions
-)
-
-// Name is the dialect's name in config (Backend spec.dialect).
-func (d Dialect) Name() string {
-	if d == OpenAIChat {
-		return "openai.chat"
-	}
-	return "anthropic.messages"
-}
 
 // Snapshots gives the configuration a request uses: taken once, at the
 // start, and used to the end (gateway.md §1).
@@ -87,84 +66,16 @@ var (
 	forwardResponse = []string{"Content-Type", "Request-Id", "X-Request-Id", "Retry-After"}  // read-only
 )
 
-const copyBuffer = 8 << 10 // events are mostly under 1 KB; a burst takes more reads
+var (
+	jsonType   = []string{"application/json"} // read-only
+	retryAfter = []string{"5"}                // read-only
+)
 
-// exchange is one request's working memory for the life of its stream,
-// pooled: the scan results, the usage readers, the copy buffer. The request
-// bodies are not in it: they go back to their pool as soon as they have been
-// sent, so a long stream holds about the copy buffer and the parser's
-// buffers, not a 200 KB agent request (PRD §7: under 64 KiB per stream).
-type exchange struct {
-	buf        []byte
-	msg        messages.Request
-	msgUsage   messages.StreamUsage
-	chat       chat.Request
-	chatUsage  chat.StreamUsage
-	parser     sse.Parser
-	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
-	tail       []byte     // a non-streamed response, for its usage
-	callerGone bool       // a write to the caller failed
-}
-
-// dropUsageOnly withholds the usage-only chunk golem asked for: the caller
-// did not, and some SDKs fail on a chunk with no choices.
-func dropUsageOnly(_, data []byte) bool { return chat.UsageOnly(data) }
-
-var exchanges = sync.Pool{New: func() any { return &exchange{buf: make([]byte, copyBuffer)} }}
-
-// bodies pools request body buffers. maxRetained bounds what an idle entry
-// keeps, so one large request does not pin its size in the pool.
-var bodies = sync.Pool{New: func() any { b := make([]byte, 0, 16<<10); return &b }}
-
-const maxRetained = 1 << 20
-
-func getBody() *[]byte { return bodies.Get().(*[]byte) }
-
-func putBody(b *[]byte) {
-	if cap(*b) <= maxRetained {
-		*b = (*b)[:0]
-		bodies.Put(b)
-	}
-}
-
-// upstreamBody is the rewritten request as the transport reads it; its
-// buffer returns to the pool when the transport closes it, once sent. The
-// HTTP/2 transport may close it from another goroutine while a write is
-// still reading it (a stream reset), so the two are serialised: a buffer is
-// never pooled while a read copies from it.
-type upstreamBody struct {
-	mu  sync.Mutex
-	r   bytes.Reader
-	buf *[]byte
-}
-
-func newUpstreamBody(buf *[]byte) *upstreamBody {
-	u := &upstreamBody{buf: buf}
-	u.r.Reset(*buf)
-	return u
-}
-
-func (u *upstreamBody) Read(p []byte) (int, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.buf == nil {
-		return 0, http.ErrBodyReadAfterClose
-	}
-	return u.r.Read(p)
-}
-
-// Close returns the buffer and drops every reference to it: the transport
-// keeps the request, and so this body, for the whole response, and a
-// reference left here would pin a 200 KB agent request per open stream.
-func (u *upstreamBody) Close() error {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.buf != nil {
-		u.r.Reset(nil)
-		putBody(u.buf)
-		u.buf = nil
-	}
-	return nil
+// refusal is a request the path will not serve: a contract code and a
+// message that says what to do next.
+type refusal struct {
+	code contract.Code
+	msg  string
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -176,154 +87,62 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqIDs := string(reqID.AppendString(idBuf[:0]))
 	w.Header()[contract.HeaderRequestID] = []string{reqIDs}
 
-	snap, err := h.Snapshots.Current()
-	switch err {
-	case nil:
-	case snapshot.ErrExpired:
-		h.fail(ctx, w, contract.GatewayAuthorizationExpired,
-			"this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted")
-		return
-	default:
-		h.fail(ctx, w, contract.GatewayNotReady, "this gateway has no configuration yet; retry shortly")
+	snap, principal, no := h.authenticate(r)
+	if no != nil {
+		h.fail(ctx, w, no)
 		return
 	}
-
-	principal := auth.Anyone
-	if snap.Auth != nil {
-		p, refused := snap.Auth.Authenticate(r.Header)
-		if refused != nil {
-			h.fail(ctx, w, refused.Code, refused.Msg)
-			return
-		}
-		principal = p
-	}
-
-	ex := exchanges.Get().(*exchange)
-	ex.callerGone = false
-	defer func() {
-		// tail is the one buffer an exchange grows and keeps: the parser
-		// and the filter are new for each stream.
-		if cap(ex.tail) <= maxRetained {
-			exchanges.Put(ex)
-		}
-	}()
-
+	ex := getExchange()
+	defer ex.release()
 	in := getBody()
 	defer func() {
 		if in != nil {
 			putBody(in)
 		}
 	}()
-	if n := r.ContentLength; n > 0 && n <= h.MaxBody && int64(cap(*in)) < n+1 {
-		*in = make([]byte, 0, n+1) // one allocation, not a doubling series
-	}
-	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, h.MaxBody))
-	body := *in
-	if err != nil {
-		if _, tooBig := errors.AsType[*http.MaxBytesError](err); tooBig {
-			h.fail(ctx, w, contract.RequestTooLarge, "the request body is larger than this gateway accepts")
-			return
-		}
-		h.fail(ctx, w, contract.RequestUnreadable, "the request body could not be read")
+	body, no := h.readBody(w, r, in)
+	if no != nil {
+		h.fail(ctx, w, no)
 		return
 	}
 
 	// Scan and route. (Hooks go here.)
-	var alias []byte
-	var stream, hasMax bool
-	var maxTokens int64
-	switch h.Dialect {
-	case AnthropicMessages:
-		err, alias, stream = ex.msg.Scan(body), ex.msg.Model, ex.msg.Stream
-		maxTokens, hasMax = ex.msg.MaxTokens, ex.msg.HasMaxTokens
-	case OpenAIChat:
-		err, alias, stream = ex.chat.Scan(body), ex.chat.Model, ex.chat.Stream
-		maxTokens, hasMax = ex.chat.MaxTokens, ex.chat.HasMaxTokens
-	}
+	req, err := ex.scan(h.Dialect, body)
 	if err != nil {
-		h.fail(ctx, w, contract.RequestInvalid, err.Error())
+		h.fail(ctx, w, &refusal{contract.RequestInvalid, err.Error()})
 		return
 	}
-	rt := snap.Routes.Lookup(alias)
-	if rt == nil {
-		h.fail(ctx, w, contract.RouteUnknownModel, "no route for this model; ask the scope's managers which aliases it may use")
-		return
-	}
-	if rt.Dialect != h.Dialect.Name() {
-		h.fail(ctx, w, contract.RouteWrongFrontend,
-			"this model speaks "+rt.Dialect+", not "+h.Dialect.Name()+": call it at that API's endpoint (golem converts only where a route says so)")
-		return
-	}
-	if !principal.Allows(alias) {
-		h.fail(ctx, w, contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows")
+	rt, no := h.route(snap, principal, req.alias)
+	if no != nil {
+		h.fail(ctx, w, no)
 		return
 	}
 	target := rt.Pick()
 	pr := snap.Prices[target.Model]
+	ticket, no := h.admit(ctx, reqIDs, principal, req, price.Worst(int64(len(body)), req.maxTokens, pr))
+	if no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
 
-	// Admission (ADR 0031): known spend against the budget, and the slots.
-	var ticket *limit.Ticket
-	if h.Limiter != nil {
-		lim := principal.Limits
-		if lim.Strict && !hasMax {
-			h.fail(ctx, w, contract.RequestInvalid, "this scope is strict: set max_tokens, so the call's worst case can be checked against the budget")
-			return
-		}
-		ticket, err = h.Limiter.Admit(ctx, limit.Call{ID: reqIDs, Principal: principal.ID, Scope: principal.Scope,
-			Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
-			Strict: lim.Strict, Worst: price.Worst(int64(len(body)), maxTokens, pr)})
-		switch {
-		case errors.Is(err, limit.ErrBudget):
-			h.fail(ctx, w, contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it")
-			return
-		case errors.Is(err, limit.ErrConcurrency):
-			h.fail(ctx, w, contract.LimitConcurrency, "too many calls in flight for this key's principal or scope; retry when one finishes")
-			return
-		case err != nil:
-			h.fail(ctx, w, contract.GatewayInternal, "the limiter failed")
-			return
-		}
-	}
 	out := getBody()
-	if cap(*out) < len(body)+len(target.Model)+64 {
-		*out = make([]byte, 0, len(body)+len(target.Model)+64)
+	if n := len(body) + len(target.Model) + 64; cap(*out) < n {
+		*out = make([]byte, 0, n)
 	}
-	switch h.Dialect {
-	case AnthropicMessages:
-		*out = ex.msg.Rewrite((*out)[:0], body, target.Model)
-	case OpenAIChat:
-		*out = ex.chat.Rewrite((*out)[:0], body, target.Model)
-	}
+	*out = ex.rewrite(h.Dialect, (*out)[:0], body, target.Model)
 	putBody(in) // the caller's body is no longer needed
 	in = nil
 
-	// One attempt. (Retries and failover before the first byte go here; a
-	// retry needs the rewritten body kept until the attempt is committed.)
-	ub := newUpstreamBody(out)
-	up := &http.Request{
-		Method:        http.MethodPost,
-		URL:           target.URL,
-		Header:        make(http.Header, 4+len(target.Header)),
-		Body:          ub,
-		ContentLength: int64(len(*out)),
-		Host:          target.URL.Host,
-	}
-	up = up.WithContext(ctx)
-	up.Header["Content-Type"] = jsonType
-	for _, k := range forwardRequest {
-		if v := r.Header[k]; v != nil {
-			up.Header[k] = v
-		}
-	}
-	for k, v := range target.Header {
-		up.Header[k] = v
-	}
 	call := telemetry.Call{RequestID: reqIDs, Principal: principal.ID, PrincipalKind: principal.Kind, Key: principal.Key,
 		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Model: target.Model,
 		Deployment: target.Backend + "/" + target.Deployment, Provider: target.Backend, Started: started,
 		Currency: snap.Snapshot.Currency, Counted: ticket != nil, Waived: ticket != nil && ticket.Waived()}
 	// The accounting runs to its end whatever the caller does.
 	acct := context.WithoutCancel(ctx)
+
+	// One attempt. (Retries and failover before the first byte go here; a
+	// retry needs the rewritten body kept until the attempt is committed.)
+	up, ub := upstreamRequest(ctx, r, target, out)
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
@@ -345,9 +164,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-
+	streamed := req.stream && resp.StatusCode == http.StatusOK
 	res := Result{RequestID: reqID, Principal: principal, Target: target, Status: resp.StatusCode}
-	if stream && resp.StatusCode == http.StatusOK {
+	if streamed {
 		res.Usage, res.Err = h.stream(w, resp.Body, ex)
 	} else {
 		res.Usage, res.Err = h.whole(w, resp.Body, ex)
@@ -356,19 +175,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// first (the upstream read then fails with its context).
 	res.Cost, res.CallerGone = price.Cost(res.Usage, pr), ex.callerGone || r.Context().Err() != nil
 	_, cut := errors.AsType[errUpstreamCut](res.Err)
+
 	call.Ended, call.Status, call.Usage, call.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
 	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
-	switch {
-	case res.CallerGone:
-		call.Outcome, call.ErrorOrigin = "cancelled", string(contract.OriginClient)
-	case cut:
-		call.Outcome = "failed"
-		call.ErrorOrigin, call.ErrorCode = string(contract.UpstreamStreamFailed.Origin), contract.UpstreamStreamFailed.Name
-	case resp.StatusCode >= 400:
-		call.Outcome, call.ErrorOrigin = "failed", string(contract.OriginProvider)
-	default:
-		call.Outcome = "completed"
-	}
+	call.Outcome, call.ErrorOrigin, call.ErrorCode = outcome(res, cut)
 	// The row is prepared before the ticket numbers its event: the
 	// limiter's OnNumbered writes it with the number.
 	h.Telemetry.Ended(acct, call)
@@ -392,7 +202,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// complete (and shorter) answer: a stream gets the contract's error
 		// event, and then the response is aborted (a reset, not an end), so
 		// no client can take it for whole (contracts.md §1).
-		if stream && resp.StatusCode == http.StatusOK {
+		if streamed {
 			w.Write(streamError(h.Dialect, reqIDs))
 			http.NewResponseController(w).Flush()
 		}
@@ -400,47 +210,125 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// streamError is upstream.stream_failed as an event in a dialect's stream.
-func streamError(d Dialect, reqID string) []byte {
-	const msg = "the provider's response was cut off before it completed; retry the request"
-	var b []byte
-	switch d {
-	case AnthropicMessages:
-		b = append(b, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\""...)
-		b = append(b, contract.UpstreamStreamFailed.Name...)
-	default:
-		b = append(b, "data: {\"error\":{\"code\":\""...)
-		b = append(b, contract.UpstreamStreamFailed.Name...)
-		b = append(b, "\",\"type\":\""...)
-		b = append(b, contract.UpstreamStreamFailed.Origin...)
+// authenticate takes the request's snapshot and finds its principal.
+func (h *Handler) authenticate(r *http.Request) (*snapshot.Compiled, *auth.Principal, *refusal) {
+	snap, err := h.Snapshots.Current()
+	switch {
+	case errors.Is(err, snapshot.ErrExpired):
+		return nil, nil, &refusal{contract.GatewayAuthorizationExpired,
+			"this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted"}
+	case err != nil:
+		return nil, nil, &refusal{contract.GatewayNotReady, "this gateway has no configuration yet; retry shortly"}
+	case snap.Auth == nil:
+		return snap, auth.Anyone, nil
 	}
-	b = append(b, "\",\"message\":\""+msg+"\",\"request_id\":\""...)
-	b = append(b, reqID...)
-	return append(b, "\"}}\n\n"...)
+	p, no := snap.Auth.Authenticate(r.Header)
+	if no != nil {
+		return nil, nil, &refusal{no.Code, no.Msg}
+	}
+	return snap, p, nil
 }
 
-var (
-	jsonType   = []string{"application/json"} // read-only
-	retryAfter = []string{"5"}                // read-only
-)
+// readBody reads the request body into the pooled buffer in, at most
+// MaxBody bytes.
+func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) ([]byte, *refusal) {
+	if n := r.ContentLength; n > 0 && n <= h.MaxBody && int64(cap(*in)) < n+1 {
+		*in = make([]byte, 0, n+1) // one allocation, not a doubling series
+	}
+	var err error
+	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, h.MaxBody))
+	switch _, tooBig := errors.AsType[*http.MaxBytesError](err); {
+	case tooBig:
+		return nil, &refusal{contract.RequestTooLarge, "the request body is larger than this gateway accepts"}
+	case err != nil:
+		return nil, &refusal{contract.RequestUnreadable, "the request body could not be read"}
+	}
+	return *in, nil
+}
+
+// route finds the alias's route, and checks the principal may call it here.
+func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte) (*route.Route, *refusal) {
+	rt := snap.Routes.Lookup(alias)
+	switch {
+	case rt == nil:
+		return nil, &refusal{contract.RouteUnknownModel, "no route for this model; ask the scope's managers which aliases it may use"}
+	case rt.Dialect != h.Dialect.Name():
+		return nil, &refusal{contract.RouteWrongFrontend,
+			"this model speaks " + rt.Dialect + ", not " + h.Dialect.Name() + ": call it at that API's endpoint (golem converts only where a route says so)"}
+	case !p.Allows(alias):
+		return nil, &refusal{contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows"}
+	}
+	return rt, nil
+}
+
+// admit checks the call against the scope's budget and in-flight limits
+// (ADR 0031) and takes its slots. A nil ticket with no refusal: no limiter.
+func (h *Handler) admit(ctx context.Context, reqID string, p *auth.Principal, req scanned, worst int64) (*limit.Ticket, *refusal) {
+	if h.Limiter == nil {
+		return nil, nil
+	}
+	lim := p.Limits
+	if lim.Strict && !req.hasMax {
+		return nil, &refusal{contract.RequestInvalid, "this scope is strict: set max_tokens, so the call's worst case can be checked against the budget"}
+	}
+	t, err := h.Limiter.Admit(ctx, limit.Call{ID: reqID, Principal: p.ID, Scope: p.Scope,
+		Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
+		Strict: lim.Strict, Worst: worst})
+	switch {
+	case errors.Is(err, limit.ErrBudget):
+		return nil, &refusal{contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it"}
+	case errors.Is(err, limit.ErrConcurrency):
+		return nil, &refusal{contract.LimitConcurrency, "too many calls in flight for this key's principal or scope; retry when one finishes"}
+	case err != nil:
+		return nil, &refusal{contract.GatewayInternal, "the limiter failed"}
+	}
+	return t, nil
+}
+
+// upstreamRequest is the provider's request: the rewritten body, the
+// route's credential, and the caller headers the provider may see.
+func upstreamRequest(ctx context.Context, r *http.Request, target *route.Target, body *[]byte) (*http.Request, *upstreamBody) {
+	ub := newUpstreamBody(body)
+	up := (&http.Request{
+		Method:        http.MethodPost,
+		URL:           target.URL,
+		Header:        make(http.Header, 4+len(target.Header)),
+		Body:          ub,
+		ContentLength: int64(len(*body)),
+		Host:          target.URL.Host,
+	}).WithContext(ctx)
+	up.Header["Content-Type"] = jsonType
+	for _, k := range forwardRequest {
+		if v := r.Header[k]; v != nil {
+			up.Header[k] = v
+		}
+	}
+	for k, v := range target.Header {
+		up.Header[k] = v
+	}
+	return up, ub
+}
+
+// outcome is a finished call's ledger outcome, and the failure's origin and
+// code (contracts.md §3).
+func outcome(res Result, cut bool) (outcome, origin, code string) {
+	switch {
+	case res.CallerGone:
+		return "cancelled", string(contract.OriginClient), ""
+	case cut:
+		c := contract.UpstreamStreamFailed
+		return "failed", string(c.Origin), c.Name
+	case res.Status >= 400:
+		return "failed", string(contract.OriginProvider), ""
+	}
+	return "completed", "", ""
+}
 
 // stream copies the response as it arrives, flushing each read, and feeds
 // the same bytes to the dialect's usage reader.
 func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (canon.Usage, error) {
 	rc := http.NewResponseController(w)
-	ex.parser = sse.Parser{}
-	switch h.Dialect {
-	case AnthropicMessages:
-		ex.msgUsage = messages.StreamUsage{}
-		ex.parser.Want, ex.parser.OnEvent = ex.msgUsage.Want, ex.msgUsage.OnEvent
-	case OpenAIChat:
-		ex.chatUsage = chat.StreamUsage{}
-		ex.parser.OnEvent = ex.chatUsage.OnEvent
-	}
-	filter := h.Dialect == OpenAIChat && ex.chat.InjectedUsage()
-	if filter {
-		ex.filter = sse.Filter{Parser: ex.parser, Drop: dropUsageOnly}
-	}
+	filter := ex.startStream(h.Dialect)
 	// send forwards bytes to the caller as they come; a failed write is the
 	// caller gone (ADR 0041 §7.6).
 	send := func(b []byte) bool {
@@ -481,19 +369,8 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 			break
 		}
 	}
-	return h.usage(ex, cut)
+	return ex.usage(h.Dialect, cut)
 }
-
-// errCallerGone is a write to the caller that failed.
-var errCallerGone = errors.New("proxy: the caller went away")
-
-// errUpstreamCut is the provider's response ending before it was complete.
-type errUpstreamCut struct{ err error }
-
-func (e errUpstreamCut) Error() string {
-	return "proxy: the provider's response was cut: " + e.err.Error()
-}
-func (e errUpstreamCut) Unwrap() error { return e.err }
 
 // whole copies a non-streamed response, keeping a copy of up to maxRetained
 // bytes to read its usage from.
@@ -519,31 +396,26 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 			break
 		}
 	}
-	switch h.Dialect {
-	case AnthropicMessages:
-		ex.msgUsage = messages.StreamUsage{}
-		ex.msgUsage.Response(ex.tail)
-	case OpenAIChat:
-		ex.chatUsage = chat.StreamUsage{}
-		ex.chatUsage.Response(ex.tail)
-	}
-	return h.usage(ex, cut)
+	ex.readWhole(h.Dialect)
+	return ex.usage(h.Dialect, cut)
 }
 
-func (h *Handler) usage(ex *exchange, cut error) (canon.Usage, error) {
-	switch h.Dialect {
-	case AnthropicMessages:
-		return ex.msgUsage.Usage, errors.Join(cut, ex.msgUsage.Err)
-	default:
-		return ex.chatUsage.Usage, errors.Join(cut, ex.chatUsage.Err)
-	}
+// errCallerGone is a write to the caller that failed.
+var errCallerGone = errors.New("proxy: the caller went away")
+
+// errUpstreamCut is the provider's response ending before it was complete.
+type errUpstreamCut struct{ err error }
+
+func (e errUpstreamCut) Error() string {
+	return "proxy: the provider's response was cut: " + e.err.Error()
 }
+func (e errUpstreamCut) Unwrap() error { return e.err }
 
 // fail refuses a request: the refusal recorded, and written in the
 // caller's dialect.
-func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, c contract.Code, msg string) {
-	h.Telemetry.Refused(ctx, c)
-	Refuse(w, h.Dialect, c, msg)
+func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, no *refusal) {
+	h.Telemetry.Refused(ctx, no.code)
+	Refuse(w, h.Dialect, no.code, no.msg)
 }
 
 // Refuse writes a refusal in a dialect's error shape, with golem's code, a
@@ -559,39 +431,5 @@ func Refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string) {
 	if v := w.Header()[contract.HeaderRequestID]; len(v) > 0 {
 		reqID = v[0]
 	}
-	var b []byte
-	switch d {
-	case AnthropicMessages:
-		b = append(b, `{"type":"error","error":{"type":"`...)
-		b = append(b, c.Name...)
-		b = append(b, `","message":`...)
-	default:
-		b = append(b, `{"error":{"code":"`...)
-		b = append(b, c.Name...)
-		b = append(b, `","type":"`...)
-		b = append(b, c.Origin...)
-		b = append(b, `","message":`...)
-	}
-	b = appendQuoted(b, msg)
-	b = append(b, `,"request_id":"`...)
-	b = append(b, reqID...)
-	b = append(b, `"}}`...)
-	w.Write(b)
-}
-
-// readAll reads r into dst, growing it as needed.
-func readAll(dst []byte, r io.Reader) ([]byte, error) {
-	for {
-		if len(dst) == cap(dst) {
-			dst = append(dst, 0)[:len(dst)]
-		}
-		n, err := r.Read(dst[len(dst):cap(dst)])
-		dst = dst[:len(dst)+n]
-		if err == io.EOF {
-			return dst, nil
-		}
-		if err != nil {
-			return dst, err
-		}
-	}
+	w.Write(appendError(nil, d, c, msg, reqID))
 }
