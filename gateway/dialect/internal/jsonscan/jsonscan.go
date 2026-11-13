@@ -134,50 +134,74 @@ func Splice(dst, body []byte, s Span, value string) []byte {
 	return append(dst, body[s.End:]...)
 }
 
-// StringBytes is the total length, escapes counted as written, of the
-// string values of the given keys anywhere in data ("text", "arguments"):
-// the content of a delta or a response, for estimating its tokens when the
-// provider reported none. It is a byte search, not a parse: a raw quote
-// cannot occur inside a JSON string, so each `"key":"` found is a key's
-// string value (a provider's compact JSON; an estimate tolerates the rest).
-func StringBytes(data []byte, keys ...string) int {
-	n := 0
-	for _, k := range keys {
-		for rest := data; ; {
-			i := indexKey(rest, k)
-			if i < 0 {
-				break
-			}
-			rest = rest[i:]
-			end := stringEnd(rest)
-			n += end
-			rest = rest[end:]
-		}
+// Needles are the keys StringBytes measures, built once.
+type Needles [][]byte
+
+// KeysOf builds the needles for keys.
+func KeysOf(keys ...string) Needles {
+	n := make(Needles, len(keys))
+	for i, k := range keys {
+		n[i] = []byte(k)
 	}
 	return n
 }
 
-// indexKey finds `"k":"` and returns where the value's characters begin.
-func indexKey(b []byte, k string) int {
-	i := bytes.Index(b, []byte(`"`+k+`":"`))
-	if i < 0 {
-		return -1
-	}
-	return i + len(k) + 4
-}
-
-// stringEnd is the length of a JSON string's characters up to its closing
-// quote.
-func stringEnd(b []byte) int {
-	for i := 0; i < len(b); i++ {
-		switch b[i] {
-		case '\\':
-			i++
-		case '"':
-			return i
+func (n Needles) has(key []byte) bool {
+	for _, k := range n {
+		if bytes.Equal(k, key) {
+			return true
 		}
 	}
-	return len(b)
+	return false
+}
+
+// StringBytes is the total length, escapes counted as written, of the
+// string values of the needles' keys anywhere in data ("text",
+// "arguments"): the content of a delta or a response, for estimating its
+// tokens when the provider reported none. It is one pass of byte searches,
+// not a parse (an estimate's, never a policy's): each `":"` is a key and
+// the start of its string value (a raw quote cannot occur inside a JSON
+// string), and each value is skipped whole.
+func StringBytes(data []byte, keys Needles) int {
+	n := 0
+	for rest := data; ; {
+		i := bytes.Index(rest, keyValue)
+		if i < 0 {
+			return n
+		}
+		key := rest[:i]
+		if q := bytes.LastIndexByte(key, '"'); q >= 0 {
+			key = key[q+1:]
+		}
+		rest = rest[i+len(keyValue):]
+		end := stringEnd(rest)
+		if keys.has(key) {
+			n += end
+		}
+		rest = rest[end:]
+	}
+}
+
+var keyValue = []byte(`":"`) // read-only
+
+// stringEnd is the length of a JSON string's characters up to its closing
+// quote: the first quote not escaped (an odd run of backslashes before it).
+func stringEnd(b []byte) int {
+	for off := 0; ; {
+		i := bytes.IndexByte(b[off:], '"')
+		if i < 0 {
+			return len(b)
+		}
+		q := off + i
+		slashes := 0
+		for j := q - 1; j >= 0 && b[j] == '\\'; j-- {
+			slashes++
+		}
+		if slashes%2 == 0 {
+			return q
+		}
+		off = q + 1
+	}
 }
 
 // Elements calls visit for each element of data, which must be exactly one

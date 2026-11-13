@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,9 +67,9 @@ func TestEstimates(t *testing.T) {
 		h, rows, res := priced(t, OpenAIChat, cutAfter{[][]byte{chunk, chunk, chunk}, 200})
 		body := `{"model":"claude","stream":true,"messages":[{"role":"user","content":"` + strings.Repeat("x", 4000) + `"}]}`
 		serveCut(h, "/v1/chat/completions", body)
-		// Input from the request's size, output a token an ordinary chunk
-		// (its framing is not output).
-		if want := (canon.Usage{Input: int64(len(body)) / 4, Output: 3}); res.Usage != want || res.Cost == 0 {
+		// Input from the request's size; output each chunk's content at 4
+		// bytes a token (12 bytes: 3 each), its framing not counted.
+		if want := (canon.Usage{Input: int64(len(body)) / 4, Output: 9}); res.Usage != want || res.Cost == 0 {
 			t.Fatalf("usage %+v cost %d, want %+v", res.Usage, res.Cost, want)
 		}
 		if row := rowOf(t, rows); row["estimated_fraction"] != 1.0 {
@@ -83,6 +84,24 @@ func TestEstimates(t *testing.T) {
 			t.Fatalf("usage %+v: a large chunk is charged by its content", res.Usage)
 		}
 	})
+	// Events either side of any size: each is charged its content, so a
+	// provider batching output into events of a few hundred bytes is not
+	// undercounted (golem#6).
+	for _, size := range []int{511, 512, 513} {
+		t.Run(fmt.Sprintf("an OpenAI event of %d bytes, cut", size), func(t *testing.T) {
+			head, tail := `{"choices":[{"delta":{"content":"`, `"}}],"usage":null}`
+			content := strings.Repeat("z", size-len(head)-len(tail))
+			data := head + content + tail
+			if len(data) != size {
+				t.Fatalf("event of %d bytes", len(data))
+			}
+			h, _, res := priced(t, OpenAIChat, cutAfter{[][]byte{[]byte("data: " + data + "\n\n")}, 200})
+			serveCut(h, "/v1/chat/completions", `{"model":"claude","stream":true,"messages":[]}`)
+			if want := int64(len(content)+3) / 4; res.Usage.Output != want || want < 100 {
+				t.Fatalf("output %d, want %d: the event's content, not a token", res.Usage.Output, want)
+			}
+		})
+	}
 	t.Run("an Anthropic stream cut before its message_delta", func(t *testing.T) {
 		ev := anthropicStream(5)
 		h, rows, res := priced(t, AnthropicMessages, cutAfter{ev[:7], 200}) // message_start, block start, 5 deltas

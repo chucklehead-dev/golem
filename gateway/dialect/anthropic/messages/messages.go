@@ -188,7 +188,7 @@ var DeltaEnvelope = int64(len(`{"type":"content_block_delta","index":0,"delta":{
 
 // contentKeys hold a delta's or a response's content: text, thinking and a
 // tool call's JSON.
-var contentKeys = []string{"text", "thinking", "partial_json"}
+var contentKeys = jsonscan.KeysOf("text", "thinking", "partial_json")
 
 // Want skips the data of events that carry no usage: content deltas are
 // counted, and their data measured by the parser, not copied or scanned.
@@ -244,7 +244,7 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 
 // Response reads usage from a whole (non-streamed) response body.
 func (u *StreamUsage) Response(body []byte) {
-	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
+	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys))
 	seen := false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
 		if string(name) != "usage" {

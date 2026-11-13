@@ -104,10 +104,37 @@ func FuzzObject(f *testing.F) {
 
 func TestStringBytes(t *testing.T) {
 	data := []byte(`{"delta":{"type":"text_delta","text":"Hello, \"world\""},"x":{"text":"ab"},"arguments":"{\"a\":1}"}`)
-	if got := StringBytes(data, "text", "arguments"); got != len(`Hello, \"world\"`)+2+len(`{\"a\":1}`) {
+	if got := StringBytes(data, KeysOf("text", "arguments")); got != len(`Hello, \"world\"`)+2+len(`{\"a\":1}`) {
 		t.Fatalf("StringBytes = %d", got)
 	}
-	if StringBytes([]byte(`{"text":"unterminated`), "text") != len("unterminated") {
+	if StringBytes([]byte(`{"text":"unterminated`), KeysOf("text")) != len("unterminated") {
 		t.Fatal("an unterminated string counts to the end")
 	}
+}
+
+func TestStringEnd(t *testing.T) {
+	for in, want := range map[string]int{`abc"`: 3, `a\"b"`: 4, `a\\"b`: 3, `\\\"x"`: 5, `none`: 4, `"`: 0} {
+		if got := stringEnd([]byte(in)); got != want {
+			t.Errorf("stringEnd(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// FuzzStringBytes: for JSON as encoding/json writes it, StringBytes is the
+// written length of the named keys' values, whatever they hold.
+func FuzzStringBytes(f *testing.F) {
+	f.Add("hello", `say "hi"\n`, "x")
+	f.Add(`":"`, `\`, `"`)
+	f.Fuzz(func(t *testing.T, content, args, other string) {
+		chunk := map[string]any{"id": other, "choices": []any{map[string]any{"delta": map[string]any{
+			"content": content, "tool_calls": []any{map[string]any{"function": map[string]any{"arguments": args, "name": other}}}}}}}
+		b, err := json.Marshal(chunk)
+		if err != nil {
+			t.Skip()
+		}
+		quoted := func(s string) int { q, _ := json.Marshal(s); return len(q) - 2 }
+		if got, want := StringBytes(b, KeysOf("content", "arguments")), quoted(content)+quoted(args); got != want {
+			t.Fatalf("%s: %d, want %d", b, got, want)
+		}
+	})
 }

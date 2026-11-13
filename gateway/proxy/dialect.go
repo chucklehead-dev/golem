@@ -144,7 +144,7 @@ func (ex *exchange) estimate(d Dialect, requestBytes int64) (total, estimated ca
 	}
 	total = u
 	out := max((content+bytesPerToken-1)/bytesPerToken, deltas)
-	if d == OpenAIChat { // a token a small chunk, plus the large chunks' content, plus what was not kept
+	if d == OpenAIChat { // the events' tokens, plus a whole response's content, plus what was not kept
 		out = deltas + (content+ex.unkept+bytesPerToken-1)/bytesPerToken
 	}
 	if out > u.Output {
