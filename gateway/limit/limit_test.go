@@ -177,3 +177,33 @@ func TestPeriodRollover(t *testing.T) {
 		t.Fatal("a call's cost belongs to the period it started in")
 	}
 }
+
+// TestOutageCounts: during an outage the local check counts this gateway's
+// running calls, and the counts follow admissions and completions exactly.
+func TestOutageCounts(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	st.SetDown(true)
+	a, err := l.Admit(ctx, scopeCall("a", "p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Admit(ctx, scopeCall("b", "p1")); !errors.Is(err, ErrConcurrency) {
+		t.Fatalf("a second call for p1: %v", err)
+	}
+	c, _ := l.Admit(ctx, scopeCall("c", "p2"))
+	if _, err := l.Admit(ctx, scopeCall("d", "p3")); !errors.Is(err, ErrConcurrency) {
+		t.Fatalf("a third in the scope: %v", err)
+	}
+	a.Complete(ctx, 1)
+	a.Complete(ctx, 1) // twice is once
+	if _, err := l.Admit(ctx, scopeCall("b", "p1")); err != nil {
+		t.Fatalf("after a completed: %v", err)
+	}
+	c.Cancel(ctx, 0)
+	c.Ended(ctx)
+	if len(l.byPrincipal) != 1 || l.byScope["s"] != 1 {
+		t.Fatalf("counts %v %v: one call (b) running", l.byPrincipal, l.byScope)
+	}
+}

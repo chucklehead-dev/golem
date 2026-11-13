@@ -2,8 +2,13 @@ package limit
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/valkey-io/valkey-go"
@@ -38,11 +43,57 @@ type Valkey struct {
 	// number to another event (ADR 0042). Adds are off the request's
 	// critical path: at completion.
 	ReplicaAcks int
+	// Unreplicated counts adds that fewer than ReplicaAcks replicas
+	// acknowledged in time: the exposure a failover could still lose.
+	Unreplicated atomic.Int64
+
+	keys   sync.Map // keyOf -> []string: a scope and period's keys, built once
+	cached atomic.Int64
+	args   atomic.Pointer[durArgs]
+}
+
+// durArgs are the scripts' duration arguments, formatted once for the
+// durations they were formatted from.
+type durArgs struct {
+	ttl, retain time.Duration
+	ttlMs       string
+	retainMs    string
+	lifeMs      string // past the longest month, plus retention
+}
+
+func (v *Valkey) durations() *durArgs {
+	if d := v.args.Load(); d != nil && d.ttl == v.TTL && d.retain == v.Retain {
+		return d
+	}
+	d := &durArgs{ttl: v.TTL, retain: v.Retain, ttlMs: ms(v.TTL), retainMs: ms(v.Retain), lifeMs: ms(31*24*time.Hour + v.Retain)}
+	v.args.Store(d)
+	return d
 }
 
 // NewValkey returns the store for site over a client.
 func NewValkey(c valkey.Client, site string) *Valkey {
 	return &Valkey{c: c, prefix: "{golem:" + site + "}:", TTL: 90 * time.Second, Retain: 5 * time.Hour}
+}
+
+// maxCachedKeys bounds the key cache: scopes times periods in use.
+const maxCachedKeys = 1 << 14
+
+// scopeKeys are a scope and period's keys: the counter's six (seq, total,
+// cum, ev, ids, times), then the scope's slots. Built once and shared
+// (read-only): every call used to build seven strings and a slice.
+func (v *Valkey) scopeKeys(scope, period string) []string {
+	k := keyOf{scope, period}
+	if ks, ok := v.keys.Load(k); ok {
+		return ks.([]string)
+	}
+	p := v.prefix + "counter:" + scope + ":" + period + ":"
+	ks := []string{p + "seq", p + "total", p + "cum", p + "ev", p + "ids", p + "times", v.scopeKey(scope)}
+	if v.cached.Add(1) > maxCachedKeys { // a new month, or many scopes: start again
+		v.keys.Clear()
+		v.cached.Store(1)
+	}
+	v.keys.Store(k, ks)
+	return ks
 }
 
 const nowMillis = `local t = redis.call('TIME'); local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
@@ -140,28 +191,29 @@ end
 `
 
 // add: KEYS the counter's six; ARGV event, cost, retain, life.
-var add = valkey.NewLuaScript(nowMillis + addTo + `
-return add(KEYS, ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4]))`)
+const addSrc = nowMillis + addTo + `
+return add(KEYS, ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4]))`
+
+var add, addSha = valkey.NewLuaScript(addSrc), sha1Hex(addSrc)
 
 // complete: add, then free the slot (KEYS[7], KEYS[8]: principal and scope
 // slots; ARGV[5] the call), in one step.
-var complete = valkey.NewLuaScript(nowMillis + addTo + `
+const completeSrc = nowMillis + addTo + `
 local n = add(KEYS, ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4]))
 redis.call('ZREM', KEYS[7], ARGV[5])
 redis.call('ZREM', KEYS[8], ARGV[5])
-return n`)
+return n`
+
+var complete, completeSha = valkey.NewLuaScript(completeSrc), sha1Hex(completeSrc)
 
 // after: KEYS seq, total, cum; ARGV w.
 var after = valkey.NewLuaScript(afterOf + `
 local a, over = after(KEYS[1], KEYS[2], KEYS[3], tonumber(ARGV[1]))
 return {a, over}`)
 
-func (v *Valkey) principalKey(p string) string { return v.prefix + "slots:p:" + p }
-func (v *Valkey) scopeKey(s string) string     { return v.prefix + "slots:s:" + s }
-func (v *Valkey) counterKeys(scope, period string) []string {
-	p := v.prefix + "counter:" + scope + ":" + period + ":"
-	return []string{p + "seq", p + "total", p + "cum", p + "ev", p + "ids", p + "times"}
-}
+func (v *Valkey) principalKey(p string) string              { return v.prefix + "slots:p:" + p }
+func (v *Valkey) scopeKey(s string) string                  { return v.prefix + "slots:s:" + s }
+func (v *Valkey) counterKeys(scope, period string) []string { return v.scopeKeys(scope, period)[:6:6] }
 
 func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
 
@@ -170,8 +222,9 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, bool, 
 	if a.Strict {
 		strict = "1"
 	}
-	keys := append([]string{v.principalKey(a.Principal), v.scopeKey(a.Scope)}, v.counterKeys(a.Scope, a.Period)[:3]...)
-	r, err := admit.Exec(ctx, v.c, keys, []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), ms(v.TTL),
+	sk := v.scopeKeys(a.Scope, a.Period)
+	keys := []string{v.principalKey(a.Principal), sk[6], sk[0], sk[1], sk[2]}
+	r, err := admit.Exec(ctx, v.c, keys, []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.durations().ttlMs,
 		i64(a.Watermark), i64(a.Spend), i64(a.Budget), strict, i64(a.Worst)}).AsIntSlice()
 	if err != nil {
 		return 0, 0, false, wrap(err)
@@ -182,27 +235,43 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, bool, 
 	return Outcome(r[0]), r[1], r[2] == 1, nil
 }
 
-// life is how long a period's counter keys live after their last add: past
-// the longest month, plus retention.
-func (v *Valkey) life() string { return ms(31*24*time.Hour + v.Retain) }
-
 func (v *Valkey) Complete(ctx context.Context, period string, s Slot, e Event) (int64, error) {
-	keys := append(v.counterKeys(s.Scope, period), v.principalKey(s.Principal), v.scopeKey(s.Scope))
-	seq, err := complete.Exec(ctx, v.c, keys, []string{e.ID, i64(e.Cost), ms(v.Retain), v.life(), s.Call}).AsInt64()
+	sk, d := v.scopeKeys(s.Scope, period), v.durations()
+	keys := []string{sk[0], sk[1], sk[2], sk[3], sk[4], sk[5], v.principalKey(s.Principal), sk[6]}
+	return v.numbered(ctx, complete, completeSrc, completeSha, keys, []string{e.ID, i64(e.Cost), d.retainMs, d.lifeMs, s.Call})
+}
+
+// numbered runs an add script and returns the event's number. With
+// ReplicaAcks it sends the script and WAIT together, on one connection: WAIT
+// counts only its own connection's writes, and valkey-go sends a blocking
+// command such as WAIT alone on a dedicated connection, where it would
+// acknowledge nothing. A replica's acknowledgement only narrows what a
+// failover can lose, so a short one is counted (Unreplicated), not an error.
+func (v *Valkey) numbered(ctx context.Context, script *valkey.Lua, src, sha string, keys, args []string) (int64, error) {
+	if v.ReplicaAcks <= 0 {
+		seq, err := script.Exec(ctx, v.c, keys, args).AsInt64()
+		return seq, wrap(err)
+	}
+	wait := v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build()
+	rs := v.c.DoMulti(ctx, v.c.B().Evalsha().Sha1(sha).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build(), wait)
+	if err, ok := valkey.IsValkeyErr(rs[0].Error()); ok && err.IsNoScript() {
+		wait = v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build()
+		rs = v.c.DoMulti(ctx, v.c.B().Eval().Script(src).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build(), wait)
+	}
+	seq, err := rs[0].AsInt64()
 	if err != nil {
 		return 0, wrap(err)
 	}
-	v.wait(ctx)
+	if n, err := rs[1].AsInt64(); err != nil || n < int64(v.ReplicaAcks) {
+		v.Unreplicated.Add(1)
+	}
 	return seq, nil
 }
 
-// wait, if ReplicaAcks is set, waits for replicas to acknowledge an add.
-// The add is done; a replica's acknowledgement only narrows what a failover
-// can lose, so its failure is not the add's.
-func (v *Valkey) wait(ctx context.Context) {
-	if v.ReplicaAcks > 0 {
-		v.c.Do(ctx, v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build())
-	}
+// sha1Hex is a script's SHA-1, as EVALSHA names it.
+func sha1Hex(src string) string {
+	sum := sha1.Sum([]byte(src))
+	return hex.EncodeToString(sum[:])
 }
 
 func i64(n int64) string { return strconv.FormatInt(n, 10) }
@@ -224,22 +293,31 @@ func (v *Valkey) Reacquire(ctx context.Context, slots []Slot) error {
 	if len(slots) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, 2*len(slots))
-	args := []string{ms(v.TTL)}
-	for _, s := range slots {
-		keys = append(keys, v.principalKey(s.Principal), v.scopeKey(s.Scope))
-		args = append(args, s.Call)
+	// In chunks: one script holds Valkey's only thread for its whole run,
+	// and a gateway with 10,000 calls in flight would stall every gateway
+	// of the site at each renewal.
+	ttl := v.durations().ttlMs
+	for chunk := range slices.Chunk(slots, renewChunk) {
+		keys := make([]string, 0, 2*len(chunk))
+		args := append(make([]string, 0, 1+len(chunk)), ttl)
+		for _, s := range chunk {
+			keys = append(keys, v.principalKey(s.Principal), v.scopeKey(s.Scope))
+			args = append(args, s.Call)
+		}
+		if err := register.Exec(ctx, v.c, keys, args).Error(); err != nil {
+			return wrap(err)
+		}
 	}
-	return wrap(register.Exec(ctx, v.c, keys, args).Error())
+	return nil
 }
 
+// renewChunk is the slots one renewal script registers: about a
+// millisecond of Valkey's time.
+const renewChunk = 256
+
 func (v *Valkey) Add(ctx context.Context, scope, period string, e Event) (int64, error) {
-	seq, err := add.Exec(ctx, v.c, v.counterKeys(scope, period), []string{e.ID, i64(e.Cost), ms(v.Retain), v.life()}).AsInt64()
-	if err != nil {
-		return 0, wrap(err)
-	}
-	v.wait(ctx)
-	return seq, nil
+	d := v.durations()
+	return v.numbered(ctx, add, addSrc, addSha, v.counterKeys(scope, period), []string{e.ID, i64(e.Cost), d.retainMs, d.lifeMs})
 }
 
 func (v *Valkey) After(ctx context.Context, scope, period string, w int64) (int64, bool, error) {

@@ -143,10 +143,16 @@ func TestMemStore(t *testing.T) { testStore(t, func(*testing.T) Store { return N
 
 // valkeyAddr is a Valkey (or Redis) to test against: GOLEM_VALKEY_ADDR, or a
 // redis-server or valkey-server started for the test.
-func valkeyAddr(t *testing.T) string {
+func valkeyAddr(t testing.TB) string {
 	if a := os.Getenv("GOLEM_VALKEY_ADDR"); a != "" {
 		return a
 	}
+	return startServer(t)
+}
+
+// startServer starts a local valkey-server or redis-server with extra
+// arguments (a replica's --replicaof) and returns its address.
+func startServer(t testing.TB, args ...string) string {
 	bin, err := exec.LookPath("valkey-server")
 	if err != nil {
 		if bin, err = exec.LookPath("redis-server"); err != nil {
@@ -159,7 +165,7 @@ func valkeyAddr(t *testing.T) string {
 	}
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
-	cmd := exec.Command(bin, "--port", fmt.Sprint(port), "--save", "", "--appendonly", "no")
+	cmd := exec.Command(bin, append([]string{"--port", fmt.Sprint(port), "--save", "", "--appendonly", "no"}, args...)...)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +185,7 @@ func valkeyAddr(t *testing.T) string {
 var siteN int
 
 // newValkey returns a store over a fresh site prefix of one server.
-func newValkey(t *testing.T, addr string) *Valkey {
+func newValkey(t testing.TB, addr string) *Valkey {
 	c, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{addr}, DisableCache: true})
 	if err != nil {
 		t.Fatal(err)
@@ -241,4 +247,73 @@ func TestValkeyStore(t *testing.T) {
 			t.Fatalf("%v, want ErrUnavailable", err)
 		}
 	})
+}
+
+// TestReplicaAcks: with ReplicaAcks the add and its WAIT go on one
+// connection, so WAIT counts the add's own write; an add fewer replicas
+// acknowledged is counted. (Sent alone, WAIT runs on a connection of its
+// own and returns at once, guaranteeing nothing.)
+func TestReplicaAcks(t *testing.T) {
+	if os.Getenv("GOLEM_VALKEY_ADDR") != "" || testing.Short() {
+		t.Skip("needs a local server to attach a replica to, and two seconds")
+	}
+	primary := startServer(t)
+	host, port, _ := net.SplitHostPort(primary)
+	replica := startServer(t, "--replicaof", host, port, "--enable-debug-command", "yes")
+	st := newValkey(t, primary)
+	ctx := t.Context()
+	st.ReplicaAcks = 1
+	deadline := time.Now().Add(10 * time.Second)
+	for { // the replica's first sync
+		st.Unreplicated.Store(0)
+		if _, err := st.Add(ctx, "s", nov, Event{fmt.Sprint("sync", time.Now().UnixNano()), 1}); err != nil {
+			t.Fatal(err)
+		}
+		if st.Unreplicated.Load() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the replica never acknowledged")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if seq, err := st.Complete(ctx, nov, Slot{"c1", "p", "s"}, Event{"c1", 2}); err != nil || seq < 2 || st.Unreplicated.Load() != 0 {
+		t.Fatalf("Complete = %d, %v, unreplicated %d", seq, err, st.Unreplicated.Load())
+	}
+	// A stalled replica cannot acknowledge the add: WAIT on the add's own
+	// connection times out and the add is counted. A WAIT on another
+	// connection waits only for that connection's own offset (where the
+	// primary stood when it last ran a command), which a replica that has
+	// caught up has acknowledged: it would return 1, wrongly. So: a client
+	// whose connections are warm (as a gateway's pooled ones are), then a
+	// pause for the replica to acknowledge everything (it does so about
+	// once a second), then the stall and the add.
+	fresh := newValkey(t, primary)
+	fresh.ReplicaAcks = 1
+	if _, err := fresh.Add(ctx, "s", nov, Event{"warm", 1}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	fresh.Unreplicated.Store(0)
+	rc, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{replica}, DisableCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	stalled := make(chan error, 1)
+	go func() {
+		stalled <- rc.Do(context.Background(), rc.B().Arbitrary("DEBUG", "SLEEP").Args("0.5").Build()).Error()
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := fresh.Add(ctx, "s", nov, Event{"stalled", 1}); err != nil || fresh.Unreplicated.Load() != 1 {
+		t.Fatalf("err %v, unreplicated %d: an add the stalled replica never saw must be counted", err, fresh.Unreplicated.Load())
+	}
+	if err := <-stalled; err != nil {
+		t.Fatal(err)
+	}
+	st.Unreplicated.Store(0)
+	st.ReplicaAcks = 2 // more than there are
+	if _, err := st.Add(ctx, "s", nov, Event{"x", 1}); err != nil || st.Unreplicated.Load() != 1 {
+		t.Fatalf("err %v, unreplicated %d: one replica short must be counted", err, st.Unreplicated.Load())
+	}
 }

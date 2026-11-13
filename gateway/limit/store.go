@@ -93,7 +93,7 @@ type Mem struct {
 	mu      sync.Mutex
 	down    bool
 	slots   map[string]Slot
-	counter map[string]*memCounter
+	counter map[keyOf]*memCounter
 	// Retain is how long the counter keeps its history, as Valkey's: at
 	// least the longest authorization lease a live gateway can hold
 	// (ADR 0042: five hours). Now is its clock.
@@ -115,7 +115,7 @@ type memEvent struct {
 
 // NewMem returns an empty store.
 func NewMem() *Mem {
-	return &Mem{slots: map[string]Slot{}, counter: map[string]*memCounter{}, Retain: 5 * time.Hour, Now: time.Now}
+	return &Mem{slots: map[string]Slot{}, counter: map[keyOf]*memCounter{}, Retain: 5 * time.Hour, Now: time.Now}
 }
 
 func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, int64, bool, error) {
@@ -187,8 +187,10 @@ func (m *Mem) Reacquire(_ context.Context, slots []Slot) error {
 	return nil
 }
 
+func (*Mem) inProcess() {}
+
 func (m *Mem) counterOf(scope, period string) *memCounter {
-	k := scope + "|" + period
+	k := keyOf{scope, period}
 	c := m.counter[k]
 	if c == nil {
 		c = &memCounter{cum: []int64{0}, byID: map[string]int64{}}

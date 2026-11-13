@@ -221,7 +221,7 @@ func TestExposureModelValkey(t *testing.T) {
 	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 50, MaxSteps: 30},
 		func(tb testing.TB) connect.Driver {
 			return &expDriver{t: tb, newSt: func(tb testing.TB) faultyStore {
-				return &valkeyFaults{Valkey: newValkey(tb.(*testing.T), addr)}
+				return &valkeyFaults{Valkey: newValkey(tb, addr)}
 			}}
 		})
 }
