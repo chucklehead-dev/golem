@@ -14,10 +14,11 @@ func Cost(u canon.Usage, p snapshot.Price) int64 {
 	return halfEven(n, 1_000_000)
 }
 
-// Worst is a strict scope's worst-case cost (ADR 0031, 0038): every input
-// byte a token at the full input rate, and the output cap at the output
-// rate, no cache discount. Bytes bound tokens from above for the text
-// tokenizers golem serves.
+// Worst is a call's declared worst-case cost, for the worst-case check
+// (ADR 0031, 0038, 0044): every input byte a token at the full input rate,
+// and the output cap at the output rate, no cache discount. Bytes bound
+// text tokens from above; they do not bound images, audio or files, or
+// units billed outside tokens: a declaration, not a ceiling.
 func Worst(inputBytes, maxOutput int64, p snapshot.Price) int64 {
 	return halfEven(inputBytes*p.InputPerMTok+maxOutput*p.OutputPerMTok, 1_000_000)
 }

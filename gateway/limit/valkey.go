@@ -133,8 +133,8 @@ end
 `
 
 // admit: KEYS principal slots, scope slots, seq, total, cum; ARGV call,
-// principal limit, scope limit, TTL, watermark, spend, budget, strict (0 or
-// 1), worst. Returns {outcome, known, over}: the check and the slot in one
+// principal limit, scope limit, TTL, watermark, spend, budget, worst-case
+// check (0 or 1), worst. Returns {outcome, known, over}: the check and the slot in one
 // atomic step, so two gateways cannot both pass the check and then both
 // take the last slot or the last of the budget.
 var admit = valkey.NewLuaScript(nowMillis + slotsTake + afterOf + `
@@ -220,14 +220,14 @@ func (v *Valkey) counterKeys(scope, period string) []string { return v.scopeKeys
 func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
 
 func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, bool, error) {
-	strict := "0"
-	if a.Strict {
-		strict = "1"
+	check := "0"
+	if a.WorstCaseCheck {
+		check = "1"
 	}
 	sk := v.scopeKeys(a.Scope, a.Period)
 	keys := []string{v.principalKey(a.Principal), sk[6], sk[0], sk[1], sk[2]}
 	r, err := admit.Exec(ctx, v.c, keys, []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.durations().ttlMs,
-		i64(a.Watermark), i64(a.Spend), i64(a.Budget), strict, i64(a.Worst)}).AsIntSlice()
+		i64(a.Watermark), i64(a.Spend), i64(a.Budget), check, i64(a.Worst)}).AsIntSlice()
 	if err != nil {
 		return 0, 0, false, wrap(err)
 	}

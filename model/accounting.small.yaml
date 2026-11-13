@@ -10,7 +10,7 @@ constants:
   LIMIT: '1'
   LIMIT_ON: 'true'
   RENEW_SLOTS: 'true'
-  STRICT: 'false'
+  WORST_CHECK: 'false'
   DEDUP: 'true'
   RECONCILE: 'true'
 actions: {}

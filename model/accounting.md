@@ -4,7 +4,10 @@ A literate Quint specification, like [publication.md](publication.md): the
 prose explains, the `quint` blocks are the model, `make` extracts and
 checks it. It models [ADR 0031](../docs/adr/0031-soft-budgets.md): budgets
 are soft and eventually consistent, by accepted risk, and the overshoot is
-bounded.
+bounded so long as no call costs more than its declared worst case. That
+condition is the model's, not the world's: [ADR 0044](../docs/adr/0044-budgets-are-controls-not-ceilings.md)
+makes budgets controls, not ceilings, and this model checks the
+mechanism's arithmetic, not a guarantee about spend.
 
 (An earlier version of this model checked a durable journal written before
 every dispatch. It showed what a hard ceiling would cost; ADR 0031 decided
@@ -23,7 +26,7 @@ questions:
 > crash loses some events?
 
 The answers hold if four rules do, each a switch as in the publication
-model, plus a fourth switch for the strict option:
+model, plus a fourth switch for the worst-case check:
 
 | Switch | When on (the design) | When off (the bug it prevents) |
 |---|---|---|
@@ -31,7 +34,7 @@ model, plus a fourth switch for the strict option:
 | `RENEW_SLOTS` | A call renews its concurrency slot while it is in flight (ADR 0038) | A long stream's slot expires mid-call, a new call takes it, and the in-flight limit is silently exceeded |
 | `DEDUP` | Balances count each event once, by event ID | At-least-once delivery counts duplicates |
 | `RECONCILE` | The daily job books the difference between the provider's bill and the ledger as an adjustment | Events a crash lost are never paid for in golem's books |
-| `STRICT` | (a scope option, not a fix) A call is admitted only if known spend plus its worst-case cost fits | The soft check: still bounded, one call looser |
+| `WORST_CHECK` | (a scope option, not a fix) A call is admitted only if known spend plus its declared worst case fits | The soft check: still bounded, one call looser |
 
 ## 2. Reading and running
 
@@ -49,7 +52,8 @@ module accounting {
 
 One principal with a `BUDGET` for the period, on one site, making a few
 `REQUESTS`. Each call costs something from `COSTS`; the largest any call
-can cost is `WORST` (what a strict scope's worst-case check computes).
+can cost is `WORST` (the declared worst case the worst-case check computes;
+the model takes it as a true bound, which the real one is not: §9).
 `LIMIT` is the principal's in-flight limit.
 
 ```quint accounting.qnt +=
@@ -61,7 +65,7 @@ can cost is `WORST` (what a strict scope's worst-case check computes).
 
   const LIMIT_ON: bool
   const RENEW_SLOTS: bool
-  const STRICT: bool
+  const WORST_CHECK: bool
   const DEDUP: bool
   const RECONCILE: bool
 ```
@@ -134,14 +138,14 @@ keeps one site, where the lag is zero, and §9 says what the lag adds.
 ### 6.1 Admit a call
 
 The check of ADR 0031. Soft: known spend is still below the budget.
-Strict: known spend plus the call's worst case fits. Either way the
+Worst-case check: known spend plus the call's worst case fits. Either way the
 principal needs a free in-flight slot (`LIMIT_ON`).
 
 ```quint accounting.qnt +=
   action admit(request: str): bool = all {
     phase.get(request) == "idle",
     if (LIMIT_ON) holdingSlots < LIMIT else true,
-    if (STRICT) known + WORST <= BUDGET else known < BUDGET,
+    if (WORST_CHECK) known + WORST <= BUDGET else known < BUDGET,
     phase' = phase.put(request, "inflight"),
     billed' = billed, known' = known, buffer' = buffer, ledger' = ledger,
     adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
@@ -296,17 +300,20 @@ running.
 Every admitted call passed its check when known spend excluded only the
 calls then in flight. Under the soft check the last admission saw known
 spend below the budget, with up to `LIMIT` calls in flight, each at most
-`WORST`; under the strict check the last admission's own worst case fit,
+`WORST`; under the worst-case check the last admission's own worst case fit,
 which saves one call. Spend that never reached `known` (crashes, failovers)
 widens the bound until the books catch up.
 
 ```quint accounting.qnt +=
-  val slack = if (STRICT) (LIMIT - 1) * WORST else LIMIT * WORST
+  val slack = if (WORST_CHECK) (LIMIT - 1) * WORST else LIMIT * WORST
   val withinBound = totalBilled <= BUDGET + slack + uncounted
 ```
 
-Strict with `LIMIT = 1` has no slack: a hard ceiling on one site, apart
-from crash losses.
+The worst-case check with `LIMIT = 1` has no slack here: spend stays
+within the budget, apart from crash losses, because every call costs at
+most `WORST`. A real call can cost more than its declared worst case (§9),
+and each such call widens the bound by its excess: nothing in the design
+prevents it, and reconciliation books it after the fact (ADR 0044).
 
 ### 7.2 Never counted twice, and books that match
 
@@ -337,7 +344,7 @@ duplicate.
 **Two calls in flight take a principal past its budget** (the accepted
 risk). With 4 of 6 spent, two calls are admitted under the soft check and
 both cost 3: the principal ends at 10, over its budget by 4, within the
-bound of `LIMIT × WORST = 6`. Under the strict check neither is admitted
+bound of `LIMIT × WORST = 6`. Under the worst-case check neither is admitted
 (4 + 3 exceeds 6).
 
 ```quint accounting.qnt +=
@@ -442,19 +449,22 @@ The model ends here:
   cap. The model's single site has no lag.
 - **Several principals and levels.** Key caps, member caps and scope pools
   are the same check at three levels; one level shows the bound.
-- **Prices.** One number per call. The worst-case formula (no cache
-  discount, `max_tokens` or the model maximum, no server-side tools) is
-  what makes `WORST` a real upper bound.
-- **Prices.** `WORST` is a real number only because each scope caps
-  `max_tokens` and input size (ADR 0038); the model takes it as given.
+- **Prices, and calls that cost more than declared.** One number per call,
+  at most `WORST`. The real worst case is a declaration: every input byte
+  a token, plus `max_tokens` × `n`, at list prices, no cache discount, no
+  server-side tools (ADR 0038, 0044). It is not a bound on what a call can
+  cost: images, audio and files take tokens that bytes do not bound, some
+  units are billed outside tokens, a provider can go on working after a
+  cut, prices change. The model assumes the declaration holds; every
+  bound it checks is conditional on that.
 
 ## 10. The designs to check
 
 | Instance | Settings | Should |
 |---|---|---|
 | `softDesign` | soft check, `LIMIT = 2` | hold `safe`; reach every scenario |
-| `strictDesign` | strict check, `LIMIT = 2` | hold `safe`, with the tighter slack |
-| `strictSingle` | strict check, `LIMIT = 1` | hold `hardCeiling` |
+| `worstCheckDesign` | worst-case check, `LIMIT = 2` | hold `safe`, with the tighter slack |
+| `worstCheckSingle` | worst-case check, `LIMIT = 1` | hold `withinDeclaredWorst` |
 | `noLimit` | no concurrency limit | break `withinBound` |
 | `rawSum` | no deduplication | break `noDoubleCount` |
 | `noReconcile` | no reconciliation | break `booksMatch` |
@@ -462,7 +472,7 @@ The model ends here:
 
 Which story passes where (as `check-accounting.sh` confirms):
 
-| Story | softDesign | strictDesign | strictSingle | noLimit | rawSum | noReconcile | noSlotRenewal |
+| Story | softDesign | worstCheckDesign | worstCheckSingle | noLimit | rawSum | noReconcile | noSlotRenewal |
 |---|---|---|---|---|---|---|---|
 | siblings overshoot (accepted risk) | **passes** | impossible | impossible | **passes** | **passes** | **passes** | **passes** |
 | unlimited overshoot | impossible | impossible | impossible | **passes** | impossible | impossible | impossible |
@@ -471,7 +481,7 @@ Which story passes where (as `check-accounting.sh` confirms):
 | duplicate counted | impossible | impossible | impossible | impossible | **passes** | impossible | impossible |
 
 Two lessons in it. The accepted risk is real and bounded: the siblings
-story passes in every soft design and is impossible in the strict ones.
+story passes in every soft design and is impossible under the worst-case check.
 And the concurrency bugs (`noLimit`, `noSlotRenewal`) have the rare kind
 of counterexample: several calls must be admitted, or slots expire, before
 any call completes, which random simulation did not find in tens of
@@ -479,44 +489,46 @@ thousands of runs. A search of every run does: on the small instance
 (`accounting.small.yaml`: three requests, a budget of 2, one call in
 flight), `check-accounting.sh` explores every run of up to 12 steps, finds
 each bug's shortest counterexample (which are these stories, step for
-step), and shows the soft and strict designs hold in all of them.
+step), and shows the soft and worst-case designs hold in all of them.
 
 ```quint accounting.qnt +=
 
 module softDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
 }
 
-module strictDesign {
+module worstCheckDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = true, DEDUP = true, RECONCILE = true).*
 }
 
-module strictSingle {
+module worstCheckSingle {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = true, DEDUP = true, RECONCILE = true).*
 
-  val hardCeiling = totalBilled <= BUDGET + uncounted
+  // Within the budget, apart from crash losses, while every call costs at
+  // most WORST: the model's assumption, not a ceiling on real spend.
+  val withinDeclaredWorst = totalBilled <= BUDGET + uncounted
 }
 
 module noLimit {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
 }
 
 module rawSum {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = false, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = false, RECONCILE = true).*
 }
 
 module noSlotRenewal {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = false, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = false, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
 }
 
 module noReconcile {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = false).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = false).*
 }
 ```

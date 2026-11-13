@@ -1,6 +1,6 @@
 # 0038: Dedicated provider accounts, monthly reconciliation, renewed slots, bounded worst case
 
-Status: Accepted. Amends [0031](0031-soft-budgets.md), [0012](0012-limits-and-accounting.md) and PRD §7.
+Status: Accepted. Amends [0031](0031-soft-budgets.md), [0012](0012-limits-and-accounting.md) and PRD §7. Amended by [0044](0044-budgets-are-controls-not-ceilings.md): the worst case is declared, not a known bound on cost.
 
 ## Decision
 
@@ -21,9 +21,9 @@ Status: Accepted. Amends [0031](0031-soft-budgets.md), [0012](0012-limits-and-ac
   flight (TTL 90 seconds), so a long agent stream keeps its slot and the
   overshoot bound holds; a crashed gateway's slots expire within the TTL.
 - **The worst case is bounded**: a `ScopePolicy` sets a ceiling on
-  `max_tokens` and on input size, enforced by the gateway; the strict
-  check's worst-case cost uses them, so the bound shown to budget owners
-  is a known number. Input tokens are bounded by the body's byte count; no
+  `max_tokens` and on input size, enforced by the gateway; the worst-case
+  check's declared cost uses them (ADR 0044: a declared worst case, not a
+  bound on what a call can cost). Input tokens are bounded by the body's byte count; no
   tokenizer is needed.
 
 ## Consequences

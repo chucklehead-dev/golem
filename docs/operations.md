@@ -41,6 +41,30 @@ already knows every cluster; nothing in one cluster reaches another's API server
 (ADR 0008). Remote sites run gateway pools and a Valkey; their config CRDs
 live in the EKS cluster, selected by a `site` label.
 
+## Spending: what golem controls, and what the provider account must
+
+Golem's budgets are admission and monitoring controls, not spending
+ceilings (ADR 0044). They stop new calls once known spend reaches a
+budget, within about a minute on every site; calls in flight, estimates
+that come out low and work a provider bills that golem never saw can go
+past it. The financial boundary is the provider account's:
+
+- **Required before production traffic:** every provider account golem
+  routes to (ADR 0038's dedicated accounts) has a spending limit or a
+  budget alarm with an enforced action at the provider (an Anthropic
+  workspace spend limit, an OpenAI project budget, an AWS Budgets action
+  that denies Bedrock invocation), sized to what finance accepts losing
+  in the worst case. Golem cannot check it; the release checklist records
+  who set it and at what level.
+- **Reconciliation is the record:** the monthly job books the provider's
+  bill against the ledger (ADR 0038). Budget reports are corrected by it.
+  A large unattributed or estimated share is investigated, not tuned away.
+- **Expected exposure, not a guarantee:** per principal, roughly its
+  in-flight limit times its largest declared call, plus a refresh lag's
+  spend across sites (ADR 0031). The worst-case check (`worstCaseCheck`)
+  narrows that by a call and refuses calls that declare no worst case; it
+  is not a ceiling either.
+
 ## Incident and delivery requirements (ADR 0041)
 
 [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) specifies the denylist lifecycle, reserved restrictive-action

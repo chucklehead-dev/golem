@@ -78,7 +78,7 @@ type Scope struct {
 	ID                string   `json:"id"`
 	Models            []string `json:"models"` // aliases its members may call
 	BudgetMicros      int64    `json:"budgetMicros,omitempty"`
-	Strict            bool     `json:"strict,omitempty"`
+	WorstCaseCheck    bool     `json:"worstCaseCheck,omitempty"` // ADR 0044
 	PrincipalInFlight int      `json:"principalInFlight"`
 	ScopeInFlight     int      `json:"scopeInFlight"`
 	// The scope's request policy: provider-side storage allowed (ADR 0027),
