@@ -82,7 +82,7 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 			add(obj, "spec.dialect", "%q is not a dialect golem serves (%s)", b.Spec.Dialect, strings.Join(Dialects, ", "))
 		}
 		a := b.Spec.Auth
-		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect,
+		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect, AllowPrivate: b.Spec.Network.AllowPrivateAddresses,
 			Auth: snapshot.Auth{Header: strings.ToLower(a.Header), Scheme: a.Scheme, Env: a.Env}}
 		switch {
 		case a.Header == "":

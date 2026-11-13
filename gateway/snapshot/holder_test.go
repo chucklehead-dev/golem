@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,7 +135,7 @@ spec: {alias: local, pool: [{backend: local, deployment: qwen}]}
 // TestUpstreamTransport: the settings the pool depends on under load, so a
 // change to them is a decision, not an accident.
 func TestUpstreamTransport(t *testing.T) {
-	tr := upstreamTransport()
+	tr := upstreamTransport(false)
 	switch {
 	case tr.Proxy != nil:
 		t.Error("a proxy from the environment: egress is the mesh's (ADR 0004)")
@@ -143,5 +145,48 @@ func TestUpstreamTransport(t *testing.T) {
 		t.Error("no HTTP/2 pings: a dead connection under a long stream goes unnoticed")
 	case tr.ResponseHeaderTimeout != 0:
 		t.Error("a response-header timeout cuts long non-streamed answers; it is the route's to set")
+	}
+}
+
+// TestCheckDestination: where golem dials (golem#5).
+func TestCheckDestination(t *testing.T) {
+	for _, tc := range []struct {
+		addr         string
+		allowPrivate bool
+		ok           bool
+	}{
+		{"203.0.113.7:443", false, true},
+		{"[2001:db8::1]:443", false, true},
+		{"169.254.169.254:80", true, false}, // metadata, even granted
+		{"[fd00:ec2::254]:80", true, false},
+		{"100.100.100.200:80", true, false},
+		{"[fe80::1]:443", true, false},
+		{"0.0.0.0:443", true, false},
+		{"127.0.0.1:8000", false, false},
+		{"127.0.0.1:8000", true, true},
+		{"10.1.2.3:443", false, false},
+		{"10.1.2.3:443", true, true},
+		{"100.64.1.1:443", false, false},
+		{"[::ffff:192.168.1.1]:443", false, false}, // IPv4-mapped
+		{"[fc00::1]:443", false, false},
+	} {
+		if err := checkDestination(tc.addr, tc.allowPrivate); (err == nil) != tc.ok {
+			t.Errorf("%s (allowPrivate %v): %v, want ok %v", tc.addr, tc.allowPrivate, err, tc.ok)
+		}
+	}
+}
+
+// TestDialRefused: the check runs on the connection itself.
+func TestDialRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL, nil)
+	if _, err := upstreamTransport(false).RoundTrip(req); err == nil || !strings.Contains(err.Error(), "refusing to dial") {
+		t.Fatalf("%v: a loopback server without the grant", err)
+	}
+	if resp, err := upstreamTransport(true).RoundTrip(req); err != nil {
+		t.Fatalf("%v: with the grant", err)
+	} else {
+		resp.Body.Close()
 	}
 }

@@ -45,6 +45,15 @@ type BackendSpec struct {
 	Dialect     string       `json:"dialect"`
 	Auth        Auth         `json:"auth"`
 	Deployments []Deployment `json:"deployments"`
+	Network     Network      `json:"network,omitzero"`
+}
+
+// Network grants a backend addresses golem otherwise refuses to dial.
+type Network struct {
+	// AllowPrivateAddresses lets the backend's deployments be on loopback
+	// or private addresses (a self-hosted model server, a developer's local
+	// one). Cloud metadata and link-local addresses are refused always.
+	AllowPrivateAddresses bool `json:"allowPrivateAddresses,omitempty"`
 }
 
 // Auth is how golem authenticates to a backend: a header carrying a secret.

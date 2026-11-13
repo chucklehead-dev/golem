@@ -134,6 +134,8 @@ type Backend struct {
 	Dialect     string       `json:"dialect"`
 	Auth        Auth         `json:"auth"`
 	Deployments []Deployment `json:"deployments"`
+	// AllowPrivate grants loopback and private addresses (golem#5).
+	AllowPrivate bool `json:"allowPrivate,omitempty"`
 }
 
 // Auth is a header and where its secret comes from.

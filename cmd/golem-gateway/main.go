@@ -42,7 +42,7 @@ func main() {
 	tenant := flag.String("entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
 	drainFor := flag.Duration("drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
 	unready := flag.Duration("unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
-	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port")
+	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless on loopback)")
 	localKeyFile := flag.String("local-key", "", "the file holding standalone's local key (generated on first use); default <user config dir>/golem/standalone-key")
 	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")

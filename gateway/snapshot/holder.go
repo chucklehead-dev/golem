@@ -12,14 +12,17 @@
 package snapshot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
@@ -162,10 +165,10 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 			if err != nil {
 				return nil, fmt.Errorf("backend %s deployment %s: %w", b.Name, d.Name, err)
 			}
-			id := b.Name + "/" + d.Name + " " + u.Scheme + "://" + u.Host
+			id := fmt.Sprint(b.Name, "/", d.Name, " ", u.Scheme, "://", u.Host, " private:", b.AllowPrivate)
 			t := h.transports[id]
 			if t == nil {
-				t = upstreamTransport()
+				t = upstreamTransport(b.AllowPrivate)
 				h.transports[id] = t
 			}
 			used[id] = true
@@ -251,10 +254,14 @@ func (e EnvSecrets) Secret(ref, env string) (string, error) {
 //   - no response-header timeout here: a non-streamed answer's headers come
 //     when the model has finished, which for a long answer is minutes; that
 //     bound is the route's (ModelRoute spec.timeouts: headers, maxDuration).
-func upstreamTransport() *http.Transport {
+func upstreamTransport(allowPrivate bool) *http.Transport {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second,
+		ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
+			return checkDestination(address, allowPrivate)
+		}}
 	return &http.Transport{
 		Proxy:               nil,
-		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:         d.DialContext,
 		ForceAttemptHTTP2:   true,
 		HTTP2:               &http.HTTP2Config{SendPingTimeout: 30 * time.Second, PingTimeout: 15 * time.Second},
 		MaxIdleConns:        0,
@@ -272,4 +279,38 @@ func (h *Holder) compileAuth(e snapshot.Entitlements, env key.Env) *auth.Keys {
 		k.RequireLocalKey(h.LocalKey)
 	}
 	return k
+}
+
+// metadata are cloud instance-metadata addresses outside link-local
+// ranges (Alibaba's); link-local ones (AWS, GCP, Azure: 169.254.169.254,
+// fd00:ec2::254 aside) are refused as link-local.
+var metadata = []netip.Prefix{netip.MustParsePrefix("100.100.100.200/32"), netip.MustParsePrefix("fd00:ec2::254/128")} // read-only
+
+// cgnat is shared address space (RFC 6598), private in effect.
+var cgnat = netip.MustParsePrefix("100.64.0.0/10") // read-only
+
+// checkDestination refuses to connect where a provider cannot be (golem#5):
+// the address a deployment's name resolved to, checked as the connection
+// is made, so a name that resolves somewhere else later is caught too.
+// Cloud metadata, link-local, unspecified and multicast addresses are
+// refused always; loopback and private ones unless the backend allows
+// them.
+func checkDestination(address string, allowPrivate bool) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("golem: refusing to dial %q: not an address", address)
+	}
+	ip := ap.Addr().Unmap()
+	for _, p := range metadata {
+		if p.Contains(ip) {
+			return fmt.Errorf("golem: refusing to dial %s: a cloud metadata address", ip)
+		}
+	}
+	switch {
+	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast(), ip.IsUnspecified(), ip.IsMulticast(), ip.IsInterfaceLocalMulticast():
+		return fmt.Errorf("golem: refusing to dial %s: link-local, unspecified or multicast", ip)
+	case !allowPrivate && (ip.IsLoopback() || ip.IsPrivate() || cgnat.Contains(ip)):
+		return fmt.Errorf("golem: refusing to dial %s: a loopback or private address, which this backend is not granted (spec.network.allowPrivateAddresses)", ip)
+	}
+	return nil
 }

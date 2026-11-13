@@ -109,6 +109,7 @@ spec:
   dialect: anthropic.messages
   auth: {header: x-api-key, env: KEY}
   deployments: [{name: sonnet, url: "URL/v1/messages", model: claude-sonnet-4-5}]
+  network: {allowPrivateAddresses: true} # the stand-in provider is on loopback
 ---
 apiVersion: golem.dev/v1alpha1
 kind: Backend
@@ -117,6 +118,7 @@ spec:
   dialect: openai.chat
   auth: {header: authorization, scheme: Bearer, env: KEY}
   deployments: [{name: gpt, url: "URL/v1/chat/completions", model: gpt-5}]
+  network: {allowPrivateAddresses: true}
 ---
 apiVersion: golem.dev/v1alpha1
 kind: ModelRoute

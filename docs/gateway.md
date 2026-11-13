@@ -267,6 +267,13 @@ without a preflight it never gets. SDKs and curl pass all three.
 - The fast path allocates per request: the pooled body buffer (returned),
   the Principal (cached), one span pair, one access-log record. Target
   well under 50 allocations; tracked by `testing.B.Loop` benchmarks in CI.
+- Each upstream connection's address is checked as it is made (after the
+  name resolved, so a name that resolves elsewhere later is caught):
+  cloud metadata, link-local, unspecified and multicast addresses are
+  refused always; loopback and private ones (RFC 1918, ULA, CGNAT) unless
+  the Backend grants them (`spec.network.allowPrivateAddresses`, for a
+  self-hosted or local model server). Telemetry, which carries the
+  ledger, goes over TLS unless the collector is on loopback (golem#5).
 - Transports are per deployment, every setting explicit
   (`snapshot.upstreamTransport`): idle connections bounded per host only
   (DefaultTransport's total of 100 re-handshook connections above 100
