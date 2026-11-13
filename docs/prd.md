@@ -290,11 +290,15 @@ The full model is [org-model.md](org-model.md). In short:
   (the ledger's deduplicated balance in the snapshot, plus the site's
   counter since), and its actual cost is added when it ends; once known
   spend reaches a limit, every further call is refused on every site within
-  about a minute. In-flight calls can overshoot by at most the principal's
-  in-flight limit times the largest call, plus one refresh lag's spend.
-  **Strict scopes** also require the worst-case cost to fit. Cut streams
-  are charged what was produced; a daily job reconciles the ledger with
-  providers' usage and books differences as adjustments.
+  about a minute. In-flight calls can overshoot, by about the principal's
+  in-flight limit times its largest declared call, plus one refresh lag's
+  spend: expected exposure, not a bound (ADR 0044).
+  Scopes with the **worst-case check** also require the request's declared
+  worst case to fit, and refuse requests that declare none. Budgets are
+  admission and monitoring controls, not spending ceilings (ADR 0044):
+  calls whose usage is missing are charged conservative estimates, the
+  provider's bill reconciled against the ledger is the record, and each
+  provider account's own spending limit is the financial backstop.
 - **Valkey at every site**, required from M1 (ADR 0012), for spend counters
   since the snapshot, rate windows, concurrency slots and provider quotas.
 - On Valkey outage: budget levels fail open or closed per scope policy;

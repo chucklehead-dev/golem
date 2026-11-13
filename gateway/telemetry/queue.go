@@ -25,7 +25,18 @@ type LedgerQueue struct {
 	flush   chan chan error
 	stop    chan context.Context
 	stopped sync.WaitGroup
-	closed  atomic.Bool
+	exited  chan struct{} // closed when the worker returns: no flush is answered after
+	// mu orders rows against the shutdown: OnEmit holds it shared from
+	// its check of closed to its enqueue, Shutdown exclusively to set
+	// closed. Every row OnEmit accepted is then queued before the worker
+	// drains, and every later one is refused and counted: none is queued
+	// with no worker left to deliver or count it (golem#4).
+	mu     sync.RWMutex
+	closed bool
+	// emitting, if set, runs inside OnEmit's critical section (a test's
+	// pause between the check and the enqueue); flushing, between
+	// ForceFlush's check and its request.
+	emitting, flushing func()
 	// base is the running exports' context: a shutdown's deadline cancels
 	// it, so an export already blocked on the collector ends with it.
 	base       context.Context
@@ -45,7 +56,7 @@ const exportTimeout = 30 * time.Second
 // up to batch rows at least every interval.
 func NewLedgerQueue(exp sdklog.Exporter, size, batch int, every time.Duration) *LedgerQueue {
 	q := &LedgerQueue{exp: exp, q: make(chan sdklog.Record, size), batch: batch, every: every,
-		flush: make(chan chan error), stop: make(chan context.Context, 1)}
+		flush: make(chan chan error), stop: make(chan context.Context, 1), exited: make(chan struct{})}
 	q.base, q.cancelBase = context.WithCancel(context.Background())
 	q.backoff.Store(int64(time.Second))
 	q.stopped.Go(q.run)
@@ -54,9 +65,14 @@ func NewLedgerQueue(exp sdklog.Exporter, size, batch int, every time.Duration) *
 
 // OnEmit queues a row; it never blocks the request path.
 func (q *LedgerQueue) OnEmit(_ context.Context, r *sdklog.Record) error {
-	if q.closed.Load() {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if q.closed {
 		q.drop("the ledger queue is shut down")
 		return nil
+	}
+	if q.emitting != nil {
+		q.emitting()
 	}
 	select {
 	case q.q <- r.Clone(): // the SDK reuses r after the call
@@ -76,6 +92,7 @@ func (q *LedgerQueue) drop(why string) {
 func (q *LedgerQueue) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }
 
 func (q *LedgerQueue) run() {
+	defer close(q.exited)
 	t := time.NewTicker(q.every)
 	defer t.Stop()
 	buf := make([]sdklog.Record, 0, q.batch)
@@ -162,7 +179,11 @@ func (q *LedgerQueue) SetBackoff(d time.Duration) { q.backoff.Store(int64(d)) }
 // Shutdown refuses further rows (counting them), exports what is queued
 // while ctx lasts, counts the rest as failed, and stops.
 func (q *LedgerQueue) Shutdown(ctx context.Context) error {
-	if q.closed.Swap(true) {
+	q.mu.Lock()
+	was := q.closed
+	q.closed = true
+	q.mu.Unlock()
+	if was {
 		return nil
 	}
 	stopCancel := context.AfterFunc(ctx, q.cancelBase)
@@ -173,14 +194,20 @@ func (q *LedgerQueue) Shutdown(ctx context.Context) error {
 	return q.exp.Shutdown(ctx)
 }
 
-// ForceFlush exports every row queued now.
+// ForceFlush exports every row queued now. A shutdown may stop the worker
+// at any point of it: it waits on the worker's exit as well, so it never
+// waits on a worker that is gone (the shutdown has drained, or counted,
+// what was queued). It takes no lock: a flush's exports can retry for
+// minutes, and must not hold a shutdown off its own deadline.
 func (q *LedgerQueue) ForceFlush(ctx context.Context) error {
-	if q.closed.Load() {
-		return nil
+	if q.flushing != nil {
+		q.flushing()
 	}
 	reply := make(chan error, 1)
 	select {
 	case q.flush <- reply:
+	case <-q.exited:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -190,6 +217,8 @@ func (q *LedgerQueue) ForceFlush(ctx context.Context) error {
 			return err
 		}
 		return q.exp.ForceFlush(ctx)
+	case <-q.exited: // stopped mid-flush; the shutdown ends what it began
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}

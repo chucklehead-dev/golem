@@ -42,16 +42,13 @@ func main() {
 	tenant := flag.String("entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
 	drainFor := flag.Duration("drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
 	unready := flag.Duration("unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
-	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless on loopback)")
+	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless a literal loopback address: 127.0.0.1:4318, [::1]:4318)")
 	localKeyFile := flag.String("local-key", "", "the file holding standalone's local key (generated on first use); default <user config dir>/golem/standalone-key")
 	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
-	if *standalone == "" {
-		fail("only --standalone <dir> is built so far; the bucket source comes with the publisher (roadmap M1)")
-	}
-	if host, _, err := net.SplitHostPort(*listen); err != nil || !isLoopback(host) {
-		fail("standalone mode listens on a loopback address only (got %q): it is not for shared use (ADR 0023)", *listen)
+	if err := releaseGate(*standalone, *listen); err != nil {
+		fail("%v", err)
 	}
 
 	// Standalone: dev keys, the in-memory limiter (ADR 0023).
@@ -222,6 +219,19 @@ func setupTelemetry(where string) (*telemetry.Telemetry, func()) {
 			slog.Warn("golem-gateway: telemetry not flushed", "err", err)
 		}
 	}
+}
+
+// releaseGate is the production-publication gate (golem#5): until M1's
+// gates pass the gateway runs standalone only (no bucket source exists to
+// serve published snapshots from), and standalone listens on loopback only.
+func releaseGate(standalone, listen string) error {
+	if standalone == "" {
+		return errors.New("only --standalone <dir> is built so far; the bucket source comes with the publisher (roadmap M1)")
+	}
+	if host, _, err := net.SplitHostPort(listen); err != nil || !isLoopback(host) {
+		return fmt.Errorf("standalone mode listens on a loopback address only (got %q): it is not for shared use (ADR 0023)", listen)
+	}
+	return nil
 }
 
 // loadLocalKey reads standalone's local key, or makes one: a dev key in a

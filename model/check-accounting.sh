@@ -15,7 +15,7 @@ fail=0
 "$QUINT" typecheck "$SPEC"
 
 echo "== the designs hold (simulation of $SAMPLES runs, not a proof)"
-for pair in softDesign:safe strictDesign:safe strictSingle:hardCeiling; do
+for pair in softDesign:safe worstCheckDesign:safe worstCheckSingle:withinDeclaredWorst; do
   m=${pair%%:*}; i=${pair##*:}
   r=$(run --main="$m" --invariant="$i"); echo "$m $i: $r"
   [[ $r == "[ok]"* ]] || fail=1
@@ -42,7 +42,7 @@ expect() { # instance story pass|fail
   echo "$2 in $1: $got"; [[ $got == "$3" ]] || { echo "  expected $3"; fail=1; }
 }
 expect softDesign siblingsOvershootTest pass
-expect strictDesign siblingsOvershootTest fail
+expect worstCheckDesign siblingsOvershootTest fail
 expect noLimit unlimitedTest pass
 expect softDesign unlimitedTest fail
 expect softDesign crashReconciledTest pass
@@ -57,7 +57,7 @@ echo "== exhaustive: accounting.small.yaml, every run up to a depth (not a sampl
 if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
   . ./graph.sh
   graph_holds accounting 12 "" expireSlot
-  graph_holds accounting 12 "STRICT=true,BUDGET=4" expireSlot
+  graph_holds accounting 12 "WORST_CHECK=true,BUDGET=4" expireSlot
   graph_breaks accounting 12 LIMIT_ON=false withinBound
   graph_breaks accounting 12 RENEW_SLOTS=false withinBound
   graph_breaks accounting 12 DEDUP=false noDoubleCount

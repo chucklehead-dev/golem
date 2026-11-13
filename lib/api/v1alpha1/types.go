@@ -165,9 +165,13 @@ type LocalScope struct {
 	Models []string `json:"models"`
 	// BudgetMicros is the period's budget in micro-units of the currency;
 	// zero is no budget.
-	BudgetMicros int64    `json:"budgetMicros,omitempty"`
-	Strict       bool     `json:"strict,omitempty"`
-	InFlight     InFlight `json:"inFlight,omitzero"`
+	BudgetMicros int64 `json:"budgetMicros,omitempty"`
+	// WorstCaseCheck admits a call only if known spend plus its declared
+	// worst case fits, and refuses calls that declare none (no max_tokens,
+	// server-side tools): a fail-closed admission mode, not a spending
+	// ceiling (ADR 0044).
+	WorstCaseCheck bool     `json:"worstCaseCheck,omitempty"`
+	InFlight       InFlight `json:"inFlight,omitzero"`
 	// ProviderStorage is "forbidden" (the default: golem turns store off and
 	// refuses provider-side state) or "allowed" (ADR 0027).
 	ProviderStorage string `json:"providerStorage,omitempty"`

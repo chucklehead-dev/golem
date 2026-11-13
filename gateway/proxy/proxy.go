@@ -419,8 +419,8 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 // policy applies the scope's request policy (contracts.md §8): its
 // ceilings on output asked for and on input size (ADR 0038), provider-side
 // storage (ADR 0027: turned off where it can be, refused where it cannot),
-// and server-side tools, refused in a strict scope, where a call's cost
-// must have a bound (ADR 0031).
+// and server-side tools, refused under the worst-case check, since a
+// request that asks for them declares no worst case (ADR 0044).
 func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
 	lim := p.Limits
 	if c := lim.MaxInputBytes; c > 0 && requestBytes > c {
@@ -442,8 +442,8 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 			ex.forbidStorage(h.Dialect)
 		}
 	}
-	if lim.Strict && req.serverTools {
-		return &refusal{contract.AuthzFeatureForbidden, "this scope is strict, and server-side tools (web search or fetch, code execution, MCP servers) have no cost bound: use client-side tools, or a scope that is not strict"}
+	if lim.WorstCaseCheck && req.serverTools {
+		return &refusal{contract.AuthzFeatureForbidden, "this scope checks each call's declared worst case, and server-side tools (web search or fetch, code execution, MCP servers) declare none: use client-side tools, or a scope without worstCaseCheck"}
 	}
 	return nil
 }
@@ -455,12 +455,12 @@ func (h *Handler) admit(ctx context.Context, reqID string, started, deadline tim
 		return nil, nil
 	}
 	lim := p.Limits
-	if lim.Strict && !req.hasMax {
-		return nil, &refusal{contract.RequestInvalid, "this scope is strict: set max_tokens, so the call's worst case can be checked against the budget"}
+	if lim.WorstCaseCheck && !req.hasMax {
+		return nil, &refusal{contract.RequestInvalid, "this scope checks each call's declared worst case: set max_tokens, so it can be checked against the budget"}
 	}
 	t, err := h.Limiter.Admit(ctx, limit.Call{ID: reqID, Principal: p.ID, Scope: p.Scope,
 		Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
-		Strict: lim.Strict, Worst: worst, Started: started, Deadline: deadline})
+		WorstCaseCheck: lim.WorstCaseCheck, Worst: worst, Started: started, Deadline: deadline})
 	switch {
 	case errors.Is(err, limit.ErrBudget):
 		return nil, &refusal{contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it"}

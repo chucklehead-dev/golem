@@ -1,6 +1,6 @@
 # 0031: Budgets are soft and eventually consistent; the overshoot is bounded and stated
 
-Status: Accepted. Supersedes the accounting parts of 0012 (money reservations, their renewal, site allocations). Amended by [0038](0038-accounting-refinements.md) (dedicated accounts, monthly reconciliation, slot renewal, worst-case ceilings) and [0042](0042-known-spend-by-counter-watermark.md) (how known spend is computed).
+Status: Accepted. Supersedes the accounting parts of 0012 (money reservations, their renewal, site allocations). Amended by [0038](0038-accounting-refinements.md) (dedicated accounts, monthly reconciliation, slot renewal, worst-case ceilings) and [0042](0042-known-spend-by-counter-watermark.md) (how known spend is computed); [0044](0044-budgets-are-controls-not-ceilings.md) (the bound is expected exposure, not a guarantee; no hard ceiling; strict renamed `worstCaseCheck`).
 reservations, renewal, uncertain liability), 0013 (fixed site allocations),
 0029 §9 (durable per-attempt accounting as an M1 gate; failing closed when
 the journal is unavailable; site allocations) and 0030 (the spool spike).

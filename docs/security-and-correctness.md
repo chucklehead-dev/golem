@@ -226,9 +226,11 @@ and site allocations are not required. What remains required:
 - Known spend (the deduplicated ledger balance published in snapshots,
   plus the site's counter since then) is the only input to budget checks;
   once it reaches a budget, every further call is refused on every site.
-- Per-principal concurrency limits are enforced; strict scopes check the
-  worst-case cost (no cache discount, `max_tokens` or the model maximum,
-  no server-side tools).
+- Per-principal concurrency limits are enforced; scopes with the
+  worst-case check admit on the declared worst case (no cache discount,
+  `max_tokens` × `n`, no server-side tools). Budgets are controls, not
+  ceilings: no estimate or declared worst case is claimed to bound real
+  spend, and the provider account's limit is the backstop (ADR 0044).
 - Numeric aggregate bounds are not established by the single-principal
   accounting model. ADR 0041 §6 (and §7.3 for failed renewal) requires scope/multi-site bounds,
   counter handoff and failed-renewal scenarios before such claims are made.

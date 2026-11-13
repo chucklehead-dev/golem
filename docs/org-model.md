@@ -151,13 +151,17 @@ plus the site's counter since) at each level, and fails with a 402 (not
 3. the scope pool's `available`.
 
 Budgets are soft and eventually consistent (ADR 0031): calls already in
-flight can take spend past a limit, by at most the principal's in-flight
-limit times the largest call, plus what it spends within one refresh lag;
-a scope's pool, shared by its members, by the scope's own in-flight limit
-times the largest call (ADR 0041 §7.6).
-A scope may choose **strict**: the request's worst-case cost must also fit,
-which tightens the bound by one call (and makes it a hard ceiling on one
-site with an in-flight limit of one).
+flight can take spend past a limit: by about the principal's in-flight
+limit times its largest declared call, plus what it spends within one
+refresh lag; a scope's pool, shared by its members, by about the scope's
+own in-flight limit times the largest call (ADR 0041 §7.6). These are
+expected exposure while calls cost what they declare, not guarantees.
+A scope may choose the **worst-case check** (`worstCaseCheck`): the
+request's declared worst case must also fit, and a request that declares
+none (no `max_tokens`, server-side tools) is refused. That narrows the
+overshoot by about one call; it is not a ceiling. A budget is an
+admission and monitoring control: the provider's bill, reconciled, is the
+record, and the provider account's spending limit the backstop (ADR 0044).
 
 What happens at a limit depends on the scope's enforcement mode (PRD
 §9.1): `observe` records the refusal it would have made, `warn` allows it

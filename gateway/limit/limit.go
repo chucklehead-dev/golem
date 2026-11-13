@@ -26,10 +26,11 @@ type Call struct {
 	Budget               int64 // the scope's budget in micro-units; 0: none
 	PrincipalLimit       int   // in-flight calls per principal; 0: none
 	ScopeLimit           int   // in-flight calls per scope (ADR 0041 §7.6); 0: none
-	// Strict (a scope option): admit only if known spend plus Worst fits
-	// (ADR 0031); else the soft check, known spend below the budget.
-	Strict bool
-	Worst  int64
+	// WorstCaseCheck (a scope option): admit only if known spend plus Worst,
+	// the call's declared worst case, fits (ADR 0031, 0044); else the soft
+	// check, known spend below the budget.
+	WorstCaseCheck bool
+	Worst          int64
 	// Started is when the call began (the request's arrival): it fixes the
 	// budget period the call belongs to, the one its ledger row names. Zero
 	// means now.
@@ -191,7 +192,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 		k := l.snapshotFor(c.Scope, period)
 		sctx, cancel := l.storeContext(ctx)
 		o, known, over, err := l.store.Admit(sctx, Admission{Slot: Slot{c.ID, c.Principal, c.Scope}, Period: period,
-			Watermark: k.Watermark, Spend: k.Spend, Budget: c.Budget, Strict: c.Strict, Worst: c.Worst,
+			Watermark: k.Watermark, Spend: k.Spend, Budget: c.Budget, WorstCaseCheck: c.WorstCaseCheck, Worst: c.Worst,
 			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit})
 		cancel()
 		switch {
@@ -225,7 +226,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	known := l.last[lastKey]
 	switch {
 	case c.Budget == 0:
-	case c.Strict && known+c.Worst > c.Budget, !c.Strict && known >= c.Budget:
+	case c.WorstCaseCheck && known+c.Worst > c.Budget, !c.WorstCaseCheck && known >= c.Budget:
 		return nil, ErrBudget
 	}
 	if (c.PrincipalLimit > 0 && l.byPrincipal[c.Principal] >= c.PrincipalLimit) || (c.ScopeLimit > 0 && l.byScope[c.Scope] >= c.ScopeLimit) {

@@ -8,7 +8,7 @@ module accounting {
 
   const LIMIT_ON: bool
   const RENEW_SLOTS: bool
-  const STRICT: bool
+  const WORST_CHECK: bool
   const DEDUP: bool
   const RECONCILE: bool
   var phase: str -> str
@@ -43,7 +43,7 @@ module accounting {
   action admit(request: str): bool = all {
     phase.get(request) == "idle",
     if (LIMIT_ON) holdingSlots < LIMIT else true,
-    if (STRICT) known + WORST <= BUDGET else known < BUDGET,
+    if (WORST_CHECK) known + WORST <= BUDGET else known < BUDGET,
     phase' = phase.put(request, "inflight"),
     billed' = billed, known' = known, buffer' = buffer, ledger' = ledger,
     adjustment' = adjustment, uncounted' = uncounted, closed' = closed,
@@ -129,7 +129,7 @@ module accounting {
       expireSlot(request),
     }
   }
-  val slack = if (STRICT) (LIMIT - 1) * WORST else LIMIT * WORST
+  val slack = if (WORST_CHECK) (LIMIT - 1) * WORST else LIMIT * WORST
   val withinBound = totalBilled <= BUDGET + slack + uncounted
   val noDoubleCount = ledgerSpend <= totalBilled
 
@@ -199,37 +199,39 @@ module accounting {
 
 module softDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
 }
 
-module strictDesign {
+module worstCheckDesign {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = true, DEDUP = true, RECONCILE = true).*
 }
 
-module strictSingle {
+module worstCheckSingle {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = true, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 1, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = true, DEDUP = true, RECONCILE = true).*
 
-  val hardCeiling = totalBilled <= BUDGET + uncounted
+  // Within the budget, apart from crash losses, while every call costs at
+  // most WORST: the model's assumption, not a ceiling on real spend.
+  val withinDeclaredWorst = totalBilled <= BUDGET + uncounted
 }
 
 module noLimit {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = false, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
 }
 
 module rawSum {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = false, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = false, RECONCILE = true).*
 }
 
 module noSlotRenewal {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = false, STRICT = false, DEDUP = true, RECONCILE = true).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = false, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
 }
 
 module noReconcile {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
-    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, STRICT = false, DEDUP = true, RECONCILE = false).*
+    BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = false).*
 }

@@ -13,7 +13,7 @@ func scopeCall(id, principal string) Call {
 	return Call{ID: id, Principal: principal, Scope: "s", Budget: 10, PrincipalLimit: 1, ScopeLimit: 2}
 }
 
-func TestSoftAndStrict(t *testing.T) {
+func TestSoftAndWorstCase(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
 	tk, err := l.Admit(ctx, scopeCall("a", "p1"))
@@ -27,15 +27,15 @@ func TestSoftAndStrict(t *testing.T) {
 	if _, err := l.Admit(ctx, soft); err != nil {
 		t.Fatalf("soft: %v", err)
 	}
-	// Strict: 8 + 5 > 10 refuses (ADR 0031).
-	strict := scopeCall("c", "p2")
-	strict.Strict, strict.Worst = true, 5
-	if _, err := l.Admit(ctx, strict); !errors.Is(err, ErrBudget) {
-		t.Fatalf("strict: %v, want ErrBudget", err)
+	// The worst-case check: 8 + 5 > 10 refuses (ADR 0031).
+	checked := scopeCall("c", "p2")
+	checked.WorstCaseCheck, checked.Worst = true, 5
+	if _, err := l.Admit(ctx, checked); !errors.Is(err, ErrBudget) {
+		t.Fatalf("checked: %v, want ErrBudget", err)
 	}
-	strict.Worst = 2
-	if _, err := l.Admit(ctx, strict); err != nil {
-		t.Fatalf("strict within the budget: %v", err)
+	checked.Worst = 2
+	if _, err := l.Admit(ctx, checked); err != nil {
+		t.Fatalf("checked within the budget: %v", err)
 	}
 }
 
