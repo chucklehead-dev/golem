@@ -88,8 +88,9 @@ prevent double counting.
 | `cost_micros` | Int64 | in the configured currency's millionths; computed by golem |
 | `currency` | FixedString(3) | |
 | `price_version` | String | the `PriceList` version used |
-| `outcome`, `error_origin`, `error_code` | | §1, §2 |
+| `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away) or `failed`; the failure's §2 origin and §1 code |
 | `estimated_fraction` | Float32 | 0 for actual rows |
+| `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
 
 - Rounding: per row, cost is computed in micro-units from integer token
   counts and prices in micro-units per million tokens, rounded half-even

@@ -122,6 +122,8 @@ gates name what is still owed):
 | the same | the same | a benchmark of the admitted path, then the model | **the design was wrong, twice hidden by an atomic model**: matching counter events to snapshots cost O(window) per admission, and deleting included events lost them for gateways still on an older snapshot. ADR 0042 replaced it (numbered counter, ledger watermark: O(1), exact under skew); the model now applies snapshots and recovers per gateway, which also exposed admissions next to unrecovered peers' calls (now waived for a grace period). 32 µs and 23 allocations per admitted request, flat |
 | `gateway/dialect/...`, `gateway/sse` | — | fuzzing: scan acceptance equals `encoding/json`'s, rewrites change one field, usage independent of chunking | a split `\r\n` across an empty write |
 | the gateway end to end | — | `test/compat`: the official SDKs through it to a stub provider | the injected OpenAI usage chunk crashed the SDKs' usual loops |
+| the same, reviewed | — | a Go specialist's and an architect's review, each fix with a test | admission read and acquired in two round trips (now one script); counters spanned months, so every budgeted scope was refused from the second; standalone could be driven by any web page; a cut provider response reached the caller as a clean, shorter one; the filtered OpenAI stream dropped keep-alives; shutdown cut every stream; a key with a missing scope was unlimited |
+| `gateway/sse.Filter` | — | fuzzing: dropping nothing is the identity, however the stream is chunked | a `\r\n` split across writes was attributed to the next event, dropped with it |
 
 ## Review acceptance gates
 

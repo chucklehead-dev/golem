@@ -134,6 +134,7 @@ func (l *Ledger) row(c Call, seq int64) []attribute.KeyValue {
 		s("error_origin", c.ErrorOrigin),
 		s("error_code", c.ErrorCode),
 		f("estimated_fraction", estimated),
+		attribute.Bool("waived", c.Waived),
 	}
 }
 

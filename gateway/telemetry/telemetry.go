@@ -50,12 +50,16 @@ type Call struct {
 	Status                          int
 	Outcome, ErrorOrigin, ErrorCode string
 	Estimated                       bool // usage counted from a cut stream's deltas
+	// Waived: admitted outside the budget's bound, while the site store was
+	// unreachable or in the grace after a recovery (ADR 0041 §7.3).
+	Waived bool
 	// Counted: the limiter numbers this call's event, and its ledger row
 	// waits for the number (Numbered). Else the row is written at once.
 	Counted bool
 }
 
-// Telemetry records calls. Its methods are safe for concurrent use.
+// Telemetry records calls. Its methods are safe for concurrent use, and on
+// a nil *Telemetry do nothing (a gateway without telemetry, tests).
 type Telemetry struct {
 	tracer   trace.Tracer
 	tokens   metric.Int64Histogram
@@ -94,6 +98,9 @@ func New(p Providers, site, pool string) (*Telemetry, error) {
 // Start begins a request's span; the request path ends it with Ended or
 // Refused.
 func (t *Telemetry) Start(ctx context.Context, frontend string) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, trace.SpanFromContext(ctx)
+	}
 	return t.tracer.Start(ctx, "chat", trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(attribute.String(attrOperation, "chat"), attribute.String("golem.dialect", frontend)))
 }
@@ -101,6 +108,9 @@ func (t *Telemetry) Start(ctx context.Context, frontend string) (context.Context
 // Ended records a call that reached a provider: the span's attributes, the
 // metrics, and the ledger row.
 func (t *Telemetry) Ended(ctx context.Context, c Call) {
+	if t == nil {
+		return
+	}
 	span := trace.SpanFromContext(ctx)
 	span.SetName("chat " + c.Alias)
 	span.SetAttributes(
@@ -115,6 +125,7 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 		attribute.String("golem.deployment", c.Deployment),
 		attribute.Int64("golem.cost_micros", c.Cost),
 		attribute.Bool("golem.usage_estimated", c.Estimated),
+		attribute.Bool("golem.waived", c.Waived),
 		attribute.Int("http.response.status_code", c.Status),
 	)
 	if c.ErrorOrigin != "" {
@@ -131,9 +142,20 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 
 // Refused records a request golem refused (no provider call, no ledger row).
 func (t *Telemetry) Refused(ctx context.Context, code contract.Code) {
+	if t == nil {
+		return
+	}
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("golem.error.origin", string(code.Origin)), attribute.String("golem.error.code", code.Name),
 		attribute.Int("http.response.status_code", code.Status))
 	t.refusals.Add(ctx, 1, metric.WithAttributes(attribute.String("golem.error.code", code.Name),
 		attribute.String("golem.error.origin", string(code.Origin))))
+}
+
+// Numbered is the limiter's OnNumbered: the ledger writes the event's row
+// with its counter number.
+func (t *Telemetry) Numbered(eventID string, seq int64) {
+	if t != nil {
+		t.Ledger.Numbered("", eventID, seq)
+	}
 }

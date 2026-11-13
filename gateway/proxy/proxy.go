@@ -7,11 +7,13 @@ package proxy
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -22,6 +24,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/sse"
+	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/contract"
 	"github.com/chucklehead-dev/golem/lib/id"
 )
@@ -70,7 +73,11 @@ type Handler struct {
 	// everything.
 	Limiter *limit.Limiter
 	MaxBody int64 // request body cap in bytes
-	Record  func(*http.Request, Result)
+	// Telemetry records each request's span, metrics and ledger row; nil
+	// records nothing.
+	Telemetry *telemetry.Telemetry
+	// Record, if set, is told each call's result (tests).
+	Record func(*http.Request, Result)
 }
 
 // Request headers a caller may pass to the provider, and response headers
@@ -161,6 +168,9 @@ func (u *upstreamBody) Close() error {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	ctx, span := h.Telemetry.Start(r.Context(), h.Dialect.Name())
+	defer span.End()
 	reqID := id.New()
 	var idBuf [36]byte
 	reqIDs := string(reqID.AppendString(idBuf[:0]))
@@ -170,11 +180,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch err {
 	case nil:
 	case snapshot.ErrExpired:
-		h.fail(w, contract.GatewayAuthorizationExpired,
+		h.fail(ctx, w, contract.GatewayAuthorizationExpired,
 			"this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted")
 		return
 	default:
-		h.fail(w, contract.GatewayNotReady, "this gateway has no configuration yet; retry shortly")
+		h.fail(ctx, w, contract.GatewayNotReady, "this gateway has no configuration yet; retry shortly")
 		return
 	}
 
@@ -182,7 +192,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if snap.Auth != nil {
 		p, refused := snap.Auth.Authenticate(r.Header)
 		if refused != nil {
-			h.fail(w, refused.Code, refused.Msg)
+			h.fail(ctx, w, refused.Code, refused.Msg)
 			return
 		}
 		principal = p
@@ -211,10 +221,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body := *in
 	if err != nil {
 		if _, tooBig := errors.AsType[*http.MaxBytesError](err); tooBig {
-			h.fail(w, contract.RequestTooLarge, "the request body is larger than this gateway accepts")
+			h.fail(ctx, w, contract.RequestTooLarge, "the request body is larger than this gateway accepts")
 			return
 		}
-		h.fail(w, contract.RequestUnreadable, "the request body could not be read")
+		h.fail(ctx, w, contract.RequestUnreadable, "the request body could not be read")
 		return
 	}
 
@@ -231,21 +241,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		maxTokens, hasMax = ex.chat.MaxTokens, ex.chat.HasMaxTokens
 	}
 	if err != nil {
-		h.fail(w, contract.RequestInvalid, err.Error())
+		h.fail(ctx, w, contract.RequestInvalid, err.Error())
 		return
 	}
 	rt := snap.Routes.Lookup(alias)
 	if rt == nil {
-		h.fail(w, contract.RouteUnknownModel, "no route for this model; ask the scope's managers which aliases it may use")
+		h.fail(ctx, w, contract.RouteUnknownModel, "no route for this model; ask the scope's managers which aliases it may use")
 		return
 	}
 	if rt.Dialect != h.Dialect.Name() {
-		h.fail(w, contract.RouteWrongFrontend,
+		h.fail(ctx, w, contract.RouteWrongFrontend,
 			"this model speaks "+rt.Dialect+", not "+h.Dialect.Name()+": call it at that API's endpoint (golem converts only where a route says so)")
 		return
 	}
 	if !principal.Allows(alias) {
-		h.fail(w, contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows")
+		h.fail(ctx, w, contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows")
 		return
 	}
 	target := rt.Pick()
@@ -256,21 +266,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Limiter != nil {
 		lim := principal.Limits
 		if lim.Strict && !hasMax {
-			h.fail(w, contract.RequestInvalid, "this scope is strict: set max_tokens, so the call's worst case can be checked against the budget")
+			h.fail(ctx, w, contract.RequestInvalid, "this scope is strict: set max_tokens, so the call's worst case can be checked against the budget")
 			return
 		}
-		ticket, err = h.Limiter.Admit(r.Context(), limit.Call{ID: reqIDs, Principal: principal.ID, Scope: principal.Scope,
+		ticket, err = h.Limiter.Admit(ctx, limit.Call{ID: reqIDs, Principal: principal.ID, Scope: principal.Scope,
 			Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
 			Strict: lim.Strict, Worst: price.Worst(int64(len(body)), maxTokens, pr)})
 		switch {
 		case errors.Is(err, limit.ErrBudget):
-			h.fail(w, contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it")
+			h.fail(ctx, w, contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it")
 			return
 		case errors.Is(err, limit.ErrConcurrency):
-			h.fail(w, contract.LimitConcurrency, "too many calls in flight for this key's principal or scope; retry when one finishes")
+			h.fail(ctx, w, contract.LimitConcurrency, "too many calls in flight for this key's principal or scope; retry when one finishes")
 			return
 		case err != nil:
-			h.fail(w, contract.GatewayInternal, "the limiter failed")
+			h.fail(ctx, w, contract.GatewayInternal, "the limiter failed")
 			return
 		}
 	}
@@ -298,7 +308,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ContentLength: int64(len(*out)),
 		Host:          target.URL.Host,
 	}
-	up = up.WithContext(r.Context())
+	up = up.WithContext(ctx)
 	up.Header["Content-Type"] = jsonType
 	for _, k := range forwardRequest {
 		if v := r.Header[k]; v != nil {
@@ -308,13 +318,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for k, v := range target.Header {
 		up.Header[k] = v
 	}
+	call := telemetry.Call{RequestID: reqIDs, Principal: principal.ID, PrincipalKind: principal.Kind, Key: principal.Key,
+		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Model: target.Model,
+		Deployment: target.Backend + "/" + target.Deployment, Provider: target.Backend, Started: started,
+		Currency: snap.Snapshot.Currency, Counted: ticket != nil, Waived: ticket != nil && ticket.Waived()}
+	// The accounting runs to its end whatever the caller does.
+	acct := context.WithoutCancel(ctx)
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
+		c := contract.UpstreamUnavailable
+		call.Ended, call.Status, call.Outcome = time.Now(), c.Status, "failed"
+		call.ErrorOrigin, call.ErrorCode = string(c.Origin), c.Name
+		h.Telemetry.Ended(acct, call) // before the ticket numbers its event
 		if ticket != nil {
-			ticket.Complete(r.Context(), 0) // no upstream work: nothing billed
+			ticket.Complete(acct, 0) // no upstream work: nothing billed
 		}
-		h.fail(w, contract.UpstreamUnavailable, "the provider could not be reached; retry shortly")
+		Refuse(w, h.Dialect, c, "the provider could not be reached; retry shortly")
 		return
 	}
 	defer resp.Body.Close()
@@ -332,25 +352,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		res.Usage, res.Err = h.whole(w, resp.Body, ex)
 	}
-	res.Cost, res.CallerGone = price.Cost(res.Usage, pr), ex.callerGone
+	// The caller is gone if a write to it failed, or if its request ended
+	// first (the upstream read then fails with its context).
+	res.Cost, res.CallerGone = price.Cost(res.Usage, pr), ex.callerGone || r.Context().Err() != nil
+	_, cut := errors.AsType[errUpstreamCut](res.Err)
+	call.Ended, call.Status, call.Usage, call.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
+	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
+	switch {
+	case res.CallerGone:
+		call.Outcome, call.ErrorOrigin = "cancelled", string(contract.OriginClient)
+	case cut:
+		call.Outcome = "failed"
+		call.ErrorOrigin, call.ErrorCode = string(contract.UpstreamStreamFailed.Origin), contract.UpstreamStreamFailed.Name
+	case resp.StatusCode >= 400:
+		call.Outcome, call.ErrorOrigin = "failed", string(contract.OriginProvider)
+	default:
+		call.Outcome = "completed"
+	}
+	// The row is prepared before the ticket numbers its event: the
+	// limiter's OnNumbered writes it with the number.
+	h.Telemetry.Ended(acct, call)
 	if ticket != nil {
-		// The request's context may be done: the accounting must not be.
-		ctx := context.WithoutCancel(r.Context())
 		if res.CallerGone {
 			// The caller went away: what was seen is charged, and the slot
 			// is held until the upstream has ended (ADR 0041 §7.6), here the
 			// connection's close.
-			ticket.Cancel(ctx, res.Cost)
+			ticket.Cancel(acct, res.Cost)
 			resp.Body.Close()
-			ticket.Ended(ctx)
+			ticket.Ended(acct)
 		} else {
-			ticket.Complete(ctx, res.Cost)
+			ticket.Complete(acct, res.Cost)
 		}
 	}
 	if h.Record != nil {
 		h.Record(r, res)
 	}
-	if _, cut := errors.AsType[errUpstreamCut](res.Err); cut && !res.CallerGone {
+	if cut && !res.CallerGone {
 		// The provider's response ended early. A clean end would read as a
 		// complete (and shorter) answer: a stream gets the contract's error
 		// event, and then the response is aborted (a reset, not an end), so
@@ -502,7 +539,10 @@ func (h *Handler) usage(ex *exchange, cut error) (canon.Usage, error) {
 	}
 }
 
-func (h *Handler) fail(w http.ResponseWriter, c contract.Code, msg string) {
+// fail refuses a request: the refusal recorded, and written in the
+// caller's dialect.
+func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, c contract.Code, msg string) {
+	h.Telemetry.Refused(ctx, c)
 	Refuse(w, h.Dialect, c, msg)
 }
 

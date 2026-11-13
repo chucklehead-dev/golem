@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS golem.spend (
     outcome               LowCardinality(String),
     error_origin          LowCardinality(String),
     error_code            LowCardinality(String),
-    estimated_fraction    Float32
+    estimated_fraction    Float32,
+    waived                Bool
 )
 ENGINE = MergeTree
 PARTITION BY period

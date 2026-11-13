@@ -28,7 +28,10 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/proxy"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
+	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/key"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
 )
 
 func main() {
@@ -37,6 +40,7 @@ func main() {
 	maxBody := flag.Int64("max-body", 32<<20, "largest request body accepted, in bytes")
 	tenant := flag.String("entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
 	drainFor := flag.Duration("drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
+	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
 	if *standalone == "" {
@@ -47,7 +51,10 @@ func main() {
 	}
 
 	// Standalone: dev keys, the in-memory limiter (ADR 0023).
+	tel, shutdownTelemetry := setupTelemetry(*telem)
+	defer shutdownTelemetry()
 	limiter := limit.New(limit.NewMem())
+	limiter.OnNumbered = func(_ string, e limit.Event, seq int64) { tel.Numbered(e.ID, seq) }
 	var entra *auth.Entra
 	if *tenant != "" {
 		entra = &auth.Entra{Tenant: *tenant, Audiences: strings.Split(*audience, ",")}
@@ -67,7 +74,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
-		mux.Handle(pattern, localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody}))
+		mux.Handle(pattern, localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody, Telemetry: tel}))
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
@@ -139,6 +146,36 @@ func renew(ctx context.Context, l *limit.Limiter) {
 		}
 		if err := l.Renew(ctx); err != nil {
 			slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
+		}
+	}
+}
+
+// setupTelemetry starts the gateway's telemetry: ledger rows on stdout, none,
+// or everything over OTLP to a collector. The returned func flushes it.
+func setupTelemetry(where string) (*telemetry.Telemetry, func()) {
+	var p telemetry.Providers
+	shutdown := func(context.Context) error { return nil }
+	switch where {
+	case "off":
+		return nil, func() {}
+	case "stdout":
+		p = telemetry.Stdout(os.Stdout)
+	default:
+		res := resource.NewSchemaless(attribute.String("service.name", "golem-gateway"), attribute.String("golem.site", "local"))
+		var err error
+		if p, shutdown, err = telemetry.OTLP(context.Background(), where, res); err != nil {
+			fail("telemetry to %s: %v", where, err)
+		}
+	}
+	tel, err := telemetry.New(p, "local", "standalone")
+	if err != nil {
+		fail("telemetry: %v", err)
+	}
+	return tel, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(ctx); err != nil {
+			slog.Warn("golem-gateway: telemetry not flushed", "err", err)
 		}
 	}
 }
