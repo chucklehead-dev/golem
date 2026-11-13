@@ -117,13 +117,31 @@ func (r *Request) Rewrite(dst, body []byte, model string) []byte {
 type StreamUsage struct {
 	Usage canon.Usage
 	Err   error // the first malformed usage event, if any
+	// Final: the output count is the provider's (a message_delta, or a
+	// whole response's usage). Else a cut stream's output is estimated
+	// from the content seen: a whole response's ContentBytes, or Deltas
+	// events whose data the parser skipped (and measured).
+	Final        bool
+	ContentBytes int64
+	Deltas       int64
 }
 
-// Want skips the data of events that carry no usage (content deltas, pings).
+// DeltaEnvelope is a content delta's data without its content: what an
+// estimate takes off each skipped delta's bytes.
+var DeltaEnvelope = int64(len(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`))
+
+// contentKeys hold a delta's or a response's content: text, thinking and a
+// tool call's JSON.
+var contentKeys = []string{"text", "thinking", "partial_json"}
+
+// Want skips the data of events that carry no usage: content deltas are
+// counted, and their data measured by the parser, not copied or scanned.
 func (u *StreamUsage) Want(event []byte) bool {
 	switch string(event) {
 	case "message_start", "message_delta":
 		return true
+	case "content_block_delta":
+		u.Deltas++
 	}
 	return false
 }
@@ -153,6 +171,7 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 			if string(name) != "usage" {
 				return d.SkipValue()
 			}
+			u.Final = true
 			return u.readUsage(d)
 		})
 	}
@@ -163,10 +182,12 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 
 // Response reads usage from a whole (non-streamed) response body.
 func (u *StreamUsage) Response(body []byte) {
+	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
 		if string(name) != "usage" {
 			return d.SkipValue()
 		}
+		u.Final = true
 		return u.readUsage(d)
 	})
 	if err != nil && u.Err == nil {

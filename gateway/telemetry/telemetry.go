@@ -54,7 +54,9 @@ type Call struct {
 	Currency                        string
 	Status                          int
 	Outcome, ErrorOrigin, ErrorCode string
-	Estimated                       bool // usage counted from a cut stream's deltas
+	// EstimatedFraction is the share of Cost estimated from what was seen
+	// (a cut stream, a missing usage report), not reported: 0 for actual.
+	EstimatedFraction float64
 	// Waived: admitted outside the budget's bound, while the site store was
 	// unreachable or in the grace after a recovery (ADR 0041 §7.3).
 	Waived bool
@@ -181,7 +183,7 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 		attribute.String("golem.scope", c.Scope),
 		attribute.String("golem.deployment", c.Deployment),
 		attribute.Int64("golem.cost_micros", c.Cost),
-		attribute.Bool("golem.usage_estimated", c.Estimated),
+		attribute.Bool("golem.usage_estimated", c.EstimatedFraction > 0),
 		attribute.Bool("golem.waived", c.Waived),
 		attribute.Int("http.response.status_code", c.Status),
 	)

@@ -20,8 +20,10 @@ type Parser struct {
 	// OnEvent receives the event's name (empty if none) and its data lines
 	// joined by "\n". Both are valid only during the call.
 	OnEvent func(event, data []byte)
-	// Dropped counts events over MaxEvent.
+	// Dropped counts events over MaxEvent; Skipped, the bytes of the data
+	// Want skipped (an estimate's measure of content seen, at no cost).
 	Dropped int
+	Skipped int64
 
 	line    []byte
 	event   []byte
@@ -155,7 +157,11 @@ func (p *Parser) field(line []byte) {
 			p.skip = true
 		}
 	case "data":
-		if p.skip || p.over {
+		if p.skip {
+			p.Skipped += int64(len(value))
+			return
+		}
+		if p.over {
 			return
 		}
 		if len(p.data)+len(value)+1 > MaxEvent {

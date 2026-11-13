@@ -130,3 +130,49 @@ func Splice(dst, body []byte, s Span, value string) []byte {
 	dst, _ = jsontext.AppendQuote(dst, value)
 	return append(dst, body[s.End:]...)
 }
+
+// StringBytes is the total length, escapes counted as written, of the
+// string values of the given keys anywhere in data ("text", "arguments"):
+// the content of a delta or a response, for estimating its tokens when the
+// provider reported none. It is a byte search, not a parse: a raw quote
+// cannot occur inside a JSON string, so each `"key":"` found is a key's
+// string value (a provider's compact JSON; an estimate tolerates the rest).
+func StringBytes(data []byte, keys ...string) int {
+	n := 0
+	for _, k := range keys {
+		for rest := data; ; {
+			i := indexKey(rest, k)
+			if i < 0 {
+				break
+			}
+			rest = rest[i:]
+			end := stringEnd(rest)
+			n += end
+			rest = rest[end:]
+		}
+	}
+	return n
+}
+
+// indexKey finds `"k":"` and returns where the value's characters begin.
+func indexKey(b []byte, k string) int {
+	i := bytes.Index(b, []byte(`"`+k+`":"`))
+	if i < 0 {
+		return -1
+	}
+	return i + len(k) + 4
+}
+
+// stringEnd is the length of a JSON string's characters up to its closing
+// quote.
+func stringEnd(b []byte) int {
+	for i := 0; i < len(b); i++ {
+		switch b[i] {
+		case '\\':
+			i++
+		case '"':
+			return i
+		}
+	}
+	return len(b)
+}

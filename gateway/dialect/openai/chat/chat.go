@@ -220,7 +220,17 @@ func (r *Request) Rewrite(dst, body []byte, model string) []byte {
 type StreamUsage struct {
 	Usage canon.Usage
 	Err   error
+	// Final: the usage is the provider's. Else a cut stream's output is
+	// estimated from the content seen: a whole response's ContentBytes, or
+	// a stream's Deltas chunks (about a token each).
+	Final        bool
+	ContentBytes int64
+	Deltas       int64
 }
+
+// contentKeys hold a chunk's or a response's content: text, reasoning, a
+// refusal and a tool call's arguments.
+var contentKeys = []string{"content", "reasoning_content", "refusal", "arguments"}
 
 var usageKey = []byte(`"usage"`)
 
@@ -253,6 +263,7 @@ func mayHaveUsage(data []byte) bool {
 
 // OnEvent reads one chunk; only a chunk that may carry usage is scanned.
 func (u *StreamUsage) OnEvent(_, data []byte) {
+	u.Deltas++
 	if mayHaveUsage(data) {
 		u.Response(data)
 	}
@@ -261,6 +272,7 @@ func (u *StreamUsage) OnEvent(_, data []byte) {
 // Response reads usage from a JSON object (a chunk or a whole response).
 // OpenAI's prompt_tokens include the cached ones; canon.Usage.Input does not.
 func (u *StreamUsage) Response(body []byte) {
+	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
 	var got canon.Usage
 	seen := false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
@@ -272,6 +284,7 @@ func (u *StreamUsage) Response(body []byte) {
 			return err // null usage: an ordinary chunk
 		}
 		seen = true
+		u.Final = true
 		return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
 			switch string(name) {
 			case "prompt_tokens":

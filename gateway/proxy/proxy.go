@@ -106,6 +106,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	body, no := h.readBody(w, r, in)
+	requestBytes := int64(len(body)) // for an estimate, once body is gone
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
@@ -196,8 +197,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The caller is gone if a write to it failed, or if its request ended
 	// first (the upstream read then fails with its context).
-	res.Cost, res.CallerGone = price.Cost(res.Usage, pr), ex.callerGone || r.Context().Err() != nil
+	res.CallerGone = ex.callerGone || r.Context().Err() != nil
 	_, cut := errors.AsType[errUpstreamCut](res.Err)
+	if resp.StatusCode == http.StatusOK { // a provider bills no error response
+		// A cut or unreported response is charged what was produced, counted
+		// from what was seen (ADR 0012), and its row says how much of its
+		// cost is estimated; never zero for work the provider did.
+		var estimated canon.Usage
+		res.Usage, estimated = ex.estimate(h.Dialect, requestBytes)
+		if est := price.Cost(estimated, pr); est > 0 {
+			call.EstimatedFraction = float64(est) / float64(max(price.Cost(res.Usage, pr), 1))
+		}
+	}
+	res.Cost = price.Cost(res.Usage, pr)
 
 	call.Ended, call.Status, call.Usage, call.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
 	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))

@@ -95,10 +95,6 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call, seq int64)
 		p = budget.Of(c.Started, l.Period)
 	}
 	period := budget.FirstDay(p)
-	estimated := 0.0
-	if c.Estimated {
-		estimated = 1
-	}
 	s, i, f := attribute.String, attribute.Int64, attribute.Float64
 	*dst = [...]attribute.KeyValue{
 		i("schema_version", SchemaVersion),
@@ -139,7 +135,7 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call, seq int64)
 		s("outcome", c.Outcome),
 		s("error_origin", c.ErrorOrigin),
 		s("error_code", c.ErrorCode),
-		f("estimated_fraction", estimated),
+		f("estimated_fraction", c.EstimatedFraction),
 		attribute.Bool("waived", c.Waived),
 	}
 }

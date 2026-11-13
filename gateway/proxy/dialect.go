@@ -62,6 +62,7 @@ func (ex *exchange) rewrite(d Dialect, dst, body []byte, model string) []byte {
 func (ex *exchange) startStream(d Dialect) (filter bool) {
 	if d == AnthropicMessages {
 		ex.msgUsage = messages.StreamUsage{}
+		ex.deltaBytes, ex.skipMark, ex.inDelta = 0, 0, false
 		ex.parser.Want, ex.parser.OnEvent = ex.msgWant, ex.msgOn
 		ex.parser.Reset()
 		return false
@@ -94,6 +95,42 @@ func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
 		return ex.msgUsage.Usage, errors.Join(cut, ex.msgUsage.Err)
 	}
 	return ex.chatUsage.Usage, errors.Join(cut, ex.chatUsage.Err)
+}
+
+// bytesPerToken is the estimate's ratio: about four bytes of English text
+// or code a token for the tokenizers golem serves. An estimate replaces no
+// count the provider gave; reconciliation corrects it (ADR 0031).
+const bytesPerToken = 4
+
+// estimate completes a response's usage when the provider's report is
+// missing (a stream cut, or a response without its usage): output from the
+// content seen, at least a token per content delta; input, if the provider
+// gave none, from the request's size. It returns the usage to charge and
+// the estimated part of it (zero when the report was whole).
+func (ex *exchange) estimate(d Dialect, requestBytes int64) (total, estimated canon.Usage) {
+	var u canon.Usage
+	var final bool
+	var content, deltas int64
+	if d == AnthropicMessages {
+		u, final, content, deltas = ex.msgUsage.Usage, ex.msgUsage.Final, ex.msgUsage.ContentBytes, ex.msgUsage.Deltas
+		if ex.closeDelta(); ex.deltaBytes > 0 { // a stream: its deltas' data, less their envelopes
+			content = max(ex.deltaBytes-deltas*messages.DeltaEnvelope, 0)
+		}
+	} else {
+		u, final, content, deltas = ex.chatUsage.Usage, ex.chatUsage.Final, ex.chatUsage.ContentBytes, ex.chatUsage.Deltas
+	}
+	if final {
+		return u, canon.Usage{}
+	}
+	total = u
+	if out := max((content+bytesPerToken-1)/bytesPerToken, deltas); out > u.Output {
+		total.Output, estimated.Output = out, out-u.Output
+	}
+	if u.Input == 0 && u.CacheRead == 0 && u.CacheWrite == 0 { // no message_start, or OpenAI's (only at the end)
+		total.Input = requestBytes / bytesPerToken
+		estimated.Input = total.Input
+	}
+	return total, estimated
 }
 
 // appendError appends a dialect's error object for a contract code, with

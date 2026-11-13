@@ -89,7 +89,7 @@ prevent double counting.
 | `currency` | FixedString(3) | |
 | `price_version` | String | the `PriceList` version used |
 | `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away) or `failed`; the failure's §2 origin and §1 code |
-| `estimated_fraction` | Float32 | 0 for actual rows |
+| `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), output is counted from what was seen (about 4 bytes a token of content, at least a token a delta; a token per OpenAI chunk) and input, if not reported, from the request's size (4 bytes a token). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
 
 - Rounding: per row, cost is computed in micro-units from integer token
