@@ -1,9 +1,11 @@
 package limit
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,6 +77,16 @@ type Limiter struct {
 	byScope     map[string]int
 	pending     []held // increments held while the store is down, in order
 	graceUntil  time.Time
+	// A renewal copies the running calls' slots, then registers them
+	// outside the lock: a call that ends meanwhile would be registered
+	// again, a phantom slot for the TTL. Calls ending while one is in
+	// flight are released after it.
+	reacquiring int
+	endedDuring []Slot
+	// MaxPending bounds the increments held during an outage (default
+	// 100,000); past it the oldest is given to OnNumbered with number 0, so
+	// its ledger row is written unnumbered (ADR 0042: never numbered).
+	MaxPending int
 }
 
 // keyOf is a scope in a budget period.
@@ -95,7 +107,7 @@ type held struct {
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{}, last: map[keyOf]int64{}, overLogged: map[keyOf]bool{},
-		running: map[string]*Ticket{}, byPrincipal: map[string]int{}, byScope: map[string]int{},
+		running: map[string]*Ticket{}, byPrincipal: map[string]int{}, byScope: map[string]int{}, MaxPending: 100_000,
 		Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
 }
 
@@ -245,6 +257,9 @@ func (l *Limiter) finish(t *Ticket) bool {
 	}
 	t.done = true
 	delete(l.running, t.call.ID)
+	if l.reacquiring > 0 {
+		l.endedDuring = append(l.endedDuring, t.slot())
+	}
 	decr(l.byPrincipal, t.call.Principal)
 	decr(l.byScope, t.call.Scope)
 	return true
@@ -316,8 +331,18 @@ func (t *Ticket) Ended(ctx context.Context) {
 
 func (l *Limiter) hold(scope, period string, e Event) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.pending = append(l.pending, held{scope, period, e}) // replayed by Recover
+	var dropped held
+	over := len(l.pending) > cmp.Or(l.MaxPending, 100_000)
+	if over {
+		dropped, l.pending = l.pending[0], l.pending[1:]
+	}
+	l.mu.Unlock()
+	if over {
+		// The oldest goes to the ledger unnumbered: its row still counts
+		// once ingested; only the counter (this site's fast view) loses it.
+		l.numbered(dropped.scope, dropped.e, 0)
+	}
 }
 
 func (l *Limiter) numbered(scope string, e Event, seq int64) {
@@ -345,15 +370,37 @@ func (l *Limiter) Renew(ctx context.Context) error {
 		l.mu.Unlock()
 		return ErrUnavailable
 	}
-	slots := l.slots()
 	l.mu.Unlock()
-	sctx, cancel := l.storeContext(ctx)
-	defer cancel()
-	if err := l.store.Reacquire(sctx, slots); err != nil {
+	if err := l.reacquire(ctx); err != nil {
 		l.markDown(err)
 		return err
 	}
 	return nil
+}
+
+// reacquire registers the running calls' slots, then releases those of
+// calls that ended while it ran.
+func (l *Limiter) reacquire(ctx context.Context) error {
+	l.mu.Lock()
+	slots := l.slots()
+	l.reacquiring++
+	l.mu.Unlock()
+	sctx, cancel := l.storeContext(ctx)
+	err := l.store.Reacquire(sctx, slots)
+	cancel()
+	l.mu.Lock()
+	l.reacquiring--
+	var ended []Slot
+	if l.reacquiring == 0 {
+		ended, l.endedDuring = l.endedDuring, nil
+	}
+	l.mu.Unlock()
+	for _, s := range ended {
+		sctx, cancel := l.storeContext(ctx)
+		l.store.Release(sctx, s) // if it fails, the slot's TTL frees it
+		cancel()
+	}
+	return err
 }
 
 // slots lists this gateway's running calls' slots; mu is held.
@@ -373,20 +420,15 @@ func (l *Limiter) slots() []Slot {
 // left.
 func (l *Limiter) Recover(ctx context.Context) error {
 	for {
-		_, ok, err := l.ReplayOne(ctx)
+		n, err := l.replayBatch(ctx)
 		if err != nil {
 			return err
 		}
-		if !ok {
+		if n == 0 {
 			break
 		}
 	}
-	l.mu.Lock()
-	slots := l.slots()
-	l.mu.Unlock()
-	sctx, cancel := l.storeContext(ctx)
-	defer cancel()
-	if err := l.store.Reacquire(sctx, slots); err != nil {
+	if err := l.reacquire(ctx); err != nil {
 		return err
 	}
 	l.mu.Lock()
@@ -398,6 +440,40 @@ func (l *Limiter) Recover(ctx context.Context) error {
 	l.graceUntil = l.now().Add(l.Grace)
 	return nil
 }
+
+// replayBatch replays up to replayBatchSize of the oldest held increments
+// in one round trip: one at a time, a busy gateway's completions (held
+// while it replays) could outpace the replay.
+func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
+	l.mu.Lock()
+	batch := slices.Clone(l.pending[:min(len(l.pending), replayBatchSize)])
+	l.mu.Unlock()
+	if len(batch) == 0 {
+		return 0, nil
+	}
+	incs := make([]Increment, len(batch))
+	for i, h := range batch {
+		incs[i] = Increment{h.scope, h.period, h.e}
+	}
+	sctx, cancel := l.storeContext(ctx)
+	seqs, err := l.store.AddAll(sctx, incs)
+	cancel()
+	if err != nil {
+		return 0, err
+	}
+	l.mu.Lock()
+	// Only Recover and ReplayOne take from the front; completions append.
+	if len(l.pending) >= len(batch) && slices.Equal(l.pending[:len(batch)], batch) {
+		l.pending = l.pending[len(batch):]
+	}
+	l.mu.Unlock()
+	for i, h := range batch {
+		l.numbered(h.scope, h.e, seqs[i])
+	}
+	return len(batch), nil
+}
+
+const replayBatchSize = 256
 
 // ReplayOne replays the oldest increment held during an outage and reports
 // it; Recover replays them all. ok is false when none is held.

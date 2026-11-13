@@ -207,3 +207,94 @@ func TestOutageCounts(t *testing.T) {
 		t.Fatalf("counts %v %v: one call (b) running", l.byPrincipal, l.byScope)
 	}
 }
+
+// gated is a store whose Reacquire waits until released, so a test can
+// end a call while a renewal is in flight.
+type gated struct {
+	*Mem
+	in, release chan struct{}
+}
+
+func (g gated) Reacquire(ctx context.Context, slots []Slot) error {
+	g.in <- struct{}{}
+	<-g.release
+	return g.Mem.Reacquire(ctx, slots)
+}
+
+// TestRenewalDoesNotRevive: a call that ends while a renewal is in flight
+// must not be registered again by it (a phantom slot for the TTL, refusing
+// its principal's next call).
+func TestRenewalDoesNotRevive(t *testing.T) {
+	ctx := t.Context()
+	st := gated{NewMem(), make(chan struct{}), make(chan struct{})}
+	l := New(st)
+	a, err := l.Admit(ctx, scopeCall("a", "p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error)
+	go func() { done <- l.Renew(ctx) }()
+	<-st.in            // the renewal has copied a's slot
+	a.Complete(ctx, 1) // a ends and frees its slot
+	close(st.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Slots(); len(got) != 0 {
+		t.Fatalf("slots %v after a completed during the renewal: none may be held", got)
+	}
+	if _, err := l.Admit(ctx, scopeCall("b", "p1")); err != nil {
+		t.Fatalf("p1's next call: %v", err)
+	}
+}
+
+// counting counts AddAll and Add calls.
+type counting struct {
+	*Mem
+	adds, batches int
+}
+
+func (c *counting) Add(ctx context.Context, scope, period string, e Event) (int64, error) {
+	c.adds++
+	return c.Mem.Add(ctx, scope, period, e)
+}
+
+func (c *counting) AddAll(ctx context.Context, incs []Increment) ([]int64, error) {
+	c.batches++
+	return c.Mem.AddAll(ctx, incs)
+}
+
+// TestRecoverBatches: an outage's held increments are replayed in batches,
+// each numbered in order, and the held ones are bounded.
+func TestRecoverBatches(t *testing.T) {
+	ctx := t.Context()
+	st := &counting{Mem: NewMem()}
+	l := New(st)
+	l.MaxPending = 600
+	var numbered []int64
+	l.OnNumbered = func(_ string, _ Event, seq int64) { numbered = append(numbered, seq) }
+	st.SetDown(true)
+	for i := range 700 {
+		c := scopeCall(fmt.Sprint(i), fmt.Sprint("p", i))
+		c.ScopeLimit = 0
+		tk, err := l.Admit(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tk.Complete(ctx, 1)
+	}
+	if len(l.Pending("s")) != 600 || len(numbered) != 100 || slices.ContainsFunc(numbered, func(n int64) bool { return n != 0 }) {
+		t.Fatalf("pending %d, numbered %d: past MaxPending the oldest go to the ledger unnumbered", len(l.Pending("s")), len(numbered))
+	}
+	st.SetDown(false)
+	if err := l.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st.batches != 3 || st.adds != 0 || len(st.Counter("s", l.period(l.now()))) != 600 {
+		t.Fatalf("%d batches, %d single adds, counter %d: 600 replayed in three round trips",
+			st.batches, st.adds, len(st.Counter("s", l.period(l.now()))))
+	}
+	if got := numbered[100:]; got[0] != 1 || got[599] != 600 {
+		t.Fatalf("numbers %d..%d, want 1..600 in order", got[0], got[599])
+	}
+}

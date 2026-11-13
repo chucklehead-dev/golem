@@ -320,6 +320,50 @@ func (v *Valkey) Add(ctx context.Context, scope, period string, e Event) (int64,
 	return v.numbered(ctx, add, addSrc, addSha, v.counterKeys(scope, period), []string{e.ID, i64(e.Cost), d.retainMs, d.lifeMs})
 }
 
+// AddAll pipelines the adds in one round trip (with their WAIT, on one
+// connection, as numbered does). An add is idempotent by its event, so a
+// batch resent whole after NOSCRIPT numbers nothing twice.
+func (v *Valkey) AddAll(ctx context.Context, incs []Increment) ([]int64, error) {
+	if len(incs) == 0 {
+		return nil, nil
+	}
+	d := v.durations()
+	build := func(eval bool) valkey.Commands {
+		cmds := make(valkey.Commands, 0, len(incs)+1)
+		for _, in := range incs {
+			keys := v.counterKeys(in.Scope, in.Period)
+			args := []string{in.ID, i64(in.Cost), d.retainMs, d.lifeMs}
+			if eval {
+				cmds = append(cmds, v.c.B().Eval().Script(addSrc).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build())
+			} else {
+				cmds = append(cmds, v.c.B().Evalsha().Sha1(addSha).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build())
+			}
+		}
+		if v.ReplicaAcks > 0 {
+			cmds = append(cmds, v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build())
+		}
+		return cmds
+	}
+	rs := v.c.DoMulti(ctx, build(false)...)
+	if err, ok := valkey.IsValkeyErr(rs[0].Error()); ok && err.IsNoScript() {
+		rs = v.c.DoMulti(ctx, build(true)...)
+	}
+	seqs := make([]int64, len(incs))
+	for i := range incs {
+		n, err := rs[i].AsInt64()
+		if err != nil {
+			return nil, wrap(err)
+		}
+		seqs[i] = n
+	}
+	if v.ReplicaAcks > 0 {
+		if n, err := rs[len(incs)].AsInt64(); err != nil || n < int64(v.ReplicaAcks) {
+			v.Unreplicated.Add(int64(len(incs)))
+		}
+	}
+	return seqs, nil
+}
+
 func (v *Valkey) After(ctx context.Context, scope, period string, w int64) (int64, bool, error) {
 	r, err := after.Exec(ctx, v.c, v.counterKeys(scope, period)[:3], []string{i64(w)}).AsIntSlice()
 	if err != nil {

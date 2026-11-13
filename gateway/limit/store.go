@@ -33,6 +33,12 @@ type Slot struct {
 // ErrUnavailable is a store that cannot be reached.
 var ErrUnavailable = errors.New("limit: the site store is unreachable")
 
+// Increment is an event for a scope's counter in a period.
+type Increment struct {
+	Scope, Period string
+	Event
+}
+
 // Admission is one admission's check, done atomically by the store: known
 // spend (the snapshot's plus the counter's total after the snapshot's
 // watermark) against the budget, then the slots.
@@ -80,6 +86,9 @@ type Store interface {
 	// its number in the scope's counter for the period: the next one, or
 	// the one it already has.
 	Add(ctx context.Context, scope, period string, e Event) (seq int64, err error)
+	// AddAll records several held events in one round trip, in order, and
+	// returns their numbers: an outage's replay.
+	AddAll(ctx context.Context, incs []Increment) (seqs []int64, err error)
 	// After returns the total of the period's events numbered above w (for
 	// reports; admission computes it inside Admit).
 	After(ctx context.Context, scope, period string, w int64) (total int64, over bool, err error)
@@ -206,6 +215,19 @@ func (m *Mem) Add(_ context.Context, scope, period string, e Event) (int64, erro
 		return 0, ErrUnavailable
 	}
 	return m.add(scope, period, e), nil
+}
+
+func (m *Mem) AddAll(_ context.Context, incs []Increment) ([]int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down {
+		return nil, ErrUnavailable
+	}
+	seqs := make([]int64, len(incs))
+	for i, in := range incs {
+		seqs[i] = m.add(in.Scope, in.Period, in.Event)
+	}
+	return seqs, nil
 }
 
 func (m *Mem) add(scope, period string, e Event) int64 {

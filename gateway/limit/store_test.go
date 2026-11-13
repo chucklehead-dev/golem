@@ -112,6 +112,11 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 		if seq, _ := st.Add(ctx, "s", "2026-12", Event{"e11", 1}); seq != 2 {
 			t.Errorf("December's second event numbered %d", seq)
 		}
+		// A batch, in order, a repeat keeping its number.
+		seqs, err := st.AddAll(ctx, []Increment{{"s", nov, Event{"e3", 1}}, {"s", nov, Event{"e1", 3}}, {"other", nov, Event{"e4", 1}}})
+		if err != nil || !slices.Equal(seqs, []int64{3, 1, 2}) {
+			t.Errorf("AddAll = %v, %v; want [3 1 2]", seqs, err)
+		}
 	})
 }
 

@@ -52,6 +52,13 @@ func (f *valkeyFaults) Add(ctx context.Context, scope, period string, e Event) (
 	return f.Valkey.Add(ctx, scope, period, e)
 }
 
+func (f *valkeyFaults) AddAll(ctx context.Context, incs []Increment) ([]int64, error) {
+	if f.down.Load() {
+		return nil, ErrUnavailable
+	}
+	return f.Valkey.AddAll(ctx, incs)
+}
+
 func (f *valkeyFaults) After(ctx context.Context, scope, period string, w int64) (int64, bool, error) {
 	if f.down.Load() {
 		return 0, false, ErrUnavailable
