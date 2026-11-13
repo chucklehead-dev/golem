@@ -87,14 +87,15 @@ func (l *Ledger) Numbered(_ string, eventID string, seq int64) {
 
 // columns are golem.spend's, in the DDL's order; a test checks them
 // against deploy/clickhouse/spend.sql.
-func (l *Ledger) row(c Call, seq int64) []attribute.KeyValue {
-	period := time.Date(c.Started.In(l.Period).Year(), c.Started.In(l.Period).Month(), 1, 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
+func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call, seq int64) {
+	start := c.Started.In(l.Period)
+	period := time.Date(start.Year(), start.Month(), 1, 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
 	estimated := 0.0
 	if c.Estimated {
 		estimated = 1
 	}
 	s, i, f := attribute.String, attribute.Int64, attribute.Float64
-	return []attribute.KeyValue{
+	*dst = [...]attribute.KeyValue{
 		i("schema_version", SchemaVersion),
 		s("row_kind", "attempt"),
 		s("request_id", c.RequestID),
@@ -138,11 +139,17 @@ func (l *Ledger) row(c Call, seq int64) []attribute.KeyValue {
 	}
 }
 
+// ledgerColumns is golem.spend's column count; the row is built in an
+// array of this size, on the stack, not a slice the record copies again.
+const ledgerColumns = 40
+
 func (l *Ledger) write(ctx context.Context, c Call, seq int64) {
+	var row [ledgerColumns]attribute.KeyValue
+	l.row(&row, &c, seq)
 	var r otellog.Record
 	r.SetTimestamp(c.Ended)
 	r.SetEventName("golem.spend")
 	r.SetBody(attribute.StringValue("golem.spend"))
-	r.AddAttributes(l.row(c, seq)...)
+	r.AddAttributes(row[:]...)
 	l.logger.Emit(ctx, r)
 }

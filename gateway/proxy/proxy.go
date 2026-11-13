@@ -150,7 +150,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c := contract.UpstreamUnavailable
 		call.Ended, call.Status, call.Outcome = time.Now(), c.Status, "failed"
 		call.ErrorOrigin, call.ErrorCode = string(c.Origin), c.Name
-		h.Telemetry.Ended(acct, call) // before the ticket numbers its event
+		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
 		if ticket != nil {
 			ticket.Complete(acct, 0) // no upstream work: nothing billed
 		}
@@ -182,7 +182,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call.Outcome, call.ErrorOrigin, call.ErrorCode = outcome(res, cut)
 	// The row is prepared before the ticket numbers its event: the
 	// limiter's OnNumbered writes it with the number.
-	h.Telemetry.Ended(acct, call)
+	h.Telemetry.Ended(ctx, call)
 	if ticket != nil {
 		if res.CallerGone {
 			// The caller went away: what was seen is charged, and the slot

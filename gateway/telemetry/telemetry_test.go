@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -163,7 +164,9 @@ func TestRowMatchesLedgerDDL(t *testing.T) {
 		}
 	}
 	var got []string
-	for _, kv := range NewLedger(nil, "", "").row(call, 1) {
+	var row [ledgerColumns]attribute.KeyValue
+	NewLedger(nil, "", "").row(&row, &call, 1)
+	for _, kv := range row {
 		got = append(got, string(kv.Key))
 	}
 	if !slices.Equal(got, want) {

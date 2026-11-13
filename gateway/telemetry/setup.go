@@ -1,11 +1,13 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -39,17 +41,32 @@ func OTLP(ctx context.Context, endpoint string, res *resource.Resource) (Provide
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(te), sdktrace.WithResource(res))
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(me)), sdkmetric.WithResource(res))
-	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewBatchProcessor(le)), sdklog.WithResource(res))
-	otel.SetTracerProvider(tp)
-	otel.SetMeterProvider(mp)
-	global.SetLoggerProvider(lp)
+	p, shutdown := SDK(te, sdkmetric.NewPeriodicReader(me), le, res)
+	otel.SetTracerProvider(p.Tracer)
+	otel.SetMeterProvider(p.Meter)
+	global.SetLoggerProvider(p.Logger)
+	return p, shutdown, nil
+}
+
+// SDK builds the providers over any exporters: OTLP's, or a benchmark's.
+func SDK(spans sdktrace.SpanExporter, metrics sdkmetric.Reader, logs sdklog.Exporter, res *resource.Resource) (Providers, func(context.Context) error) {
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(spans), sdktrace.WithResource(res))
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(metrics), sdkmetric.WithResource(res))
+	// The ledger's rows are billing data: their own queue, which counts
+	// what it cannot deliver. Their 40 keys are unique by construction (a
+	// test checks them against the DDL), so the SDK's per-record key
+	// deduplication, a quarter of a call's CPU, is turned off.
+	ledger := NewLedgerQueue(logs, ledgerQueueSize, 512, time.Second)
+	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(ledger), sdklog.WithResource(res), sdklog.WithAllowKeyDuplication())
 	shutdown := func(ctx context.Context) error {
 		return errors.Join(tp.Shutdown(ctx), mp.Shutdown(ctx), lp.Shutdown(ctx))
 	}
-	return Providers{Tracer: tp, Meter: mp, Logger: lp}, shutdown, nil
+	return Providers{Tracer: tp, Meter: mp, Logger: lp, Ledger: ledger}, shutdown
 }
+
+// ledgerQueueSize holds about 30 seconds of rows at 2,000 calls a second: a
+// collector restart, not an outage (a durable spool is for that).
+const ledgerQueueSize = 1 << 16
 
 // Stdout is standalone telemetry: no spans or metrics, and the ledger's
 // rows written to w as JSON lines, one per row.
@@ -66,22 +83,48 @@ type jsonLogs struct {
 
 type jsonLogger struct {
 	embedded.Logger
-	mu sync.Mutex
-	w  io.Writer
+	mu  sync.Mutex
+	w   io.Writer
+	buf bytes.Buffer
+	enc jsontext.Encoder
 }
 
 func (j *jsonLogs) Logger(string, ...otellog.LoggerOption) otellog.Logger { return &j.l }
 
 func (j *jsonLogger) Enabled(context.Context, otellog.EnabledParameters) bool { return true }
 
+// Emit writes the record's attributes as one JSON object, in their order
+// (the DDL's, for ledger rows).
 func (j *jsonLogger) Emit(_ context.Context, r otellog.Record) {
-	m := map[string]any{}
-	r.WalkAttributes(func(kv attribute.KeyValue) bool {
-		m[string(kv.Key)] = kv.Value.AsInterface()
-		return true
-	})
-	b, _ := json.Marshal(m)
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.w.Write(append(b, '\n'))
+	j.buf.Reset()
+	j.enc.Reset(&j.buf)
+	j.enc.WriteToken(jsontext.BeginObject)
+	r.WalkAttributes(func(kv attribute.KeyValue) bool {
+		j.enc.WriteToken(jsontext.String(string(kv.Key)))
+		writeValue(&j.enc, kv.Value)
+		return true
+	})
+	j.enc.WriteToken(jsontext.EndObject) // the encoder ends a top-level value with "\n"
+	j.w.Write(j.buf.Bytes())
+}
+
+func writeValue(enc *jsontext.Encoder, v attribute.Value) {
+	switch v.Type() {
+	case attribute.BOOL:
+		enc.WriteToken(jsontext.Bool(v.AsBool()))
+	case attribute.INT64:
+		enc.WriteToken(jsontext.Int(v.AsInt64()))
+	case attribute.FLOAT64:
+		enc.WriteToken(jsontext.Float(v.AsFloat64()))
+	case attribute.STRINGSLICE:
+		enc.WriteToken(jsontext.BeginArray)
+		for _, s := range v.AsStringSlice() {
+			enc.WriteToken(jsontext.String(s))
+		}
+		enc.WriteToken(jsontext.EndArray)
+	default:
+		enc.WriteToken(jsontext.String(v.Emit()))
+	}
 }

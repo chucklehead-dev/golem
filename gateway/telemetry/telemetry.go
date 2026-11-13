@@ -9,6 +9,8 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -66,6 +68,39 @@ type Telemetry struct {
 	duration metric.Float64Histogram
 	refusals metric.Int64Counter
 	Ledger   *Ledger
+
+	// Attribute sets are built once per route and per refusal code, not per
+	// request: building and merging them was a quarter of a call's
+	// allocations. The keys are bounded by the snapshot's routes and the
+	// contract's codes.
+	routes  sync.Map // routeKey -> *routeSets
+	refused sync.Map // code name -> []metric.AddOption
+	starts  sync.Map // frontend -> []trace.SpanStartOption
+}
+
+type routeKey struct{ provider, alias, model string }
+
+// routeSets are one route's precomputed options.
+type routeSets struct {
+	name          string // the span's: "chat <alias>"
+	input, output []metric.RecordOption
+	duration      []metric.RecordOption
+}
+
+func (t *Telemetry) routeSets(c *Call) *routeSets {
+	k := routeKey{c.Provider, c.Alias, c.Model}
+	if v, ok := t.routes.Load(k); ok {
+		return v.(*routeSets)
+	}
+	attrs := []attribute.KeyValue{attribute.String(attrProvider, c.Provider), attribute.String(attrRequestModel, c.Alias),
+		attribute.String(attrResponseModel, c.Model)}
+	with := func(extra ...attribute.KeyValue) []metric.RecordOption {
+		return []metric.RecordOption{metric.WithAttributeSet(attribute.NewSet(append(slices.Clone(attrs), extra...)...))}
+	}
+	rs := &routeSets{name: "chat " + c.Alias, input: with(attribute.String(attrTokenType, "input")),
+		output: with(attribute.String(attrTokenType, "output")), duration: with()}
+	v, _ := t.routes.LoadOrStore(k, rs)
+	return v.(*routeSets)
 }
 
 // Providers are the OTel providers telemetry records through.
@@ -73,6 +108,9 @@ type Providers struct {
 	Tracer trace.TracerProvider
 	Meter  metric.MeterProvider
 	Logger otellog.LoggerProvider // the ledger's rows; nil: the global one
+	// Ledger, if set, is the rows' queue: its losses are reported as the
+	// golem.ledger.dropped and golem.ledger.failed counters.
+	Ledger *LedgerQueue
 }
 
 // New makes telemetry for a site and gateway pool.
@@ -86,6 +124,15 @@ func New(p Providers, site, pool string) (*Telemetry, error) {
 	refusals, err3 := m.Int64Counter("golem.refusals", metric.WithDescription("Requests refused, by contract code"))
 	if err := errors.Join(err1, err2, err3); err != nil {
 		return nil, err
+	}
+	if q := p.Ledger; q != nil {
+		_, err1 = m.Int64ObservableCounter("golem.ledger.dropped", metric.WithDescription("Ledger rows dropped: the queue was full"),
+			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Dropped.Load()); return nil }))
+		_, err2 = m.Int64ObservableCounter("golem.ledger.failed", metric.WithDescription("Ledger rows the collector did not take"),
+			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Failed.Load()); return nil }))
+		if err := errors.Join(err1, err2); err != nil {
+			return nil, err
+		}
 	}
 	lp := p.Logger
 	if lp == nil {
@@ -101,18 +148,25 @@ func (t *Telemetry) Start(ctx context.Context, frontend string) (context.Context
 	if t == nil {
 		return ctx, trace.SpanFromContext(ctx)
 	}
-	return t.tracer.Start(ctx, "chat", trace.WithSpanKind(trace.SpanKindServer),
-		trace.WithAttributes(attribute.String(attrOperation, "chat"), attribute.String("golem.dialect", frontend)))
+	v, ok := t.starts.Load(frontend)
+	if !ok {
+		v, _ = t.starts.LoadOrStore(frontend, []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(attribute.String(attrOperation, "chat"), attribute.String("golem.dialect", frontend))})
+	}
+	return t.tracer.Start(ctx, "chat", v.([]trace.SpanStartOption)...)
 }
 
 // Ended records a call that reached a provider: the span's attributes, the
-// metrics, and the ledger row.
+// metrics, and the ledger row. ctx is the request's, and may be done:
+// nothing here stops for it (and a context.WithoutCancel would cost an
+// allocation on every lookup through it).
 func (t *Telemetry) Ended(ctx context.Context, c Call) {
 	if t == nil {
 		return
 	}
+	rs := t.routeSets(&c)
 	span := trace.SpanFromContext(ctx)
-	span.SetName("chat " + c.Alias)
+	span.SetName(rs.name)
 	span.SetAttributes(
 		attribute.String(attrProvider, c.Provider),
 		attribute.String(attrRequestModel, c.Alias),
@@ -131,12 +185,9 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 	if c.ErrorOrigin != "" {
 		span.SetAttributes(attribute.String("golem.error.origin", c.ErrorOrigin), attribute.String("golem.error.code", c.ErrorCode))
 	}
-	set := metric.WithAttributes(attribute.String(attrProvider, c.Provider), attribute.String(attrRequestModel, c.Alias),
-		attribute.String(attrResponseModel, c.Model))
-	in := c.Usage.Input + c.Usage.CacheRead + c.Usage.CacheWrite
-	t.tokens.Record(ctx, in, set, metric.WithAttributes(attribute.String(attrTokenType, "input")))
-	t.tokens.Record(ctx, c.Usage.Output, set, metric.WithAttributes(attribute.String(attrTokenType, "output")))
-	t.duration.Record(ctx, c.Ended.Sub(c.Started).Seconds(), set)
+	t.tokens.Record(ctx, c.Usage.Input+c.Usage.CacheRead+c.Usage.CacheWrite, rs.input...)
+	t.tokens.Record(ctx, c.Usage.Output, rs.output...)
+	t.duration.Record(ctx, c.Ended.Sub(c.Started).Seconds(), rs.duration...)
 	t.Ledger.Ended(ctx, c)
 }
 
@@ -148,8 +199,12 @@ func (t *Telemetry) Refused(ctx context.Context, code contract.Code) {
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("golem.error.origin", string(code.Origin)), attribute.String("golem.error.code", code.Name),
 		attribute.Int("http.response.status_code", code.Status))
-	t.refusals.Add(ctx, 1, metric.WithAttributes(attribute.String("golem.error.code", code.Name),
-		attribute.String("golem.error.origin", string(code.Origin))))
+	v, ok := t.refused.Load(code.Name)
+	if !ok {
+		v, _ = t.refused.LoadOrStore(code.Name, []metric.AddOption{metric.WithAttributeSet(attribute.NewSet(
+			attribute.String("golem.error.code", code.Name), attribute.String("golem.error.origin", string(code.Origin))))})
+	}
+	t.refusals.Add(ctx, 1, v.([]metric.AddOption)...) // a 429 storm costs no allocation here
 }
 
 // Numbered is the limiter's OnNumbered: the ledger writes the event's row
