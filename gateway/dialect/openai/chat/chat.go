@@ -306,7 +306,7 @@ func (u *StreamUsage) OnEvent(_, data []byte) {
 	c := int64(jsonscan.StringBytes(data, contentKeys))
 	u.Deltas += max(1, (c+bytesPerToken-1)/bytesPerToken)
 	if mayHaveUsage(data) {
-		u.Response(data)
+		u.usage(data) // its content is in Deltas already, not ContentBytes too
 	}
 }
 
@@ -314,6 +314,11 @@ func (u *StreamUsage) OnEvent(_, data []byte) {
 // OpenAI's prompt_tokens include the cached ones; canon.Usage.Input does not.
 func (u *StreamUsage) Response(body []byte) {
 	u.ContentBytes += int64(jsonscan.StringBytes(body, contentKeys))
+	u.usage(body)
+}
+
+// usage reads a usage object, if the body has one.
+func (u *StreamUsage) usage(body []byte) {
 	var got canon.Usage
 	seen, input, output := false, false, false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {

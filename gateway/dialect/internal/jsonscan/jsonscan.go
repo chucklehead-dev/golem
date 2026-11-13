@@ -158,31 +158,65 @@ func (n Needles) has(key []byte) bool {
 // StringBytes is the total length, escapes counted as written, of the
 // string values of the needles' keys anywhere in data ("text",
 // "arguments"): the content of a delta or a response, for estimating its
-// tokens when the provider reported none. It is one pass of byte searches,
-// not a parse (an estimate's, never a policy's): each `":"` is a key and
-// the start of its string value (a raw quote cannot occur inside a JSON
-// string), and each value is skipped whole.
+// tokens when the provider reported none. It is one pass over the strings,
+// not a parse (an estimate's, never a policy's): a raw quote cannot occur
+// inside a JSON string, so each quote outside one starts the next, and a
+// string followed by a colon (whitespace allowed between) is a member's
+// name, compared unescaped (`"cont\u0065nt"` is content). A named
+// member's string value is measured; every other string is skipped whole.
 func StringBytes(data []byte, keys Needles) int {
 	n := 0
 	for rest := data; ; {
-		i := bytes.Index(rest, keyValue)
-		if i < 0 {
+		q := bytes.IndexByte(rest, '"')
+		if q < 0 {
 			return n
 		}
-		key := rest[:i]
-		if q := bytes.LastIndexByte(key, '"'); q >= 0 {
-			key = key[q+1:]
-		}
-		rest = rest[i+len(keyValue):]
+		rest = rest[q+1:]
 		end := stringEnd(rest)
-		if keys.has(key) {
-			n += end
+		name := rest[:end]
+		if end == len(rest) {
+			return n
 		}
-		rest = rest[end:]
+		rest = skipSpace(rest[end+1:])
+		if len(rest) == 0 || rest[0] != ':' {
+			continue // a string value, not a name
+		}
+		rest = skipSpace(rest[1:])
+		if len(rest) == 0 || rest[0] != '"' {
+			continue // a number, object, array or literal: its strings come next
+		}
+		rest = rest[1:]
+		v := stringEnd(rest)
+		if keys.hasName(name) {
+			n += v
+		}
+		if v == len(rest) {
+			return n
+		}
+		rest = rest[v+1:]
 	}
 }
 
-var keyValue = []byte(`":"`) // read-only
+// hasName is has for a name as written: unescaped first if it holds an
+// escape, which only a hand-written or re-encoded body does.
+func (n Needles) hasName(name []byte) bool {
+	if bytes.IndexByte(name, '\\') < 0 {
+		return n.has(name)
+	}
+	var buf [64]byte
+	quoted := make([]byte, 0, len(name)+2)
+	quoted = append(append(append(quoted, '"'), name...), '"')
+	plain, err := jsontext.AppendUnquote(buf[:0], quoted)
+	return err == nil && n.has(plain)
+}
+
+// skipSpace drops JSON's insignificant whitespace.
+func skipSpace(b []byte) []byte {
+	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t' || b[0] == '\n' || b[0] == '\r') {
+		b = b[1:]
+	}
+	return b
+}
 
 // stringEnd is the length of a JSON string's characters up to its closing
 // quote: the first quote not escaped (an odd run of backslashes before it).

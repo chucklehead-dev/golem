@@ -2,8 +2,10 @@ package jsonscan
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -112,6 +114,36 @@ func TestStringBytes(t *testing.T) {
 	}
 }
 
+// TestStringBytesFormatting: any valid JSON is measured alike, compact or
+// not, its names escaped or not (a body re-encoded by a proxy, or written
+// by hand to dodge the estimate).
+func TestStringBytesFormatting(t *testing.T) {
+	keys := KeysOf("content", "arguments")
+	for _, in := range []string{
+		`{"content":"many tokens"}`,
+		`{"content" : "many tokens"}`,
+		"{\n\t\"content\"\r\n:\n \"many tokens\"\n}",
+		`{"cont\u0065nt":"many tokens"}`,
+		`{"\u0063\u006f\u006e\u0074\u0065\u006e\u0074" :"many tokens"}`,
+		`{"x":["content", {"y" :1}], "cont\u0065nt"	:	"many tokens", "content2":"zz"}`,
+	} {
+		if got := StringBytes([]byte(in), keys); got != len("many tokens") {
+			t.Errorf("StringBytes(%s) = %d, want %d", in, got, len("many tokens"))
+		}
+	}
+	// Strings that only look like names are not: a value followed by a
+	// colon inside another string, and a name whose value is not a string.
+	for in, want := range map[string]int{
+		`{"a":"content: x","content":{"text":"y"}}`:                          0,
+		`{"content":null,"b":"content","arguments" : "{\"content\":\"q\"}"}`: len(`{\"content\":\"q\"}`),
+		`{"cont\u00":"bad escape"}`:                                          0,
+	} {
+		if got := StringBytes([]byte(in), keys); got != want {
+			t.Errorf("StringBytes(%s) = %d, want %d", in, got, want)
+		}
+	}
+}
+
 func TestStringEnd(t *testing.T) {
 	for in, want := range map[string]int{`abc"`: 3, `a\"b"`: 4, `a\\"b`: 3, `\\\"x"`: 5, `none`: 4, `"`: 0} {
 		if got := stringEnd([]byte(in)); got != want {
@@ -120,20 +152,50 @@ func TestStringEnd(t *testing.T) {
 	}
 }
 
-// FuzzStringBytes: for JSON as encoding/json writes it, StringBytes is the
-// written length of the named keys' values, whatever they hold.
+// FuzzStringBytes: for any valid JSON, compact or spaced, its names
+// escaped or not, StringBytes is the written length of the named keys'
+// values, whatever they hold. The layout byte picks each gap's whitespace
+// and which names are written with \u escapes.
 func FuzzStringBytes(f *testing.F) {
-	f.Add("hello", `say "hi"\n`, "x")
-	f.Add(`":"`, `\`, `"`)
-	f.Fuzz(func(t *testing.T, content, args, other string) {
-		chunk := map[string]any{"id": other, "choices": []any{map[string]any{"delta": map[string]any{
-			"content": content, "tool_calls": []any{map[string]any{"function": map[string]any{"arguments": args, "name": other}}}}}}}
-		b, err := json.Marshal(chunk)
-		if err != nil {
-			t.Skip()
+	f.Add("hello", `say "hi"\n`, "x", uint64(0))
+	f.Add(`":"`, `\`, `"`, uint64(0xffffffffffffffff))
+	f.Add("content", "arguments", `" : "`, uint64(0x5a5a5a5a))
+	f.Fuzz(func(t *testing.T, content, args, other string, layout uint64) {
+		bits := layout
+		take := func() uint64 { b := bits & 3; bits = bits>>2 | bits<<62; return b }
+		ws := func() string { return [...]string{"", " ", "\n\t", " \r\n "}[take()] }
+		str := func(s string) string { q, _ := json.Marshal(s); return string(q) }
+		name := func(s string) string {
+			if take() == 0 {
+				return str(s)
+			}
+			var b strings.Builder
+			b.WriteByte('"')
+			for i, r := range s {
+				if i%2 == int(take()&1) {
+					fmt.Fprintf(&b, `\u%04x`, r)
+				} else {
+					b.WriteRune(r)
+				}
+			}
+			b.WriteByte('"')
+			return b.String()
 		}
-		quoted := func(s string) int { q, _ := json.Marshal(s); return len(q) - 2 }
-		if got, want := StringBytes(b, KeysOf("content", "arguments")), quoted(content)+quoted(args); got != want {
+		member := func(k, v string) string { return ws() + name(k) + ws() + ":" + ws() + v + ws() }
+		obj := func(members ...string) string { return "{" + strings.Join(members, ",") + "}" }
+		arr := func(elems ...string) string { return "[" + ws() + strings.Join(elems, ","+ws()) + ws() + "]" }
+		b := []byte(obj(
+			member("id", str(other)),
+			member("choices", arr(obj(member("delta", obj(
+				member("content", str(content)),
+				member("tool_calls", arr(obj(member("function", obj(
+					member("arguments", str(args)),
+					member("name", str(other)))))))))))),
+		))
+		if !json.Valid(b) {
+			t.Fatalf("not JSON: %s", b)
+		}
+		if got, want := StringBytes(b, KeysOf("content", "arguments")), len(str(content))-2+len(str(args))-2; got != want {
 			t.Fatalf("%s: %d, want %d", b, got, want)
 		}
 	})

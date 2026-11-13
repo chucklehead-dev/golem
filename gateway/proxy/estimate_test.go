@@ -102,6 +102,22 @@ func TestEstimates(t *testing.T) {
 			}
 		})
 	}
+	// Valid JSON in any layout is charged alike: spaced around its colons,
+	// its member names escaped, or both.
+	for name, data := range map[string]string{
+		"spaced":  `{"choices" : [ {"delta" : {"content" : "%s"} } ], "usage" : null}`,
+		"escaped": `{"choices":[{"delta":{"cont\u0065nt":"%s"}}],"usage":null}`,
+		"mixed":   "{\"choices\":[{\"delta\":{ \t\"\\u0063ontent\"\t: \"%s\"}}],\"usage\":null}", // an SSE data line holds no newline
+	} {
+		t.Run("an OpenAI event "+name+", cut", func(t *testing.T) {
+			ev := []byte("data: " + fmt.Sprintf(data, strings.Repeat("w", 4000)) + "\n\n")
+			h, _, res := priced(t, OpenAIChat, cutAfter{[][]byte{ev}, 200})
+			serveCut(h, "/v1/chat/completions", `{"model":"claude","stream":true,"messages":[]}`)
+			if res.Usage.Output != 1000 {
+				t.Fatalf("output %d, want 1000: the event's content, however laid out", res.Usage.Output)
+			}
+		})
+	}
 	t.Run("an Anthropic stream cut before its message_delta", func(t *testing.T) {
 		ev := anthropicStream(5)
 		h, rows, res := priced(t, AnthropicMessages, cutAfter{ev[:7], 200}) // message_start, block start, 5 deltas
