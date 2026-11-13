@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 	"uuid"
 
@@ -58,6 +59,11 @@ type Handler struct {
 	// Telemetry records each request's span, metrics and ledger row; nil
 	// records nothing.
 	Telemetry *telemetry.Telemetry
+	// BodyTimeout bounds reading a request's body (default 30 s);
+	// MaxResponse, the bytes of a provider's response forwarded (default
+	// 64 MiB; past it the response is cut, golem#5).
+	BodyTimeout time.Duration
+	MaxResponse int64
 	// ProviderTail is how long a call's slot is held after an ambiguous
 	// end (a cut, an abandoned response, an upstream failure the provider
 	// may have seen), bounded by the call's deadline: the provider may still
@@ -158,6 +164,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rt, no := h.route(snap, principal, req.alias)
 	if no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
+	if no := h.features(r.Header, principal, rt, req); no != nil {
 		h.fail(ctx, w, no)
 		return
 	}
@@ -332,8 +342,13 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) (
 	if n := r.ContentLength; n > 0 && n <= h.MaxBody && int64(cap(*in)) < n+1 {
 		*in = make([]byte, 0, n+1) // one allocation, not a doubling series
 	}
+	// The body must arrive within BodyTimeout: a client trickling it in
+	// would hold a connection and a buffer before any admission (golem#5).
+	rc := http.NewResponseController(w)
+	rc.SetReadDeadline(time.Now().Add(cmp.Or(h.BodyTimeout, 30*time.Second))) // a test's recorder has none
 	var err error
 	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, h.MaxBody))
+	rc.SetReadDeadline(time.Time{})
 	switch _, tooBig := errors.AsType[*http.MaxBytesError](err); {
 	case tooBig:
 		return nil, &refusal{contract.RequestTooLarge, "the request body is larger than this gateway accepts"}
@@ -356,6 +371,41 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 		return nil, &refusal{contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows"}
 	}
 	return rt, nil
+}
+
+// approvedVersions are the anthropic-version values restricted mode
+// forwards.
+var approvedVersions = map[string]bool{"2023-06-01": true} // read-only
+
+// features applies the request-feature mode (ADR 0037, 0041 §3, §7.1):
+// in restricted mode (the default, but for agent routes) only approved
+// request members, betas and API versions are forwarded; compatible mode
+// forwards unknown ones. Known policy (policy below) applies in both.
+func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, req scanned) *refusal {
+	mode := p.Limits.Features
+	if mode == "" {
+		mode = "restricted"
+		if rt.Agent {
+			mode = "compatible"
+		}
+	}
+	if mode == "compatible" {
+		return nil
+	}
+	if req.unknown > 0 {
+		return &refusal{contract.AuthzFeatureForbidden, fmt.Sprintf("%d request member(s) golem does not know: this route forwards approved features only (restricted mode); its managers can approve them", req.unknown)}
+	}
+	for _, v := range hdr.Values("Anthropic-Beta") {
+		for b := range strings.SplitSeq(v, ",") {
+			if b = strings.TrimSpace(b); b != "" && !rt.Betas[b] {
+				return &refusal{contract.AuthzFeatureForbidden, "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
+			}
+		}
+	}
+	if v := hdr.Get("Anthropic-Version"); v != "" && !approvedVersions[v] {
+		return &refusal{contract.AuthzFeatureForbidden, "anthropic-version " + v + " is not approved (restricted mode)"}
+	}
+	return nil
 }
 
 // policy applies the scope's request policy (contracts.md §8): its
@@ -462,6 +512,10 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
+		if ex.received += int64(n); ex.received > cmp.Or(h.MaxResponse, defaultMaxResponse) {
+			cut = errUpstreamCut{errResponseTooLarge}
+			break
+		}
 		if n > 0 {
 			var ok bool
 			if filter {
@@ -497,6 +551,10 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
+		if ex.received += int64(n); ex.received > cmp.Or(h.MaxResponse, defaultMaxResponse) {
+			cut = errUpstreamCut{errResponseTooLarge}
+			break
+		}
 		if n > 0 {
 			if werr := ex.write(ex.buf[:n], false); werr != nil {
 				cut, ex.callerGone = errCallerGone, true
@@ -517,6 +575,11 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 	ex.readWhole(h.Dialect)
 	return ex.usage(h.Dialect, cut)
 }
+
+// errResponseTooLarge cuts a response past MaxResponse.
+var errResponseTooLarge = errors.New("the provider's response is larger than this gateway forwards")
+
+const defaultMaxResponse = 64 << 20
 
 // errCallerGone is a write to the caller that failed.
 var errCallerGone = errors.New("proxy: the caller went away")

@@ -39,6 +39,7 @@ type scanned struct {
 	store       bool  // OpenAI's store: true (rewritten off where forbidden)
 	state       bool  // provider-side state with no off switch (an Anthropic container)
 	serverTools bool  // tools the provider runs: egress, and no cost bound
+	unknown     int   // members golem does not know (restricted mode refuses them)
 }
 
 // scan reads the routing and policy fields of a request body.
@@ -47,11 +48,12 @@ func (ex *exchange) scan(d Dialect, body []byte) (scanned, error) {
 		err := ex.msg.Scan(body)
 		f := ex.msg.Flags
 		return scanned{alias: ex.msg.Model, stream: ex.msg.Stream, maxTokens: ex.msg.MaxTokens, hasMax: ex.msg.HasMaxTokens,
-			n: 1, state: f&messages.FlagContainer != 0, serverTools: f&(messages.FlagServerTools|messages.FlagMCPServers) != 0}, err
+			n: 1, state: f&messages.FlagContainer != 0, serverTools: f&(messages.FlagServerTools|messages.FlagMCPServers) != 0,
+			unknown: ex.msg.Unknown}, err
 	}
 	err := ex.chat.Scan(body)
 	return scanned{alias: ex.chat.Model, stream: ex.chat.Stream, maxTokens: ex.chat.MaxTokens, hasMax: ex.chat.HasMaxTokens,
-		n: ex.chat.N, store: ex.chat.Store, serverTools: ex.chat.Flags&chat.FlagWebSearch != 0}, err
+		n: ex.chat.N, store: ex.chat.Store, serverTools: ex.chat.Flags&chat.FlagWebSearch != 0, unknown: ex.chat.Unknown}, err
 }
 
 // forbidStorage turns the request's provider-side storage off (OpenAI's

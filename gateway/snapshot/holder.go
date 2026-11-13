@@ -176,7 +176,11 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 	routes := make([]*route.Route, 0, len(s.Routes))
 	for _, r := range s.Routes {
 		rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect, MaxDuration: time.Duration(r.MaxDurationMs) * time.Millisecond,
-			Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond}
+			Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond,
+			Agent: r.Agent, Betas: map[string]bool{}}
+		for _, b := range r.ApprovedBetas {
+			rt.Betas[b] = true
+		}
 		for _, m := range r.Pool {
 			t := targets[depKey{m.Backend, m.Deployment}]
 			if t == nil {

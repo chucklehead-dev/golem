@@ -37,8 +37,9 @@ type Limits struct {
 	ScopeInFlight     int
 	// The scope's request policy (contracts.md §8).
 	StorageAllowed  bool
-	MaxOutputTokens int64 // max_tokens times n; 0: none
-	MaxInputBytes   int64 // 0: none
+	MaxOutputTokens int64  // max_tokens times n; 0: none
+	MaxInputBytes   int64  // 0: none
+	Features        string // restricted, compatible, or "" (by the route)
 }
 
 // Allows reports whether the principal may call an alias: the intersection
@@ -95,7 +96,7 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *
 	for _, s := range e.Scopes {
 		r := &rights{models: make(map[string]bool, len(s.Models)), limits: Limits{BudgetMicros: s.BudgetMicros, Strict: s.Strict,
 			PrincipalInFlight: s.PrincipalInFlight, ScopeInFlight: s.ScopeInFlight, StorageAllowed: s.StorageAllowed,
-			MaxOutputTokens: s.MaxOutputTokens, MaxInputBytes: s.MaxInputBytes}}
+			MaxOutputTokens: s.MaxOutputTokens, MaxInputBytes: s.MaxInputBytes, Features: s.Features}}
 		for _, a := range s.Models {
 			r.models[a] = true
 		}

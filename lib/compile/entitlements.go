@@ -59,6 +59,8 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 			add(obj, at+".inFlight", "limits must not be negative")
 		case sc.MaxOutputTokens < 0 || sc.MaxInputBytes < 0:
 			add(obj, at, "ceilings must not be negative")
+		case sc.Features != "" && sc.Features != "restricted" && sc.Features != "compatible":
+			add(obj, at+".features", "%q: restricted or compatible (unset: restricted, compatible on agent routes)", sc.Features)
 		case sc.ProviderStorage != "" && sc.ProviderStorage != "forbidden" && sc.ProviderStorage != "allowed":
 			add(obj, at+".providerStorage", "%q: forbidden (the default) or allowed", sc.ProviderStorage)
 		}
@@ -70,7 +72,7 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 		s := snapshot.Scope{ID: sc.Name, Models: slices.Sorted(slices.Values(sc.Models)), BudgetMicros: sc.BudgetMicros,
 			Strict: sc.Strict, PrincipalInFlight: cmp.Or(sc.InFlight.Principal, DefaultPrincipalInFlight),
 			ScopeInFlight: cmp.Or(sc.InFlight.Scope, DefaultScopeInFlight), StorageAllowed: sc.ProviderStorage == "allowed",
-			MaxOutputTokens: sc.MaxOutputTokens, MaxInputBytes: sc.MaxInputBytes}
+			MaxOutputTokens: sc.MaxOutputTokens, MaxInputBytes: sc.MaxInputBytes, Features: sc.Features}
 		scopes[sc.Name] = &s
 	}
 	hashes := map[string]bool{}

@@ -140,7 +140,7 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 		if len(r.Spec.Pool) == 0 {
 			add(obj, "spec.pool", "a route needs at least one deployment")
 		}
-		sr := snapshot.Route{Alias: r.Spec.Alias}
+		sr := snapshot.Route{Alias: r.Spec.Alias, Agent: r.Spec.Agent, ApprovedBetas: slices.Clone(r.Spec.ApprovedBetas)}
 		sr.MaxDurationMs, sr.HeadersMs, sr.IdleMs = timeouts(r.Spec.Timeouts, func(field, msg string) { add(obj, "spec.timeouts."+field, "%s", msg) })
 		for i, m := range r.Spec.Pool {
 			at := fmt.Sprintf("spec.pool[%d]", i)

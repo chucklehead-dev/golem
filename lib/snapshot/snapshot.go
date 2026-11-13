@@ -87,6 +87,8 @@ type Scope struct {
 	StorageAllowed  bool  `json:"storageAllowed,omitempty"`
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
+	// Features: "restricted", "compatible", or "" (by the route's kind).
+	Features string `json:"features,omitempty"`
 	// KnownSpend is the ledger's balance for Period (a calendar month,
 	// "2026-11") with this site's events numbered above Watermark left out;
 	// Watermark is the site counter's number for the period up to which
@@ -156,9 +158,11 @@ type Route struct {
 	Pool    []Target `json:"pool"`
 	// The call's bounds in milliseconds, the compiler's defaults filled in
 	// (ModelRoute spec.timeouts).
-	MaxDurationMs int64 `json:"maxDurationMs"`
-	HeadersMs     int64 `json:"headersMs"`
-	IdleMs        int64 `json:"idleMs"`
+	Agent         bool     `json:"agent,omitempty"`
+	ApprovedBetas []string `json:"approvedBetas,omitempty"`
+	MaxDurationMs int64    `json:"maxDurationMs"`
+	HeadersMs     int64    `json:"headersMs"`
+	IdleMs        int64    `json:"idleMs"`
 }
 
 // Target is a pool member.

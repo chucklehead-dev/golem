@@ -206,7 +206,11 @@ non-agent applications and sensitive or residency-bound scopes; compatible
 (unknown features forwarded, exposure accepted until remediation) is the
 default for coding-agent routes under one standing approval. Names are bounded/sanitized or keyed-hashed before logging;
 values are never logged. Nightly diffs do not bound remediation time. These are enforced
-wherever they appear, and the list grows with the nightly review:
+wherever they appear, and the list grows with the nightly review. The
+mode is the scope's `features` (unset: restricted, but compatible on routes
+marked `agent`); restricted refuses unknown request members, unapproved
+`anthropic-beta` values (the route's `approvedBetas`) and unapproved
+`anthropic-version`s (`authz.feature_forbidden`):
 
 | Field or family | Policy |
 |---|---|
