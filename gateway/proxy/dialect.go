@@ -80,7 +80,6 @@ func (ex *exchange) rewrite(d Dialect, dst, body []byte, model string) []byte {
 func (ex *exchange) startStream(d Dialect) (filter bool) {
 	if d == AnthropicMessages {
 		ex.msgUsage = messages.StreamUsage{}
-		ex.deltaBytes, ex.skipMark, ex.inDelta = 0, 0, false
 		ex.parser.Want, ex.parser.OnEvent = ex.msgWant, ex.msgOn
 		ex.parser.Reset()
 		return false
@@ -115,46 +114,46 @@ func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
 	return ex.chatUsage.Usage, errors.Join(cut, ex.chatUsage.Err)
 }
 
-// bytesPerToken is the estimate's ratio: about four bytes of English text
-// or code a token for the tokenizers golem serves. An estimate replaces no
-// count the provider gave; reconciliation corrects it (ADR 0031).
-const bytesPerToken = 4
-
 // estimate completes a response's usage when the provider's report is
-// missing (a stream cut, or a response without its usage): output from the
-// content seen, at least a token per content delta; input, if the provider
-// gave none, from the request's size. It returns the usage to charge and
-// the estimated part of it (zero when the report was whole).
-func (ex *exchange) estimate(d Dialect, requestBytes int64) (total, estimated canon.Usage) {
-	var u canon.Usage
-	var final bool
-	var content, deltas int64
+// missing (a stream cut, or a response without its usage) with bounds, not
+// averages: no text tokenizer golem serves makes a token of less than a
+// byte, and every output token the provider sent is in the response's
+// bytes, so output is every byte received, whatever its framing or fields,
+// and at most the request's output ceiling (max_tokens × n), which the
+// provider enforces; input, if the provider gave none, every byte of the
+// request (as price.Worst). An estimate replaces no count the provider
+// gave; reconciliation corrects it (ADR 0031). It returns the usage to
+// charge and the estimated part of it (zero when the report was whole).
+func (ex *exchange) estimate(d Dialect, requestBytes, ceiling int64) (total, estimated canon.Usage) {
+	u, final := ex.chatUsage.Usage, ex.chatUsage.Final
 	if d == AnthropicMessages {
-		u, final, content, deltas = ex.msgUsage.Usage, ex.msgUsage.Final, ex.msgUsage.ContentBytes, ex.msgUsage.Deltas
-		if ex.closeDelta(); ex.deltaBytes > 0 { // a stream: its deltas' data, less their envelopes
-			content = max(ex.deltaBytes-deltas*messages.DeltaEnvelope, 0)
-		}
-	} else {
-		u, final, content, deltas = ex.chatUsage.Usage, ex.chatUsage.Final, ex.chatUsage.ContentBytes, ex.chatUsage.Deltas
-		// A whole response's bytes past what was kept count as content: they
-		// were never seen (conservative, and rare).
+		u, final = ex.msgUsage.Usage, ex.msgUsage.Final
 	}
 	if final {
 		return u, canon.Usage{}
 	}
 	total = u
-	out := max((content+bytesPerToken-1)/bytesPerToken, deltas)
-	if d == OpenAIChat { // the events' tokens, plus a whole response's content, plus what was not kept
-		out = deltas + (content+ex.unkept+bytesPerToken-1)/bytesPerToken
+	out := ex.received
+	if ceiling > 0 {
+		out = min(out, ceiling)
 	}
 	if out > u.Output {
 		total.Output, estimated.Output = out, out-u.Output
 	}
 	if u.Input == 0 && u.CacheRead == 0 && u.CacheWrite == 0 { // no message_start, or OpenAI's (only at the end)
-		total.Input = requestBytes / bytesPerToken
+		total.Input = requestBytes
 		estimated.Input = total.Input
 	}
 	return total, estimated
+}
+
+// outputCeiling is the most output the request allows, or 0 if it set no
+// max_tokens (admission has checked the product cannot overflow).
+func outputCeiling(req scanned) int64 {
+	if !req.hasMax {
+		return 0
+	}
+	return req.maxTokens * req.n
 }
 
 // appendError appends a dialect's error object for a contract code, with

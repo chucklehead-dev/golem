@@ -235,7 +235,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case !reachedProvider(err):
 		case r.Context().Err() != nil: // the caller left first: its input, at least, was read
 			call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
-			cost = price.Cost(canon.Usage{Input: requestBytes / bytesPerToken}, pr)
+			cost = price.Cost(canon.Usage{Input: requestBytes}, pr) // a token a byte, as Worst bounds it
 		default: // a timeout or a reset after the request went out: the worst it may have cost
 			call.Outcome = "uncertain"
 			var ok bool
@@ -283,7 +283,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// from what was seen (ADR 0012), and its row says how much of its
 		// cost is estimated; never zero for work the provider did.
 		var estimated canon.Usage
-		res.Usage, estimated = ex.estimate(h.Dialect, requestBytes)
+		res.Usage, estimated = ex.estimate(h.Dialect, requestBytes, outputCeiling(req))
 		if est := price.Cost(estimated, pr); est > 0 {
 			call.EstimatedFraction = float64(est) / float64(max(price.Cost(res.Usage, pr), 1))
 		}
@@ -570,8 +570,6 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 			}
 			if len(ex.tail)+n <= maxRetained {
 				ex.tail = append(ex.tail, ex.buf[:n]...)
-			} else {
-				ex.unkept += int64(n)
 			}
 		}
 		if err == io.EOF {

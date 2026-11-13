@@ -59,7 +59,7 @@ security):
   allocations. Spend events go out through the normal access-log path
   (ADR 0015) and are deduplicated by event ID in ClickHouse.
 - **Ledger rows**: one `attempt` row per upstream attempt (flagged
-  `estimated` when a stream was cut and its usage counted from deltas), and
+  `estimated` when a stream was cut and its usage bounded by the bytes received), and
   `adjustment` rows from reconciliation, attributed where the provider data
   allows, else to an `unattributed` principal under the provider account.
 

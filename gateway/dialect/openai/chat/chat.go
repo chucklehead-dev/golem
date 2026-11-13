@@ -252,20 +252,10 @@ func (r *Request) Rewrite(dst, body []byte, model string) []byte {
 type StreamUsage struct {
 	Usage canon.Usage
 	Err   error
-	// Final: the usage is the provider's. Else a cut stream's output is
-	// estimated: Deltas, its events' tokens (each event's content at 4
-	// bytes a token, at least one), plus a whole response's ContentBytes.
-	Final        bool
-	ContentBytes int64
-	Deltas       int64
+	// Final: the usage is the provider's. Else the gateway estimates it
+	// from the response's bytes (proxy's estimate).
+	Final bool
 }
-
-// bytesPerToken is an estimate's ratio of content bytes to tokens.
-const bytesPerToken = 4
-
-// contentKeys hold a chunk's or a response's content: text, reasoning, a
-// refusal and a tool call's arguments.
-var contentKeys = jsonscan.KeysOf("content", "reasoning_content", "refusal", "arguments")
 
 var usageKey = []byte(`"usage"`)
 
@@ -298,27 +288,14 @@ func mayHaveUsage(data []byte) bool {
 
 // OnEvent reads one chunk; only a chunk that may carry usage is scanned.
 func (u *StreamUsage) OnEvent(_, data []byte) {
-	// Every event's content is measured, at 4 bytes a token and at least
-	// a token an event: a conservative bound on any event, however the
-	// provider batches its output, that counts no framing (an ordinary
-	// chunk is a token or two inside about 200 bytes of id, model and
-	// choices). The scan is a few byte searches a chunk.
-	c := int64(jsonscan.StringBytes(data, contentKeys))
-	u.Deltas += max(1, (c+bytesPerToken-1)/bytesPerToken)
 	if mayHaveUsage(data) {
-		u.usage(data) // its content is in Deltas already, not ContentBytes too
+		u.Response(data)
 	}
 }
 
 // Response reads usage from a JSON object (a chunk or a whole response).
 // OpenAI's prompt_tokens include the cached ones; canon.Usage.Input does not.
 func (u *StreamUsage) Response(body []byte) {
-	u.ContentBytes += int64(jsonscan.StringBytes(body, contentKeys))
-	u.usage(body)
-}
-
-// usage reads a usage object, if the body has one.
-func (u *StreamUsage) usage(body []byte) {
 	var got canon.Usage
 	seen, input, output := false, false, false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
