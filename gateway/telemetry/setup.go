@@ -58,8 +58,10 @@ func SDK(spans sdktrace.SpanExporter, metrics sdkmetric.Reader, logs sdklog.Expo
 	// deduplication, a quarter of a call's CPU, is turned off.
 	ledger := NewLedgerQueue(logs, ledgerQueueSize, 512, time.Second)
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(ledger), sdklog.WithResource(res), sdklog.WithAllowKeyDuplication())
+	// The ledger first, the metrics last: the final drop and failure
+	// counts are exported after the rows they count.
 	shutdown := func(ctx context.Context) error {
-		return errors.Join(tp.Shutdown(ctx), mp.Shutdown(ctx), lp.Shutdown(ctx))
+		return errors.Join(lp.Shutdown(ctx), tp.Shutdown(ctx), mp.Shutdown(ctx))
 	}
 	return Providers{Tracer: tp, Meter: mp, Logger: lp, Ledger: ledger}, shutdown
 }

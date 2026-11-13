@@ -17,9 +17,13 @@ type recordingExp struct {
 	gate chan struct{} // if set, Export waits on it
 }
 
-func (e *recordingExp) Export(_ context.Context, rs []sdklog.Record) error {
+func (e *recordingExp) Export(ctx context.Context, rs []sdklog.Record) error {
 	if e.gate != nil {
-		<-e.gate
+		select {
+		case <-e.gate:
+		case <-ctx.Done():
+			return ctx.Err() // as an OTLP exporter does
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -69,5 +73,50 @@ func TestLedgerQueue(t *testing.T) {
 	q.Shutdown(t.Context())
 	if q.Failed.Load() != 5 {
 		t.Fatalf("failed %d, want 5", q.Failed.Load())
+	}
+}
+
+// TestLedgerQueueShutdown: shutdown keeps to its deadline even when the
+// collector does not answer, and every row it could not send, or that came
+// after it, is counted.
+func TestLedgerQueueShutdown(t *testing.T) {
+	var r sdklog.Record
+	stuck := &recordingExp{gate: make(chan struct{})}
+	q := NewLedgerQueue(stuck, 100, 10, time.Hour)
+	for range 25 {
+		q.OnEmit(t.Context(), &r)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	q.Shutdown(ctx)
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("shutdown took %v past its 200 ms deadline", took)
+	}
+	if q.Failed.Load() != 25 {
+		t.Fatalf("failed %d: all 25 undelivered rows must be counted", q.Failed.Load())
+	}
+	q.OnEmit(t.Context(), &r)
+	if q.Dropped.Load() != 1 {
+		t.Fatal("a row after shutdown was neither delivered nor counted")
+	}
+}
+
+// TestLedgerQueueForceFlush: ForceFlush delivers what is queued now.
+func TestLedgerQueueForceFlush(t *testing.T) {
+	var r sdklog.Record
+	exp := &recordingExp{}
+	q := NewLedgerQueue(exp, 100, 50, time.Hour)
+	defer q.Shutdown(t.Context())
+	for range 7 {
+		q.OnEmit(t.Context(), &r)
+	}
+	if err := q.ForceFlush(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	exp.mu.Lock()
+	defer exp.mu.Unlock()
+	if exp.got != 7 {
+		t.Fatalf("flushed %d of 7", exp.got)
 	}
 }

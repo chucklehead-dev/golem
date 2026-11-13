@@ -40,6 +40,7 @@ func main() {
 	maxBody := flag.Int64("max-body", 32<<20, "largest request body accepted, in bytes")
 	tenant := flag.String("entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
 	drainFor := flag.Duration("drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
+	unready := flag.Duration("unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
 	telem := flag.String("telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	flag.Parse()
@@ -52,7 +53,6 @@ func main() {
 
 	// Standalone: dev keys, the in-memory limiter (ADR 0023).
 	tel, shutdownTelemetry := setupTelemetry(*telem)
-	defer shutdownTelemetry()
 	limiter := limit.New(limit.NewMem())
 	limiter.OnNumbered = func(_ string, e limit.Event, seq int64) { tel.Numbered(e.ID, seq) }
 	var entra *auth.Entra
@@ -72,18 +72,13 @@ func main() {
 		fail("%v", err)
 	}
 
+	lc := &lifecycle{unready: *unready, drain: *drainFor, cut: 10 * time.Second}
 	mux := http.NewServeMux()
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
-		mux.Handle(pattern, localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody, Telemetry: tel}))
+		mux.Handle(pattern, lc.track(localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody, Telemetry: tel})))
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if _, err := holder.Current(); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		w.Write([]byte("ok\n"))
-	})
+	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))
 
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)
@@ -107,35 +102,53 @@ func main() {
 		// No WriteTimeout: streams are long (gateway.md §3 step 1).
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	lc.srv = srv
+	sig, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// Every goroutine is owned here and ends with ctx; main returns only
-	// when all have, the server's drain included.
+	// The background loops live through the drain (renewals keep calls'
+	// slots), and end after it. Every goroutine is owned here.
+	bg, stopBg := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Go(func() { dir.Run(ctx) })
-	wg.Go(func() { renew(ctx, limiter) })
+	wg.Go(func() { dir.Run(bg) })
+	wg.Go(func() { renew(bg, limiter) })
 	if entra != nil {
-		wg.Go(func() { entra.Run(ctx) })
+		wg.Go(func() { entra.Run(bg) })
 	}
+	drained := make(chan struct{})
 	wg.Go(func() {
-		<-ctx.Done()
-		// Shutdown stops accepting and waits for calls in flight, streams
-		// included, up to the deadline; ListenAndServe returns at once, so
-		// main waits for this.
-		drain, cancel := context.WithTimeout(context.Background(), *drainFor)
-		defer cancel()
-		if err := srv.Shutdown(drain); err != nil {
-			slog.Warn("golem-gateway: calls still in flight at the drain deadline were cut", "err", err)
-		}
+		<-sig.Done()
+		lc.shutdown()
+		close(drained)
 	})
 	fmt.Fprintf(os.Stderr, "golem-gateway standalone: %s on http://%s — for this machine only, not for shared use\n", *standalone, *listen)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	code := 0
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { // returns as the shutdown begins
 		slog.Error("golem-gateway", "err", err)
-		stop() // end the other goroutines
-		wg.Wait()
-		os.Exit(1)
+		code = 1
 	}
+	stop() // a failed listen starts the shutdown too
+	<-drained
+	stopBg()
 	wg.Wait()
+	finish(limiter, tel)
+	shutdownTelemetry() // last: it delivers the rows the calls wrote
+	os.Exit(code)
+}
+
+// finish is the last accounting, once every call has ended: increments
+// held through an outage replayed if the store answers, then every ledger
+// row still waiting for its number written without one.
+func finish(l *limit.Limiter, tel *telemetry.Telemetry) {
+	if l.Down() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := l.Recover(ctx); err != nil {
+			slog.Warn("golem-gateway: increments held through the outage were not replayed; their rows go unnumbered", "err", err)
+		}
+		cancel()
+	}
+	if n := tel.FlushWaiting(context.Background()); n > 0 {
+		slog.Warn("golem-gateway: ledger rows written without their counter numbers", "rows", n)
+	}
 }
 
 // renew keeps running calls' slots alive (ADR 0038: every 30 seconds) and,

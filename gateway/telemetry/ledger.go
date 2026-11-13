@@ -153,3 +153,24 @@ func (l *Ledger) write(ctx context.Context, c Call, seq int64) {
 	r.AddAttributes(row[:]...)
 	l.logger.Emit(ctx, r)
 }
+
+// FlushWaiting writes every row still waiting for its counter number,
+// unnumbered: at shutdown, a row is worth more than its number (which
+// golem-control treats as never numbered, ADR 0042).
+func (l *Ledger) FlushWaiting(ctx context.Context) int {
+	l.mu.Lock()
+	rows := make([]Call, 0, len(l.waiting))
+	for _, id := range l.order {
+		if c, ok := l.waiting[id]; ok {
+			rows = append(rows, c)
+		}
+	}
+	clear(l.waiting)
+	l.order = nil
+	l.mu.Unlock()
+	for _, c := range rows {
+		l.Unnumbered.Add(1)
+		l.write(ctx, c, 0)
+	}
+	return len(rows)
+}

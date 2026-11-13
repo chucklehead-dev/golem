@@ -214,3 +214,12 @@ func (t *Telemetry) Numbered(eventID string, seq int64) {
 		t.Ledger.Numbered("", eventID, seq)
 	}
 }
+
+// FlushWaiting writes the ledger rows still waiting for their counter
+// numbers without them (at shutdown), and says how many.
+func (t *Telemetry) FlushWaiting(ctx context.Context) int {
+	if t == nil {
+		return 0
+	}
+	return t.Ledger.FlushWaiting(ctx)
+}
