@@ -45,7 +45,7 @@ module exposure {
 A scope with a `BUDGET`, several principals each with `LIMIT` calls in
 flight, the scope with `SCOPE_LIMIT`, a site's `GATEWAYS`, and a few
 `REQUESTS`, each its `OWNER`'s. Costs and `WORST` as in the first model.
-Only the soft check: the worst-case check tightens the bound by a call, as
+Only the soft check: the declared-worst-case check tightens the bound by a call, as
 accounting.md shows, and changes nothing here.
 
 ```quint exposure.qnt +=
@@ -717,7 +717,7 @@ The model ends here:
   sites spend within one snapshot's lag, which their rate limits cap. With
   the secondary site a warm standby, that term is zero in normal
   operation. Not modelled.
-- **The worst-case check** (accounting.md): one call tighter, nothing else changes.
+- **The declared-worst-case check** (accounting.md): one call tighter, nothing else changes.
 - **Crashes and reconciliation** (accounting.md): a gateway crash is
   another source of `uncounted`; reconciliation books it.
 - **Prices**: `WORST` is a true bound only for the modalities and billing

@@ -227,7 +227,7 @@ and site allocations are not required. What remains required:
   plus the site's counter since then) is the only input to budget checks;
   once it reaches a budget, every further call is refused on every site.
 - Per-principal concurrency limits are enforced; scopes with the
-  worst-case check admit on the declared worst case (no cache discount,
+  declared-worst-case check admit on the declared worst case (no cache discount,
   `max_tokens` × `n`, no server-side tools). Budgets are controls, not
   ceilings: no estimate or declared worst case is claimed to bound real
   spend, and the provider account's limit is the backstop (ADR 0044).

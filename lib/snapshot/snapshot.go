@@ -75,12 +75,12 @@ type Member struct {
 
 // Scope is a scope's rights and limits for the period.
 type Scope struct {
-	ID                string   `json:"id"`
-	Models            []string `json:"models"` // aliases its members may call
-	BudgetMicros      int64    `json:"budgetMicros,omitempty"`
-	WorstCaseCheck    bool     `json:"worstCaseCheck,omitempty"` // ADR 0044
-	PrincipalInFlight int      `json:"principalInFlight"`
-	ScopeInFlight     int      `json:"scopeInFlight"`
+	ID                     string   `json:"id"`
+	Models                 []string `json:"models"` // aliases its members may call
+	BudgetMicros           int64    `json:"budgetMicros,omitempty"`
+	DeclaredWorstCaseCheck bool     `json:"declaredWorstCaseCheck,omitempty"` // ADR 0044
+	PrincipalInFlight      int      `json:"principalInFlight"`
+	ScopeInFlight          int      `json:"scopeInFlight"`
 	// The scope's request policy: provider-side storage allowed (ADR 0027),
 	// and ceilings on output tokens asked for and on input size (ADR 0038;
 	// zero is none).

@@ -70,7 +70,7 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 			}
 		}
 		s := snapshot.Scope{ID: sc.Name, Models: slices.Sorted(slices.Values(sc.Models)), BudgetMicros: sc.BudgetMicros,
-			WorstCaseCheck: sc.WorstCaseCheck, PrincipalInFlight: cmp.Or(sc.InFlight.Principal, DefaultPrincipalInFlight),
+			DeclaredWorstCaseCheck: sc.DeclaredWorstCaseCheck, PrincipalInFlight: cmp.Or(sc.InFlight.Principal, DefaultPrincipalInFlight),
 			ScopeInFlight: cmp.Or(sc.InFlight.Scope, DefaultScopeInFlight), StorageAllowed: sc.ProviderStorage == "allowed",
 			MaxOutputTokens: sc.MaxOutputTokens, MaxInputBytes: sc.MaxInputBytes, Features: sc.Features}
 		scopes[sc.Name] = &s

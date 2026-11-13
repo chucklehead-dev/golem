@@ -216,7 +216,7 @@ marked `agent`); restricted refuses unknown request members, unapproved
 |---|---|
 | `store`, `previous_response_id`, `background`, conversation identifiers | provider-side storage (ADR 0027; M1 refuses stateful use). Enforced: where a scope forbids storage (the default), `store: true` reaches the provider as `false`, and an Anthropic `container` is refused (`authz.provider_storage_forbidden`) |
 | file, container and upload identifiers | provider-side storage |
-| `mcp_servers`, server-side tools with network access (web search, fetch, code execution) | egress and data movement; billing units. Enforced: refused in scopes with the worst-case check, since such a request declares no worst case (`authz.feature_forbidden`, ADR 0044) |
+| `mcp_servers`, server-side tools with network access (web search, fetch, code execution) | egress and data movement; billing units. Enforced: refused in scopes with the declared-worst-case check, since such a request declares no worst case (`authz.feature_forbidden`, ADR 0044) |
 | `n`, `max_tokens` above the scope's ceiling, input above the scope's size ceiling | cost (ADR 0038). Enforced: `max_tokens` × `n` over the scope's `maxOutputTokens`, a missing `max_tokens` under it, or a body over `maxInputBytes` is refused (`request.over_ceiling`); the declared worst case counts `n` completions |
 | `metadata.user_id`, `user`, session fields | attribution only, never identity |
 

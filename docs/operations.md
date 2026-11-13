@@ -61,7 +61,7 @@ past it. The financial boundary is the provider account's:
   A large unattributed or estimated share is investigated, not tuned away.
 - **Expected exposure, not a guarantee:** per principal, roughly its
   in-flight limit times its largest declared call, plus a refresh lag's
-  spend across sites (ADR 0031). The worst-case check (`worstCaseCheck`)
+  spend across sites (ADR 0031). The declared-worst-case check (`declaredWorstCaseCheck`)
   narrows that by a call and refuses calls that declare no worst case; it
   is not a ceiling either.
 

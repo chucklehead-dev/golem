@@ -76,8 +76,8 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 		}{ // known: the snapshot's 2 (as of number 1) plus the 5 after it
 			{"soft, under", Admission{Budget: 8}, Admitted},
 			{"soft, at", Admission{Budget: 7}, OverBudget},
-			{"worst-case check, fits", Admission{Budget: 9, WorstCaseCheck: true, Worst: 2}, Admitted},
-			{"worst-case check, does not", Admission{Budget: 9, WorstCaseCheck: true, Worst: 3}, OverBudget},
+			{"declared-worst-case check, fits", Admission{Budget: 9, DeclaredWorstCaseCheck: true, Worst: 2}, Admitted},
+			{"declared-worst-case check, does not", Admission{Budget: 9, DeclaredWorstCaseCheck: true, Worst: 3}, OverBudget},
 			{"none", Admission{}, Admitted},
 		} {
 			a := tc.a

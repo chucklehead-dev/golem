@@ -53,7 +53,7 @@ Its value for golem is in the protocols, not the plumbing.
 
 | Model | State and actions | Properties |
 |---|---|---|
-| **Accounting** (ADR 0031; written: [model/accounting.md](../model/accounting.md), [model/exposure.md](../model/exposure.md)) | admissions under the soft and worst-case checks, concurrency limits, completions, crashes, Valkey loss, duplicate delivery, reconciliation | overshoot within the stated bound; never counted twice; books match after reconciliation; the worst-case check with one in flight stays within the budget apart from crash losses while every call costs at most its declared worst case (the model's assumption, not the world's: ADR 0044) |
+| **Accounting** (ADR 0031; written: [model/accounting.md](../model/accounting.md), [model/exposure.md](../model/exposure.md)) | admissions under the soft and declared-worst-case checks, concurrency limits, completions, crashes, Valkey loss, duplicate delivery, reconciliation | overshoot within the stated bound; never counted twice; books match after reconciliation; the declared-worst-case check with one in flight stays within the budget apart from crash losses while every call costs at most its declared worst case (the model's assumption, not the world's: ADR 0044) |
 | **State and distribution** (control-plane.md §3–4; written: [model/publication.md](../model/publication.md), [model/freshness.md](../model/freshness.md)) | writers racing with `If-Match` (lost responses included), leader changes, signed publication with a publish sequence, gateway polls and restarts with empty disks, restore | every acknowledged write is in a snapshot every gateway applies; no gateway applies a lower publish sequence or an unsigned snapshot; no write is lost to a race; a restore never revives a revoked key; revocation within the bound after a settle |
 | **Attempt loop** (ADR 0002) | attempts, first byte, failover, retry budget, ejection | no retry after the first byte; retries bounded by the budget; an ejected deployment receives nothing until probed back |
 | **Approvals and grants** (org-model §4.3; when built, ADR 0034) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
@@ -67,7 +67,7 @@ liveness), before any code is bound to it.
 1. **The limiter in simulation (M1; not yet tried: the limiter is checked
    by connect and qhegel against model/exposure.md instead, see Built so
    far).** Run the limiter (known-spend
-   checks, concurrency slots, the worst-case check) on `qenv` with a
+   checks, concurrency slots, the declared-worst-case check) on `qenv` with a
    `qenv.Store`-backed double of Valkey (scripts as atomic transactions),
    gateways crashing and Valkey failing over; `qtest.System.Explore` judged
    by the accounting model. This is where a bug costs the most and is hardest to

@@ -221,7 +221,7 @@ func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10)
 
 func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, bool, error) {
 	check := "0"
-	if a.WorstCaseCheck {
+	if a.DeclaredWorstCaseCheck {
 		check = "1"
 	}
 	sk := v.scopeKeys(a.Scope, a.Period)

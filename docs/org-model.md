@@ -156,7 +156,7 @@ limit times its largest declared call, plus what it spends within one
 refresh lag; a scope's pool, shared by its members, by about the scope's
 own in-flight limit times the largest call (ADR 0041 §7.6). These are
 expected exposure while calls cost what they declare, not guarantees.
-A scope may choose the **worst-case check** (`worstCaseCheck`): the
+A scope may choose the **declared-worst-case check** (`declaredWorstCaseCheck`): the
 request's declared worst case must also fit, and a request that declares
 none (no `max_tokens`, server-side tools) is refused. That narrows the
 overshoot by about one call; it is not a ceiling. A budget is an

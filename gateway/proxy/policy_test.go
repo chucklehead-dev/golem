@@ -21,7 +21,7 @@ kind: LocalIdentity
 metadata: {name: local}
 spec:
   scopes:
-  - {name: checked, models: [claude], worstCaseCheck: true, budgetMicros: 1000000000000}
+  - {name: checked, models: [claude], declaredWorstCaseCheck: true, budgetMicros: 1000000000000}
   - {name: open, models: [claude], providerStorage: allowed}
   - {name: capped, models: [claude], maxOutputTokens: 1000, maxInputBytes: 300}
   keys:
@@ -77,7 +77,7 @@ func TestStoreOff(t *testing.T) {
 func TestPolicyUnits(t *testing.T) {
 	h := &Handler{Dialect: OpenAIChat}
 	capped := &auth.Principal{Limits: auth.Limits{MaxOutputTokens: 1000}}
-	checkedP := &auth.Principal{Limits: auth.Limits{WorstCaseCheck: true}}
+	checkedP := &auth.Principal{Limits: auth.Limits{DeclaredWorstCaseCheck: true}}
 	for _, tc := range []struct {
 		name string
 		p    *auth.Principal

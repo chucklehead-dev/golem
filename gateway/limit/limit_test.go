@@ -27,9 +27,9 @@ func TestSoftAndWorstCase(t *testing.T) {
 	if _, err := l.Admit(ctx, soft); err != nil {
 		t.Fatalf("soft: %v", err)
 	}
-	// The worst-case check: 8 + 5 > 10 refuses (ADR 0031).
+	// The declared-worst-case check: 8 + 5 > 10 refuses (ADR 0031).
 	checked := scopeCall("c", "p2")
-	checked.WorstCaseCheck, checked.Worst = true, 5
+	checked.DeclaredWorstCaseCheck, checked.Worst = true, 5
 	if _, err := l.Admit(ctx, checked); !errors.Is(err, ErrBudget) {
 		t.Fatalf("checked: %v, want ErrBudget", err)
 	}
