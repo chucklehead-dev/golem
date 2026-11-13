@@ -1,6 +1,7 @@
 # 0041: Security boundaries and incident controls after the second review
 
-Status: Accepted, with the adaptations in §7. Amends ADRs 0029, 0031,
+Status: Accepted, with the adaptations in §7; §7.6's hand-off amended by
+[0042](0042-known-spend-by-counter-watermark.md). Amends ADRs 0029, 0031,
 0032, 0035, 0037 and 0040 in the areas below. These are requirements and assumptions to validate,
 not implemented controls or proofs. Four-hour internal leases, soft budgets,
 collector-held capture credentials and platform delivery remain the design.

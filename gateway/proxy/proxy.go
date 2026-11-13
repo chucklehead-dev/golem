@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"uuid"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -21,7 +22,6 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/contract"
-	"github.com/chucklehead-dev/golem/lib/id"
 )
 
 // Snapshots gives the configuration a request uses: taken once, at the
@@ -33,7 +33,7 @@ type Snapshots interface {
 // Result is what a finished call reports: the input to pricing, the
 // counters and the access log (gateway.md §3 step 9).
 type Result struct {
-	RequestID id.UUID
+	RequestID uuid.UUID
 	Principal *auth.Principal
 	Target    *route.Target
 	Cost      int64 // micro-units, from the usage and the snapshot's price
@@ -82,9 +82,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	ctx, span := h.Telemetry.Start(r.Context(), h.Dialect.Name())
 	defer span.End()
-	reqID := id.New()
+	reqID := uuid.NewV7() // time-ordered: the ledger and logs sort by it (contracts.md §5)
 	var idBuf [36]byte
-	reqIDs := string(reqID.AppendString(idBuf[:0]))
+	text, _ := reqID.AppendText(idBuf[:0]) // never fails
+	reqIDs := string(text)
 	w.Header()[contract.HeaderRequestID] = []string{reqIDs}
 
 	snap, principal, no := h.authenticate(r)

@@ -283,9 +283,12 @@ without a preflight it never gets. SDKs and curl pass all three.
   byte, a provider recovering): gotogether's qenv doubles can drive them,
   with a small Quint model of "never double-charge, never replay a started
   stream" as the judge. Worth doing once M1's routing settles.
-- Budget enforcement is judged by `model/accounting.md`: no double count,
-  books matching after reconciliation, overshoot within ADR 0031's bound.
-- Limit scripts tested against Valkey containers in CI.
+- The limiter is judged by `model/exposure.md` (its connect test and a
+  Hegel state machine drive `gateway/limit` against it, over the in-memory
+  and the Valkey store); `model/accounting.md` judges the books: no double
+  count, matching after reconciliation, overshoot within ADR 0031's bound.
+- Limit scripts tested against a Valkey service in CI (the store
+  contract, and the exposure model's connect test over Valkey).
 - End-to-end: kind cluster with Istio ambient, the chart, a stub provider,
   ClickHouse, and the real OpenAI and Anthropic SDKs (and a coding agent)
   as clients.

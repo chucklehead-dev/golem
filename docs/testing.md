@@ -64,7 +64,9 @@ liveness), before any code is bound to it.
 
 ### 3.2 Where gotogether can be trialled during development
 
-1. **The limiter in simulation (M1).** Run the limiter (known-spend
+1. **The limiter in simulation (M1; not yet tried: the limiter is checked
+   by connect and qhegel against model/exposure.md instead, see Built so
+   far).** Run the limiter (known-spend
    checks, concurrency slots, the strict worst-case check) on `qenv` with a
    `qenv.Store`-backed double of Valkey (scripts as atomic transactions),
    gateways crashing and Valkey failing over; `qtest.System.Explore` judged

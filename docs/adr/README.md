@@ -10,7 +10,7 @@ baseline one, marked in both.
 |---|---|
 | [0001](0001-dialects-canonical-model-and-envelopes.md) | Same-dialect pass-through; translation through one canonical model (an adapter pair per dialect); hosting as envelopes (Bedrock, Vertex, Foundry); the decision APIs |
 | [0002](0002-no-replay-after-first-byte.md) | Retries and failover stop at the first response byte |
-| [0003](0003-components-and-layering.md) | Gateway, golem-control (one Deployment, a leader), operator per cluster, golemctl, console; layering checked by a test |
+| [0003](0003-components-and-layering.md) | Gateway, golem-control (one Deployment, a leader), golemctl, console; layering checked by a test (the operator removed by 0036) |
 | [0004](0004-behind-the-mesh.md) | Behind the enterprise's ingress and mesh, not a Gateway API implementation |
 | [0005](0005-config-crds-and-overrides.md) | Five config CRDs read by golem-control, one validation path, expiring operational overrides |
 | [0006](0006-state-and-distribution-in-object-storage.md) | Control-plane state as one CAS-updated document in S3; whole snapshots published there and polled by gateways |
@@ -19,7 +19,7 @@ baseline one, marked in both.
 | [0009](0009-identity-and-authentication.md) | Authenticator chain, Entra, checksummed keys, agents by Entra token, mesh identity, pass-through |
 | [0010](0010-organisation-scopes-and-roles.md) | Scopes (teams with sub-teams, projects), four roles, rights by intersection |
 | [0011](0011-budgets.md) | Pools funded by grants, approvals, three enforcement levels, observe/warn/enforce |
-| [0012](0012-limits-and-accounting.md) | Valkey at every site; expected-cost reservations, renewal, cut streams, quotas, reconciliation |
+| [0012](0012-limits-and-accounting.md) | Valkey at every site, cut streams, provider quotas, reconciliation (its reservations and renewal superseded by 0031) |
 | [0013](0013-site-ceilings.md) | Site allocations (superseded by 0031) |
 | [0014](0014-lifecycle-hooks.md) | Four hook phases, in-process or remote, selected by CEL |
 | [0015](0015-telemetry-and-ledger.md) | OTLP routed by the collector; the ledger and audit in ClickHouse |
@@ -37,9 +37,9 @@ baseline one, marked in both.
 | [0027](0027-provider-side-retention.md) | Provider-side storage forbidden unless a scope allows it |
 | [0028](0028-capabilities-and-determinism.md) | Capability-aware routing; deterministic encoders |
 
-| [0029](0029-security-and-correctness-revision.md) | Proposed security and correctness review amendments and production gates |
+| [0029](0029-security-and-correctness-revision.md) | Security and correctness review amendments and production gates |
 | [0030](0030-authorization-renewal-and-availability.md) | Authorization renewed every minute within a five-minute lease; the control plane, bucket and KMS on the availability path; the accounting spool spike |
-| [0031](0031-soft-budgets.md) | Budgets are soft and eventually consistent; overshoot bounded by concurrency limits and an optional strict worst-case check; no journal, reservations or site allocations |
+| [0031](0031-soft-budgets.md) | Budgets are soft and eventually consistent; overshoot bounded by concurrency limits and an optional strict worst-case check; no journal, reservations or site allocations (known spend's computation amended by 0042) |
 | [0032](0032-authorization-lease-length.md) | Internal pools: a four-hour authorization lease, renewed every minute; jitter on polls and retries, none on expiry |
 | [0033](0033-explicit-cross-dialect-conversion.md) | Cross-dialect conversion only where a route asks for it; no implicit cross-dialect failover |
 | [0034](0034-budgets-for-m2.md) | M2 budgets are caps and a cost-center mapping; grants and approvals wait for demand |
