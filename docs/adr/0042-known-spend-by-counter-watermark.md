@@ -61,7 +61,8 @@ snapshot to every gateway in one step. A benchmark found it.
 - **Gaps.** An event a crash keeps from the ledger stalls the watermark, and
   nothing is lost while it does: later events are still counted from the
   counter. After a timeout (15 minutes) golem-control declares the gap lost
-  and moves the watermark past it. The lost event's cost then leaves known
+  and moves the watermark past it (after trying to reconstruct the row
+  from the site counter, ADR 0043). The lost event's cost then leaves known
   spend, and the monthly reconciliation books it (ADR 0031's accepted
   crash loss).
 - **Retention.** The per-number totals are kept longer than any snapshot a
