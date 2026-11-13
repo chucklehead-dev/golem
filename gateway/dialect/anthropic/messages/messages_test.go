@@ -21,6 +21,12 @@ func TestScan(t *testing.T) {
 		{"escaped model", `{"model":"claude","messages":[]}`, Request{Model: []byte("claude")}, false},
 		{"policy flags and unknown", `{"model":"m","mcp_servers":[],"container":"c","novel":1}`,
 			Request{Model: []byte("m"), Flags: FlagMCPServers | FlagContainer, Unknown: 1}, false},
+		{"server tool with whitespace", `{"model":"m","tools":[{"type" : "web_search_20250305"}]}`,
+			Request{Model: []byte("m"), Flags: FlagServerTools}, false},
+		{"server tool with escaped type member", `{"model":"m","tools":[{"t\u0079pe":"code_execution_20250825"}]}`,
+			Request{Model: []byte("m"), Flags: FlagServerTools}, false},
+		{"client tool", `{"model":"m","tools":[{"type":"custom","name":"lookup"}]}`,
+			Request{Model: []byte("m")}, false},
 		{"no model", `{"messages":[]}`, Request{}, true},
 		{"model not a string", `{"model":1}`, Request{}, true},
 		{"stream not a bool", `{"model":"m","stream":"yes"}`, Request{}, true},
@@ -108,6 +114,20 @@ func TestResponseUsage(t *testing.T) {
 	u.Response([]byte(`{"id":"msg_1","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":3,"output_tokens":7,"cache_read_input_tokens":null}}`))
 	if want := (canon.Usage{Input: 3, Output: 7}); u.Usage != want || u.Err != nil {
 		t.Fatalf("usage = %+v, %v; want %+v", u.Usage, u.Err, want)
+	}
+}
+
+func TestInvalidUsageDoesNotBecomeFinal(t *testing.T) {
+	for _, body := range []string{
+		`{"content":[{"type":"text","text":"hello"}],"usage":{}}`,
+		`{"content":[],"usage":{"input_tokens":1}}`,
+		`{"content":[],"usage":{"input_tokens":1,"output_tokens":-1}}`,
+	} {
+		var u StreamUsage
+		u.Response([]byte(body))
+		if u.Final || u.Err == nil {
+			t.Errorf("%s: Final=%v Err=%v, want a non-final invalid report", body, u.Final, u.Err)
+		}
 	}
 }
 

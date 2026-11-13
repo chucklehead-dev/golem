@@ -4,8 +4,9 @@
 package messages
 
 import (
-	"bytes"
+	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
@@ -20,9 +21,15 @@ const (
 	FlagServerTools                   // a server tool (web search or fetch, code execution): egress, unbounded cost
 )
 
-// serverTools are the tool types the provider runs itself, by prefix of
-// their versioned type names ("web_search_20250305").
-var serverTools = []string{`"type":"web_search`, `"type":"web_fetch`, `"type":"code_execution`}
+// serverTools are the prefixes of versioned tool types the provider runs
+// itself ("web_search_20250305"). Tool objects are decoded below: byte
+// searches are unsafe for policy because insignificant whitespace and JSON
+// escapes would bypass them.
+var serverTools = []string{"web_search", "web_fetch", "code_execution"}
+
+type tool struct {
+	Type string `json:"type"`
+}
 
 // known lists the request members golem forwards without comment; others
 // are forwarded and counted (and logged by name, ADR 0037).
@@ -94,9 +101,15 @@ func (r *Request) Scan(body []byte) error {
 			if err != nil {
 				return err
 			}
-			for _, t := range serverTools {
-				if bytes.Contains(v, []byte(t)) {
-					r.Flags |= FlagServerTools
+			var tools []tool
+			if err := json.Unmarshal(v, &tools); err != nil {
+				return ErrField
+			}
+			for _, candidate := range tools {
+				for _, prefix := range serverTools {
+					if strings.HasPrefix(candidate.Type, prefix) {
+						r.Flags |= FlagServerTools
+					}
 				}
 			}
 		default:
@@ -179,7 +192,8 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 				if string(name) != "usage" {
 					return d.SkipValue()
 				}
-				return u.readUsage(d)
+				_, err = u.readUsage(d)
+				return err
 			})
 		})
 	case "message_delta":
@@ -187,8 +201,13 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 			if string(name) != "usage" {
 				return d.SkipValue()
 			}
-			u.Final = true
-			return u.readUsage(d)
+			var output bool
+			output, err = u.readUsage(d)
+			if err == nil && !output {
+				return ErrField
+			}
+			u.Final = err == nil
+			return err
 		})
 	}
 	if err != nil && u.Err == nil {
@@ -199,31 +218,43 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 // Response reads usage from a whole (non-streamed) response body.
 func (u *StreamUsage) Response(body []byte) {
 	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
+	seen := false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
 		if string(name) != "usage" {
 			return d.SkipValue()
 		}
-		u.Final = true
-		return u.readUsage(d)
+		seen = true
+		var output bool
+		output, err := u.readUsage(d)
+		if err == nil && !output {
+			return ErrField
+		}
+		u.Final = err == nil
+		return err
 	})
+	if err == nil && !seen {
+		u.Final = false
+	}
 	if err != nil && u.Err == nil {
 		u.Err = err
 	}
 }
 
 // readUsage reads a usage object; counts are cumulative, so the last wins.
-func (u *StreamUsage) readUsage(d *jsonscan.Decoder) error {
+func (u *StreamUsage) readUsage(d *jsonscan.Decoder) (hasOutput bool, err error) {
 	v, _, err := d.ReadValue()
 	if err != nil {
-		return err
+		return false, err
 	}
-	return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
+	err = jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
 		var dst *int64
+		isOutput := false
 		switch string(name) {
 		case "input_tokens":
 			dst = &u.Usage.Input
 		case "output_tokens":
 			dst = &u.Usage.Output
+			isOutput = true
 		case "cache_read_input_tokens":
 			dst = &u.Usage.CacheRead
 		case "cache_creation_input_tokens":
@@ -239,10 +270,12 @@ func (u *StreamUsage) readUsage(d *jsonscan.Decoder) error {
 			return nil
 		}
 		n, ok := jsonscan.Int(v)
-		if !ok {
+		if !ok || n < 0 {
 			return ErrField
 		}
 		*dst = n
+		hasOutput = hasOutput || isOutput
 		return nil
 	})
+	return hasOutput, err
 }

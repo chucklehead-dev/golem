@@ -4,6 +4,8 @@
 package price
 
 import (
+	"math"
+
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
@@ -18,8 +20,35 @@ func Cost(u canon.Usage, p snapshot.Price) int64 {
 // byte a token at the full input rate, and the output cap at the output
 // rate, no cache discount. Bytes bound tokens from above for the text
 // tokenizers golem serves.
-func Worst(inputBytes, maxOutput int64, p snapshot.Price) int64 {
-	return halfEven(inputBytes*p.InputPerMTok+maxOutput*p.OutputPerMTok, 1_000_000)
+func Worst(inputBytes, maxOutput, completions int64, p snapshot.Price) (cost int64, ok bool) {
+	output, ok := product(maxOutput, completions)
+	if !ok {
+		return 0, false
+	}
+	n, ok := numerator([2]int64{inputBytes, p.InputPerMTok}, [2]int64{output, p.OutputPerMTok})
+	if !ok {
+		return 0, false
+	}
+	return halfEven(n, 1_000_000), true
+}
+
+func product(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 || a != 0 && b > math.MaxInt64/a {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func numerator(terms ...[2]int64) (int64, bool) {
+	var total int64
+	for _, term := range terms {
+		n, ok := product(term[0], term[1])
+		if !ok || n > math.MaxInt64-total {
+			return 0, false
+		}
+		total += n
+	}
+	return total, true
 }
 
 func halfEven(n, d int64) int64 {

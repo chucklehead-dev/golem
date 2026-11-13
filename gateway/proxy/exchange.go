@@ -29,6 +29,10 @@ type exchange struct {
 	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
 	tail       []byte     // a non-streamed response, for its usage
 	callerGone bool       // a write to the caller failed
+	// responseBytes is the upstream body observed. When an OpenAI provider
+	// omits usage, charging from the whole body is conservative even if it
+	// put a large completion in one SSE event or beyond tail's retention cap.
+	responseBytes int64
 
 	// The usage readers' methods, bound once: a method value allocates
 	// each time it is taken, and the readers stay at these addresses.
@@ -99,7 +103,7 @@ func dropUsageOnly(_, data []byte) bool { return chat.UsageOnly(data) }
 
 func getExchange() *exchange {
 	ex := exchanges.Get().(*exchange)
-	ex.callerGone = false
+	ex.callerGone, ex.responseBytes = false, 0
 	return ex
 }
 

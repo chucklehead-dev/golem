@@ -66,8 +66,9 @@ func TestEstimates(t *testing.T) {
 		h, rows, res := priced(t, OpenAIChat, cutAfter{[][]byte{chunk, chunk, chunk}, 200})
 		body := `{"model":"claude","stream":true,"messages":[{"role":"user","content":"` + strings.Repeat("x", 4000) + `"}]}`
 		serveCut(h, "/v1/chat/completions", body)
-		// Input from the request's size, output a token a chunk.
-		if want := (canon.Usage{Input: int64(len(body)) / 4, Output: 3}); res.Usage != want || res.Cost == 0 {
+		// Input from the request's size; output conservatively from every
+		// upstream body byte, not merely one token per SSE chunk.
+		if want := (canon.Usage{Input: int64(len(body)) / 4, Output: int64(3*len(chunk)+3) / 4}); res.Usage != want || res.Cost == 0 {
 			t.Fatalf("usage %+v cost %d, want %+v", res.Usage, res.Cost, want)
 		}
 		if row := rowOf(t, rows); row["estimated_fraction"] != 1.0 {

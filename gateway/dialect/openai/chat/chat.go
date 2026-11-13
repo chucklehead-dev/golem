@@ -306,7 +306,7 @@ func (u *StreamUsage) OnEvent(_, data []byte) {
 func (u *StreamUsage) Response(body []byte) {
 	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
 	var got canon.Usage
-	seen := false
+	seen, input, output := false, false, false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
 		if string(name) != "usage" {
 			return d.SkipValue()
@@ -316,13 +316,16 @@ func (u *StreamUsage) Response(body []byte) {
 			return err // null usage: an ordinary chunk
 		}
 		seen = true
-		u.Final = true
 		return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
 			switch string(name) {
 			case "prompt_tokens":
-				return readInt(d, &got.Input)
+				err := readInt(d, &got.Input)
+				input = err == nil
+				return err
 			case "completion_tokens":
-				return readInt(d, &got.Output)
+				err := readInt(d, &got.Output)
+				output = err == nil
+				return err
 			case "prompt_tokens_details":
 				return readDetail(d, "cached_tokens", &got.CacheRead)
 			case "completion_tokens_details":
@@ -331,6 +334,9 @@ func (u *StreamUsage) Response(body []byte) {
 			return d.SkipValue()
 		})
 	})
+	if err == nil && seen && (!input || !output) {
+		err = ErrField // a partial report must not suppress estimation
+	}
 	if err != nil {
 		if u.Err == nil {
 			u.Err = err
@@ -340,6 +346,7 @@ func (u *StreamUsage) Response(body []byte) {
 	if seen {
 		got.Input -= min(got.CacheRead, got.Input)
 		u.Usage = got
+		u.Final = true
 	}
 }
 
@@ -349,7 +356,7 @@ func readInt(d *jsonscan.Decoder, dst *int64) error {
 		return err
 	}
 	n, ok := jsonscan.Int(v)
-	if !ok {
+	if !ok || n < 0 {
 		return ErrField
 	}
 	*dst = n

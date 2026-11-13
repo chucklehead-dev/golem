@@ -134,7 +134,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt.MaxDuration > 0 {
 		deadline = started.Add(rt.MaxDuration)
 	}
-	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, price.Worst(int64(len(body)), req.maxTokens*req.n, pr))
+	worst, ok := price.Worst(int64(len(body)), req.maxTokens, req.n, pr)
+	if !ok {
+		h.fail(ctx, w, &refusal{contract.RequestInvalid, "the request's token count is too large to price safely: lower max_tokens or n"})
+		return
+	}
+	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, worst)
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
@@ -406,6 +411,7 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 	for {
 		n, err := body.Read(ex.buf)
 		if n > 0 {
+			ex.responseBytes += int64(n)
 			var ok bool
 			if filter {
 				ok = send(ex.filter.Pass(ex.buf[:n]))
@@ -441,6 +447,7 @@ func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (ca
 	for {
 		n, err := body.Read(ex.buf)
 		if n > 0 {
+			ex.responseBytes += int64(n)
 			if werr := ex.write(ex.buf[:n], false); werr != nil {
 				cut, ex.callerGone = errCallerGone, true
 				break
