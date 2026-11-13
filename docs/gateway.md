@@ -94,7 +94,7 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
 6. **Check** (ADR 0031), in one Valkey round trip: known spend (the
    snapshot's, plus the site's counter since) against the key cap, member
    cap and scope pool, with the request's declared worst case added in
-   scopes with the worst-case check (bounded by the scope's `max_tokens` and input-size ceilings,
+   scopes with the declared-worst-case check (bounded by the scope's `max_tokens` and input-size ceilings,
    input tokens by byte count: ADR 0038); a concurrency slot for the
    principal, renewed every 30 seconds while the call is in flight; rate limits and the
    deployment's provider quota share. Refusals are 402 (budgets) or 429
@@ -141,7 +141,7 @@ gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
 gateway/limit/         Limiter: known-spend checks, worst-case cost, concurrency slots, GCRA rate windows; Valkey and in-memory implementations
                        (built: known spend as snapshot spend plus the counter after the ledger watermark, O(1) (ADR 0042);
-                       soft and worst-case checks; principal and scope slots; holding on cancel; outages with waivers, replay and a
+                       soft and declared-worst-case checks; principal and scope slots; holding on cancel; outages with waivers, replay and a
                        recovery grace; over an in-memory store and Valkey (Lua scripts; slot TTLs on the server's clock);
                        both checked against model/exposure.md)
 gateway/price/         model catalog lookups and pricing (the catalog comes in the snapshot)
@@ -304,7 +304,7 @@ without a preflight it never gets. SDKs and curl pass all three.
 - Upstream TLS sessions resumed; DNS cached by the resolver, not golem.
 - SSE scanning reads lines from the tee without copying the payload when
   it is not a usage-bearing event (look for the event type first).
-- Token estimation for the worst-case check uses a cheap byte-count heuristic per
+- Token estimation for the declared-worst-case check uses a cheap byte-count heuristic per
   model family by default; exact counting (provider `count_tokens` or a
   local tokenizer) is opt-in per limit where precision matters.
 - Benchmarks against a stub upstream, with `pprof` and the flight recorder,

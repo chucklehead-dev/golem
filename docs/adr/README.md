@@ -39,7 +39,7 @@ baseline one, marked in both.
 
 | [0029](0029-security-and-correctness-revision.md) | Security and correctness review amendments and production gates |
 | [0030](0030-authorization-renewal-and-availability.md) | Authorization renewed every minute within a five-minute lease; the control plane, bucket and KMS on the availability path; the accounting spool spike |
-| [0031](0031-soft-budgets.md) | Budgets are soft and eventually consistent; overshoot bounded by concurrency limits and an optional worst-case check; no journal, reservations or site allocations (known spend's computation amended by 0042; the bound's status by 0044) |
+| [0031](0031-soft-budgets.md) | Budgets are soft and eventually consistent; overshoot bounded by concurrency limits and an optional declared-worst-case check; no journal, reservations or site allocations (known spend's computation amended by 0042; the bound's status by 0044) |
 | [0032](0032-authorization-lease-length.md) | Internal pools: a four-hour authorization lease, renewed every minute; jitter on polls and retries, none on expiry |
 | [0033](0033-explicit-cross-dialect-conversion.md) | Cross-dialect conversion only where a route asks for it; no implicit cross-dialect failover |
 | [0034](0034-budgets-for-m2.md) | M2 budgets are caps and a cost-center mapping; grants and approvals wait for demand |
@@ -53,4 +53,4 @@ baseline one, marked in both.
 | [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, the pool capture boundary and a golem-owned capture collector, request feature modes by route class, delivery privileges, composite publication freshness by consistent reads, narrowed budget claims |
 | [0042](0042-known-spend-by-counter-watermark.md) | Known spend by counter sequence and ledger watermark: O(1) admission, exact under snapshot skew; supersedes the hand-off by event |
 | [0043](0043-ledger-durability.md) | Ledger durability in a node-local collector's persistent queue, not a gateway spool; rows written at a call's end with their numbers joined later; gaps reconstructed from the site counter before they are declared lost |
-| [0044](0044-budgets-are-controls-not-ceilings.md) | Budgets are admission and monitoring controls, not spending ceilings; provider-account limits are the financial backstop; reconciliation is authoritative; `strict` renamed `worstCaseCheck`, described by what it closes on |
+| [0044](0044-budgets-are-controls-not-ceilings.md) | Budgets are admission and monitoring controls, not spending ceilings; provider-account limits are the financial backstop; reconciliation is authoritative; `strict` renamed `declaredWorstCaseCheck`, described by what it closes on |

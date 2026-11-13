@@ -44,14 +44,14 @@ type Increment struct {
 // watermark) against the budget, then the slots.
 type Admission struct {
 	Slot
-	Period         string // the budget period, e.g. "2026-11": counters are per period
-	Watermark      int64  // the snapshot's, for this period (0 if it is of another)
-	Spend          int64  // the snapshot's known spend for this period
-	Budget         int64  // 0: none
-	WorstCaseCheck bool
-	Worst          int64
-	PrincipalLimit int // 0: none
-	ScopeLimit     int // 0: none
+	Period                 string // the budget period, e.g. "2026-11": counters are per period
+	Watermark              int64  // the snapshot's, for this period (0 if it is of another)
+	Spend                  int64  // the snapshot's known spend for this period
+	Budget                 int64  // 0: none
+	DeclaredWorstCaseCheck bool
+	Worst                  int64
+	PrincipalLimit         int // 0: none
+	ScopeLimit             int // 0: none
 }
 
 // Outcome is an admission's result.
@@ -137,7 +137,7 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, int64, bool, error
 	known := a.Spend + after
 	switch {
 	case a.Budget == 0:
-	case a.WorstCaseCheck && known+a.Worst > a.Budget, !a.WorstCaseCheck && known >= a.Budget:
+	case a.DeclaredWorstCaseCheck && known+a.Worst > a.Budget, !a.DeclaredWorstCaseCheck && known >= a.Budget:
 		return OverBudget, known, over, nil
 	}
 	if !m.acquire(a.Slot, a.PrincipalLimit, a.ScopeLimit) {

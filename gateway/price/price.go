@@ -25,7 +25,7 @@ func Cost(u canon.Usage, p snapshot.Price) int64 {
 // any budget, and sums of a few such costs cannot overflow the counters.
 const MaxCost = math.MaxInt64 / 1024
 
-// Worst is a call's declared worst-case cost, for the worst-case check
+// Worst is a call's declared worst-case cost, for the declared-worst-case check
 // (ADR 0031, 0038, 0044): every input byte a token at the full input rate,
 // and the output cap at the output rate, no cache discount. Bytes bound
 // text tokens from above; they do not bound images, audio or files, or

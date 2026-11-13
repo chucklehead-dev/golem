@@ -129,7 +129,7 @@ Claude, golem can place prompt-cache breakpoints itself by route policy.
 
 5.1.3 **Decision dialects** *(added)*: both are billed on input tokens
 only and do not stream, so their cost is known before the call: the
-worst-case check (§5.5) is exact, and a `stream: true` request is refused by
+declared-worst-case check (§5.5) has no output term, and a `stream: true` request is refused by
 golem with the provider's own error shape.
 
 5.1.4 **Provider headers and betas pass through** *(added)*:
@@ -293,7 +293,7 @@ The full model is [org-model.md](org-model.md). In short:
   about a minute. In-flight calls can overshoot, by about the principal's
   in-flight limit times its largest declared call, plus one refresh lag's
   spend: expected exposure, not a bound (ADR 0044).
-  Scopes with the **worst-case check** also require the request's declared
+  Scopes with the **declared-worst-case check** also require the request's declared
   worst case to fit, and refuse requests that declare none. Budgets are
   admission and monitoring controls, not spending ceilings (ADR 0044):
   calls whose usage is missing are charged conservative estimates, the

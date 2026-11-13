@@ -76,7 +76,7 @@ The platform team's own apps and coding agents, us-east-2, EKS.
   constraints, caps, team pools granted by admins; enforcement modes
   (below), starting in `observe`.
 - **Limits**: Valkey; soft budgets on known spend with the optional
-  worst-case check (controls, not ceilings: ADR 0044), concurrency slots, rate limits, cut-stream estimates
+  declared-worst-case check (controls, not ceilings: ADR 0044), concurrency slots, rate limits, cut-stream estimates
   (ADR 0031).
 - **Control plane**: golem-control (one Deployment, a leader) on the S3
   state document; CRD config with schema rules and offline validation;

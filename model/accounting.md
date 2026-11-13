@@ -26,7 +26,7 @@ questions:
 > crash loses some events?
 
 The answers hold if four rules do, each a switch as in the publication
-model, plus a fourth switch for the worst-case check:
+model, plus a fourth switch for the declared-worst-case check:
 
 | Switch | When on (the design) | When off (the bug it prevents) |
 |---|---|---|
@@ -52,7 +52,7 @@ module accounting {
 
 One principal with a `BUDGET` for the period, on one site, making a few
 `REQUESTS`. Each call costs something from `COSTS`; the largest any call
-can cost is `WORST` (the declared worst case the worst-case check computes;
+can cost is `WORST` (the declared worst case the declared-worst-case check computes;
 the model takes it as a true bound, which the real one is not: §9).
 `LIMIT` is the principal's in-flight limit.
 
@@ -138,7 +138,7 @@ keeps one site, where the lag is zero, and §9 says what the lag adds.
 ### 6.1 Admit a call
 
 The check of ADR 0031. Soft: known spend is still below the budget.
-Worst-case check: known spend plus the call's worst case fits. Either way the
+Declared-worst-case check: known spend plus the call's worst case fits. Either way the
 principal needs a free in-flight slot (`LIMIT_ON`).
 
 ```quint accounting.qnt +=
@@ -300,7 +300,7 @@ running.
 Every admitted call passed its check when known spend excluded only the
 calls then in flight. Under the soft check the last admission saw known
 spend below the budget, with up to `LIMIT` calls in flight, each at most
-`WORST`; under the worst-case check the last admission's own worst case fit,
+`WORST`; under the declared-worst-case check the last admission's own worst case fit,
 which saves one call. Spend that never reached `known` (crashes, failovers)
 widens the bound until the books catch up.
 
@@ -309,7 +309,7 @@ widens the bound until the books catch up.
   val withinBound = totalBilled <= BUDGET + slack + uncounted
 ```
 
-The worst-case check with `LIMIT = 1` has no slack here: spend stays
+The declared-worst-case check with `LIMIT = 1` has no slack here: spend stays
 within the budget, apart from crash losses, because every call costs at
 most `WORST`. A real call can cost more than its declared worst case (§9),
 and each such call widens the bound by its excess: nothing in the design
@@ -344,7 +344,7 @@ duplicate.
 **Two calls in flight take a principal past its budget** (the accepted
 risk). With 4 of 6 spent, two calls are admitted under the soft check and
 both cost 3: the principal ends at 10, over its budget by 4, within the
-bound of `LIMIT × WORST = 6`. Under the worst-case check neither is admitted
+bound of `LIMIT × WORST = 6`. Under the declared-worst-case check neither is admitted
 (4 + 3 exceeds 6).
 
 ```quint accounting.qnt +=
@@ -463,8 +463,8 @@ The model ends here:
 | Instance | Settings | Should |
 |---|---|---|
 | `softDesign` | soft check, `LIMIT = 2` | hold `safe`; reach every scenario |
-| `worstCheckDesign` | worst-case check, `LIMIT = 2` | hold `safe`, with the tighter slack |
-| `worstCheckSingle` | worst-case check, `LIMIT = 1` | hold `withinDeclaredWorst` |
+| `worstCheckDesign` | declared-worst-case check, `LIMIT = 2` | hold `safe`, with the tighter slack |
+| `worstCheckSingle` | declared-worst-case check, `LIMIT = 1` | hold `withinDeclaredWorst` |
 | `noLimit` | no concurrency limit | break `withinBound` |
 | `rawSum` | no deduplication | break `noDoubleCount` |
 | `noReconcile` | no reconciliation | break `booksMatch` |
@@ -481,7 +481,7 @@ Which story passes where (as `check-accounting.sh` confirms):
 | duplicate counted | impossible | impossible | impossible | impossible | **passes** | impossible | impossible |
 
 Two lessons in it. The accepted risk is real and bounded: the siblings
-story passes in every soft design and is impossible under the worst-case check.
+story passes in every soft design and is impossible under the declared-worst-case check.
 And the concurrency bugs (`noLimit`, `noSlotRenewal`) have the rare kind
 of counterexample: several calls must be admitted, or slots expire, before
 any call completes, which random simulation did not find in tens of

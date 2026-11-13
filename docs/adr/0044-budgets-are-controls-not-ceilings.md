@@ -76,8 +76,8 @@ actions for Bedrock), sized to what finance accepts losing. This is a
 deployment requirement (operations.md), not a check golem can make, and it
 is the financial backstop.
 
-**The worst-case check, renamed and described by what it closes on.** The
-scope option `strict` becomes `worstCaseCheck`. It is a fail-closed
+**The declared-worst-case check, renamed and described by what it closes on.** The
+scope option `strict` becomes `declaredWorstCaseCheck`. It is a fail-closed
 admission mode. It refuses a call when:
 
 1. known spend plus the request's declared worst case (every input byte a
@@ -103,7 +103,7 @@ provider's bill, reconciled monthly, is the record".
 
 ## Consequences
 
-- `ScopePolicy.strict` is `worstCaseCheck` (v1alpha1, unreleased: no
+- `ScopePolicy.strict` is `declaredWorstCaseCheck` (v1alpha1, unreleased: no
   conversion). The snapshot, the limiter and its Valkey script follow.
   Refusal messages name the check and what it closes on.
 - The accounting model's `STRICT` switch is `WORST_CHECK`, its instances
@@ -124,7 +124,7 @@ provider's bill, reconciled monthly, is the record".
 
 - **Keep strict and close each gap as found.** An open-ended proof
   obligation against every provider's features, modalities and billing.
-- **Drop the worst-case check.** It still refuses calls that would
+- **Drop the declared-worst-case check.** It still refuses calls that would
   plainly pass a budget and calls that declare no bound, cheaply; kept,
   under a name that says what it does.
 - **Hard ceilings through reservations and a journal** (the design ADR
