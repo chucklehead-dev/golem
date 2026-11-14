@@ -90,6 +90,7 @@ type routeSets struct {
 	duration      []metric.RecordOption
 }
 
+// routeSets are c's route's options, made on its first call.
 func (t *Telemetry) routeSets(c *Call) *routeSets {
 	return cached(&t.routes, routeKey{c.Provider, c.Alias, c.Model}, func() *routeSets {
 		attrs := []attribute.KeyValue{attribute.String(attrProvider, c.Provider), attribute.String(attrRequestModel, c.Alias),

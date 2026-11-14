@@ -108,6 +108,7 @@ func (d *Denylist) denies(p *Principal, cred, entraID string) bool {
 	return d.principals[p.ID] || entraID != "" && d.entra[entraID]
 }
 
+// denied is the refusal of a caller the denylist names (read-only).
 var denied = &Refusal{contract.AuthDenied, "this credential or caller is on the site's emergency denylist: ask the platform team"}
 
 // DenyFile is a denylist file, re-read when it changes (a ConfigMap's
@@ -154,8 +155,14 @@ func (f *DenyFile) Current() *Denylist {
 
 // Run re-reads the file every Interval until ctx ends.
 func (f *DenyFile) Run(ctx context.Context) {
-	t := time.NewTicker(cmpOr(f.Interval, 5*time.Second))
+	interval := f.Interval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	t := time.NewTicker(interval)
 	defer t.Stop()
+	// Like the snapshot sources' loop: a failure is logged when it is
+	// first seen or changes, not at every tick.
 	var last string
 	for {
 		select {
@@ -163,20 +170,14 @@ func (f *DenyFile) Run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		if err := f.Load(); err != nil && err.Error() != last {
+		switch err := f.Load(); {
+		case err == nil:
+			last = ""
+		case err.Error() != last:
 			if f.Log != nil {
 				f.Log.Error("emergency denylist", "err", err)
 			}
 			last = err.Error()
-		} else if err == nil {
-			last = ""
 		}
 	}
-}
-
-func cmpOr(d, def time.Duration) time.Duration {
-	if d > 0 {
-		return d
-	}
-	return def
 }

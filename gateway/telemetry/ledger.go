@@ -7,7 +7,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 
-	budget "github.com/chucklehead-dev/golem/lib/period"
+	"github.com/chucklehead-dev/golem/lib/period"
 )
 
 // SchemaVersion is golem.spend's contract version (contracts.md §3): 2,
@@ -39,6 +39,7 @@ func (l *Ledger) Ended(ctx context.Context, c Call) {
 	l.emit(ctx, c.Ended, "golem.spend", row[:])
 }
 
+// emit writes one log record: the event name, also its body, and attrs.
 func (l *Ledger) emit(ctx context.Context, at time.Time, name string, attrs []attribute.KeyValue) {
 	var r otellog.Record
 	r.SetTimestamp(at)
@@ -48,14 +49,15 @@ func (l *Ledger) emit(ctx context.Context, at time.Time, name string, attrs []at
 	l.logger.Emit(ctx, r)
 }
 
-// columns are golem.spend's, in the DDL's order; a test checks them
-// against deploy/clickhouse/spend.sql.
+// row fills dst with c's golem.spend columns, in the DDL's order; a test
+// checks them against deploy/clickhouse/spend.sql. The period is the
+// limiter's when the call has one, else its start's month in l.Period.
 func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 	p := c.Period
 	if p == "" {
-		p = budget.Of(c.Started, l.Period)
+		p = period.Of(c.Started, l.Period)
 	}
-	period := budget.FirstDay(p)
+	firstDay := period.FirstDay(p)
 	s, i, f := attribute.String, attribute.Int64, attribute.Float64
 	*dst = [...]attribute.KeyValue{
 		i("schema_version", SchemaVersion),
@@ -66,7 +68,7 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		s("provider_request_id", c.ProviderRequestID),
 		s("started_at", c.Started.UTC().Format(time.RFC3339Nano)),
 		s("ended_at", c.Ended.UTC().Format(time.RFC3339Nano)),
-		s("period", period),
+		s("period", firstDay),
 		s("site", l.site),
 		s("gateway_pool", l.pool),
 		s("principal_kind", c.PrincipalKind),

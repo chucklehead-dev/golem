@@ -102,17 +102,9 @@ func (b *Bucket) loadLastGood() {
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	var lg lastGood
-	if err == nil {
-		err = json.Unmarshal(raw, &lg)
-	}
 	var ptr snapshot.Pointer
-	var s *snapshot.Snapshot
 	if err == nil {
-		ptr, s, err = b.verify(lg.Pointer, lg.Snapshot)
-	}
-	if err == nil {
-		err = b.Holder.Apply(s, ptr.Hash, b.Secrets)
+		ptr, err = b.applyLastGood(raw)
 	}
 	if err != nil {
 		b.log().Warn("the last-good snapshot on disk was not applied; waiting for the bucket", "path", b.LastGood, "err", err)
@@ -121,6 +113,23 @@ func (b *Bucket) loadLastGood() {
 	b.log().Info("the last-good snapshot applied from disk", "pool", b.Pool, "seq", ptr.PublishSeq, "hash", ptr.Hash[:12])
 }
 
+// applyLastGood decodes a last-good file, verifies it as a publication
+// read from the bucket would be, and applies it.
+func (b *Bucket) applyLastGood(raw []byte) (snapshot.Pointer, error) {
+	var lg lastGood
+	if err := json.Unmarshal(raw, &lg); err != nil {
+		return snapshot.Pointer{}, err
+	}
+	ptr, s, err := b.verify(lg.Pointer, lg.Snapshot)
+	if err != nil {
+		return ptr, err
+	}
+	return ptr, b.Holder.Apply(s, ptr.Hash, b.Secrets)
+}
+
+// localCheckpoint is the sequence in the Checkpoint file, and whether
+// there was one: a missing file is an empty disk, an unreadable one an
+// error.
 func (b *Bucket) localCheckpoint() (uint64, bool, error) {
 	if b.Checkpoint == "" {
 		return 0, false, nil
@@ -139,6 +148,8 @@ func (b *Bucket) localCheckpoint() (uint64, bool, error) {
 	return seq, true, nil
 }
 
+// trustedCheckpoint is the sequence of the pool's signed checkpoint in the
+// bucket; zero for a pool never published.
 func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
 	key := snapshot.CheckpointKey(b.Pool)
 	raw, _, err := b.Bucket.Get(ctx, key, "")
@@ -162,7 +173,7 @@ func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("checkpoint %s: %w", key, err)
 	}
 	if cp.Pool != b.Pool {
-		return 0, fmt.Errorf("checkpoint %s is pool %q's", snapshot.CheckpointKey(b.Pool), cp.Pool)
+		return 0, fmt.Errorf("checkpoint %s is pool %q's", key, cp.Pool)
 	}
 	return cp.PublishSeq, nil
 }
@@ -355,6 +366,8 @@ func writeAtomic(path string, data []byte) error {
 	return dir.Sync()
 }
 
+// writeStatus writes this gateway's status object for golem-control's
+// diagnostics; a failure is logged, never returned.
 func (b *Bucket) writeStatus(ctx context.Context, ptr snapshot.Pointer) {
 	if b.GatewayID == "" {
 		return
