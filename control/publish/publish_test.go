@@ -82,9 +82,9 @@ func TestFenced(t *testing.T) {
 		lease  Lease
 		source uint64
 	}{
-		"an old epoch":          {Lease{"r1", 1}, 9},
-		"another's lease":       {Lease{"r2", 2}, 9},
-		"a lease not yet taken": {Lease{"r1", 3}, 9},
+		"an old epoch":          {Lease{Holder: "r1", Epoch: 1}, 9},
+		"another's lease":       {Lease{Holder: "r2", Epoch: 2}, 9},
+		"a lease not yet taken": {Lease{Holder: "r1", Epoch: 3}, 9},
 		"old state":             {l, 4},
 	} {
 		if _, err := p.Publish(ctx, c.lease, c.source, build); !errors.Is(err, ErrFenced) {
@@ -197,7 +197,7 @@ func TestPausedAfterRecord(t *testing.T) {
 	d.Put(ctx, snapshot.PointerKey("internal"), forged, "")
 	r2 := *p
 	r2.State = &state.Store{Bucket: d}
-	if ptr, err := r2.Publish(ctx, Lease{"r2", 2}, 1, build); err != nil || ptr.PublishSeq != 4 {
+	if ptr, err := r2.Publish(ctx, Lease{Holder: "r2", Epoch: 2}, 1, build); err != nil || ptr.PublishSeq != 4 {
 		t.Fatalf("after a forged pointer: %+v %v", ptr, err)
 	}
 }
