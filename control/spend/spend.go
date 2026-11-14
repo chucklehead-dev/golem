@@ -107,13 +107,16 @@ func (j *Job) Current() (Known, bool) {
 type ClickHouse struct {
 	URL            string // e.g. https://clickhouse.golem.svc:8443
 	User, Password string
+	Database       string // default golem (tests use their own)
 	Client         *http.Client
 }
 
-// spendQuery sums the deduplicated rows (contracts.md §3: golem.spend_dedup,
-// one row per event_id) of the period that ended before the boundary.
+// spendQuery sums the period's events that ended before the boundary, one
+// row per event_id (deploy/clickhouse/spend.sql: golem.spend_by_event,
+// deduplicated by its engine; FINAL makes that exact at read time, within
+// the one partition the period names).
 const spendQuery = `SELECT scope_id, toString(sum(cost_micros)) AS spend
-FROM golem.spend_dedup
+FROM {db}.spend_by_event FINAL
 WHERE period = {period:Date} AND ended_at < {before:DateTime64(3, 'UTC')}
 GROUP BY scope_id
 FORMAT JSONEachRow`
@@ -124,7 +127,8 @@ func (c ClickHouse) Spend(ctx context.Context, period string, before time.Time) 
 		"param_period": {budget.FirstDay(period)},
 		"param_before": {before.UTC().Format("2006-01-02 15:04:05.000")},
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(c.URL, "/")+"/?"+q.Encode(), strings.NewReader(spendQuery))
+	query := strings.Replace(spendQuery, "{db}", cmp.Or(c.Database, "golem"), 1)
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(c.URL, "/")+"/?"+q.Encode(), strings.NewReader(query))
 	if err != nil {
 		return nil, err
 	}

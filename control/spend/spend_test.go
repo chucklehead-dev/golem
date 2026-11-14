@@ -19,7 +19,7 @@ func TestClickHouse(t *testing.T) {
 		switch {
 		case r.Header.Get("X-ClickHouse-User") != "golem" || r.Header.Get("X-ClickHouse-Key") != "pw":
 			http.Error(w, "Code: 516. Authentication failed", 401)
-		case !strings.Contains(string(q), "FROM golem.spend_dedup") || !strings.Contains(string(q), "{before:DateTime64(3, 'UTC')}"):
+		case !strings.Contains(string(q), "FROM golem.spend_by_event FINAL") || !strings.Contains(string(q), "{before:DateTime64(3, 'UTC')}"):
 			http.Error(w, "unexpected query "+string(q), 400)
 		case r.URL.Query().Get("param_period") != "2026-11-01" || r.URL.Query().Get("param_before") != "2026-11-14 09:55:00.000":
 			http.Error(w, "parameters "+r.URL.RawQuery, 400)

@@ -52,9 +52,40 @@ ORDER BY (scope_id, principal_id, started_at, event_id);
 -- Balances and rollups read this view, never the table: at-least-once
 -- delivery writes some events twice, and background merges do not remove
 -- them in time (ADR 0029). One row per event_id, whatever the merges. A
--- snapshot's known spend is this view's sum for a scope and period over
--- the rows that ended before its boundary (ADR 0048).
+-- snapshot's known spend is the same sum, read from golem.spend_by_event
+-- below, which is cheaper to read every minute (ADR 0048).
 CREATE VIEW IF NOT EXISTS golem.spend_dedup AS
 SELECT * FROM golem.spend
 ORDER BY event_id, ended_at
 LIMIT 1 BY event_id;
+
+-- Known spend's input (ADR 0048): one narrow row per event, filled from
+-- golem.spend by the materialized view below as rows arrive. The known-
+-- spend job reads it every minute; golem.spend_dedup would sort the whole
+-- wide table each time.
+--
+-- Exact: a duplicate of an event (a retried batch, at-least-once delivery)
+-- has the same scope, event_id and period, so the same sorting key in the
+-- same partition, and ReplacingMergeTree keeps one. Merges do that
+-- eventually; FINAL does it at read time, within the one partition the
+-- query names, so a read never counts a duplicate whether or not it has
+-- been merged yet. The cost is a read of five narrow columns of one month.
+-- If that grows too large (hundreds of millions of calls a month), the next
+-- step is a per-minute rollup of the minutes old enough to be merged, with
+-- FINAL only over the recent ones.
+CREATE TABLE IF NOT EXISTS golem.spend_by_event (
+    period      Date,
+    scope_id    String,
+    event_id    UUID,
+    ended_at    DateTime64(3, 'UTC'),
+    cost_micros Int64
+)
+ENGINE = ReplacingMergeTree
+PARTITION BY period
+ORDER BY (scope_id, event_id);
+
+-- Rows inserted before this view existed are not in the table: on a ledger
+-- that already has rows, backfill once with
+--   INSERT INTO golem.spend_by_event SELECT period, scope_id, event_id, ended_at, cost_micros FROM golem.spend;
+CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_by_event_mv TO golem.spend_by_event AS
+SELECT period, scope_id, event_id, ended_at, cost_micros FROM golem.spend;
