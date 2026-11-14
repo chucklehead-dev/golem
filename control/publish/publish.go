@@ -41,6 +41,15 @@ var (
 	// ErrConflict: another publisher updated the record first; re-read and
 	// retry.
 	ErrConflict = errors.New("publish: the publication record changed concurrently")
+	// ErrRegressed: the pool's publication record, read afresh, is below
+	// what the bucket proves was published (its verified checkpoint or
+	// pointer). A record is written before its checkpoint and pointer, and a
+	// restore keeps the current records, so the state document went back
+	// (an older version put back, or a deleted one bootstrapped): its
+	// revocations since may have revived. The pool is not published until a
+	// person restores the newest document, or adopts this one
+	// (golem-control bootstrap -adopt).
+	ErrRegressed = errors.New("publish: the state document went back: the pool's publication record is below what the bucket proves was published")
 )
 
 // Publisher publishes one pool's snapshots.
@@ -132,7 +141,7 @@ func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64
 	}
 	var ready []prepared
 	for _, p := range pubs {
-		pr, err := p.prepare(ctx, st.Current().Publications[p.Pool], lease, source, build)
+		pr, err := p.prepare(ctx, st, st.Current().Publications[p.Pool], lease, source, build)
 		if err != nil {
 			errs[p.Pool] = err
 			continue
@@ -182,19 +191,19 @@ type prepared struct {
 }
 
 // prepare numbers the pool's next publication and writes its snapshot.
-func (p *Publisher) prepare(ctx context.Context, rec state.Record, lease Lease, source uint64,
+func (p *Publisher) prepare(ctx context.Context, st *state.Store, rec state.Record, lease Lease, source uint64,
 	build func(*Publisher, uint64) (*snapshot.Snapshot, error)) (prepared, error) {
 	if lease.Epoch < rec.Epoch || source < rec.Source {
 		return prepared{}, fmt.Errorf("%w: the record is at epoch %d, state %d; this publisher has epoch %d, state %d", ErrFenced, rec.Epoch, rec.Source, lease.Epoch, source)
 	}
-	// Numbered above the record, the verified checkpoint and the signed
-	// pointer: a rolled-back record beside an older checkpoint copied back
-	// would otherwise publish below what gateways already trust.
 	floor, err := p.floor(ctx, rec)
 	if err != nil {
 		return prepared{}, err
 	}
-	seq := max(rec.Seq, floor) + 1
+	if floor > rec.Seq {
+		return prepared{}, p.below(ctx, st, lease, floor)
+	}
+	seq := rec.Seq + 1
 	s, err := build(p, seq)
 	if err != nil {
 		return prepared{}, err
@@ -211,6 +220,40 @@ func (p *Publisher) prepare(ctx context.Context, rec state.Record, lease Lease, 
 		return prepared{}, err
 	}
 	return prepared{p: p, rec: rec, seq: seq, hash: hash}, nil
+}
+
+// below is the error for a record read below floor, what the bucket proves
+// was published. The record is written before the checkpoint and pointer,
+// so either another publisher has won it since it was read (ErrConflict,
+// or ErrFenced if it led at a later epoch: the document read afresh shows
+// it), or the document went back (ErrRegressed). Numbering past it, as the
+// guard of model/leadership.md does, would keep the floor, but publish the
+// older document's entitlements: revocations made since revived.
+func (p *Publisher) below(ctx context.Context, st *state.Store, lease Lease, floor uint64) error {
+	if err := st.Refresh(ctx); err != nil {
+		return err
+	}
+	d := st.Current()
+	if err := holds(d.Fence, lease); err != nil {
+		return err
+	}
+	rec := d.Publications[p.Pool]
+	if rec.Seq >= floor {
+		return fmt.Errorf("%w: pool %s's record moved to %d while this publisher read it", ErrConflict, p.Pool, rec.Seq)
+	}
+	return fmt.Errorf("%w: pool %s's record (state version %d) is publication %d, but the bucket proves publication %d (its verified checkpoint or pointer). "+
+		"The document was put back to an older version or replaced, and revocations since may have revived; nothing is published to this pool. "+
+		"Put the newest version of %s back from the bucket's versions and restart golem-control; if it cannot be recovered, redo the revocations since (the audit archive lists them) and run golem-control bootstrap -adopt",
+		ErrRegressed, p.Pool, d.StateVersion, rec.Seq, floor, state.DocumentKey)
+}
+
+// Floor is the highest publication the bucket proves was made to the pool:
+// its verified checkpoint's and signed pointer's sequence, as the
+// publisher numbers above (golem-control bootstrap writes records at it).
+// A checkpoint that does not verify, or one missing beside a signed
+// pointer, is ErrTampered.
+func (p *Publisher) Floor(ctx context.Context) (uint64, error) {
+	return p.floor(ctx, state.Record{})
 }
 
 // finish writes a pool's checkpoint, then its pointer, once its record is won.
@@ -302,7 +345,11 @@ func (p *Publisher) floor(ctx context.Context, rec state.Record) (uint64, error)
 	default:
 		// An unverifiable pointer proves nothing (gateways refuse it, and
 		// this publication replaces it).
-		ptrSeq, havePtr = p.verifiedSeq(false, raw)
+		// Its sequence counts only if it verifies as this pool's: another
+		// pool's signed pointer copied here would otherwise set the floor.
+		if seq, ok := p.verifiedSeq(false, raw); ok {
+			ptrSeq, havePtr = seq, true
+		}
 	}
 	key := snapshot.CheckpointKey(p.Pool)
 	raw, _, err := p.Bucket.Get(ctx, key, "")

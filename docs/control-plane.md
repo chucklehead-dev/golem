@@ -111,6 +111,16 @@ validate` (the snapshot compiler as a library), not by a live API call
   added since is rolled back, keys minted since revoked), the fence,
   records, revocations and outbox the current document's, the write an
   audited `Update`. `golemctl state restore` over the admin API is next.
+  A document that has gone is never started over silently: a store
+  that finds none where the bucket shows golem-control has run (the lease
+  object, a pool's checkpoint or pointer) refuses to start (`ErrMissing`)
+  until the newest version is put back or `golem-control bootstrap`
+  creates one deliberately, create-only, each pool's record at what the
+  bucket proves was published. A document put back to an older version is
+  adopted by a replica that starts after it, but its records are then
+  below the pools' checkpoints and pointers, and the publisher halts those
+  pools (`ErrRegressed`) until the newest version is put back or the older
+  one adopted (`golem-control bootstrap -adopt`).
 - **Write access**: golem-control's role only, by bucket policy; a
   break-glass role exists, audited, MFA, two-person (ADR 0007).
 - **Not in the document**: shipped audit (ClickHouse), counters and
@@ -173,10 +183,11 @@ control plane.
   implementation), `lib/sign` (Ed25519; KMS is the next implementation),
   `lib/snapshot`'s signed `Pointer`, `control/publish` (the publisher) and
   `gateway/snapshot.Bucket` (the gateway's source). As built:
-  - the publisher numbers above the highest of the pool's **publication
-    record** in the state document, its verified checkpoint and its signed
-    pointer, and stops on a checkpoint that does not verify or has gone
-    (`ErrTampered`); every pool's record is won in one fenced update a
+  - the publisher numbers above the pool's **publication record** in the
+    state document, refuses a record below its verified checkpoint or
+    signed pointer (the document went back: `ErrRegressed`), and stops on a
+    checkpoint that does not verify or has gone (`ErrTampered`); every
+    pool's record is won in one fenced update a
     cycle (ADR 0049), checking the document's fence in the same write and
     fenced by state version;
     then it writes the pool's **trusted checkpoint**
@@ -290,7 +301,12 @@ control plane.
   the Entra registrations; `golemctl bootstrap` writes the first empty document
   with `If-None-Match: *`, registers the gateway pools, and creates the
   first scopes; the first admin is whoever holds the `golem.admin` Entra
-  app role.
+  app role. **Built so far:** on a bucket golem-control has never run on,
+  the first write creates the document; where it has run (the lease
+  object, a pool's checkpoint or pointer exists) and the document is
+  missing, golem-control refuses to start, and only `golem-control
+  bootstrap` (create-only, each pool's record at what the bucket proves
+  was published; `-adopt` for an older version put back) starts it over.
 
 ## 6. Jobs
 

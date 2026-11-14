@@ -46,39 +46,63 @@ pool's publication record (`Publications`, a `Record` of epoch, sequence
 and source state version, `state.go:40`), the entitlements (`Principals`,
 `Scopes`, `Keys`, `Revocations`, `Roles`; `entitlements.go`) and the audit
 outbox (`Audit`, `AuditSeq`). Decoding is strict (`Decode`,
-`state.go:357`): another schema or an unknown member is refused, so an
+`state.go:401`): another schema or an unknown member is refused, so an
 older replica never silently drops a field a newer one wrote.
 
-**Reads are from memory.** `Store.Current` (`state.go:198`) hands out a
+**Reads are from memory.** `Store.Current` (`state.go:242`) hands out a
 copy of the document as last read or written. `Load` is a full get;
 `Refresh` is a conditional get with the entity tag the store holds, so an
-unchanged document costs one 304 (`refresh`, `state.go:139`). `Store.Run`
-(`state.go:370`) refreshes every 500 ms. `set` (`state.go:186`) never
+unchanged document costs one 304 (`refresh`, `state.go:152`). `Store.Run`
+(`state.go:414`) refreshes every 500 ms. `set` (`state.go:230`) never
 moves the document back: a slow get that returns an older `stateVersion`
 than one this store wrote is ignored.
 
 **Never adopting a document that went back.** If the bucket holds an older
 version than the store has seen, or none (an out-of-band put of an old
 version, a deletion), `refresh` returns `ErrRegressed` (`state.go:115`,
-message from `regressed`, `state.go:171`) and the store keeps serving what
+message from `regressed`, `state.go:196`) and the store keeps serving what
 it last read and writes nothing: adopting the older document would drop
 every later revocation. A restore goes through `Restore` (§1.2) instead.
 `TestRegressed` covers both cases.
 
-**Writes go through `Update`** (`state.go:211`), a compare-and-swap with
+A store that has read nothing yet has no memory to compare with, so the
+bucket's other objects tell a first start from a deletion: `Installed`
+(set by golem-control to the lease object and each configured pool's
+checkpoint and pointer; the bucket interface cannot list) are looked for
+when there is no document (`installed`, `state.go:207`), and if one
+exists, `Load` is `ErrMissing` (message from `missing`, `state.go:202`:
+put the newest version back from the bucket's versions, or bootstrap on
+purpose), not the empty document. Before this, the next replica to start
+after a deletion claimed the fence over an empty document and published
+snapshots with no principals or keys: every caller refused. Only
+`Store.Bootstrap` (`bootstrap.go`, `golem-control bootstrap`, §6) creates
+a document then, create-only (`If-None-Match: *`), each pool's record at
+what the bucket proves was published, so publication goes on above what
+gateways trust; with `-adopt` it instead accepts a document put back to an
+older version, raising its records the same way. A restore over no
+document is refused too: restored over nothing, every right would be
+withheld and an empty document written. `TestMissingDocument`,
+`TestBootstrapCommand`.
+
+A document put back to an older version is still adopted by a store
+started after it (nothing in memory to compare). What catches it is the
+publisher (§3, step 2): its records are below what the bucket proves was
+published, so no pool is published from it.
+
+**Writes go through `Update`** (`state.go:255`), a compare-and-swap with
 retry:
 
 1. Take the current document and its tag.
-2. `apply` (`state.go:298`): run the caller's `change` on a copy, number
+2. `apply` (`state.go:342`): run the caller's `change` on a copy, number
    the new audit events, check the invariants against the document it
    started from. A `change` error or a broken invariant ends the update;
    nothing is written.
 3. Increment `stateVersion`, stamp a fresh write ID (`Write`,
-   `state.go:228`) and `Put` with `If-Match: <tag>` (`state.go:233`).
+   `state.go:272`) and `Put` with `If-Match: <tag>` (`state.go:277`).
 4. On `ErrPrecondition`, `Load`. If the document there carries this
    attempt's write ID, the put landed and only its reply was lost (a
    retried conditional put fails its own condition): the update succeeded
-   (`state.go:241`). Otherwise another writer won: go round again, running
+   (`state.go:285`). Otherwise another writer won: go round again, running
    `change` afresh on the winner's document. After `Attempts` (default 8)
    losses it returns `ErrContended`, which the API reports as `Aborted`
    (retry).
@@ -88,17 +112,17 @@ document it is given, not of state outside it. The documents a store holds
 are replaced, never edited in place: that is what lets `apply` read the
 base without copying it twice.
 
-**Leader-only writes go through `FencedUpdate`** (`state.go:260`): an
+**Leader-only writes go through `FencedUpdate`** (`state.go:304`): an
 `Update` whose change first checks that the document's fence is still the
 writer's (holder and epoch), else `ErrFenced` (`state.go:118`) and nothing
 is written. The check is inside the same compare-and-swap, so a leader
 deposed while it worked (a pause, a slow directory read) writes nothing.
 Publication (§3) and the group sync (§5.2) use it.
 
-**Validate-only.** `Store.Validate` (`state.go:275`) runs the same `apply`
+**Validate-only.** `Store.Validate` (`state.go:319`) runs the same `apply`
 and writes nothing: the API's `validate_only` (control-plane.md §2). The
 service layer builds every change, with its audit event, once and hands it
-to either (`control/service/service.go:93`, `Service.apply`).
+to either (`control/service/service.go:99`, `Service.apply`).
 
 **The audit outbox's numbering.** A change appends `AuditEvent`s with
 `Seq` 0; `Document.number` (`state.go:80`) gives each the next number from
@@ -107,19 +131,21 @@ compare-and-swap as the change and a retried change is numbered afresh.
 
 ### 1.1 The invariants
 
-`check` (`state.go:317`) runs on every write and validation, in order:
+`check` (`state.go:361`) runs on every write and validation, in order:
 
 | Invariant | Where | Tested by |
 | --- | --- | --- |
-| The fence's epoch never goes back, and the fence is never dropped | `checkFence`, `state.go:329` | `TestFenceInvariant` |
+| The fence's epoch never goes back, and the fence is never dropped | `checkFence`, `state.go:373` | `TestFenceInvariant` |
 | A principal is a user or a service; its ID is not in the reserved `entra:` namespace; its scopes exist; its default is one of them; only a user with an Entra ID has synced memberships | `checkPrincipals`, `entitlements.go:139` | `TestEntitlementInvariants` |
 | No two principals share an Entra ID | `checkPrincipals` | `TestEntitlementInvariants` |
 | A key's owner exists; a live key's owner is a member of its scope | `checkKeys`, `entitlements.go:171` | `TestEntitlementInvariants` |
 | A role is `manager`, of an existing principal on an existing scope | `checkRoles`, `entitlements.go:186` | `TestRolesAndAudit` |
 | The outbox loses only its oldest events and gains new ones numbered on without a gap; the counter never goes back | `outboxFollows`, `entitlements.go:306` | `TestRolesAndAudit`, `control/audit`'s tests |
 | Revocations are append-only, and a revoked key stays revoked | `checkRevocations`, `entitlements.go:204` | `TestEntitlementInvariants` |
-| No pool's publication record is removed or goes back in sequence, epoch or source | `checkPublications`, `state.go:339` | `TestInvariants` |
-| A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:260` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced` |
+| No pool's publication record is removed or goes back in sequence, epoch or source | `checkPublications`, `state.go:383` | `TestInvariants` |
+| A store that has read nothing starts from an empty document only where golem-control has not run (no `Installed` object), else `ErrMissing`; only `Bootstrap` creates one then | `refresh`, `installed`, `state.go:207` | `TestMissingDocument`, `TestBootstrapCommand` |
+| No pool is published from a record below what the bucket proves (its verified checkpoint or pointer): the document went back, `ErrRegressed` | `prepare` and `below`, `control/publish/publish.go:203` | `TestGuard` |
+| A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:304` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced` |
 
 Every refusal wraps `ErrInvariant`, which the API maps to Connect's
 `FailedPrecondition` (`control/api/api.go`, `connectError`).
@@ -234,41 +260,50 @@ write recognised as the writer's own).
 
 ## 3. Publication
 
-`PublishAll` (`control/publish/publish.go:110`) publishes every pool given
+`PublishAll` (`control/publish/publish.go:123`) publishes every pool given
 the fence the elector holds (`Lease`, an alias of `state.Fence`,
-`publish.go:72`) and `source`, the state version the snapshots are built
-from. `Publisher.Publish` (`publish.go:94`) is the same for one pool. In
+`publish.go:85`) and `source`, the state version the snapshots are built
+from. `Publisher.Publish` (`publish.go:107`) is the same for one pool. In
 order:
 
 1. **Fencing**: refresh the state; if the fence is not this one (`holds`,
-   `publish.go:126`, so a deposed publisher writes no snapshot either), or
+   `publish.go:319`, so a deposed publisher writes no snapshot either), or
    a pool's record has a later epoch or source (`prepare`), that is
    `ErrFenced`.
-2. **Numbering** (`floor`, `publish.go:250`; the model's GUARD and
-   VERIFY): each pool's next publication is one above the highest of its
-   record, its verified checkpoint and its signed pointer
-   (`publish.go:193`), so a rolled-back record, alone or beside an older
-   checkpoint copied back, still numbers above what gateways trust. A
-   checkpoint that does not verify, or is missing once a publication was
+2. **Numbering** (`floor`, `publish.go:334`; the model's GUARD and
+   VERIFY): the floor is the highest of the pool's verified checkpoint and
+   its signed pointer (each counted only if it verifies as this pool's),
+   and the next publication is one above the record. A record **below**
+   the floor (`publish.go:203`) can only mean the document went back: a
+   record is written before its checkpoint and pointer, and a restore keeps
+   the current records. `below` (`publish.go:232`) re-reads the document
+   first, so a record another publisher won meanwhile is `ErrConflict` (or
+   `ErrFenced`), not a rollback; otherwise it is `ErrRegressed`: that pool
+   is not published, and the error says to put the newest document back,
+   or, if it cannot be recovered, redo the revocations since and run
+   `golem-control bootstrap -adopt`. The model's guard numbers past such a
+   record instead, which keeps the floor but would publish the older
+   document's entitlements, revoked keys revived (model/leadership.md §6).
+   A checkpoint that does not verify, or is missing once a publication was
    made (the record above 1, or a signed pointer present), is
    `ErrTampered`: that pool is not published until a person looks. Record
    1 without a checkpoint is a publisher that died between the first two
    writes, not tampering. The checkpoint and pointer are verified with the
-   signer's own public half or any of `Keys` (`keys`, `publish.go:350`):
+   signer's own public half or any of `Keys` (`keys`, `publish.go:421`):
    golem-control's `-trusted-keys`, the retiring keys during a rotation.
    What a retiring key signed counts, and step 5 re-signs it with the
    current signer, so the publication after needs only the new key
    (operations.md §2.1). Before `-trusted-keys`, a rotated signer met the
    old key's checkpoint as `ErrTampered`, and every pool stopped.
 3. **Build** each snapshot and write it, content-addressed (`prepare`,
-   `publish.go:181`). A pool that fails here is left out; the others go on.
-4. **Win every pool's record in one `FencedUpdate`** (`publish.go:141`):
+   `publish.go:194`). A pool that fails here is left out; the others go on.
+4. **Win every pool's record in one `FencedUpdate`** (`publish.go:154`):
    one document version a cycle, whatever the number of pools (ADR 0049).
    If a record changed since step 1, `ErrConflict`. The store's
    `checkPublications` keeps each record monotonic.
 5. Each pool's signed **checkpoint** `control/<pool>/checkpoint`, then its
-   signed **pointer** (`finish`, `publish.go:213`), each only forward
-   (`advance`, `publish.go:293`): written conditionally on the object
+   signed **pointer** (`finish`, `publish.go:260`), each only forward
+   (`advance`, `publish.go:381`): written conditionally on the object
    read, refused (`ErrFenced`) over a later publication's (a successor's,
    while this publisher was paused). A stored checkpoint that does not
    verify is `ErrTampered`; a stored pointer that does not verify is
@@ -279,8 +314,10 @@ order:
 **Why the record, not the pointer.** Anyone who can write the pool's
 objects but cannot sign can copy an old signed pointer back (the model's
 `replayPointer`). Numbering from the pointer alone would let that replay
-set the sequence back; numbering from the highest of all three cannot be
-set back by any one of them.
+set the sequence back; a record checked against the other two cannot be
+set back by any one of them (a rolled-back record halts publication; an
+old checkpoint or pointer copied back is below the record and changes
+nothing).
 
 A publisher that dies after step 4 leaves the checkpoint and pointer behind
 the record; the next publication (the renewal, within a minute) moves them
@@ -290,9 +327,11 @@ checkpoint as its floor.
 The tests (`control/publish/publish_test.go`): `TestPublish`, `TestFenced`
 (the model's FENCE), `TestConcurrentPublishers`,
 `TestLeaseLostBeforeRecord`, `TestPausedAfterRecord`, `TestGuard`
-(model/leadership.md's counterexamples, each refused: a rolled-back record
-met by an older checkpoint, a forged or deleted checkpoint, and the first
-publication's crash window not mistaken for tampering),
+(model/leadership.md's counterexamples, each refused: a rolled-back record,
+alone or met by an older checkpoint, halting until adopted; a race for the
+record and another pool's signed pointer not mistaken for one; a forged or
+deleted checkpoint; and the first publication's crash window not mistaken
+for tampering),
 `TestPublishAll` (one state write for several pools; a failing pool left
 out without stopping the others) and `TestKeyRotation` (a signer rotated
 with the old key trusted goes on and re-signs; without it, `ErrTampered`;
@@ -300,21 +339,21 @@ with the old key trusted goes on and re-signs; without it, `ErrTampered`;
 
 ## 4. The controller loop
 
-`Controller.Run` (`control/controller/controller.go:211`) starts the
-elector's loop and, every second, runs `tick` (`controller.go:236`): a
+`Controller.Run` (`control/controller/controller.go:384`) starts the
+elector's loop and, every second, runs `tick` (`controller.go:409`): a
 publication if due (`Step`), then, while this replica leads, the audit
 outbox shipped (§5.1) and the group sync if due (§5.2). Each error is
 logged once until it changes. `Run` returns only once the elector's loop
 has, so a `Release` after it cannot be undone by a renewal in flight.
 
-`Controller.Step` (`controller.go:94`):
+`Controller.Step` (`controller.go:107`):
 
 1. **Not leading** (`Elector.Fence` reports none): do nothing.
-2. **Entitlements**: refresh the state (`controller.go:110`) and hash its
+2. **Entitlements**: refresh the state (`controller.go:115`) and hash its
    principals, scopes, keys and revocations (`entitlementsSum`,
-   `controller.go:389`). The state version is not hashed: the publisher's
+   `controller.go:439`). The state version is not hashed: the publisher's
    own record write moves it at every publication.
-3. **Config compile** (`load`, `controller.go:271`): hash the config
+3. **Config compile** (`load`, `controller.go:293`): hash the config
    directory; if it changed, decode it and trial-compile it (`trial`) with
    the state's entitlements, as it will be published. A config that
    compiles becomes the **last good config**; one that does not is
@@ -341,16 +380,16 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    published to renew either, nothing is published. Before this, the last
    good config lived only in memory, and a restarted leader over a broken
    directory published nothing until every gateway's lease lapsed.
-4. **Due?** (`due`, `controller.go:130`) A publication is due when the good
+4. **Due?** (`due`, `controller.go:213`) A publication is due when the good
    config's hash, the entitlements' hash or the epoch differs from the last
    publication's, or the renewal interval (`Renew`, default a minute) has
    passed. Renewal extends the snapshots' authorization lease (`Lease`,
    default four hours; ADRs 0030, 0032).
 5. **Known spend**: if a known-spend job is set, run it (§4.1).
-6. **Publish** every pool (`publish`, `controller.go:139`), in sorted order,
+6. **Publish** every pool (`publish`, `controller.go:222`), in sorted order,
    through one `PublishAll` with the same snapshot built by
-   `compile.Compile` from the good config and `entitlements`
-   (`controller.go:165`): the state's `Document.Entitlements` (scopes'
+   `compile.Compile` from the good config (or `compile.Renew`, step 3) and
+   `entitlements` (`controller.go:237`): the state's `Document.Entitlements` (scopes'
    models limited to routes that exist) with known spend laid over it.
    Only if every pool succeeded is the publication remembered; otherwise
    the next step tries them all again.
@@ -381,7 +420,7 @@ has compiled, the directory's). `TestUnpricedScope`, `TestCreateScopePriced`.
 With `-clickhouse`, `Controller.Spend` is a `spend.Job`: when a
 publication is due, `Step` runs `spend.Job.Step`, and `entitlements` puts
 its current result into every scope of the snapshot (`Period`, `Since`,
-`KnownSpend`, `controller.go:172`): each scope's spend this period from
+`KnownSpend`, `controller.go:277`): each scope's spend this period from
 the ledger, up to a boundary a few minutes back. Gateways add their site's
 own minutes from that boundary on (ADR 0048). A failed query keeps the
 last result for its period and is reported with the step; with no result
@@ -413,7 +452,7 @@ the outbox only once it is durably archived.
 ### 5.2 Entra group sync
 
 `Sync.Step` (`control/entrasync/sync.go:79`, ADR 0047) runs from the
-controller loop (`syncStep`, `controller.go:251`) every `SyncEvery` (five
+controller loop (`syncStep`, `controller.go:424`) every `SyncEvery` (five
 minutes) while this replica leads, under the elector's fence:
 
 1. **Read every bound group first** (`boundGroups`: each scope's
@@ -443,10 +482,10 @@ membership that is only a group's.
 
 ## 6. The binary
 
-`main` (`cmd/golem-control/main.go:53`) dispatches the subcommands
-(`dispatch`, `main.go:61`); anything else is golem-control itself, `run`
-(`main.go:188`): `parseFlags` (`main.go:152`), the bucket and signer
-opened, the state loaded, `newController` (`main.go:262`) wiring an
+`main` (`cmd/golem-control/main.go:57`) dispatches the subcommands
+(`dispatch`, `main.go:65`); anything else is golem-control itself, `run`
+(`main.go:270`): `parseFlags` (`main.go:233`), the bucket and signer
+opened, the state loaded, `newController` (`main.go:344`) wiring an
 elector and a publisher per pool and the jobs the flags ask for, then the
 state's refresh loop, the API (if `-listen`) and the controller until
 SIGTERM or a component fails. Shutdown is in order: the publishing loop
@@ -474,45 +513,53 @@ are flushed.
 
 The subcommands:
 
-- `golem-control keygen <dir>` (`keygen`, `main.go:438`) writes a
+- `golem-control keygen <dir>` (`keygen`, `main.go:530`) writes a
   development key pair (`publishing.key`, never overwritten, and
   `publishing.pub` for gateways). `TestKeygen`.
-- `golem-control pubkey <signing key>` (`pubkey`, `main.go:367`) prints the
+- `golem-control pubkey <signing key>` (`pubkey`, `main.go:459`) prints the
   key's public half for gateways' `-keys` directories: a PEM with a
   `Key-ID` header (a KMS key's ARN, a file key's name), which
   `sign.LoadKeys` trusts under that ID. `TestPubkey`.
 - `golem-control restore -bucket <...> -from <document.json> -actor <who>
-  [-apply]` (`restore`, `main.go:88`) runs `Store.Restore` (§1.2) with a
+  [-apply]` (`restore`, `main.go:168`) runs `Store.Restore` (§1.2) with a
   backup document taken from the bucket's history or its Object Lock
   replica. Without `-apply` it is a dry run: it prints what would be
   withheld and rolled back and writes nothing. `TestRestoreCommand`.
+- `golem-control bootstrap -bucket <...> -keys <dir> -pools <a,b> -actor
+  <who> [-adopt]` (`bootstrap`, `main.go:110`) runs `Store.Bootstrap`
+  (§1) with each pool's floor (`Publisher.Floor`: the checkpoint and
+  pointer verified with `-keys`, the publishing keys' public halves as
+  gateways hold them): it creates a deleted document, empty of
+  entitlements, or with `-adopt` accepts an older one put back. Stop every
+  replica first: one still running refuses the new document as having
+  gone back. `TestBootstrapCommand`.
 
 ## 7. Worked example: a key revoked through the API reaches a gateway
 
 1. **The API call.** `keys.RevokeKey` (`control/api/keys.go:30`) calls
-   `Service.RevokeKey` (`control/service/service.go:367`), which checks the
+   `Service.RevokeKey` (`control/service/service.go:435`), which checks the
    caller is the key's owner, an admin, or, for a service's key, a manager
-   of its scope, and calls `Service.apply` (`service.go:93`) with a change
+   of its scope, and calls `Service.apply` (`service.go:99`) with a change
    that calls `Document.Revoke` (`control/state/entitlements.go:217`): the
    key's `RevokedAt` is set and a `Revocation` appended. `apply` adds a
    `key.revoke` audit event.
-2. **The state update.** `Store.Update` (`state.go:211`) copies the
+2. **The state update.** `Store.Update` (`state.go:255`) copies the
    document, applies the change, numbers the audit event (`state.go:80`),
    checks the invariants (`checkRevocations` among them), and writes
-   `stateVersion + 1` with `If-Match` (`state.go:233`). On a lost race it
+   `stateVersion + 1` with `If-Match` (`state.go:277`). On a lost race it
    re-reads and reapplies; on a lost reply it finds its own write ID.
 3. **The controller's next step**, within a second on the leader (it may
-   be another replica: its `Refresh` at `controller.go:105` reads the new
-   document). `entitlementsSum` (`controller.go:109`) now differs, so
-   `due` (`controller.go:113`) says a publication is due.
+   be another replica: its `Refresh` at `controller.go:115` reads the new
+   document). `entitlementsSum` (`controller.go:131`) now differs, so
+   `due` (`controller.go:135`) says a publication is due.
 4. **The publication.** `Controller.publish` calls `PublishAll`
-   (`controller.go:145`) under the elector's fence. Each pool is numbered
-   above its record, checkpoint and pointer (`publish.go:189`-`193`), its
+   (`controller.go:229`) under the elector's fence. Each pool is numbered
+   from its record, checked against its checkpoint and pointer (`publish.go:199`-`206`), its
    snapshot built by `compile.Compile` with `Controller.entitlements`, in
    which `Document.Entitlements` (`entitlements.go:247`) lists the key with
    `Revoked: true` (`entitlements.go:289`). Every pool's record is won in
-   one `FencedUpdate` (`publish.go:141`), then each checkpoint and signed
-   pointer is written (`publish.go:218`, `:228`).
+   one `FencedUpdate` (`publish.go:154`), then each checkpoint and signed
+   pointer is written (`publish.go:265`, `:275`).
 5. **The gateway's poll** (`gateway/snapshot/bucket.go:172`, `Bucket.Poll`),
    every second: a conditional get of the pointer, now changed. `read`
    (`bucket.go:272`) verifies the signature, the pool and the floor
@@ -527,10 +574,11 @@ path with a real gateway source over one bucket.
 ## 8. How it is tested
 
 - `control/state`: the store's update, retry under 8 concurrent writers,
-  a document gone back refused (`TestRegressed`), every invariant above
-  (`TestInvariants`, `TestFenceInvariant`, `TestEntitlementInvariants`,
-  `TestRolesAndAudit`), and the restore (`TestRestore`,
-  `TestRestoreNeverWidens`).
+  a document gone back refused (`TestRegressed`), a deleted one not
+  started over unless bootstrapped (`TestMissingDocument`), every
+  invariant above (`TestInvariants`, `TestFenceInvariant`,
+  `TestEntitlementInvariants`, `TestRolesAndAudit`), and the restore
+  (`TestRestore`, `TestRestoreNeverWidens`).
 - `control/lead`: the tests in §2.
 - `control/publish`: the tests in §3.
 - `control/entrasync`: the sync (`TestSync`, `TestSyncNames`), its safety
@@ -550,7 +598,8 @@ path with a real gateway source over one bucket.
 - `control/audit`: archive, emit, trim; a retry after a crash; a mismatch;
   batches.
 - `cmd/golem-control`: `TestKeygen`, `TestOpenSigner`, `TestAPINeedsTenant`,
-  `TestPubkey`, `TestRestoreCommand`, `TestTrustedKeys`.
+  `TestPubkey`, `TestRestoreCommand`, `TestTrustedKeys`,
+  `TestBootstrapCommand`.
 - `model/check-leadership.sh`: the lease and fence placements compared by
   exhaustive search, each mechanism shown necessary.
 - `gateway/snapshot/publication_mbt_test.go`: model/publication.qnt's
@@ -572,9 +621,20 @@ path with a real gateway source over one bucket.
   site and audience (control-plane.md §4), and the CRD watch replacing
   the directory, come later.
 - **Restore over the API**: `golem-control restore` runs against the
-  bucket directly; `golemctl state restore` over the admin API is next
-  (control-plane.md §3). `ErrRegressed`'s message already names that
-  command rather than `golem-control restore`.
+  bucket directly, and `ErrRegressed`'s message names it; `golemctl state
+  restore` over the admin API is next (control-plane.md §3).
+- **A rolled-back document is caught by the publisher, not the store**: a
+  replica started after an older version was put back adopts it (it has
+  nothing to compare with) and serves it to the API until a person acts;
+  the publisher refuses to publish from it (`ErrRegressed`). A rollback
+  that also puts back every pool's checkpoint and pointer leaves nothing
+  newer to compare with: the bucket policy is what prevents that
+  (model/leadership.md §6).
+- **A missing document is recognised by name**: the bucket interface
+  cannot list, so `Installed` is the lease object and the configured
+  pools' checkpoints and pointers. A deletion of the document together
+  with all of those (or a deployment whose `-pools` names none that were
+  published) is taken for a first start.
 - **One failing pool republishes the rest every second**: `Step` records a
   publication only when every pool succeeded, so while one pool fails (a
   tampered checkpoint, say) the others are published, and the document

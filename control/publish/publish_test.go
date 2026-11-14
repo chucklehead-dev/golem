@@ -220,10 +220,12 @@ func (b *pauseAfterRecord) Put(ctx context.Context, key string, body []byte, ifM
 }
 
 // TestGuard: model/leadership.md's counterexamples, each refused. A
-// rolled-back record, met by an older checkpoint copied back, still
-// numbers above what gateways trust (the signed pointer); a forged or
-// deleted checkpoint stops publication; the first publication's crash
-// window (a record with no checkpoint yet) is not mistaken for tampering.
+// rolled-back record, alone or met by an older checkpoint copied back,
+// stops the pool's publication until the document is adopted, then
+// numbers above what gateways trust (the signed pointer); a race for the
+// record is not mistaken for one; a forged or deleted checkpoint stops
+// publication; the first publication's crash window (a record with no
+// checkpoint yet) is not mistaken for tampering.
 func TestGuard(t *testing.T) {
 	ctx := t.Context()
 	// fresh is another replica, started after the bucket changed under
@@ -242,34 +244,76 @@ func TestGuard(t *testing.T) {
 		return cp.PublishSeq
 	}
 
-	t.Run("a rolled-back record and an older checkpoint copied back", func(t *testing.T) {
-		p, keys, d := setup(t)
-		l := leads(t, p.State, "r1", 1)
-		p.Publish(ctx, l, 1, build)
-		oldDoc, _, _ := d.Get(ctx, state.DocumentKey, "")
-		oldCp, _, _ := d.Get(ctx, snapshot.CheckpointKey("internal"), "")
-		for range 2 {
-			if _, err := p.Publish(ctx, l, 1, build); err != nil {
+	// A rolled-back record, alone or with an older checkpoint copied back:
+	// the publisher halts (ErrRegressed) rather than numbering past it,
+	// which would keep the floor (the model's GUARD) but publish the older
+	// document's entitlements. Nothing moves until the document is adopted
+	// (golem-control bootstrap -adopt); then publication goes on above
+	// what gateways trust (the signed pointer at 3).
+	for name, oldCheckpoint := range map[string]bool{"a rolled-back record alone": false, "a rolled-back record and an older checkpoint copied back": true} {
+		t.Run(name, func(t *testing.T) {
+			p, keys, d := setup(t)
+			l := leads(t, p.State, "r1", 1)
+			p.Publish(ctx, l, 1, build)
+			oldDoc, _, _ := d.Get(ctx, state.DocumentKey, "")
+			oldCp, _, _ := d.Get(ctx, snapshot.CheckpointKey("internal"), "")
+			for range 2 {
+				if _, err := p.Publish(ctx, l, 1, build); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d.Put(ctx, state.DocumentKey, oldDoc, "") // record back to 1
+			cp := uint64(3)
+			if oldCheckpoint {
+				d.Put(ctx, snapshot.CheckpointKey("internal"), oldCp, "") // checkpoint back to 1
+				cp = 1
+			}
+			ptrBefore, _, _ := d.Get(ctx, snapshot.PointerKey("internal"), "")
+			q := fresh(p, d)
+			if _, err := q.Publish(ctx, l, 1, build); !errors.Is(err, ErrRegressed) || !contains(err, "bootstrap -adopt") {
+				t.Fatalf("%v, want ErrRegressed saying what to do", err)
+			}
+			if ptrAfter, _, _ := d.Get(ctx, snapshot.PointerKey("internal"), ""); cpSeq(d, keys) != cp || string(ptrAfter) != string(ptrBefore) {
+				t.Fatal("the checkpoint or pointer moved past the rollback")
+			}
+			if rec, _ := q.Record(ctx); rec.Seq != 1 {
+				t.Fatalf("record %d: a publication was won past the rollback", rec.Seq)
+			}
+			floor, err := q.Floor(ctx)
+			if err != nil || floor != 3 {
+				t.Fatalf("floor %d %v, want 3", floor, err)
+			}
+			if _, err := q.State.Bootstrap(ctx, map[string]uint64{"internal": floor}, "ops", true); err != nil {
 				t.Fatal(err)
 			}
-		}
-		d.Put(ctx, state.DocumentKey, oldDoc, "")                 // record back to 1
-		d.Put(ctx, snapshot.CheckpointKey("internal"), oldCp, "") // checkpoint back to 1
-		ptr, err := fresh(p, d).Publish(ctx, l, 1, build)
-		if err != nil || ptr.PublishSeq != 4 || cpSeq(d, keys) != 4 {
-			t.Fatalf("published %d (%v), checkpoint %d; want 4: above the signed pointer at 3", ptr.PublishSeq, err, cpSeq(d, keys))
-		}
-	})
-	t.Run("a rolled-back record alone", func(t *testing.T) {
-		p, keys, d := setup(t)
+			if ptr, err := q.Publish(ctx, l, 1, build); err != nil || ptr.PublishSeq != 4 || cpSeq(d, keys) != 4 {
+				t.Fatalf("after adopting: published %d (%v), checkpoint %d; want 4", ptr.PublishSeq, err, cpSeq(d, keys))
+			}
+		})
+	}
+	t.Run("another pool's signed pointer copied over this one's", func(t *testing.T) {
+		p, _, d := setup(t)
 		l := leads(t, p.State, "r1", 1)
 		p.Publish(ctx, l, 1, build)
-		oldDoc, _, _ := d.Get(ctx, state.DocumentKey, "")
+		other, _ := snapshot.SignPointer(ctx, snapshot.Pointer{Pool: "edge", PublishSeq: 9}, p.Signer)
+		d.Put(ctx, snapshot.PointerKey("internal"), other, "")
+		if ptr, err := p.Publish(ctx, l, 1, build); err != nil || ptr.PublishSeq != 2 {
+			t.Fatalf("%+v %v: want publication 2, the other pool's sequence not counted", ptr, err)
+		}
+	})
+	t.Run("a record won by another publisher while this one read the bucket", func(t *testing.T) {
+		p, _, d := setup(t)
+		l := leads(t, p.State, "r1", 1)
 		p.Publish(ctx, l, 1, build)
-		p.Publish(ctx, l, 1, build)
-		d.Put(ctx, state.DocumentKey, oldDoc, "")
-		if ptr, err := fresh(p, d).Publish(ctx, l, 1, build); err != nil || ptr.PublishSeq != 4 || cpSeq(d, keys) != 4 {
-			t.Fatalf("published %d (%v); want 4, not 2 (today's advance lowered the checkpoint)", ptr.PublishSeq, err)
+		other := fresh(p, d)
+		racing := *p
+		racing.Bucket = &beforeGet{Bucket: d, key: snapshot.PointerKey("internal"), run: func() {
+			if _, err := other.Publish(ctx, l, 1, build); err != nil {
+				t.Fatal(err)
+			}
+		}}
+		if _, err := racing.Publish(ctx, l, 1, build); !errors.Is(err, ErrConflict) {
+			t.Fatalf("%v, want ErrConflict: a race, not a rollback", err)
 		}
 	})
 	// Each tampering returns the bucket as the publisher then sees it.
@@ -365,6 +409,22 @@ func TestKeyRotation(t *testing.T) {
 }
 
 func contains(err error, s string) bool { return err != nil && strings.Contains(err.Error(), s) }
+
+// beforeGet runs run before the first get of key.
+type beforeGet struct {
+	bucket.Bucket
+	key  string
+	run  func()
+	done bool
+}
+
+func (b *beforeGet) Get(ctx context.Context, key, inm string) ([]byte, string, error) {
+	if key == b.key && !b.done {
+		b.done = true
+		b.run()
+	}
+	return b.Bucket.Get(ctx, key, inm)
+}
 
 // failAt is a bucket whose puts of key fail.
 type failAt struct {

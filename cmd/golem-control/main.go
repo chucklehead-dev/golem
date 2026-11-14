@@ -7,6 +7,7 @@
 //	golem-control keygen ./keys   (a development Ed25519 key pair)
 //	golem-control pubkey kms:arn:aws:kms:...   (the publishing key's public half, for gateways' -keys)
 //	golem-control restore -bucket s3://golem-state/golem/ -from old.json -actor alice [-apply]   (an older document's entitlements, never widening)
+//	golem-control bootstrap -bucket s3://golem-state/golem/ -keys ./keys -pools internal,edge -actor alice [-adopt]   (a deleted document started over, or an older one adopted)
 package main
 
 import (
@@ -19,10 +20,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -48,6 +51,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/otlp"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/sign/kmssign"
+	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 func main() {
@@ -56,7 +60,7 @@ func main() {
 	}
 }
 
-// dispatch runs a subcommand (keygen, pubkey, restore), or golem-control
+// dispatch runs a subcommand (keygen, pubkey, restore, bootstrap), or golem-control
 // itself given anything else, flags included.
 func dispatch(args []string) error {
 	ctx := context.Background()
@@ -76,8 +80,84 @@ func dispatch(args []string) error {
 		return pubkey(ctx, os.Stdout, args[1])
 	case "restore":
 		return restore(ctx, os.Stdout, args[1:])
+	case "bootstrap":
+		return bootstrap(ctx, os.Stdout, args[1:])
 	}
 	return run()
+}
+
+// installed is what shows golem-control has run on a bucket publishing
+// pools (a comma-separated list): the lease object, and each pool's
+// checkpoint and pointer. The bucket interface cannot list, so these are
+// looked for by name (state.Store.Installed).
+func installed(pools string) []string {
+	keys := []string{lead.LeaseKey}
+	for p := range strings.SplitSeq(pools, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			keys = append(keys, snapshot.CheckpointKey(p), snapshot.PointerKey(p))
+		}
+	}
+	return keys
+}
+
+// bootstrap creates the state document deliberately where golem-control
+// has run before (state.Store.Bootstrap), each pool's record at what the
+// bucket proves was published (its checkpoint and pointer, verified with
+// -keys), so publication goes on above what gateways trust. With -adopt it
+// instead accepts the document that is there, an older version put back,
+// raising its records the same way. Stop every golem-control replica
+// first: one still running refuses the new document as having gone back.
+func bootstrap(ctx context.Context, w io.Writer, args []string) error {
+	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	where := fs.String("bucket", "", "the state bucket: a directory, or s3://bucket/prefix/")
+	keysDir := fs.String("keys", "", "the publishing keys' public halves (*.pub), as gateways' -keys: the checkpoints and pointers are verified with them")
+	pools := fs.String("pools", "internal", "the gateway pools golem-control publishes, comma-separated")
+	actor := fs.String("actor", "", "who bootstraps, for the audit event (required)")
+	adopt := fs.Bool("adopt", false, "accept the document that is there (an older version put back) instead of creating one")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *where == "" || *keysDir == "" || *actor == "" || fs.NArg() > 0 {
+		return errors.New("usage: golem-control bootstrap -bucket <dir|s3://...> -keys <dir> -pools <a,b> -actor <who> [-adopt]")
+	}
+	keys, err := sign.LoadKeys(*keysDir)
+	if err != nil {
+		return fmt.Errorf("-keys: %w", err)
+	}
+	b, err := openBucket(ctx, *where)
+	if err != nil {
+		return err
+	}
+	st := &state.Store{Bucket: b}
+	floors := map[string]uint64{}
+	for p := range strings.SplitSeq(*pools, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		f, err := (&publish.Publisher{State: st, Bucket: b, Keys: keys, Pool: p}).Floor(ctx)
+		if err != nil {
+			return fmt.Errorf("pool %s (nothing written): %w", p, err)
+		}
+		floors[p] = f
+	}
+	d, err := st.Bootstrap(ctx, floors, *actor, *adopt)
+	if err != nil {
+		return fmt.Errorf("bootstrap refused: %w", err)
+	}
+	verb := "created"
+	if *adopt {
+		verb = "adopted"
+	}
+	fmt.Fprintf(w, "%s %s at state version %d\n", state.DocumentKey, verb, d.StateVersion)
+	for _, p := range slices.Sorted(maps.Keys(floors)) {
+		fmt.Fprintf(w, "  pool %s: publication record %d (the bucket proves %d)\n", p, d.Publications[p].Seq, floors[p])
+	}
+	if !*adopt {
+		fmt.Fprintln(w, "the document holds no principals, scopes or keys: every caller is refused until they are created again")
+	} else {
+		fmt.Fprintln(w, "publication resumes from this document: a key revoked after its version and not revoked again works again (the audit archive lists those revocations)")
+	}
+	return nil
 }
 
 // restore brings an older state document's entitlements back without
@@ -208,7 +288,7 @@ func run() error {
 			return fmt.Errorf("-id: %w", err)
 		}
 	}
-	st := &state.Store{Bucket: b}
+	st := &state.Store{Bucket: b, Installed: installed(o.pools)}
 	if err := st.Load(ctx); err != nil {
 		return fmt.Errorf("the state document: %w", err)
 	}
