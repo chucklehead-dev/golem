@@ -237,15 +237,18 @@ func (d *pubDriver) Step(s *connect.Step) error {
 		},
 		// The environment: golem-control and the attacker.
 		"takeLease": func(s *connect.Step) error {
-			// The replica's clock moves past the lease (its holder paused);
-			// it then takes it, at the next epoch.
+			// The replica sees the lease, then its own clock moves past the
+			// lease's duration with the lease unchanged (its holder paused):
+			// it judges it lapsed, takes it at the next epoch and claims the
+			// fence. The time guard holds because the driver arranges it.
 			r := d.replicas[connect.MustPick[string](s, "replica")]
 			if err := r.el.State.Load(context.Background()); err != nil {
 				return err
 			}
-			if l := r.el.State.Current().Leader; l != nil && !r.clock.After(l.Expires()) {
-				r.clock = l.Expires().Add(time.Second)
+			if _, err := r.el.Try(context.Background()); err != nil {
+				return err
 			}
+			r.clock = r.clock.Add(r.el.Duration + time.Second)
 			var want int
 			if err := connectDecode(s, &want, "leaseEpoch"); err != nil {
 				return err
@@ -305,7 +308,7 @@ func (d *pubDriver) State() (any, error) {
 		return nil, err
 	}
 	st.Record = recState{Epoch: int(rec.Epoch), Seq: int(rec.Seq), Source: int(rec.Source)}
-	if l := d.pub.State.Current().Leader; l != nil {
+	if l := d.pub.State.Current().Fence; l != nil {
 		st.LeaseHolder, st.LeaseEpoch = l.Holder, int(l.Epoch)
 	}
 	st.Believes = map[string]int{}

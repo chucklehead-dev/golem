@@ -38,7 +38,7 @@ func newPublished(t *testing.T) *published {
 	s := sign.Ed25519{ID: "k1", Key: sk}
 	st := &state.Store{Bucket: d}
 	if _, err := st.Update(t.Context(), func(doc *state.Document) error {
-		doc.Leader = &state.Lease{Holder: "r1", Epoch: 1}
+		doc.Fence = &state.Fence{Holder: "r1", Epoch: 1}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

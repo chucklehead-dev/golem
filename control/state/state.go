@@ -14,6 +14,7 @@ package state
 
 import (
 	"context"
+	"crypto/rand"
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -41,28 +42,19 @@ type Record struct {
 	Source uint64 `json:"source"`
 }
 
-// Lease is golem-control's leadership (control/lead): who holds it, its
-// epoch (which increases whenever it changes hands, and fences
-// publication), and when its holder last renewed it.
-type Lease struct {
-	Holder    string    `json:"holder"`
-	Epoch     uint64    `json:"epoch"`
-	RenewedAt time.Time `json:"renewedAt"`
-	// DurationMillis is how long a renewal holds it (encoding/json/v2 has
-	// no default form for a time.Duration).
-	DurationMillis int64 `json:"durationMillis"`
-}
-
-// Expires is when the lease lapses unless renewed.
-func (l *Lease) Expires() time.Time {
-	return l.RenewedAt.Add(time.Duration(l.DurationMillis) * time.Millisecond)
-}
-
 // Document is the state.
 type Document struct {
-	Schema       int               `json:"schema"`
-	StateVersion uint64            `json:"stateVersion"`
-	Leader       *Lease            `json:"leader,omitempty"`
+	Schema       int    `json:"schema"`
+	StateVersion uint64 `json:"stateVersion"`
+	// Fence is golem-control's leadership as the document knows it: who
+	// leads, at which epoch (ADR 0049). The lease itself is an object of
+	// its own (control/lead); a replica leads once it has claimed the fence
+	// here, and every leader-only write checks it (FencedUpdate).
+	Fence *Fence `json:"fence,omitempty"`
+	// Write names the update that wrote this version, so a writer whose
+	// compare-and-swap reply was lost can tell its own write from
+	// another's (Update).
+	Write        string            `json:"write,omitempty"`
 	Publications map[string]Record `json:"publications,omitempty"`
 
 	Principals  map[string]Principal `json:"principals,omitempty"` // by principal ID
@@ -95,9 +87,9 @@ func (d *Document) clone() *Document {
 	c.Revocations = slices.Clone(d.Revocations)
 	c.Roles = slices.Clone(d.Roles)
 	c.Audit = slices.Clone(d.Audit)
-	if d.Leader != nil {
-		l := *d.Leader
-		c.Leader = &l
+	if d.Fence != nil {
+		f := *d.Fence
+		c.Fence = &f
 	}
 	return &c
 }
@@ -218,15 +210,21 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 			return nil, err
 		}
 		next.Schema, next.StateVersion = Schema, base.StateVersion+1
+		next.Write = rand.Text()
 		body, err := next.Encode()
 		if err != nil {
 			return nil, err
 		}
 		newTag, err := s.Bucket.Put(ctx, DocumentKey, body, tag)
 		if errors.Is(err, bucket.ErrPrecondition) {
-			// Another writer won: read what it wrote and try again on that.
+			// Another writer won, or this one did and its reply was lost (a
+			// retried conditional put fails its own condition): read what
+			// is there, and if it is this write, it succeeded.
 			if err := s.Load(ctx); err != nil {
 				return nil, err
+			}
+			if cur := s.Current(); cur.Write == next.Write {
+				return cur, nil
 			}
 			continue
 		}
@@ -239,11 +237,11 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 	return nil, ErrContended
 }
 
-// Fence is the leadership a leader-only write is made under: the replica
-// that believes it leads, and at which epoch (control/lead).
+// Fence is a leadership: the replica that leads, and at which epoch. The
+// epoch increases whenever leadership changes hands (control/lead).
 type Fence struct {
-	Holder string
-	Epoch  uint64
+	Holder string `json:"holder"`
+	Epoch  uint64 `json:"epoch"`
 }
 
 // ErrFenced: the document's leadership is not the writer's (it has lost
@@ -257,7 +255,7 @@ var ErrFenced = errors.New("state: fenced: this replica does not lead at that ep
 // JOBS "doc").
 func (s *Store) FencedUpdate(ctx context.Context, f Fence, change func(*Document) error) (*Document, error) {
 	return s.Update(ctx, func(d *Document) error {
-		if l := d.Leader; l == nil || l.Holder != f.Holder || l.Epoch != f.Epoch {
+		if l := d.Fence; l == nil || l.Holder != f.Holder || l.Epoch != f.Epoch {
 			have := "no leader"
 			if l != nil {
 				have = fmt.Sprintf("%s leads at epoch %d", l.Holder, l.Epoch)
@@ -325,11 +323,11 @@ func check(old, next *Document) error {
 	return checkPublications(old, next)
 }
 
-// checkLease: the lease's epoch never goes back and the lease is never
+// checkLease: the fence's epoch never goes back and the fence is never
 // dropped, so a fenced epoch stays fenced (control/lead).
 func checkLease(old, next *Document) error {
-	if old.Leader != nil && (next.Leader == nil || next.Leader.Epoch < old.Leader.Epoch) {
-		return broken("the lease's epoch goes back")
+	if old.Fence != nil && (next.Fence == nil || next.Fence.Epoch < old.Fence.Epoch) {
+		return broken("the fence's epoch goes back")
 	}
 	return nil
 }

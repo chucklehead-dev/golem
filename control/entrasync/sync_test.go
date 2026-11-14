@@ -54,7 +54,7 @@ func setup(t *testing.T, d *dir) *Sync {
 			"ci":    {Kind: "service", Scopes: []string{"team-c"}},
 		}
 		doc.Keys = map[string]state.Key{"kc": {Owner: "carol", Scope: "team-a"}, "kc2": {Owner: "carol", Scope: "team-c"}}
-		doc.Leader = &state.Lease{Holder: "r1", Epoch: 1}
+		doc.Fence = &state.Fence{Holder: "r1", Epoch: 1}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -286,7 +286,7 @@ type deposing struct {
 
 func (d deposing) Members(ctx context.Context, g string) ([]User, error) {
 	d.st.Update(ctx, func(doc *state.Document) error {
-		doc.Leader = &state.Lease{Holder: "r2", Epoch: 2}
+		doc.Fence = &state.Fence{Holder: "r2", Epoch: 2}
 		return nil
 	})
 	return d.dir.Members(ctx, g)

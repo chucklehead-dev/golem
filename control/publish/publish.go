@@ -93,7 +93,7 @@ func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, bui
 	if err != nil {
 		return snapshot.Pointer{}, err
 	}
-	if err := holds(p.State.Current().Leader, lease); err != nil {
+	if err := holds(p.State.Current().Fence, lease); err != nil {
 		return snapshot.Pointer{}, err
 	}
 	epoch := lease.Epoch
@@ -124,7 +124,7 @@ func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, bui
 		return snapshot.Pointer{}, err
 	}
 	if _, err := p.State.Update(ctx, func(d *state.Document) error {
-		if err := holds(d.Leader, lease); err != nil {
+		if err := holds(d.Fence, lease); err != nil {
 			return err
 		}
 		if d.Publications[p.Pool] != rec {
@@ -159,7 +159,7 @@ func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, bui
 }
 
 // holds refuses a publication unless l is the state's lease.
-func holds(l *state.Lease, want Lease) error {
+func holds(l *state.Fence, want Lease) error {
 	if l == nil || l.Holder != want.Holder || l.Epoch != want.Epoch {
 		have := "no lease"
 		if l != nil {

@@ -29,7 +29,7 @@ func setup(t *testing.T) (*Publisher, sign.Ed25519Keys, *bucket.Dir) {
 func leads(t *testing.T, st *state.Store, holder string, epoch uint64) Lease {
 	t.Helper()
 	if _, err := st.Update(t.Context(), func(d *state.Document) error {
-		d.Leader = &state.Lease{Holder: holder, Epoch: epoch, RenewedAt: time.Now().UTC(), DurationMillis: 15000}
+		d.Fence = &state.Fence{Holder: holder, Epoch: epoch}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

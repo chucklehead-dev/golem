@@ -170,8 +170,12 @@ func TestPublishes(t *testing.T) {
 		os.Remove(filepath.Join(w.dir, "broken.yaml"))
 	})
 	t.Run("a new leader publishes; the paused one is fenced", func(t *testing.T) {
-		// r1 pauses: its clock and belief stand still. r2's passes the lease.
-		r2.clock = r1.clock.Add(time.Minute)
+		// r1 pauses: its clock and belief stand still. r2 sees the lease,
+		// then sees it unchanged for longer than its duration.
+		if w.lead("r2") != 0 {
+			t.Fatal("r2 took a held lease")
+		}
+		r2.clock = r2.clock.Add(time.Minute)
 		if w.lead("r2") != 2 {
 			t.Fatal("r2 takes the lapsed lease at epoch 2")
 		}

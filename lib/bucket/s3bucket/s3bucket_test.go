@@ -47,7 +47,7 @@ func TestS3Publish(t *testing.T) {
 	pk, sk, _ := ed25519.GenerateKey(nil)
 	p := &publish.Publisher{State: &state.Store{Bucket: b}, Bucket: b, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "internal"}
 	if _, err := p.State.Update(t.Context(), func(d *state.Document) error {
-		d.Leader = &state.Lease{Holder: "r1", Epoch: 1}
+		d.Fence = &state.Fence{Holder: "r1", Epoch: 1}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
