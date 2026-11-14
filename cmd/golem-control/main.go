@@ -217,6 +217,7 @@ type options struct {
 	config, bucket, signingKey, pools, id string
 	trustedKeys                           string
 	authLease                             time.Duration
+	counterRetention                      time.Duration
 	listen                                string
 	archive, telemetry                    string
 	tenant, audience                      string
@@ -249,6 +250,7 @@ func parseFlags() (options, error) {
 	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
 	flag.StringVar(&o.clickhouse, "clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
 	flag.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
+	flag.DurationVar(&o.counterRetention, "counter-retention", 6*time.Hour, "how long the gateways' site counters keep a minute (their stores' Retain): a known-spend result older than this less the lease is reported stale")
 	flag.DurationVar(&o.allowance, "spend-allowance", 5*time.Minute, "how long after a call's end its ledger row is surely in ClickHouse: known spend's boundary is this far back")
 	flag.StringVar(&o.periodZone, "period-zone", "UTC", "the budget periods' time zone (an IANA name): the gateways' -period-zone")
 	flag.Parse()
@@ -379,7 +381,10 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 			return nil, closeAudit, fmt.Errorf("-period-zone: %w", err)
 		}
 		c.Spend = &spend.Job{Ledger: spend.ClickHouse{URL: o.clickhouse, User: o.clickhouseUser, Password: os.Getenv("CLICKHOUSE_PASSWORD")},
-			Allowance: o.allowance, Location: zone}
+			Allowance: o.allowance, Location: zone, Lease: o.authLease, Retention: o.counterRetention}
+		if err := c.Spend.Validate(); err != nil {
+			return nil, closeAudit, err
+		}
 	} else {
 		slog.Warn("golem-control: no -clickhouse: snapshots carry no known spend, and each site's gateways budget against their own counter alone")
 	}
