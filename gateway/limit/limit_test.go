@@ -536,3 +536,106 @@ func TestOverlappingReplays(t *testing.T) {
 		t.Fatalf("held %+v after two replays of a: want b still held", p)
 	}
 }
+
+// atCap is a store at which, at every replayed batch while the limiter is
+// still down, more of its calls complete first (each held, the oldest
+// dropped at MaxPending), and which counts each call's increments.
+type atCap struct {
+	*Mem
+	l       *Limiter
+	perAdd  int // completions arriving during each replayed batch
+	left    int // completions still to arrive (negative: no end)
+	n       int
+	batches int
+	counted map[string]int
+}
+
+func (s *atCap) arrive(ctx context.Context) {
+	for range s.perAdd {
+		if s.left == 0 || !s.l.Down() {
+			return
+		}
+		s.left--
+		s.n++
+		c := scopeCall(fmt.Sprint("busy", s.n), fmt.Sprint("busy", s.n))
+		c.ScopeLimit, c.Budget = 0, 0
+		if tk, err := s.l.Admit(ctx, c); err == nil {
+			tk.Complete(ctx, 1)
+		}
+	}
+}
+
+func (s *atCap) AddAll(ctx context.Context, incs []Increment) error {
+	if s.batches++; s.batches > 1000 {
+		return errors.New("the replay does not converge")
+	}
+	s.arrive(ctx)
+	if err := s.Mem.AddAll(ctx, incs); err != nil {
+		return err
+	}
+	for _, in := range incs {
+		s.counted[in.Call]++
+	}
+	return nil
+}
+
+func (s *atCap) Complete(ctx context.Context, in Increment, sl Slot) error {
+	if err := s.Mem.Complete(ctx, in, sl); err != nil {
+		return err
+	}
+	s.counted[in.Call]++
+	return nil
+}
+
+// TestRecoverAtTheCap: completions held while a replay is in flight, at
+// MaxPending, drop the oldest held increments; the batch in flight is
+// still taken off once sent, so no increment is counted twice, and the
+// recovery converges however many complete meanwhile. Taking a batch off
+// only while it was still the held list's prefix re-sent it every round
+// (1580 counted of 350 completed) and, under steady traffic, never ended.
+func TestRecoverAtTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		perAdd, left int
+	}{
+		{"a burst during the replay", 10, 50},
+		{"steady traffic past a batch per replay", 300, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			st := &atCap{Mem: NewMem(), perAdd: tc.perAdd, left: tc.left, counted: map[string]int{}}
+			l := New(st)
+			st.l = l
+			l.MaxPending = 300
+			st.SetDown(true)
+			for i := range 300 {
+				c := scopeCall(fmt.Sprint(i), fmt.Sprint("p", i))
+				c.ScopeLimit = 0
+				tk, err := l.Admit(ctx, c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tk.Complete(ctx, 1)
+			}
+			st.SetDown(false)
+			if err := l.Recover(ctx); err != nil || l.Down() {
+				t.Fatalf("Recover = %v, down %v: it must converge at the cap", err, l.Down())
+			}
+			twice := 0
+			for _, n := range st.counted {
+				if n > 1 {
+					twice++
+				}
+			}
+			completed := int64(300 + st.n)
+			held, known := len(l.Pending("s")), l.Known(ctx, "s")
+			if twice > 0 || held != 0 || known != int64(len(st.counted)) || known > completed {
+				t.Fatalf("held %d, known %d, %d calls counted (%d more than once), of %d completed (%d dropped): each must be counted at most once",
+					held, known, len(st.counted), twice, completed, l.Dropped.Load())
+			}
+			if known+l.Dropped.Load() < completed {
+				t.Fatalf("known %d + dropped %d < %d completed: an increment lost uncounted", known, l.Dropped.Load(), completed)
+			}
+		})
+	}
+}
