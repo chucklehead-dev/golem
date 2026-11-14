@@ -1,11 +1,11 @@
 package snapshot
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	v1 "github.com/chucklehead-dev/golem/lib/api/v1alpha1"
@@ -24,8 +24,8 @@ type Dir struct {
 	Log      *slog.Logger
 	Interval time.Duration // default one second
 
-	seq  uint64
-	last [32]byte
+	seq  uint64   // the last publication number given; each applied config takes the next
+	last [32]byte // the content hash of the files last applied
 }
 
 // Load reads the directory once and applies it if it changed. A config that
@@ -56,62 +56,22 @@ func (d *Dir) Load() error {
 	if err != nil {
 		return err
 	}
-	if err := d.Holder.Apply(s, snapshot.Hash(b), d.Secrets); err != nil {
+	hash := snapshot.Hash(b)
+	if err := d.Holder.Apply(s, hash, d.Secrets); err != nil {
 		return err
 	}
 	d.seq++
 	d.last = sum
-	d.log().Info("config applied", "dir", d.Path, "routes", len(s.Routes), "hash", snapshot.Hash(b)[:12])
+	d.log().Info("config applied", "dir", d.Path, "routes", len(s.Routes), "hash", hash[:12])
 	return nil
 }
 
-// Run reloads until ctx ends.
+// Run reloads at every interval until ctx ends; the first load is the
+// caller's (Load), so the first reload waits an interval.
 func (d *Dir) Run(ctx context.Context) {
-	every := d.Interval
-	if every <= 0 {
-		every = time.Second
-	}
-	t := time.NewTicker(every)
-	defer t.Stop()
-	var lastErr string
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		if err := d.Load(); err != nil {
-			if err.Error() != lastErr { // report a problem once, not every second
-				d.log().Error("config not applied; serving the previous one", "dir", d.Path, "err", err)
-			}
-			lastErr = err.Error()
-		} else {
-			lastErr = ""
-		}
-	}
+	repeat(ctx, d.Interval, false, d.Load, func(err error) {
+		d.log().Error("config not applied; serving the previous one", "dir", d.Path, "err", err)
+	})
 }
 
-func (d *Dir) log() *slog.Logger {
-	if d.Log != nil {
-		return d.Log
-	}
-	return slog.Default()
-}
-
-// FileSecrets resolves secretRef "name/key" to the file key in the
-// directory a Secret name is mounted at, under Root (production: each
-// Secret mounted at /var/run/golem/secrets/<name>). Env credentials are
-// refused: they are standalone's only.
-type FileSecrets struct{ Root *os.Root }
-
-func (f FileSecrets) Secret(ref, env string) (string, error) {
-	if ref == "" {
-		return "", fmt.Errorf("environment credential %s: only standalone mode reads the environment", env)
-	}
-	name, key, _ := strings.Cut(ref, "/")
-	b, err := f.Root.ReadFile(name + "/" + key)
-	if err != nil {
-		return "", fmt.Errorf("secret %s: %w (is the Secret mounted?)", ref, err)
-	}
-	return strings.TrimSpace(string(b)), nil
-}
+func (d *Dir) log() *slog.Logger { return cmp.Or(d.Log, slog.Default()) }

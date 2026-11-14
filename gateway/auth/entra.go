@@ -79,8 +79,6 @@ type entraClaims struct {
 	Ver   string   `json:"ver"`
 }
 
-var errUnknownKey = errors.New("auth: the token is signed by a key not in the cached key set")
-
 // Verify checks a token and says who it names.
 func (e *Entra) Verify(raw string) (Identity, *Refusal) {
 	invalid := func(why string) (Identity, *Refusal) {
@@ -201,10 +199,16 @@ func (e *Entra) Refresh(ctx context.Context) error {
 	return nil
 }
 
-func (e *Entra) requestRefresh() {
+// wakeup is the channel requestRefresh wakes Run by, made on first use.
+func (e *Entra) wakeup() chan struct{} {
 	e.wakeOne.Do(func() { e.wake = make(chan struct{}, 1) })
+	return e.wake
+}
+
+// requestRefresh asks Run for a refresh; one already asked for absorbs it.
+func (e *Entra) requestRefresh() {
 	select {
-	case e.wake <- struct{}{}:
+	case e.wakeup() <- struct{}{}:
 	default:
 	}
 }
@@ -212,7 +216,7 @@ func (e *Entra) requestRefresh() {
 // Run keeps the key set fresh: hourly, and when a token names an unknown
 // key (at most once a minute).
 func (e *Entra) Run(ctx context.Context) {
-	e.wakeOne.Do(func() { e.wake = make(chan struct{}, 1) })
+	wake := e.wakeup()
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
 	var last time.Time
@@ -221,7 +225,7 @@ func (e *Entra) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-hourly.C:
-		case <-e.wake:
+		case <-wake:
 			if e.now().Sub(last) < time.Minute {
 				continue
 			}

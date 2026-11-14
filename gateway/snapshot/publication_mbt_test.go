@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"testing"
@@ -327,7 +328,7 @@ func (d *pubDriver) State() (any, error) {
 	}
 	st.Pointer = ptrState{Seq: int(ptr.PublishSeq), Epoch: int(ptr.Epoch), Source: int(ptr.Source),
 		ValidUntil: int(snap.ValidUntil.Sub(epoch) / time.Minute)}
-	for _, g := range slices.Sorted(mapsKeys(d.gateways)) {
+	for _, g := range slices.Sorted(maps.Keys(d.gateways)) {
 		h := d.gateways[g].Holder
 		gs := gwState{Applied: pub{Seq: -1}, Floor: int(h.Floor())}
 		if c := h.cur.Load(); c != nil {
@@ -336,16 +337,6 @@ func (d *pubDriver) State() (any, error) {
 		st.Gws[g] = gs
 	}
 	return st, nil
-}
-
-func mapsKeys[K comparable, V any](m map[K]V) func(func(K) bool) {
-	return func(yield func(K) bool) {
-		for k := range m {
-			if !yield(k) {
-				return
-			}
-		}
-	}
 }
 
 func TestPublicationModel(t *testing.T) {

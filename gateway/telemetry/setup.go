@@ -38,22 +38,23 @@ func OTLP(ctx context.Context, endpoint string, res *resource.Resource) (Provide
 	if err != nil {
 		return Providers{}, nil, fmt.Errorf("telemetry endpoint %q: want host:port", endpoint)
 	}
-	var traceOpts []otlptracehttp.Option
-	var metricOpts []otlpmetrichttp.Option
-	var logOpts []otlploghttp.Option
+	traceOpts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
+	metricOpts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(endpoint)}
+	logOpts := []otlploghttp.Option{otlploghttp.WithEndpoint(endpoint)}
 	if plaintextOK(host) {
-		traceOpts, metricOpts, logOpts = []otlptracehttp.Option{otlptracehttp.WithInsecure()},
-			[]otlpmetrichttp.Option{otlpmetrichttp.WithInsecure()}, []otlploghttp.Option{otlploghttp.WithInsecure()}
+		traceOpts = append(traceOpts, otlptracehttp.WithInsecure())
+		metricOpts = append(metricOpts, otlpmetrichttp.WithInsecure())
+		logOpts = append(logOpts, otlploghttp.WithInsecure())
 	}
-	te, err := otlptracehttp.New(ctx, append(traceOpts, otlptracehttp.WithEndpoint(endpoint))...)
+	te, err := otlptracehttp.New(ctx, traceOpts...)
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	me, err := otlpmetrichttp.New(ctx, append(metricOpts, otlpmetrichttp.WithEndpoint(endpoint))...)
+	me, err := otlpmetrichttp.New(ctx, metricOpts...)
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	le, err := otlploghttp.New(ctx, append(logOpts, otlploghttp.WithEndpoint(endpoint))...)
+	le, err := otlploghttp.New(ctx, logOpts...)
 	if err != nil {
 		return Providers{}, nil, err
 	}

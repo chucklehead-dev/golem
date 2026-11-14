@@ -12,6 +12,7 @@
 package snapshot
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -19,7 +20,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -48,13 +48,6 @@ var (
 	ErrExpired  = errors.New("snapshot: the authorization lease has expired; the gateway serves no new requests until a renewed snapshot arrives")
 )
 
-// Secrets resolves a backend's credential reference to its value.
-type Secrets interface {
-	// Secret returns the value of a "name/key" reference or of an
-	// environment variable (standalone).
-	Secret(ref, env string) (string, error)
-}
-
 // Holder is the gateway's current snapshot.
 type Holder struct {
 	cur atomic.Pointer[Compiled]
@@ -75,7 +68,7 @@ type Holder struct {
 	floor uint64
 	// transports by deployment identity, kept across snapshots so
 	// connections and their state survive a swap (gateway.md §6).
-	transports map[string]*http.Transport
+	transports map[transportKey]*http.Transport
 }
 
 // Current returns the snapshot a request should use.
@@ -143,17 +136,61 @@ func (h *Holder) now() time.Time {
 	return time.Now()
 }
 
+// compile builds s's request-path form: its deployments as targets, its
+// routes over them, its entitlements and its prices.
 func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*Compiled, error) {
-	if h.transports == nil {
-		h.transports = map[string]*http.Transport{}
+	targets, used, err := h.targets(s.Backends, secrets)
+	if err != nil {
+		return nil, err
 	}
-	type depKey struct{ backend, deployment string }
-	targets := map[depKey]*route.Target{}
-	used := map[string]bool{}
-	for _, b := range s.Backends {
+	routes := make([]*route.Route, 0, len(s.Routes))
+	for _, r := range s.Routes {
+		rt, err := compileRoute(r, targets)
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, rt)
+	}
+	// Transports of deployments that left the config are dropped, and
+	// their idle connections closed; requests still on the snapshot being
+	// replaced finish on the connections they hold.
+	for id, t := range h.transports {
+		if !used[id] {
+			t.CloseIdleConnections()
+			delete(h.transports, id)
+		}
+	}
+	prices := map[string]snapshot.Price{}
+	for _, p := range s.Prices {
+		prices[p.Model] = p
+	}
+	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...),
+		Auth: h.compileAuth(s.Entitlements), Prices: prices}, nil
+}
+
+// targetKey names a deployment in a snapshot.
+type targetKey struct{ backend, deployment string }
+
+// transportKey is a deployment's identity for its connection pool: a
+// deployment keeps its pool across snapshots while its name, scheme, host
+// and network grant stay the same.
+type transportKey struct {
+	backend, deployment, scheme, host string
+	allowPrivate                      bool
+}
+
+// targets resolves each backend's credential and makes a target of each of
+// its deployments, on the deployment's kept transport or a new one; used
+// are the transports the targets take.
+func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets map[targetKey]*route.Target, used map[transportKey]bool, err error) {
+	if h.transports == nil {
+		h.transports = map[transportKey]*http.Transport{}
+	}
+	targets, used = map[targetKey]*route.Target{}, map[transportKey]bool{}
+	for _, b := range backends {
 		secret, err := secrets.Secret(b.Auth.SecretRef, b.Auth.Env)
 		if err != nil {
-			return nil, fmt.Errorf("backend %s: %w", b.Name, err)
+			return nil, nil, fmt.Errorf("backend %s: %w", b.Name, err)
 		}
 		v := secret
 		if b.Auth.Scheme != "" {
@@ -163,58 +200,52 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 		for _, d := range b.Deployments {
 			u, err := url.Parse(d.URL)
 			if err != nil {
-				return nil, fmt.Errorf("backend %s deployment %s: %w", b.Name, d.Name, err)
+				return nil, nil, fmt.Errorf("backend %s deployment %s: %w", b.Name, d.Name, err)
 			}
-			id := fmt.Sprint(b.Name, "/", d.Name, " ", u.Scheme, "://", u.Host, " private:", b.AllowPrivate)
+			id := transportKey{b.Name, d.Name, u.Scheme, u.Host, b.AllowPrivate}
 			t := h.transports[id]
 			if t == nil {
 				t = upstreamTransport(b.AllowPrivate, nil)
 				h.transports[id] = t
 			}
 			used[id] = true
-			targets[depKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
+			targets[targetKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
 				URL: u, Transport: t, Header: header}
 		}
 	}
-	routes := make([]*route.Route, 0, len(s.Routes))
-	for _, r := range s.Routes {
-		rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect, MaxDuration: time.Duration(r.MaxDurationMs) * time.Millisecond,
-			Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond,
-			Agent: r.Agent, Betas: map[string]bool{}}
-		for _, b := range r.ApprovedBetas {
-			rt.Betas[b] = true
-		}
-		for _, m := range r.Pool {
-			t := targets[depKey{m.Backend, m.Deployment}]
-			if t == nil {
-				return nil, fmt.Errorf("route %s: no deployment %s/%s in the snapshot", r.Alias, m.Backend, m.Deployment)
-			}
-			rt.Pool = append(rt.Pool, t)
-		}
-		if len(rt.Pool) == 0 {
-			return nil, fmt.Errorf("route %s: empty pool", r.Alias)
-		}
-		routes = append(routes, rt)
+	return targets, used, nil
+}
+
+// compileRoute builds a route over the snapshot's targets.
+func compileRoute(r snapshot.Route, targets map[targetKey]*route.Target) (*route.Route, error) {
+	rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect, MaxDuration: time.Duration(r.MaxDurationMs) * time.Millisecond,
+		Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond,
+		Agent: r.Agent, Betas: map[string]bool{}}
+	for _, b := range r.ApprovedBetas {
+		rt.Betas[b] = true
 	}
-	// Transports of deployments that left the config are closed once no
-	// longer referenced by the snapshot being replaced: requests still
-	// using it finish on their open connections.
-	for id, t := range h.transports {
-		if !used[id] {
-			t.CloseIdleConnections()
-			delete(h.transports, id)
+	for _, m := range r.Pool {
+		t := targets[targetKey{m.Backend, m.Deployment}]
+		if t == nil {
+			return nil, fmt.Errorf("route %s: no deployment %s/%s in the snapshot", r.Alias, m.Backend, m.Deployment)
 		}
+		rt.Pool = append(rt.Pool, t)
 	}
-	env := h.Env
-	if env == "" {
-		env = key.Live
+	if len(rt.Pool) == 0 {
+		return nil, fmt.Errorf("route %s: empty pool", r.Alias)
 	}
-	prices := map[string]snapshot.Price{}
-	for _, p := range s.Prices {
-		prices[p.Model] = p
+	return rt, nil
+}
+
+// compileAuth indexes the snapshot's entitlements for this gateway's
+// installation (Live unless Env says otherwise), with the standalone
+// gateway's local key for an implicit principal.
+func (h *Holder) compileAuth(e snapshot.Entitlements) *auth.Keys {
+	k := auth.Compile(e, cmp.Or(h.Env, key.Live), h.now, h.Entra)
+	if h.LocalKey != "" {
+		k.RequireLocalKey(h.LocalKey)
 	}
-	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...),
-		Auth: h.compileAuth(s.Entitlements, env), Prices: prices}, nil
+	return k
 }
 
 // Static is a Holder with one compiled snapshot and no lease: for tests.
@@ -225,21 +256,6 @@ func Static(c *Compiled) *Holder {
 	h := &Holder{}
 	h.cur.Store(c)
 	return h
-}
-
-// EnvSecrets resolves standalone credentials from the environment, and
-// refuses Secret references (there is no cluster).
-type EnvSecrets struct{ Getenv func(string) string }
-
-func (e EnvSecrets) Secret(ref, env string) (string, error) {
-	if env == "" {
-		return "", fmt.Errorf("secretRef %s: standalone mode reads credentials from environment variables (spec.auth.env)", ref)
-	}
-	v := e.Getenv(env)
-	if v == "" {
-		return "", fmt.Errorf("environment variable %s is not set", env)
-	}
-	return strings.TrimSpace(v), nil
 }
 
 // upstreamTransport is a deployment's connection pool, every setting chosen
@@ -273,16 +289,6 @@ func upstreamTransport(allowPrivate bool, resolver *net.Resolver) *http.Transpor
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
-}
-
-// compileAuth indexes the snapshot's entitlements, with the standalone
-// gateway's local key for an implicit principal.
-func (h *Holder) compileAuth(e snapshot.Entitlements, env key.Env) *auth.Keys {
-	k := auth.Compile(e, env, h.now, h.Entra)
-	if h.LocalKey != "" {
-		k.RequireLocalKey(h.LocalKey)
-	}
-	return k
 }
 
 // metadata are cloud instance-metadata addresses outside link-local

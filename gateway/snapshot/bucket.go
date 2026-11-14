@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
@@ -44,7 +45,7 @@ type Bucket struct {
 	Interval  time.Duration // default one second
 	Log       *slog.Logger
 
-	tag string // the pointer's entity tag last seen
+	tag string // the entity tag of the last pointer judged (Poll)
 }
 
 // Start raises the holder's floor to the local checkpoint and the pool's
@@ -140,6 +141,8 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 	if ptr.Pool != b.Pool {
 		return fmt.Errorf("pointer for pool %q in pool %q's place: refused", ptr.Pool, b.Pool)
 	}
+	// Holder.Apply checks the floor too; checking it here as well refuses a
+	// replayed pointer before its snapshot is fetched.
 	if floor := b.Holder.Floor(); ptr.PublishSeq < floor {
 		return fmt.Errorf("pointer %d is below the floor %d: refused (a replayed pointer, or a stale publisher)", ptr.PublishSeq, floor)
 	}
@@ -207,36 +210,12 @@ func (b *Bucket) writeStatus(ctx context.Context, ptr snapshot.Pointer) {
 	}
 }
 
-// Run polls until ctx ends, reporting a refusal or failure once until it
-// changes.
+// Run polls at once and then at every interval until ctx ends, reporting
+// a refusal or failure once until it changes.
 func (b *Bucket) Run(ctx context.Context) {
-	every := b.Interval
-	if every <= 0 {
-		every = time.Second
-	}
-	t := time.NewTicker(every)
-	defer t.Stop()
-	var lastErr string
-	for {
-		if err := b.Poll(ctx); err != nil {
-			if err.Error() != lastErr {
-				b.log().Error("publication not applied; serving the previous one", "pool", b.Pool, "err", err)
-			}
-			lastErr = err.Error()
-		} else {
-			lastErr = ""
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
+	repeat(ctx, b.Interval, true, func() error { return b.Poll(ctx) }, func(err error) {
+		b.log().Error("publication not applied; serving the previous one", "pool", b.Pool, "err", err)
+	})
 }
 
-func (b *Bucket) log() *slog.Logger {
-	if b.Log != nil {
-		return b.Log
-	}
-	return slog.Default()
-}
+func (b *Bucket) log() *slog.Logger { return cmp.Or(b.Log, slog.Default()) }

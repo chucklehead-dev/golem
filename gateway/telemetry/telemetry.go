@@ -11,6 +11,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -46,7 +47,7 @@ type Call struct {
 	Alias, Model, Deployment      string
 	Provider, ProviderRequestID   string
 	Started, Ended                time.Time
-	// Period is the budget period the call is counted in (the limiter\'s,
+	// Period is the budget period the call is counted in (the limiter's,
 	// lib/period); empty: the ledger names it from Started.
 	Period                          string
 	Usage                           canon.Usage
@@ -93,19 +94,27 @@ type routeSets struct {
 }
 
 func (t *Telemetry) routeSets(c *Call) *routeSets {
-	k := routeKey{c.Provider, c.Alias, c.Model}
-	if v, ok := t.routes.Load(k); ok {
-		return v.(*routeSets)
+	return cached(&t.routes, routeKey{c.Provider, c.Alias, c.Model}, func() *routeSets {
+		attrs := []attribute.KeyValue{attribute.String(attrProvider, c.Provider), attribute.String(attrRequestModel, c.Alias),
+			attribute.String(attrResponseModel, c.Model)}
+		with := func(extra ...attribute.KeyValue) []metric.RecordOption {
+			return []metric.RecordOption{metric.WithAttributeSet(attribute.NewSet(append(slices.Clone(attrs), extra...)...))}
+		}
+		return &routeSets{name: "chat " + c.Alias, input: with(attribute.String(attrTokenType, "input")),
+			output: with(attribute.String(attrTokenType, "output")), duration: with()}
+	})
+}
+
+// cached is m's value for k, made by mk and stored on first use; racing
+// first uses all get the one stored. k is typed, not any, so that each
+// call boxes it on its own: the lookup's box stays on the stack, and only
+// a first use's escapes into the map.
+func cached[K comparable, V any](m *sync.Map, k K, mk func() V) V {
+	if v, ok := m.Load(k); ok {
+		return v.(V)
 	}
-	attrs := []attribute.KeyValue{attribute.String(attrProvider, c.Provider), attribute.String(attrRequestModel, c.Alias),
-		attribute.String(attrResponseModel, c.Model)}
-	with := func(extra ...attribute.KeyValue) []metric.RecordOption {
-		return []metric.RecordOption{metric.WithAttributeSet(attribute.NewSet(append(slices.Clone(attrs), extra...)...))}
-	}
-	rs := &routeSets{name: "chat " + c.Alias, input: with(attribute.String(attrTokenType, "input")),
-		output: with(attribute.String(attrTokenType, "output")), duration: with()}
-	v, _ := t.routes.LoadOrStore(k, rs)
-	return v.(*routeSets)
+	v, _ := m.LoadOrStore(k, mk())
+	return v.(V)
 }
 
 // Providers are the OTel providers telemetry records through.
@@ -131,13 +140,20 @@ func New(p Providers, site, pool string) (*Telemetry, error) {
 		return nil, err
 	}
 	if q := p.Ledger; q != nil {
-		_, err1 = m.Int64ObservableCounter("golem.ledger.dropped", metric.WithDescription("Ledger rows dropped: the queue was full"),
-			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Dropped.Load()); return nil }))
-		_, err2 = m.Int64ObservableCounter("golem.ledger.failed", metric.WithDescription("Ledger rows the collector did not take"),
-			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Failed.Load()); return nil }))
-		_, err3 = m.Int64ObservableCounter("golem.ledger.retried", metric.WithDescription("Ledger exports retried"),
-			metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(q.Retried.Load()); return nil }))
-		if err := errors.Join(err1, err2, err3); err != nil {
+		var errs []error
+		for _, c := range []struct {
+			name, desc string
+			n          *atomic.Int64
+		}{
+			{"golem.ledger.dropped", "Ledger rows dropped: the queue was full", &q.Dropped},
+			{"golem.ledger.failed", "Ledger rows the collector did not take", &q.Failed},
+			{"golem.ledger.retried", "Ledger exports retried", &q.Retried},
+		} {
+			_, err := m.Int64ObservableCounter(c.name, metric.WithDescription(c.desc),
+				metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error { o.Observe(c.n.Load()); return nil }))
+			errs = append(errs, err)
+		}
+		if err := errors.Join(errs...); err != nil {
 			return nil, err
 		}
 	}
@@ -155,12 +171,11 @@ func (t *Telemetry) Start(ctx context.Context, frontend string) (context.Context
 	if t == nil {
 		return ctx, trace.SpanFromContext(ctx)
 	}
-	v, ok := t.starts.Load(frontend)
-	if !ok {
-		v, _ = t.starts.LoadOrStore(frontend, []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(attribute.String(attrOperation, "chat"), attribute.String("golem.dialect", frontend))})
-	}
-	return t.tracer.Start(ctx, "chat", v.([]trace.SpanStartOption)...)
+	opts := cached(&t.starts, frontend, func() []trace.SpanStartOption {
+		return []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(attribute.String(attrOperation, "chat"), attribute.String("golem.dialect", frontend))}
+	})
+	return t.tracer.Start(ctx, "chat", opts...)
 }
 
 // Ended records a call that reached a provider: the span's attributes, the
@@ -172,13 +187,14 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 		return
 	}
 	rs := t.routeSets(&c)
+	input := c.Usage.Input + c.Usage.CacheRead + c.Usage.CacheWrite // GenAI's input tokens include the cache's
 	span := trace.SpanFromContext(ctx)
 	span.SetName(rs.name)
 	span.SetAttributes(
 		attribute.String(attrProvider, c.Provider),
 		attribute.String(attrRequestModel, c.Alias),
 		attribute.String(attrResponseModel, c.Model),
-		attribute.Int64(attrInputTokens, c.Usage.Input+c.Usage.CacheRead+c.Usage.CacheWrite),
+		attribute.Int64(attrInputTokens, input),
 		attribute.Int64(attrOutputTokens, c.Usage.Output),
 		attribute.String("golem.request_id", c.RequestID),
 		attribute.String("golem.principal", c.Principal),
@@ -192,7 +208,7 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 	if c.ErrorOrigin != "" {
 		span.SetAttributes(attribute.String("golem.error.origin", c.ErrorOrigin), attribute.String("golem.error.code", c.ErrorCode))
 	}
-	t.tokens.Record(ctx, c.Usage.Input+c.Usage.CacheRead+c.Usage.CacheWrite, rs.input...)
+	t.tokens.Record(ctx, input, rs.input...)
 	t.tokens.Record(ctx, c.Usage.Output, rs.output...)
 	t.duration.Record(ctx, c.Ended.Sub(c.Started).Seconds(), rs.duration...)
 	t.Ledger.Ended(ctx, c)
@@ -206,12 +222,11 @@ func (t *Telemetry) Refused(ctx context.Context, code contract.Code) {
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("golem.error.origin", string(code.Origin)), attribute.String("golem.error.code", code.Name),
 		attribute.Int("http.response.status_code", code.Status))
-	v, ok := t.refused.Load(code.Name)
-	if !ok {
-		v, _ = t.refused.LoadOrStore(code.Name, []metric.AddOption{metric.WithAttributeSet(attribute.NewSet(
-			attribute.String("golem.error.code", code.Name), attribute.String("golem.error.origin", string(code.Origin))))})
-	}
-	t.refusals.Add(ctx, 1, v.([]metric.AddOption)...) // a 429 storm costs no allocation here
+	opts := cached(&t.refused, code.Name, func() []metric.AddOption {
+		return []metric.AddOption{metric.WithAttributeSet(attribute.NewSet(
+			attribute.String("golem.error.code", code.Name), attribute.String("golem.error.origin", string(code.Origin))))}
+	})
+	t.refusals.Add(ctx, 1, opts...) // a 429 storm costs no allocation here
 }
 
 // Numbered is the limiter's OnNumbered: the event's numbering record.

@@ -18,14 +18,13 @@ import (
 // shutdown included. Durability through outages is the collector's
 // (ADR 0043): the gateway's queue only bridges a node-local agent's restart.
 type LedgerQueue struct {
-	exp     sdklog.Exporter
-	q       chan sdklog.Record
-	batch   int
-	every   time.Duration
-	flush   chan chan error
-	stop    chan context.Context
-	stopped sync.WaitGroup
-	exited  chan struct{} // closed when the worker returns: no flush is answered after
+	exp    sdklog.Exporter
+	q      chan sdklog.Record
+	batch  int
+	every  time.Duration
+	flush  chan chan struct{} // a flush's request, answered once its rows are exported
+	stop   chan context.Context
+	exited chan struct{} // closed when the worker returns: no flush is answered after
 	// mu orders rows against the shutdown: OnEmit holds it shared from
 	// its check of closed to its enqueue, Shutdown exclusively to set
 	// closed. Every row OnEmit accepted is then queued before the worker
@@ -56,10 +55,10 @@ const exportTimeout = 30 * time.Second
 // up to batch rows at least every interval.
 func NewLedgerQueue(exp sdklog.Exporter, size, batch int, every time.Duration) *LedgerQueue {
 	q := &LedgerQueue{exp: exp, q: make(chan sdklog.Record, size), batch: batch, every: every,
-		flush: make(chan chan error), stop: make(chan context.Context, 1), exited: make(chan struct{})}
+		flush: make(chan chan struct{}), stop: make(chan context.Context, 1), exited: make(chan struct{})}
 	q.base, q.cancelBase = context.WithCancel(context.Background())
 	q.backoff.Store(int64(time.Second))
-	q.stopped.Go(q.run)
+	go q.run()
 	return q
 }
 
@@ -105,7 +104,7 @@ func (q *LedgerQueue) run() {
 		case <-t.C:
 		case reply := <-q.flush:
 			buf = q.drain(q.base, buf)
-			reply <- nil
+			close(reply)
 			continue
 		case ctx := <-q.stop:
 			buf = q.drain(ctx, buf)
@@ -190,7 +189,7 @@ func (q *LedgerQueue) Shutdown(ctx context.Context) error {
 	defer stopCancel()
 	defer q.cancelBase()
 	q.stop <- ctx
-	q.stopped.Wait()
+	<-q.exited
 	return q.exp.Shutdown(ctx)
 }
 
@@ -203,7 +202,7 @@ func (q *LedgerQueue) ForceFlush(ctx context.Context) error {
 	if q.flushing != nil {
 		q.flushing()
 	}
-	reply := make(chan error, 1)
+	reply := make(chan struct{})
 	select {
 	case q.flush <- reply:
 	case <-q.exited:
@@ -212,10 +211,7 @@ func (q *LedgerQueue) ForceFlush(ctx context.Context) error {
 		return ctx.Err()
 	}
 	select {
-	case err := <-reply:
-		if err != nil {
-			return err
-		}
+	case <-reply:
 		return q.exp.ForceFlush(ctx)
 	case <-q.exited: // stopped mid-flush; the shutdown ends what it began
 		return nil

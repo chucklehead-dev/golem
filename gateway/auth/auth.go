@@ -92,8 +92,27 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *
 		k.implicit = &Principal{ID: "local", Kind: "user", Scope: "local",
 			Limits: Limits{PrincipalInFlight: implicitInFlight}}
 	}
-	scopes := make(map[string]*rights, len(e.Scopes))
-	for _, s := range e.Scopes {
+	scopes := compileScopes(e.Scopes)
+	owners := map[string]owner{}
+	for _, o := range e.KeyOwners {
+		owners[o.ID] = owner{o.Kind, o.Scopes}
+	}
+	k.addMembers("user", e.Users, scopes, owners)
+	k.addMembers("service", e.Services, scopes, owners)
+	for _, sk := range e.Keys {
+		b, err := hex.DecodeString(sk.Hash)
+		if err != nil || len(b) != 32 {
+			continue // lib/compile wrote it; a bad one cannot match anything
+		}
+		k.byHash[[32]byte(b)] = keyEntry(sk, scopes, owners)
+	}
+	return k
+}
+
+// compileScopes is each scope's rights, by its ID.
+func compileScopes(ss []snapshot.Scope) map[string]*rights {
+	scopes := make(map[string]*rights, len(ss))
+	for _, s := range ss {
 		r := &rights{models: make(map[string]bool, len(s.Models)), limits: Limits{BudgetMicros: s.BudgetMicros, DeclaredWorstCaseCheck: s.DeclaredWorstCaseCheck,
 			PrincipalInFlight: s.PrincipalInFlight, ScopeInFlight: s.ScopeInFlight, StorageAllowed: s.StorageAllowed,
 			MaxOutputTokens: s.MaxOutputTokens, MaxInputBytes: s.MaxInputBytes, Features: s.Features}}
@@ -102,69 +121,64 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *
 		}
 		scopes[s.ID] = r
 	}
-	// ownerOf: every listed principal's kind and scopes, by its golem ID.
-	type owner struct {
-		kind   string
-		scopes []string
-	}
-	ownerOf := map[string]owner{}
-	for _, o := range e.KeyOwners {
-		ownerOf[o.ID] = owner{o.Kind, o.Scopes}
-	}
-	member := func(kind string, ms []snapshot.Member) {
-		for _, m := range ms {
-			o := ownerOf[m.ID]
-			ownerOf[m.ID] = owner{kind, append(slices.Clone(o.scopes), m.Scopes...)}
-			byScope := map[string]*Principal{}
-			for _, id := range m.Scopes {
-				if r := scopes[id]; r != nil {
-					byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: r.models, Limits: r.limits}
-				}
+	return scopes
+}
+
+// owner is a principal a key may belong to: its kind and its scopes.
+type owner struct {
+	kind   string
+	scopes []string
+}
+
+// addMembers indexes users' or services' Entra identities by the scopes
+// they act in (the empty scope their default's), and records each as an
+// owner of kind for its keys, with its membership's scopes added.
+func (k *Keys) addMembers(kind string, ms []snapshot.Member, scopes map[string]*rights, owners map[string]owner) {
+	for _, m := range ms {
+		owners[m.ID] = owner{kind, append(slices.Clone(owners[m.ID].scopes), m.Scopes...)}
+		byScope := map[string]*Principal{}
+		for _, id := range m.Scopes {
+			if r := scopes[id]; r != nil {
+				byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: r.models, Limits: r.limits}
 			}
-			if p := byScope[m.Default]; p != nil {
-				byScope[""] = p
-			}
-			k.byEntra[m.Entra] = byScope
 		}
+		if p := byScope[m.Default]; p != nil {
+			byScope[""] = p
+		}
+		k.byEntra[m.Entra] = byScope
 	}
-	member("user", e.Users)
-	member("service", e.Services)
-	for _, sk := range e.Keys {
-		var h [32]byte
-		if b, err := hex.DecodeString(sk.Hash); err != nil || len(b) != 32 {
-			continue // lib/compile wrote it; a bad one cannot match anything
-		} else {
-			copy(h[:], b)
-		}
-		en := &entry{p: Principal{ID: sk.Principal, Kind: sk.PrincipalKind, Scope: sk.Scope, Key: sk.Display},
-			expires: sk.ExpiresAt, revoked: sk.Revoked}
-		k.byHash[h] = en
-		r := scopes[sk.Scope]
-		o, listed := ownerOf[sk.Principal]
-		switch {
-		case r == nil:
-			en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's scope " + sk.Scope + " no longer exists: mint a key for a scope you are in"}
-			continue
-		case !listed || o.kind != cmp.Or(sk.PrincipalKind, "user"):
-			// Fail closed (golem#5): a key whose owner is gone, or is of
-			// another kind than the key says, is no key.
-			en.refused = &Refusal{contract.AuthKeyRevoked, "this key's principal is no longer known to golem: mint a new key"}
-			continue
-		case !slices.Contains(o.scopes, sk.Scope):
-			en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's principal is no longer a member of scope " + sk.Scope + ": its managers can add it back, or mint a key for a scope it is in"}
-			continue
-		}
-		en.p.Limits, en.p.models = r.limits, r.models
-		if len(sk.Models) > 0 { // the key narrows its scope's models
-			en.p.models = make(map[string]bool, len(sk.Models))
-			for _, m := range sk.Models {
-				if r.models[m] {
-					en.p.models[m] = true
-				}
+}
+
+// keyEntry is a key's entry: its principal with the scope's rights,
+// narrowed by the key's models, or why it is refused whatever its state.
+func keyEntry(sk snapshot.Key, scopes map[string]*rights, owners map[string]owner) *entry {
+	en := &entry{p: Principal{ID: sk.Principal, Kind: sk.PrincipalKind, Scope: sk.Scope, Key: sk.Display},
+		expires: sk.ExpiresAt, revoked: sk.Revoked}
+	r := scopes[sk.Scope]
+	o, listed := owners[sk.Principal]
+	switch {
+	case r == nil:
+		en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's scope " + sk.Scope + " no longer exists: mint a key for a scope you are in"}
+		return en
+	case !listed || o.kind != cmp.Or(sk.PrincipalKind, "user"):
+		// Fail closed (golem#5): a key whose owner is gone, or is of
+		// another kind than the key says, is no key.
+		en.refused = &Refusal{contract.AuthKeyRevoked, "this key's principal is no longer known to golem: mint a new key"}
+		return en
+	case !slices.Contains(o.scopes, sk.Scope):
+		en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's principal is no longer a member of scope " + sk.Scope + ": its managers can add it back, or mint a key for a scope it is in"}
+		return en
+	}
+	en.p.Limits, en.p.models = r.limits, r.models
+	if len(sk.Models) > 0 { // the key narrows its scope's models
+		en.p.models = make(map[string]bool, len(sk.Models))
+		for _, m := range sk.Models {
+			if r.models[m] {
+				en.p.models[m] = true
 			}
 		}
 	}
-	return k
+	return en
 }
 
 // Anyone is the principal of a snapshot with no entitlements to check
@@ -178,8 +192,9 @@ type Refusal struct {
 	Msg  string
 }
 
-// Authenticate finds the request's principal. The credential is a golem key
-// in Authorization: Bearer (OpenAI's SDKs) or x-api-key (Anthropic's).
+// Authenticate finds the request's principal. The credential, a golem key
+// or an Entra token, is in Authorization: Bearer (OpenAI's SDKs) or
+// x-api-key (Anthropic's).
 func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
 	cred, conflict := credential(h)
 	if conflict {

@@ -1,6 +1,7 @@
-// Command golem-gateway is the data plane. It runs from a pool's signed
-// snapshots in object storage (not yet built) or, for a developer's own
-// machine, standalone (ADR 0023):
+// Command golem-gateway is the data plane. It is to run from a pool's
+// signed snapshots in object storage (gateway/snapshot.Bucket, not yet
+// wired here: the release gate refuses it) and runs today, for a
+// developer's own machine, standalone (ADR 0023):
 //
 //	golem-gateway --standalone ./config
 //
@@ -51,7 +52,6 @@ func main() {
 		fail("%v", err)
 	}
 
-	// Standalone: dev keys, the in-memory limiter (ADR 0023).
 	// One period zone for the counters and the ledger rows: a call near
 	// midnight on the last of the month belongs to one month in both.
 	zone, err := time.LoadLocation(*zoneName)
@@ -62,16 +62,11 @@ func main() {
 	if tel != nil {
 		tel.Ledger.Period = zone
 	}
+	// Standalone: the in-memory limiter, dev keys (ADR 0023).
 	limiter := limit.New(limit.NewMem())
 	limiter.Location = zone
 	limiter.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
-	var entra *auth.Entra
-	if *tenant != "" {
-		entra = &auth.Entra{Tenant: *tenant, Audiences: strings.Split(*audience, ",")}
-		if err := entra.Refresh(context.Background()); err != nil {
-			fail("Entra's signing keys: %v", err)
-		}
-	}
+	entra := newEntra(*tenant, *audience)
 	localKey, keyPath, err := loadLocalKey(*localKeyFile)
 	if err != nil {
 		fail("the local key: %v", err)
@@ -93,30 +88,9 @@ func main() {
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))
-
-	var protocols http.Protocols
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true) // h2c behind the mesh (gateway.md §3 step 1)
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           mux,
-		Protocols:         &protocols,
-		ReadHeaderTimeout: 10 * time.Second,
-		// A keep-alive connection idle this long is closed: idle ones held
-		// for ever are memory and file descriptors under load.
-		IdleTimeout: 2 * time.Minute,
-		// Headers carry a key or an Entra token (a few KB): 64 KiB, not the
-		// default 1 MiB a client could make every connection hold.
-		MaxHeaderBytes: 64 << 10,
-		HTTP2: &http.HTTP2Config{
-			MaxConcurrentStreams: 256,              // per connection: an agent's parallel calls, not a flood
-			SendPingTimeout:      30 * time.Second, // find dead connections under long streams
-			PingTimeout:          15 * time.Second,
-		},
-		// No WriteTimeout: streams are long (gateway.md §3 step 1).
-	}
-
+	srv := newServer(*listen, mux)
 	lc.srv = srv
+
 	sig, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// The background loops live through the drain (renewals keep calls'
@@ -154,6 +128,46 @@ func main() {
 	os.Exit(code)
 }
 
+// newEntra is the verifier of tenant's Entra tokens, its signing keys
+// fetched before the gateway starts; nil (golem keys only) without a
+// tenant.
+func newEntra(tenant, audiences string) *auth.Entra {
+	if tenant == "" {
+		return nil
+	}
+	e := &auth.Entra{Tenant: tenant, Audiences: strings.Split(audiences, ",")}
+	if err := e.Refresh(context.Background()); err != nil {
+		fail("Entra's signing keys: %v", err)
+	}
+	return e
+}
+
+// newServer is the API's server, its limits set for long streams over
+// HTTP/1.1 and h2c.
+func newServer(addr string, h http.Handler) *http.Server {
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true) // h2c behind the mesh (gateway.md §3 step 1)
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		Protocols:         &protocols,
+		ReadHeaderTimeout: 10 * time.Second,
+		// A keep-alive connection idle this long is closed: idle ones held
+		// for ever are memory and file descriptors under load.
+		IdleTimeout: 2 * time.Minute,
+		// Headers carry a key or an Entra token (a few KB): 64 KiB, not the
+		// default 1 MiB a client could make every connection hold.
+		MaxHeaderBytes: 64 << 10,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams: 256,              // per connection: an agent's parallel calls, not a flood
+			SendPingTimeout:      30 * time.Second, // find dead connections under long streams
+			PingTimeout:          15 * time.Second,
+		},
+		// No WriteTimeout: streams are long (gateway.md §3 step 1).
+	}
+}
+
 // setupTelemetry starts the gateway's telemetry: ledger rows on stdout, none,
 // or everything over OTLP to a collector. The returned func flushes it.
 func setupTelemetry(where string) (*telemetry.Telemetry, func()) {
@@ -185,8 +199,9 @@ func setupTelemetry(where string) (*telemetry.Telemetry, func()) {
 }
 
 // releaseGate is the production-publication gate (golem#5): until M1's
-// gates pass the gateway runs standalone only (no bucket source exists to
-// serve published snapshots from), and standalone listens on loopback only.
+// gates pass the gateway runs standalone only (the bucket source,
+// gateway/snapshot.Bucket, is built but not wired to this binary), and
+// standalone listens on loopback only.
 // Lifting it requires golem#7's deployment evidence first: provider-account
 // spending limits, OTLP TLS against the real collector, and the mTLS owner
 // of each hop.
