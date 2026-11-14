@@ -27,8 +27,9 @@ import (
 
 // Errors a publish reports.
 var (
-	// ErrFenced: the record was written under a later epoch or from a newer
-	// state; this publisher has lost its lease or reads stale state.
+	// ErrFenced: this publisher does not hold the lease at its epoch, or the
+	// record was written under a later epoch or from a newer state, or a
+	// later publication's checkpoint or pointer is in place.
 	ErrFenced = errors.New("publish: fenced by a newer publication")
 	// ErrConflict: another publisher updated the record first; re-read and
 	// retry.
@@ -52,19 +53,36 @@ func (p *Publisher) Record(ctx context.Context) (state.Record, error) {
 	return p.State.Current().Publications[p.Pool], nil
 }
 
+// Lease is the leadership a publication is made under: the replica that
+// believes it holds the lease, and at which epoch (control/lead).
+type Lease struct {
+	Holder string
+	Epoch  uint64
+}
+
 // Publish builds the next publication with build, given its sequence
-// number, and publishes it under the leadership epoch from the state
-// version source. The snapshot is written first (content-addressed), then
-// the record by the state's compare-and-swap, then the checkpoint, then
-// the pointer. A publisher that dies after the record leaves the
-// checkpoint and pointer behind it, and the next publication (the lease
-// renewal, within a minute) moves them on; until then a gateway restarted
-// with an empty disk takes the older checkpoint as its floor.
-func (p *Publisher) Publish(ctx context.Context, epoch, source uint64, build func(seq uint64) (*snapshot.Snapshot, error)) (snapshot.Pointer, error) {
+// number, and publishes it under lease from the state version source. The
+// snapshot is written first (content-addressed), then the record by the
+// state's compare-and-swap, which refuses it unless the state's lease is
+// still lease, then the checkpoint, then the pointer. A publisher that
+// dies after the record leaves the checkpoint and pointer behind it, and
+// the next publication (the lease renewal, within a minute) moves them on;
+// until then a gateway restarted with an empty disk takes the older
+// checkpoint as its floor.
+//
+// The record's write checks the holder and epoch, not the lease's expiry:
+// while this replica is still the holder no other has taken the lease, so
+// none can have published, and a replica stops believing it leads before
+// its lease lapses by its own clock (lead.Elector.Epoch).
+func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, build func(seq uint64) (*snapshot.Snapshot, error)) (snapshot.Pointer, error) {
 	rec, err := p.Record(ctx)
 	if err != nil {
 		return snapshot.Pointer{}, err
 	}
+	if err := holds(p.State.Current().Leader, lease); err != nil {
+		return snapshot.Pointer{}, err
+	}
+	epoch := lease.Epoch
 	if epoch < rec.Epoch || source < rec.Source {
 		return snapshot.Pointer{}, fmt.Errorf("%w: the record is at epoch %d, state %d; this publisher has epoch %d, state %d", ErrFenced, rec.Epoch, rec.Source, epoch, source)
 	}
@@ -85,6 +103,9 @@ func (p *Publisher) Publish(ctx context.Context, epoch, source uint64, build fun
 		return snapshot.Pointer{}, err
 	}
 	if _, err := p.State.Update(ctx, func(d *state.Document) error {
+		if err := holds(d.Leader, lease); err != nil {
+			return err
+		}
 		if d.Publications[p.Pool] != rec {
 			return ErrConflict // another publisher won since this one read the record
 		}
@@ -97,7 +118,7 @@ func (p *Publisher) Publish(ctx context.Context, epoch, source uint64, build fun
 		return snapshot.Pointer{}, err
 	}
 	cp, _ := json.Marshal(snapshot.Checkpoint{Pool: p.Pool, PublishSeq: seq})
-	if _, err := p.Bucket.Put(ctx, snapshot.CheckpointKey(p.Pool), cp, ""); err != nil {
+	if err := p.advance(ctx, snapshot.CheckpointKey(p.Pool), seq, cp, checkpointSeq); err != nil {
 		return snapshot.Pointer{}, err
 	}
 	ptr := snapshot.Pointer{Pool: p.Pool, PublishSeq: seq, Epoch: epoch, Source: source, IssuedAt: p.now(), Hash: hash}
@@ -105,10 +126,68 @@ func (p *Publisher) Publish(ctx context.Context, epoch, source uint64, build fun
 	if err != nil {
 		return snapshot.Pointer{}, err
 	}
-	if _, err := p.Bucket.Put(ctx, snapshot.PointerKey(p.Pool), signed, ""); err != nil {
+	if err := p.advance(ctx, snapshot.PointerKey(p.Pool), seq, signed, pointerSeq); err != nil {
 		return snapshot.Pointer{}, err
 	}
 	return ptr, nil
+}
+
+// holds refuses a publication unless l is the state's lease.
+func holds(l *state.Lease, want Lease) error {
+	if l == nil || l.Holder != want.Holder || l.Epoch != want.Epoch {
+		have := "no lease"
+		if l != nil {
+			have = fmt.Sprintf("%s holds the lease at epoch %d", l.Holder, l.Epoch)
+		}
+		return fmt.Errorf("%w: %s; this publisher is %s at epoch %d", ErrFenced, have, want.Holder, want.Epoch)
+	}
+	return nil
+}
+
+// advance writes body, publication seq's object at key, unless a later
+// publication's is there: conditionally on the object it read, so a later
+// one written meanwhile is not overwritten. A stored object whose sequence
+// is later than the record's was not written by golem-control (the record
+// is written before either object), and is replaced.
+func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []byte, seqOf func([]byte) (uint64, error)) error {
+	for range 5 {
+		cur, tag, err := p.Bucket.Get(ctx, key, "")
+		switch {
+		case errors.Is(err, bucket.ErrNotFound):
+			tag = bucket.Absent
+		case err != nil:
+			return err
+		default:
+			if stored, err := seqOf(cur); err == nil && stored > seq {
+				rec, err := p.Record(ctx)
+				if err != nil {
+					return err
+				}
+				if rec.Seq >= stored {
+					return fmt.Errorf("%w: %s holds publication %d, this publisher wrote %d", ErrFenced, key, stored, seq)
+				}
+			}
+		}
+		_, err = p.Bucket.Put(ctx, key, body, tag)
+		if !errors.Is(err, bucket.ErrPrecondition) {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: %s kept changing", ErrConflict, key)
+}
+
+// checkpointSeq and pointerSeq read a stored object's sequence. The
+// pointer's is read without its signature: a forged one names a sequence
+// above the record's and is replaced (advance).
+func checkpointSeq(b []byte) (uint64, error) {
+	var cp snapshot.Checkpoint
+	err := json.Unmarshal(b, &cp)
+	return cp.PublishSeq, err
+}
+
+func pointerSeq(b []byte) (uint64, error) {
+	ptr, err := snapshot.PeekPointer(b)
+	return ptr.PublishSeq, err
 }
 
 func (p *Publisher) now() time.Time {

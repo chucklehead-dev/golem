@@ -117,32 +117,43 @@ duration (`epochLocked`, `lead.go:105`). Belief runs from the time stamped
 store error within the lease keeps it. A paused leader therefore stops
 believing before any other replica, by that replica's clock, may take the
 lease. Clock skew changes only when a lapsed lease may be taken; it cannot
-let an old epoch publish over a newer one, because the record refuses it.
+let an old holder publish, because the record's write checks the lease.
 
 ## 3. Publication
 
 `Publisher.Publish` (`control/publish/publish.go:63`) publishes one pool,
-given the epoch its elector believes and `source`, the state version the
-snapshot is built from. In order:
+given the lease its elector believes it holds (`Lease`: the replica and
+its epoch) and `source`, the state version the snapshot is built from. In
+order:
 
 1. Read the pool's **publication record** (`Record`: a `Refresh`, then
-   the record). **Fencing**: if `epoch` or `source` is below the record's,
-   return `ErrFenced` (`publish.go:69`): this publisher lost its lease or
-   reads stale state. This is the model's FENCE.
+   the record). **Fencing**: if the state's lease is not this one
+   (`holds`), or the epoch or `source` is below the record's, return
+   `ErrFenced`: this publisher lost its lease or reads stale state. This
+   is the model's FENCE.
 2. Build the snapshot as publication `record.Seq + 1` and write it,
    content-addressed, as `snapshots/<pool>/<hash>.json` (`publish.go:84`).
    An object nobody points at is harmless.
-3. Win the record by `Update`: if the record changed since step 1, return
-   `ErrConflict` (`publish.go:89`); otherwise write `{epoch, seq, source}`.
+3. Win the record by `Update`, which checks the lease again in the same
+   write: a leader deposed since step 1 is refused even if its successor
+   has not published. If the record changed since step 1, return
+   `ErrConflict`; otherwise write `{epoch, seq, source}`.
    The store's `checkPublications` makes the record monotonic whatever any
    writer does.
 4. Write the **trusted checkpoint** `control/<pool>/checkpoint` with the
-   new sequence (`publish.go:100`). A gateway restarted with an empty disk
-   takes it as its floor.
-5. Sign and write the **pointer** `snapshots/<pool>/current`
-   (`publish.go:104`): pool, sequence, epoch, source, issue time and the
-   snapshot's hash. Only the pointer is signed; the snapshot is checked
-   against the pointer's hash.
+   new sequence. A gateway restarted with an empty disk takes it as its
+   floor.
+5. Sign and write the **pointer** `snapshots/<pool>/current`: pool,
+   sequence, epoch, source, issue time and the snapshot's hash. Only the
+   pointer is signed; the snapshot is checked against the pointer's hash.
+
+Steps 4 and 5 only move forward (`advance`): each reads the object, and
+writes conditionally on it (If-Match its tag, or create-only). A leader
+paused between step 3 and them, whose successor has published since,
+finds a later publication there and returns `ErrFenced` rather than set
+the floor or the pointer back. A stored pointer whose sequence is above
+the record's was not written by golem-control (the record is always
+written first) and is replaced.
 
 **Why the record, not the pointer.** Anyone who can write the pool's
 objects but cannot sign can copy an old signed pointer back (the model's

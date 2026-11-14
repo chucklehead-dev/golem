@@ -138,7 +138,8 @@ module publication {
     believes.get(replica) > 0,
     val e = believes.get(replica)
     val v = views.get(replica)
-    val fenced = e >= record.epoch and v.version >= record.source
+    val fenced = replica == leaseHolder and e == leaseEpoch
+      and e >= record.epoch and v.version >= record.source
     val p = {
       seq: record.seq + 1,
       epoch: e,
@@ -272,6 +273,8 @@ module publication {
   val revocationReachesGateway = GATEWAYS.exists(g =>
     revoked.exists(k => gws.get(g).applied.revoked.contains(k)))
 
+  // Never reached in the design (the record's write checks the Lease);
+  // reached without FENCE.
   val staleLeaderPublished = staleWin
 
   val partitionedAndExpired = GATEWAYS.exists(g =>
@@ -279,11 +282,10 @@ module publication {
       and clock >= gws.get(g).applied.validUntil)
 
   val restoredWithRevocations = restoredOnce and everRevoked.size() > 0
-  run staleLeaderTest =
+  run staleViewTest =
     initWith("r1")
       .then(loadState("r1"))
       .then(revoke("k1"))
-      .then(takeLease("r2"))
       .then(tick).then(tick).then(tick)
       .then(publish("r1"))
       .then(poll("g1"))

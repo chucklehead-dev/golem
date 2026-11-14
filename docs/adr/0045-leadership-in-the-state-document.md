@@ -7,9 +7,10 @@ Status: Accepted. Amends [0003](0003-components-and-layering.md),
 ## Context
 
 golem-control's leader runs the jobs and publishes snapshots. Its epoch
-fences publication: a publisher publishes only with an epoch at least the
-publication record's (model/publication.md's FENCE), so a paused leader
-that publishes after losing leadership is refused. The record is in the
+fences publication: the publication record is won in the same write that
+checks the lease's holder and epoch (model/publication.md's FENCE), so a
+paused leader that publishes after losing leadership is refused, whether
+or not its successor has published. The record is in the
 state document (control/state). A Kubernetes Lease would put the epoch in
 a second store, written by a second compare-and-swap, behind the API
 server, and need client-go in golem-control and an API server in tests and

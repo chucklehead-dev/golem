@@ -165,11 +165,15 @@ control plane.
   `lib/snapshot`'s signed `Pointer`, `control/publish` (the publisher) and
   `gateway/snapshot.Bucket` (the gateway's source). As built:
   - the publisher numbers from the pool's **publication record** in the
-    state document, won by a state update and fenced by epoch and state
-    version, not from the pointer, which anyone who can write the pool's
-    objects can replay; then it writes the pool's **trusted checkpoint**
-    (`control/<pool>/checkpoint`), then the pointer, so a publisher that
-    dies between them leaves the record ahead until the next publication;
+    state document, won by a state update that checks the lease's holder
+    and epoch in the same write and fenced by state version, not from the
+    pointer, which anyone who can write the pool's objects can replay;
+    then it writes the pool's **trusted checkpoint**
+    (`control/<pool>/checkpoint`), then the pointer, each only forward
+    (conditionally on the object read, never over a later publication's),
+    so a publisher that dies between them leaves the record ahead until
+    the next publication, and one paused between them cannot set either
+    back;
   - only the pointer is signed (with a context string, so the key's
     signature means nothing else); the snapshot object is checked against
     the pointer's hash and must carry the pointer's sequence;

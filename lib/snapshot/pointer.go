@@ -75,6 +75,21 @@ func OpenPointer(b []byte, v sign.Verifier) (Pointer, error) {
 	return p, nil
 }
 
+// PeekPointer decodes a stored pointer without verifying it: for the
+// publisher, which compares what is stored with the record, never for
+// trusting what it says.
+func PeekPointer(b []byte) (Pointer, error) {
+	var s signed
+	if err := jsonv2.Unmarshal(b, &s); err != nil {
+		return Pointer{}, fmt.Errorf("pointer: %w", err)
+	}
+	var p Pointer
+	if err := jsonv2.Unmarshal(s.Payload, &p); err != nil {
+		return Pointer{}, fmt.Errorf("pointer: %w", err)
+	}
+	return p, nil
+}
+
 // Checkpoint is a pool's trusted floor: the last publication golem-control
 // recorded, for a gateway that starts with no local checkpoint (the
 // publication model's TRUSTED_FLOOR). It is trusted by where it is: under

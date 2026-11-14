@@ -18,7 +18,7 @@ r=$(run --main=design --invariant=safe); echo "design safe: $r"
 [[ $r == "[ok]"* ]] || fail=1
 
 echo "== the design can reach every scenario (each negation must be violated)"
-for v in revocationReachesGateway staleLeaderPublished partitionedAndExpired restoredWithRevocations; do
+for v in revocationReachesGateway partitionedAndExpired restoredWithRevocations; do
   r=$(run --main=design --invariant="not($v)"); echo "$v: $r"
   [[ $r == "[violation]"* ]] || { echo "  scenario not reached: the model may be too strict"; fail=1; }
 done
@@ -34,7 +34,7 @@ for pair in noFencing:publicationsOrdered noFencing:noRollback \
 done
 
 echo "== each bug's story passes in its broken design and fails in the correct one"
-for pair in leaseFromSigning:staleLeaderTest noFencing:pausedLeaderTest naiveRestore:restoreTest; do
+for pair in leaseFromSigning:staleViewTest noFencing:pausedLeaderTest naiveRestore:restoreTest; do
   m=${pair%%:*}; t=${pair##*:}
   if "$QUINT" test --backend="$BACKEND" --main="$m" --match="^$t\$" publication.qnt >/dev/null 2>&1; then echo "$t in $m: passes"; else echo "$t in $m: FAILS (should pass)"; fail=1; fi
   if "$QUINT" test --backend="$BACKEND" --main=design --match="^$t\$" publication.qnt >/dev/null 2>&1; then echo "$t in design: PASSES (should fail)"; fail=1; else echo "$t in design: impossible, as it should be"; fi

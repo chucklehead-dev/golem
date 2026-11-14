@@ -355,18 +355,20 @@ between it may still try to publish, and §6.5 is what stops it.
 A replica that believes it leads builds a snapshot from its view and tries
 to win the publication record. Two rules make this safe:
 
-- **Fencing** (`FENCE`): the record remembers the epoch and source of the
-  last publication. A publisher with an older epoch (a paused old leader,
-  once the new one has published) or an older view than the record's
-  source cannot win it. Pointer compare-and-swap alone is not enough: a
-  stale leader that re-reads the pointer's ETag wins it happily, with stale
-  content.
+- **Fencing** (`FENCE`): the record is won in the same write that checks
+  the Lease (ADR 0045: the Lease and the record are one document), so only
+  the replica holding the Lease, at its current epoch, can win it, and the
+  record remembers the epoch and source of the last publication, so a
+  view older than the record's source cannot win it either. A paused old
+  leader is refused whether or not its successor has published. Pointer
+  compare-and-swap alone is not enough: a stale leader that re-reads the
+  pointer's ETag wins it happily, with stale content.
 - **Lease from source** (`LEASE_FROM_SOURCE`): the snapshot's authorization
   ends `LEASE` after its **source** was read, not after it was signed.
-  Fencing cannot stop an old leader whose successor has not published yet,
-  or a leader whose own view is a little stale; this rule bounds what such a
-  publication can do: whatever it carries, it stops counting `LEASE` after
-  the state it reflects.
+  Fencing cannot stop a leader whose own view is stale (it read the state,
+  then a revocation was written, then it published); this rule bounds what
+  such a publication can do: whatever it carries, it stops counting `LEASE`
+  after the state it reflects.
 
 Publishing is also renewal: the leader publishes every 60 seconds (ADR
 0030) even when nothing changed, which extends the lease from a fresh read.
@@ -379,7 +381,8 @@ a pointer left behind by a crash is replaced by the next publication.
     believes.get(replica) > 0,
     val e = believes.get(replica)
     val v = views.get(replica)
-    val fenced = e >= record.epoch and v.version >= record.source
+    val fenced = replica == leaseHolder and e == leaseEpoch
+      and e >= record.epoch and v.version >= record.source
     val p = {
       seq: record.seq + 1,
       epoch: e,
@@ -638,9 +641,6 @@ find one (by checking the negation as an invariant, which must fail).
 
 - A revocation reaches a gateway: some gateway holds a snapshot in which a
   revoked key is revoked.
-- A stale leader publishes: a publication with an epoch older than the
-  current Lease is accepted (before the new leader's first publication),
-  and the bound still holds.
 - A partitioned gateway refuses requests because its authorization has
   ended.
 - A restore happens and the revoked keys stay revoked.
@@ -649,6 +649,8 @@ find one (by checking the negation as an invariant, which must fail).
   val revocationReachesGateway = GATEWAYS.exists(g =>
     revoked.exists(k => gws.get(g).applied.revoked.contains(k)))
 
+  // Never reached in the design (the record's write checks the Lease);
+  // reached without FENCE.
   val staleLeaderPublished = staleWin
 
   val partitionedAndExpired = GATEWAYS.exists(g =>
@@ -669,11 +671,11 @@ and **fails** in the correct one (one of its steps is impossible), and
 
 | Story | design | noFencing | leaseFromSigning | statusFloor | naiveRestore | noExpiry |
 |---|---|---|---|---|---|---|
-| stale leader revives a key | impossible | impossible | **passes** | impossible | impossible | **passes** |
+| a stale view revives a key | impossible | impossible | **passes** | impossible | impossible | **passes** |
 | paused leader rolls back | impossible | **passes** | impossible | impossible | impossible | impossible |
 | restore brings a key back | impossible | impossible | impossible | impossible | **passes** | impossible |
 
-The stale-leader story passes in two broken designs, and that is the
+The stale-view story passes in two broken designs, and that is the
 lesson in it: the bound needs *both* halves of the lease, its end counted
 from the source read and the gateway checking it. Either one missing lets a
 stale publication through. (The status-floor bug has no story here: its
@@ -681,21 +683,20 @@ counterexample needs an empty-disk restart, a forged status object and a
 replayed pointer, which the simulator finds in §10.) Reading them is the quickest way to see why each
 mechanism is there.
 
-**A stale leader revives a revoked key** (`leaseFromSigning`). Replica r1
-reads the state, then k1 is revoked, then r2 takes the Lease but has not
-published yet. Three ticks later r1, still believing it leads, publishes
-its old view. Fencing lets it through (no newer publication exists), so
-everything rests on the lease: in the correct design the snapshot's
+**A stale view revives a revoked key** (`leaseFromSigning`). The leader
+r1 reads the state, then k1 is revoked. Three ticks later r1, which still
+holds the Lease, publishes its old view (its refresh failed, or it was
+slow). Fencing lets it through: it leads, and no newer publication exists,
+so everything rests on the lease: in the correct design the snapshot's
 authorization ended at r1's read time plus `LEASE`, so no gateway accepts
 it; with the lease counted from signing, g1 accepts it and serves k1 a
 full lease after the revocation.
 
 ```quint publication.qnt +=
-  run staleLeaderTest =
+  run staleViewTest =
     initWith("r1")
       .then(loadState("r1"))
       .then(revoke("k1"))
-      .then(takeLease("r2"))
       .then(tick).then(tick).then(tick)
       .then(publish("r1"))
       .then(poll("g1"))
@@ -707,7 +708,8 @@ full lease after the revocation.
 new leader r2 publishes it and g1 applies it. Then the old leader r1 wakes
 with its pre-revocation view and publishes. With fencing, the record's
 newer epoch stops it; without, it wins the next sequence number and g1
-moves backwards to content in which k1 is valid again. (Here the lease
+moves backwards to content in which k1 is valid again. (In the design r1
+no longer holds the Lease, and the record's write refuses it.) (Here the lease
 still bounds the damage: the rollback is what fencing prevents.)
 
 ```quint publication.qnt +=

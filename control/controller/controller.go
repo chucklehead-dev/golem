@@ -107,7 +107,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	source := doc.StateVersion
 	var errs []error
 	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
-		ptr, err := c.Publishers[pool].Publish(ctx, epoch, source, func(seq uint64) (*snapshot.Snapshot, error) {
+		ptr, err := c.Publishers[pool].Publish(ctx, publish.Lease{Holder: c.Elector.ID, Epoch: epoch}, source, func(seq uint64) (*snapshot.Snapshot, error) {
 			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
 				Entitlements: doc.Entitlements})
 		})

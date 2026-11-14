@@ -174,7 +174,8 @@ module freshness {
     believes.get(replica) > 0,
     val e = believes.get(replica)
     val v = views.get(replica)
-    val fenced = e >= record.epoch and v.sv >= record.sv and (if (FENCE_BOTH) v.cv >= record.cv else true)
+    val fenced = replica == leaseHolder and e == leaseEpoch
+      and e >= record.epoch and v.sv >= record.sv and (if (FENCE_BOTH) v.cv >= record.cv else true)
     val anchor = if (ANCHOR_EARLIEST and v.cAt < v.sAt) v.cAt else v.sAt
     val p = { seq: record.seq + 1, epoch: e, sv: v.sv, cv: v.cv,
               rights: v.sRights.intersect(v.cRights), validUntil: anchor + LEASE }

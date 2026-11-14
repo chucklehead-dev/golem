@@ -147,10 +147,10 @@ If freshness cannot be established, do not extend the lease.
 The publication/fencing spike must define ordering, cache resync, deletions,
 leader changes and the atomic publication/checkpoint boundary. Existing
 publication.qnt proves properties of key revocations in a single source;
-it does not yet prove this composite protocol. The model allows an old
-leader to publish before a successor advances the publication record.
-Treat that as bounded stale publication subject to source expiry, not a
-proof that every stale leader is immediately rejected.
+it does not yet prove this composite protocol. (Amended: the record's
+write now checks the lease's holder and epoch, ADR 0045, and both models
+require it, so a deposed leader is refused at once; a leader publishing
+from a stale view is the bounded case, subject to source expiry.)
 
 Extend model scenarios and implementation tests to include role removal,
 service deletion, capture/storage prohibition, route narrowing, CRD rollback,

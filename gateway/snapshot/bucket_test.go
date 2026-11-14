@@ -35,7 +35,14 @@ func newPublished(t *testing.T) *published {
 	}
 	t.Cleanup(func() { d.Close() })
 	s := sign.Ed25519{ID: "k1", Key: sk}
-	return &published{pub: &publish.Publisher{State: &state.Store{Bucket: d}, Bucket: d, Signer: s, Pool: "internal"}, bucket: d,
+	st := &state.Store{Bucket: d}
+	if _, err := st.Update(t.Context(), func(doc *state.Document) error {
+		doc.Leader = &state.Lease{Holder: "r1", Epoch: 1}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return &published{pub: &publish.Publisher{State: st, Bucket: d, Signer: s, Pool: "internal"}, bucket: d,
 		keys: sign.Ed25519Keys{"k1": pk}, signer: s, dir: t.TempDir()}
 }
 
@@ -52,7 +59,7 @@ func (p *published) gateway(t *testing.T) *Bucket {
 
 func (p *published) publish(t *testing.T) snapshot.Pointer {
 	t.Helper()
-	ptr, err := p.pub.Publish(t.Context(), 1, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+	ptr, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 		return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, ValidUntil: time.Now().Add(time.Hour).UTC()}, nil
 	})
 	if err != nil {

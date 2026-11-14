@@ -20,7 +20,7 @@ r=$(run --main=freshDesign --invariant=safe); echo "freshDesign safe: $r"
 
 echo "== the design can reach every scenario"
 # compositeGapReached needs five steps in one order, too rare for random simulation; compositeGapTest is its witness below.
-for v in configRestrictionApplied regrantedRightServed staleLeaderPublished restoreHappened; do
+for v in configRestrictionApplied regrantedRightServed restoreHappened; do
   r=$(run --main=freshDesign --invariant="not($v)"); echo "$v: $r"
   [[ $r == "[violation]"* ]] || { echo "  scenario not reached by simulation"; fail=1; }
 done

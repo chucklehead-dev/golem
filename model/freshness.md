@@ -351,7 +351,8 @@ model meet here:
     believes.get(replica) > 0,
     val e = believes.get(replica)
     val v = views.get(replica)
-    val fenced = e >= record.epoch and v.sv >= record.sv and (if (FENCE_BOTH) v.cv >= record.cv else true)
+    val fenced = replica == leaseHolder and e == leaseEpoch
+      and e >= record.epoch and v.sv >= record.sv and (if (FENCE_BOTH) v.cv >= record.cv else true)
     val anchor = if (ANCHOR_EARLIEST and v.cAt < v.sAt) v.cAt else v.sAt
     val p = { seq: record.seq + 1, epoch: e, sv: v.sv, cv: v.cv,
               rights: v.sRights.intersect(v.cRights), validUntil: anchor + LEASE }
@@ -478,8 +479,8 @@ it for a full lease:
 ### 6.2 Possibility
 
 The design must be able to: carry a config restriction to a gateway; serve
-a right that a Git rollback re-granted; let a stale leader publish (and
-still hold the bound); and restore.
+a right that a Git rollback re-granted; and restore. (A stale leader
+cannot publish: the record's write checks the Lease, publication.md §6.5.)
 
 It also can, and this is worth knowing, serve a right that has been out of
 force for longer than a lease (`compositeGapReached`). The two reads

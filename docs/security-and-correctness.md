@@ -72,9 +72,10 @@ and secret-scanning revocation require fresh publication; encoded credential
 expiry and a locally applied denylist are the independent paths.
 
 Publication must prevent source regression after the authoritative publication
-record advances. An old leader may publish before its successor advances that
-record, bounded by source-read expiry; immediate rejection of all stale leaders
-is not established by the current model (ADR 0041 §5). Pointer CAS
+record advances. The record is won in the same write that checks the lease's
+holder and epoch (ADR 0045), so a deposed leader is refused whether or not its
+successor has published, and the checkpoint and pointer only move forward; a
+leader whose own view is stale is bounded by source-read expiry (ADR 0041 §5). Pointer CAS
 alone is insufficient. A fencing generation and source revision are checked
 against an authoritative publication record; losing leadership or CAS requires
 reloading inputs and rebuilding, never just renumbering old content. The

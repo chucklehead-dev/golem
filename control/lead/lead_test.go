@@ -100,11 +100,11 @@ func TestStaleLeaderFenced(t *testing.T) {
 		return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq}, nil
 	}
 	pb := &publish.Publisher{State: b.State, Bucket: bkt, Signer: signer, Pool: "p"}
-	if _, err := pb.Publish(t.Context(), newEpoch, 1, build); err != nil {
+	if _, err := pb.Publish(t.Context(), publish.Lease{Holder: "b", Epoch: newEpoch}, 1, build); err != nil {
 		t.Fatal(err)
 	}
 	pa := &publish.Publisher{State: a.State, Bucket: bkt, Signer: signer, Pool: "p"}
-	if _, err := pa.Publish(t.Context(), staleEpoch, 1, build); !errors.Is(err, publish.ErrFenced) {
+	if _, err := pa.Publish(t.Context(), publish.Lease{Holder: "a", Epoch: staleEpoch}, 1, build); !errors.Is(err, publish.ErrFenced) {
 		t.Fatalf("the paused leader published at epoch %d after epoch %d: %v", staleEpoch, newEpoch, err)
 	}
 }

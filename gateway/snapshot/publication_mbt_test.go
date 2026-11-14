@@ -189,7 +189,7 @@ func (d *pubDriver) Step(s *connect.Step) error {
 			if int(believed) != p.Epoch {
 				return fmt.Errorf("the model publishes at epoch %d; the replica's elector believes %d", p.Epoch, believed)
 			}
-			ptr, err := r.pub.Publish(context.Background(), believed, uint64(p.Source), func(seq uint64) (*snapshot.Snapshot, error) {
+			ptr, err := r.pub.Publish(context.Background(), publish.Lease{Holder: r.el.ID, Epoch: believed}, uint64(p.Source), func(seq uint64) (*snapshot.Snapshot, error) {
 				return publication(pub{Seq: int(seq), ValidUntil: p.ValidUntil}), nil
 			})
 			if err != nil {

@@ -43,8 +43,14 @@ func TestS3Publish(t *testing.T) {
 	b := against(t, fake)
 	pk, sk, _ := ed25519.GenerateKey(nil)
 	p := &publish.Publisher{State: &state.Store{Bucket: b}, Bucket: b, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "internal"}
+	if _, err := p.State.Update(t.Context(), func(d *state.Document) error {
+		d.Leader = &state.Lease{Holder: "r1", Epoch: 1}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
-		if _, err := p.Publish(t.Context(), 1, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+		if _, err := p.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 			return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, ValidUntil: time.Now().Add(time.Hour).UTC()}, nil
 		}); err != nil {
 			t.Fatal(err)
