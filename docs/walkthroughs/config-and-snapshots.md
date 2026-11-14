@@ -320,11 +320,14 @@ verifier refuses an ID it holds no key for with the same error
 - `ECDSAKeys` (`ecdsa.go:15`): ECDSA P-256 over SHA-256, ASN.1 DER, as
   KMS's ECDSA_SHA_256 produces; `ParseECDSAPublicKey` (`ecdsa.go:32`)
   reads KMS's DER or PEM public key and refuses other curves.
-- `Keys` and `LoadKeys` (`keys.go:17`, `:38`): what a pool gateway trusts
+- `Keys` and `LoadKeys` (`keys.go:17`, `:43`): what a pool gateway trusts
   (`-keys`, `cmd/golem-gateway/main.go:248`). Every `*.pub` file of the
   directory is a PEM `PUBLIC KEY`, Ed25519 or ECDSA P-256; its key ID is
   the PEM's `Key-ID` header if it has one (a KMS key's ARN), else the
-  file's name without `.pub`. A directory with no keys is an error: a
+  file's name without `.pub`. A key ID given by two files is refused,
+  naming both (`keys.go:63`): one would replace the other, or, of two
+  kinds, `Keys.Verify` would try only the Ed25519 one, so a misplaced
+  file could shadow a trusted key. A directory with no keys is an error: a
   gateway trusts no snapshot without one. A key is rotated by adding the
   new file beside the old, then removing the old.
 - `kmssign.Signer` (`kmssign.go:27`): the publishing key never leaves KMS.
@@ -450,7 +453,7 @@ publishing the last good config.
 | A scope's policy is refused field by field: a budget above 2^50 micro-units or negative, a negative in-flight limit or ceiling, an unknown `features` or `providerStorage` | `scopePolicy`, `policy.go:39` | `TestScopePolicyCheck`, `policy_test.go:16`; `TestEntitlementProblems`, `entitlements_test.go:73` |
 | An unknown, duplicate or miscased snapshot member, or another schema, is refused; another schema says to upgrade the gateway | `Decode`, `snapshot.go:196` | `TestDecodeFailsClosed`, `lib/snapshot/snapshot_test.go:35` |
 | Only a pointer or checkpoint signed by a trusted key, in its own context, opens | `open`, `pointer.go:110` | `TestPointer`, `lib/snapshot/pointer_test.go:37`; `TestCheckpoint`, `:67`; `TestKMSPointer`, `lib/sign/kmssign/kmssign_test.go:48` |
-| A gateway trusts the keys of its key directory, by Key-ID header or file name, and refuses an empty one | `LoadKeys`, `lib/sign/keys.go:38` | `TestLoadKeys`, `lib/sign/keys_test.go:19` |
+| A gateway trusts the keys of its key directory, by Key-ID header or file name, and refuses an empty one, or one key ID given by two files | `LoadKeys`, `lib/sign/keys.go:43` | `TestLoadKeys`, `lib/sign/keys_test.go:53`; `TestLoadKeysRefusesARepeatedID`, `:21` |
 | Of concurrent swaps from one tag exactly one wins, on Dir and S3 | `Dir.Put`, `bucket.go:102`; S3's conditional writes | `lib/bucket/buckettest/buckettest.go:56`, run by `bucket_test.go:10` and `s3bucket_test.go:39` |
 | A missing S3 bucket is an error, never a missing object | `mapErr`, `s3bucket.go:96` | `TestNoSuchBucket`, `s3bucket_test.go:94` |
 | An S3 object over `MaxObject` is refused, not buffered | `Bucket.Get`, `s3bucket.go:45` | `TestMaxObject`, `s3bucket_test.go:76` |
@@ -473,9 +476,6 @@ publishing the last good config.
   `TestPointer` round-trips a pointer with a zero `Expires` (the
   gateway's `TestOverdue`, `gateway/snapshot/bucket_test.go:241`, covers
   an expired one).
-- **`LoadKeys` does not refuse a repeated key ID**: two files with one
-  `Key-ID` header leave the later one, and an Ed25519 and an ECDSA key
-  under one ID leave `Keys.Verify` trying only the Ed25519 one.
 - The YAML splitter treats only a bare `---` line as a separator: `---`
   followed by content on the same line is not split.
 - ScopePolicy and Hook, two of ADR 0005's kinds, are not in v1alpha1 yet.

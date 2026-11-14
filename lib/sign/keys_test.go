@@ -11,8 +11,42 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestLoadKeysRefusesARepeatedID: two files giving one key ID, by header
+// or by file name and of either kind, are refused, naming both, rather
+// than one shadowing the other.
+func TestLoadKeysRefusesARepeatedID(t *testing.T) {
+	edPub, _, _ := ed25519.GenerateKey(nil)
+	edPub2, _, _ := ed25519.GenerateKey(nil)
+	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	type file struct {
+		name    string
+		pub     any
+		headers map[string]string
+	}
+	id := map[string]string{"Key-ID": "k1"}
+	for name, files := range map[string][]file{
+		"two Ed25519 keys by header":       {{"a.pub", edPub, id}, {"b.pub", edPub2, id}},
+		"an Ed25519 and an ECDSA key":      {{"a.pub", &ec.PublicKey, id}, {"b.pub", edPub, id}},
+		"a header and another file's name": {{"k1.pub", &ec.PublicKey, nil}, {"z.pub", edPub, id}},
+		"the same key twice, by header":    {{"a.pub", edPub, id}, {"b.pub", edPub, id}},
+	} {
+		dir := t.TempDir()
+		for _, f := range files {
+			der, _ := x509.MarshalPKIXPublicKey(f.pub)
+			if err := os.WriteFile(filepath.Join(dir, f.name), pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Headers: f.headers, Bytes: der}), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err := LoadKeys(dir)
+		if err == nil || !strings.Contains(err.Error(), files[0].name) || !strings.Contains(err.Error(), files[1].name) || !strings.Contains(err.Error(), `key ID "k1"`) {
+			t.Errorf("%s: %v, want the repeated key ID refused, naming both files", name, err)
+		}
+	}
+}
 
 // TestLoadKeys: Ed25519 and ECDSA public keys load by file name or Key-ID
 // header, and verify their own signatures only.

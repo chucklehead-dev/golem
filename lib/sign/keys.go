@@ -35,8 +35,14 @@ func (k Keys) Verify(keyID string, msg, sig []byte) error {
 // public half), its key ID the PEM's Key-ID header if it has one (a KMS
 // key's ARN), else the file's name without .pub. A key is rotated by adding
 // the new one beside the old, then removing the old.
+//
+// A key ID given by two files is refused, naming both: one would silently
+// replace the other, or, an Ed25519 and an ECDSA key under one ID, Verify
+// would try only the Ed25519 one, so a misplaced file could shadow a
+// trusted key.
 func LoadKeys(dir string) (Keys, error) {
 	k := Keys{Ed25519: Ed25519Keys{}, ECDSA: ECDSAKeys{}}
+	from := map[string]string{} // key ID to the file that gave it
 	paths, err := filepath.Glob(filepath.Join(dir, "*.pub"))
 	if err != nil {
 		return k, err
@@ -54,6 +60,10 @@ func LoadKeys(dir string) (Keys, error) {
 		if id == "" {
 			id = strings.TrimSuffix(filepath.Base(p), ".pub")
 		}
+		if other, dup := from[id]; dup {
+			return k, fmt.Errorf("%s and %s both give key ID %q: remove the misplaced one, or give each its own Key-ID header or file name", other, p, id)
+		}
+		from[id] = p
 		pub, err := x509.ParsePKIXPublicKey(blk.Bytes)
 		if err != nil {
 			return k, fmt.Errorf("%s: %w", p, err)
