@@ -3,3 +3,6 @@ __pycache__/
 *.test
 dump.rdb
 .claude/worktrees/
+/golem-gateway
+/golem-control
+/golemctl
