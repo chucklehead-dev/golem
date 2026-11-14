@@ -239,16 +239,35 @@ standalone's: no spans or metrics, ledger rows as JSON lines.
 
 ## 4. The binary's lifecycle (`cmd/golem-gateway`)
 
-`main` (`main.go:39`) first applies `releaseGate` (`main.go:208`): until
-M1's gates pass (golem#5, golem#7) it runs only with `--standalone` and
-only on a loopback address. It then sets up telemetry, the in-memory
-limiter (both in one period zone), the Entra verifier if a tenant is
-given (its keys fetched before start), the local key (`loadLocalKey`,
-`main.go:221`: a dev key in a 0600 file, kept across restarts), the
-holder and the directory source, which must load once before the server
-starts.
+`run` (main.go) first applies `releaseGate`. The gateway has two modes:
 
-Every API handler is wrapped as `track(localOnly(...))`. `localOnly`
+- **standalone** (`-standalone <dir>`, ADR 0023): only on a loopback
+  address; the in-memory limiter; dev keys, with the local key
+  (`loadLocalKey`: a dev key in a 0600 file, kept across restarts); the
+  directory source, which must load once before the server starts;
+  provider credentials from the environment;
+- **pool** (`-pool <name>`): `-bucket`, `-keys`, `-valkey` and `-site` are
+  required, and until golem#7's deployment evidence is in, so is
+  `-accept-unreleased`. `poolSource` opens the bucket (`s3bucket.Open`),
+  loads the trusted publishing keys (`sign.LoadKeys`: a directory of PEM
+  public keys, a KMS key's named by its `Key-ID` header), and starts the
+  bucket source: `Start` raises the floor from the local checkpoint
+  (`-checkpoint`) and the pool's signed trusted checkpoint, refusing to
+  start with neither, then one `Poll`. Provider credentials come from the
+  Secrets mounted under `-secrets` (`FileSecrets`), live keys only, and
+  the limiter is over the site's Valkey (`limit.NewValkey`,
+  `-valkey-replica-acks` for WAIT).
+
+Both then set up telemetry (labelled with the site and pool), the Entra
+verifier if a tenant is given, and the denylist if one is named. `/readyz`
+is ready once a snapshot is applied and its authorization holds.
+`TestPoolMode` runs pool mode end to end: golem-control's publisher writes
+a snapshot to a bucket, and the gateway serves a key's call from it, with
+the provider credential from a mounted Secret and its spend in a real
+Valkey.
+
+Standalone's API handlers are wrapped as `track(localOnly(...))`; pool
+mode's as `track(...)`. `localOnly`
 (`guard.go:24`) keeps the developer's browser out: a loopback `Host` only
 (DNS rebinding), no cross-origin request by the browser's own headers,
 and a JSON body only (no preflight-free page can send one). `track`
@@ -294,16 +313,16 @@ row with outcome `cancelled`, its cost in the counter.
 | OTLP uses TLS unless the collector is a literal loopback address, whatever the environment says | `otlp.PlaintextOK`, `otlp.New` | `TestPlaintextOK`, `TestOTLPIgnoresInsecureEnv` (lib/otlp) |
 | A stream cut at shutdown still leaves its row and counter add | `lifecycle.shutdown`, the order in `main` | `TestShutdownAccounts` |
 | Standalone answers only loopback, same-origin JSON requests | `localOnly` | `TestLocalOnly` |
-| Production publication stays disabled | `releaseGate` | `TestReleaseGate` |
+| Pool mode needs its inputs, and `-accept-unreleased` until golem#7 | `releaseGate` | `TestReleaseGate` |
+| A pool's published snapshot is served, its credential from a Secret, its spend in Valkey | `poolSource`, `run` | `TestPoolMode` |
 | A source reports a failure once, not every second | `repeat` | `TestRepeat` |
 
 ## Known gaps
 
-- The binary has no bucket source yet: `Bucket` is built and tested, but
-  `main` refuses to run without `--standalone` (the release gate), and
-  `FileSecrets`, the production credential reader, is unused and
-  untested. The on-disk last-good snapshot and the emergency denylist
-  (gateway.md §6) are not built.
+- Pool mode runs only with `-accept-unreleased` until golem#7's evidence
+  is in. The on-disk last-good snapshot (gateway.md §6) is not built: a
+  gateway restarted while the bucket is unreachable is not ready until it
+  can read a publication.
 - A snapshot refused by `Holder.Apply` for a reason that may pass (a
   Secret not yet mounted) is still judged final for that pointer: the
   gateway retries only when the pointer changes, at the next publication

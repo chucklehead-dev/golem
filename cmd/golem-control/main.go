@@ -27,7 +27,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
 
@@ -234,25 +233,9 @@ func openAudit(ctx context.Context, st *state.Store, archive, telem string) (_ *
 	}, nil
 }
 
-// openBucket is a directory, or an S3 bucket with the default AWS
-// credential chain (workload identity in the cluster).
+// openBucket is a directory, or an S3 bucket (s3bucket.Open).
 func openBucket(ctx context.Context, where string) (bucket.Bucket, error) {
-	rest, ok := strings.CutPrefix(where, "s3://")
-	if !ok {
-		return bucket.OpenDir(where)
-	}
-	name, prefix, _ := strings.Cut(rest, "/")
-	if name == "" {
-		return nil, errors.New("s3://<bucket>/<prefix>: no bucket")
-	}
-	if prefix != "" && !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-	awsCfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &s3bucket.Bucket{Client: s3.NewFromConfig(awsCfg), Name: name, Prefix: prefix}, nil
+	return s3bucket.Open(ctx, where)
 }
 
 func openSigner(ctx context.Context, spec string) (sign.Signer, error) {

@@ -20,8 +20,9 @@ config directory to a bucket while it leads (`golem-control keygen ./keys`, then
 `golem-control -config ./config -bucket ./bucket -signing-key file:keys/publishing.key`;
 `-bucket s3://…` and `-signing-key kms:…` in AWS; `-listen` with
 `-entra-tenant` serves the org and key APIs over Connect, which `golemctl login`,
-`scopes`, `members`, `managers` and `keys create|revoke` call); the gateway's bucket source
-reads them, not yet wired into its binary (golem#7).
+`scopes`, `members`, `managers` and `keys create|revoke` call); `golem-gateway -pool <name> -bucket … -keys … -valkey … -site …` serves a
+pool from them, behind `-accept-unreleased` until golem#7's deployment
+evidence is in.
 
 - [docs/prd.md](docs/prd.md): what it does and for whom, the feature set,
   cross-cutting requirements, and the open questions.
