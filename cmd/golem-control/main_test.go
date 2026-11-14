@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/pem"
@@ -55,5 +56,30 @@ func TestOpenSigner(t *testing.T) {
 func TestAPINeedsTenant(t *testing.T) {
 	if _, err := apiServer(t.Context(), "127.0.0.1:0", "", "api://golem", nil); err == nil || !strings.Contains(err.Error(), "-entra-tenant") {
 		t.Fatalf("an API without a tenant: %v", err)
+	}
+}
+
+// TestPubkey: the public half golem-control prints is what a gateway's
+// sign.LoadKeys trusts, under the key ID the signer signs with.
+func TestPubkey(t *testing.T) {
+	dir := t.TempDir()
+	if err := keygen(dir); err != nil {
+		t.Fatal(err)
+	}
+	spec := "file:" + filepath.Join(dir, "publishing.key")
+	var out bytes.Buffer
+	if err := pubkey(t.Context(), &out, spec); err != nil {
+		t.Fatal(err)
+	}
+	keys := t.TempDir()
+	os.WriteFile(filepath.Join(keys, "any-name.pub"), out.Bytes(), 0o644)
+	k, err := sign.LoadKeys(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := openSigner(t.Context(), spec)
+	sig, _ := s.Sign(t.Context(), []byte("m"))
+	if err := k.Verify(s.KeyID(), []byte("m"), sig); err != nil {
+		t.Fatalf("the printed key does not verify the signer's signature under its ID: %v", err)
 	}
 }

@@ -5,6 +5,7 @@
 //	golem-control -config ./config -bucket ./bucket -signing-key file:publishing.key -pools internal
 //	golem-control -config ./config -bucket s3://golem-state/golem/ -signing-key kms:arn:aws:kms:... -pools internal,edge
 //	golem-control keygen ./keys   (a development Ed25519 key pair)
+//	golem-control pubkey kms:arn:aws:kms:...   (the publishing key's public half, for gateways' -keys)
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -52,6 +54,15 @@ func main() {
 			fail("usage: golem-control keygen <dir>")
 		}
 		if err := keygen(os.Args[2]); err != nil {
+			fail("%v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "pubkey" {
+		if len(os.Args) != 3 {
+			fail("usage: golem-control pubkey file:<key> | kms:<arn>")
+		}
+		if err := pubkey(context.Background(), os.Stdout, os.Args[2]); err != nil {
 			fail("%v", err)
 		}
 		return
@@ -231,6 +242,30 @@ func openAudit(ctx context.Context, st *state.Store, archive, telem string) (_ *
 		defer cancel()
 		stop(sctx)
 	}, nil
+}
+
+// pubkey writes the publishing key's public half as a gateway's -keys
+// directory takes it: a PEM PUBLIC KEY whose Key-ID header names the key as
+// it signs (a KMS key's ARN; a file key's name).
+func pubkey(ctx context.Context, w io.Writer, spec string) error {
+	signer, err := openSigner(ctx, spec)
+	if err != nil {
+		return err
+	}
+	var pub any
+	switch s := signer.(type) {
+	case sign.Ed25519:
+		pub = s.Key.Public()
+	case kmssign.Signer:
+		pub = s.Public
+	default:
+		return fmt.Errorf("no public key for a %T", signer)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return err
+	}
+	return pem.Encode(w, &pem.Block{Type: "PUBLIC KEY", Headers: map[string]string{"Key-ID": signer.KeyID()}, Bytes: der})
 }
 
 // openBucket is a directory, or an S3 bucket (s3bucket.Open).
