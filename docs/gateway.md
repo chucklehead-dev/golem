@@ -296,7 +296,10 @@ without a preflight it never gets. SDKs and curl pass all three.
   refused always; loopback and private ones (RFC 1918, ULA, CGNAT) unless
   the Backend grants them (`spec.network.allowPrivateAddresses`, for a
   self-hosted or local model server). Telemetry, which carries the
-  ledger, goes over TLS unless the collector is on loopback (golem#5).
+  ledger, goes over TLS unless the collector is on loopback (golem#5); the
+  exporters are given their whole URLs, so the `OTEL_EXPORTER_OTLP_*`
+  variables cannot turn TLS off or redirect them (the CERTIFICATE ones
+  still add trust).
 - Transports are per deployment, every setting explicit
   (`snapshot.upstreamTransport`): idle connections bounded per host only
   (DefaultTransport's total of 100 re-handshook connections above 100

@@ -33,28 +33,26 @@ import (
 // the providers and their shutdown. Telemetry carries the ledger: it goes
 // over TLS unless the collector is on this machine (a node-local agent at
 // a literal loopback address, 127.0.0.1 or [::1]; ADR 0043, golem#5).
+//
+// Each exporter is given its whole URL, scheme included: the OTEL_EXPORTER_OTLP_*
+// variables (INSECURE, ENDPOINT, the per-signal ones) are applied before
+// options, and an explicit URL overrides every one of them, so none can
+// turn TLS off or send the ledger elsewhere. The CERTIFICATE variables
+// still apply: they add trust, they cannot remove verification.
 func OTLP(ctx context.Context, endpoint string, res *resource.Resource) (Providers, func(context.Context) error, error) {
-	host, _, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		return Providers{}, nil, fmt.Errorf("telemetry endpoint %q: want host:port", endpoint)
-	}
-	traceOpts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
-	metricOpts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(endpoint)}
-	logOpts := []otlploghttp.Option{otlploghttp.WithEndpoint(endpoint)}
-	if plaintextOK(host) {
-		traceOpts = append(traceOpts, otlptracehttp.WithInsecure())
-		metricOpts = append(metricOpts, otlpmetrichttp.WithInsecure())
-		logOpts = append(logOpts, otlploghttp.WithInsecure())
-	}
-	te, err := otlptracehttp.New(ctx, traceOpts...)
+	base, err := otlpBase(endpoint)
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	me, err := otlpmetrichttp.New(ctx, metricOpts...)
+	te, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(base+"/v1/traces"))
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	le, err := otlploghttp.New(ctx, logOpts...)
+	me, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpointURL(base+"/v1/metrics"))
+	if err != nil {
+		return Providers{}, nil, err
+	}
+	le, err := otlploghttp.New(ctx, otlploghttp.WithEndpointURL(base+"/v1/logs"))
 	if err != nil {
 		return Providers{}, nil, err
 	}
@@ -153,6 +151,18 @@ func writeValue(enc *jsontext.Encoder, v attribute.Value) {
 // included, is resolved when dialed, by whatever resolver and hosts file
 // the node has, so it would not hold telemetry to this machine: a name
 // gets TLS.
+// otlpBase is the collector's base URL: https unless plaintext is allowed.
+func otlpBase(endpoint string) (string, error) {
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("telemetry endpoint %q: want host:port", endpoint)
+	}
+	if plaintextOK(host) {
+		return "http://" + endpoint, nil
+	}
+	return "https://" + endpoint, nil
+}
+
 func plaintextOK(host string) bool {
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.IsLoopback()
