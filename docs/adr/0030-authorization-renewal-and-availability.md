@@ -1,6 +1,6 @@
 # 0030: Authorization renewal puts the control plane within five minutes of every request
 
-Status: Accepted. Follows from [0029](0029-security-and-correctness-revision.md); amends the SLOs of PRD §9.4. Its accounting-spool part is superseded by [0031](0031-soft-budgets.md). Amended by [0032](0032-authorization-lease-length.md) (four-hour internal lease, SLO back to 99.9%).
+Status: Accepted. Follows from [0029](0029-security-and-correctness-revision.md); amends the SLOs of PRD §9.4. Its accounting-spool part is superseded by [0031](0031-soft-budgets.md). Amended by [0032](0032-authorization-lease-length.md) (four-hour internal lease, SLO back to 99.9%) and [0045](0045-leadership-in-the-state-document.md) (leadership is a lease in the state document).
 
 ## Context
 

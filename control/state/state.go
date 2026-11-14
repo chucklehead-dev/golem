@@ -38,16 +38,38 @@ type Record struct {
 	Source uint64 `json:"source"`
 }
 
+// Lease is golem-control's leadership (control/lead): who holds it, its
+// epoch (which increases whenever it changes hands, and fences
+// publication), and when its holder last renewed it.
+type Lease struct {
+	Holder    string    `json:"holder"`
+	Epoch     uint64    `json:"epoch"`
+	RenewedAt time.Time `json:"renewedAt"`
+	// DurationMillis is how long a renewal holds it (encoding/json/v2 has
+	// no default form for a time.Duration).
+	DurationMillis int64 `json:"durationMillis"`
+}
+
+// Expires is when the lease lapses unless renewed.
+func (l *Lease) Expires() time.Time {
+	return l.RenewedAt.Add(time.Duration(l.DurationMillis) * time.Millisecond)
+}
+
 // Document is the state.
 type Document struct {
 	Schema       int               `json:"schema"`
 	StateVersion uint64            `json:"stateVersion"`
+	Leader       *Lease            `json:"leader,omitempty"`
 	Publications map[string]Record `json:"publications,omitempty"`
 }
 
 func (d *Document) clone() *Document {
 	c := *d
 	c.Publications = maps.Clone(d.Publications)
+	if d.Leader != nil {
+		l := *d.Leader
+		c.Leader = &l
+	}
 	return &c
 }
 
@@ -172,10 +194,14 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 	return nil, ErrContended
 }
 
-// check is what every write must keep: no pool's publication record is
-// removed or goes back in sequence, epoch or source (a publisher fenced
-// by it must stay fenced; model/publication.md).
+// check is what every write must keep: the lease's epoch never goes back
+// and is never dropped, and no pool's publication record is removed or
+// goes back in sequence, epoch or source (a publisher fenced by them must
+// stay fenced; model/publication.md).
 func check(old, next *Document) error {
+	if old.Leader != nil && (next.Leader == nil || next.Leader.Epoch < old.Leader.Epoch) {
+		return fmt.Errorf("%w: the lease's epoch goes back", ErrInvariant)
+	}
 	for pool, r := range old.Publications {
 		n, ok := next.Publications[pool]
 		if !ok {

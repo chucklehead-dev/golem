@@ -1,6 +1,6 @@
 # 0019: Background jobs are idempotent scans by the leader; Temporal later
 
-Status: Accepted (v1 baseline). From archive 0020, 0032.
+Status: Accepted (v1 baseline). From archive 0020, 0032. Amended by [0045](0045-leadership-in-the-state-document.md) (leadership is a lease in the state document).
 
 ## Decision
 

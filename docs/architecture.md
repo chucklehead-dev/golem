@@ -25,7 +25,7 @@ rules that keep them apart. Each component's inside has its own document:
 | Component | Does | Does not | State |
 |---|---|---|---|
 | **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; call the control plane or Kubernetes | Caches; limit counters in Valkey; reads its snapshots from object storage |
-| **golem-control** | The control API (config read, explain, overrides, entitlements, self-service, admin, spend) and the watch on config CRDs and their status; its leader (a Kubernetes Lease) runs the jobs and signs and publishes snapshots | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADRs 0006, 0007); reads ClickHouse |
+| **golem-control** | The control API (config read, explain, overrides, entitlements, self-service, admin, spend) and the watch on config CRDs and their status; its leader (a lease in the state document, ADR 0045) runs the jobs and signs and publishes snapshots | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADRs 0006, 0007); reads ClickHouse |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
 | **golem-console** | A small web UI for the same tasks (M2) | Anything the API does not offer | None |
 | **Backstage plugin** | Keys, spend and budgets inside Backstage (M3, optional) | Same | None |

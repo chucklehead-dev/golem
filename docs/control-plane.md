@@ -146,6 +146,10 @@ control plane.
   - the checkpoint is trusted by where it is: the bucket policy must let
     only golem-control's role write `state/` and `control/` (and
     `snapshots/`), and a pool's credentials write only its `status/`.
+  - leadership: `control/lead`, the lease in the state document (ADR
+    0045): taken when lapsed at the next epoch, renewed by its holder,
+    given up by its holder's own clock before another may take it; the
+    publisher publishes at the epoch its elector believes;
   - slice 2: `lib/bucket/s3bucket` (S3, with its conditional requests:
     If-None-Match on GetObject, If-Match and If-None-Match: * on
     PutObject; 304, 404, 412 and 409 mapped to the bucket's errors; reads

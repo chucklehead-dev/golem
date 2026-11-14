@@ -114,7 +114,7 @@ has something to restore.
 
 ### 4.2 Leadership
 
-Leadership is a Kubernetes Lease: one holder and an epoch that increases
+Leadership is a lease in the state document (ADR 0045): one holder and an epoch that increases
 when it changes hands. The crucial detail is `believes`: what each replica
 *thinks* its epoch is. A replica that was paused (a long GC, a frozen node)
 still believes it leads after the Lease has moved on. It finds out only

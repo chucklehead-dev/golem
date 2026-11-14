@@ -54,3 +54,4 @@ baseline one, marked in both.
 | [0042](0042-known-spend-by-counter-watermark.md) | Known spend by counter sequence and ledger watermark: O(1) admission, exact under snapshot skew; supersedes the hand-off by event |
 | [0043](0043-ledger-durability.md) | Ledger durability in a node-local collector's persistent queue, not a gateway spool; rows written at a call's end with their numbers joined later; gaps reconstructed from the site counter before they are declared lost |
 | [0044](0044-budgets-are-controls-not-ceilings.md) | Budgets are admission and monitoring controls, not spending ceilings; provider-account limits are the financial backstop; reconciliation is authoritative; `strict` renamed `declaredWorstCaseCheck`, described by what it closes on |
+| [0045](0045-leadership-in-the-state-document.md) | golem-control's leadership is a lease in the state document, its epoch beside the publication record it fences |

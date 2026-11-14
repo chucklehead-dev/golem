@@ -13,6 +13,7 @@ import (
 	"github.com/chucklehead-dev/gotogether/connect"
 	"github.com/chucklehead-dev/gotogether/itf"
 
+	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket"
@@ -28,11 +29,14 @@ import (
 // Publisher (fenced by the record, as the model's FENCE), the pointer and
 // snapshots live in a real bucket, poll is each gateway's Bucket source,
 // and replayPointer is an attacker copying an old signed pointer back. A
-// restart with an empty disk takes its floor from the publisher's record
-// (the design's TRUSTED_FLOOR). Leadership and the authoritative state
-// (leases, revocations, restores, replicas' reads) remain the
-// environment: their effect reaches the publisher as the epoch and state
-// version the model's publish used.
+// restart with an empty disk takes its floor from the trusted checkpoint
+// (the design's TRUSTED_FLOOR). Leadership is real too: each replica is a
+// control/lead Elector with its own view of the state and its own clock
+// (a paused replica's stands still), takeLease is a replica taking the
+// lapsed lease, noticeLoss its next try, and publish uses the epoch its
+// elector believes. The authoritative state (revocations, restores,
+// replicas' reads) remains the environment: it reaches the publisher as
+// the state version the model's publish used.
 
 // pub is the model's Pub record.
 type pub struct {
@@ -45,11 +49,20 @@ var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func at(tick int) time.Time { return epoch.Add(time.Duration(tick) * time.Minute) }
 
+// ctlReplica is a golem-control replica: its elector, its publisher and
+// its clock.
+type ctlReplica struct {
+	el    *lead.Elector
+	pub   *publish.Publisher
+	clock time.Time
+}
+
 type pubDriver struct {
 	t        testing.TB
 	clock    int
 	bucket   *bucket.Dir
-	pub      *publish.Publisher
+	pub      *publish.Publisher // r1's: what the driver reads the state through
+	replicas map[string]*ctlReplica
 	keys     sign.Ed25519Keys
 	signed   map[int][]byte // every pointer signed, by sequence: what a replay copies back
 	gateways map[string]*Bucket
@@ -120,8 +133,24 @@ func (d *pubDriver) Step(s *connect.Step) error {
 			}
 			pk, sk, _ := ed25519.GenerateKey(nil)
 			d.keys = sign.Ed25519Keys{"k": pk}
-			d.pub = &publish.Publisher{State: &state.Store{Bucket: d.bucket}, Bucket: d.bucket, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "pool",
-				Now: func() time.Time { return at(d.clock) }}
+			var believes map[string]int
+			if err := connectDecode(s, &believes, "believes"); err != nil {
+				return err
+			}
+			d.replicas = map[string]*ctlReplica{}
+			for r := range believes {
+				c := &ctlReplica{clock: at(0)}
+				st := &state.Store{Bucket: d.bucket}
+				c.el = &lead.Elector{State: st, ID: r, Duration: 30 * time.Second, Now: func() time.Time { return c.clock }}
+				c.pub = &publish.Publisher{State: st, Bucket: d.bucket, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "pool",
+					Now: func() time.Time { return at(d.clock) }}
+				d.replicas[r] = c
+			}
+			d.pub = d.replicas["r1"].pub
+			// The first leader, r1, holds the lease at epoch 1 (the model's init).
+			if e, err := d.replicas["r1"].el.Try(context.Background()); err != nil || e != 1 {
+				return fmt.Errorf("r1's first lease: epoch %d, %v", e, err)
+			}
 			d.signed = map[int][]byte{}
 			if err := d.seed(genesis); err != nil {
 				return err
@@ -154,7 +183,12 @@ func (d *pubDriver) Step(s *connect.Step) error {
 			if err := connectDecode(s, &p, "pointer"); err != nil {
 				return err
 			}
-			ptr, err := d.pub.Publish(context.Background(), uint64(p.Epoch), uint64(p.Source), func(seq uint64) (*snapshot.Snapshot, error) {
+			r := d.replicas[connect.MustPick[string](s, "replica")]
+			believed := r.el.Epoch()
+			if int(believed) != p.Epoch {
+				return fmt.Errorf("the model publishes at epoch %d; the replica's elector believes %d", p.Epoch, believed)
+			}
+			ptr, err := r.pub.Publish(context.Background(), believed, uint64(p.Source), func(seq uint64) (*snapshot.Snapshot, error) {
 				return publication(pub{Seq: int(seq), ValidUntil: p.ValidUntil}), nil
 			})
 			if err != nil {
@@ -199,8 +233,34 @@ func (d *pubDriver) Step(s *connect.Step) error {
 			return err
 		},
 		// The environment: golem-control and the attacker.
-		"revoke": connect.Skip, "restore": connect.Skip, "takeLease": connect.Skip,
-		"noticeLoss": connect.Skip, "forgeStatus": connect.Skip, "partition": connect.Skip, "heal": connect.Skip,
+		"takeLease": func(s *connect.Step) error {
+			// The replica's clock moves past the lease (its holder paused);
+			// it then takes it, at the next epoch.
+			r := d.replicas[connect.MustPick[string](s, "replica")]
+			if err := r.el.State.Load(context.Background()); err != nil {
+				return err
+			}
+			if l := r.el.State.Current().Leader; l != nil && !r.clock.After(l.Expires()) {
+				r.clock = l.Expires().Add(time.Second)
+			}
+			var want int
+			if err := connectDecode(s, &want, "leaseEpoch"); err != nil {
+				return err
+			}
+			if e, err := r.el.Try(context.Background()); err != nil || int(e) != want {
+				return fmt.Errorf("the model's lease is epoch %d; the elector took %d (%v)", want, e, err)
+			}
+			return nil
+		},
+		"noticeLoss": func(s *connect.Step) error {
+			r := d.replicas[connect.MustPick[string](s, "replica")]
+			if e, err := r.el.Try(context.Background()); err != nil || e != 0 {
+				return fmt.Errorf("a replica that lost the lease tried and kept epoch %d (%v)", e, err)
+			}
+			return nil
+		},
+		"revoke": connect.Skip, "restore": connect.Skip,
+		"forgeStatus": connect.Skip, "partition": connect.Skip, "heal": connect.Skip,
 		"loadState": connect.Skip,
 	}.Step(s)
 }
@@ -226,9 +286,12 @@ type recState struct{ Epoch, Seq, Source int }
 type ptrState struct{ Seq, Epoch, Source, ValidUntil int }
 
 type pubState struct {
-	Gws     map[string]gwState
-	Record  recState
-	Pointer ptrState
+	Gws         map[string]gwState
+	Record      recState
+	Pointer     ptrState
+	LeaseHolder string
+	LeaseEpoch  int
+	Believes    map[string]int
 }
 
 func (d *pubDriver) State() (any, error) {
@@ -239,6 +302,13 @@ func (d *pubDriver) State() (any, error) {
 		return nil, err
 	}
 	st.Record = recState{Epoch: int(rec.Epoch), Seq: int(rec.Seq), Source: int(rec.Source)}
+	if l := d.pub.State.Current().Leader; l != nil {
+		st.LeaseHolder, st.LeaseEpoch = l.Holder, int(l.Epoch)
+	}
+	st.Believes = map[string]int{}
+	for r, c := range d.replicas {
+		st.Believes[r] = int(c.el.Epoch())
+	}
 	raw, _, err := d.bucket.Get(ctx, snapshot.PointerKey("pool"), "")
 	if err != nil {
 		return nil, err

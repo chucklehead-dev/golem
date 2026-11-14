@@ -1,6 +1,6 @@
 # 0003: Components with one job each; layering checked by a test
 
-Status: Accepted (v1 baseline). From archive 0013, 0017, 0025, 0032. Amended by [0036](0036-no-mesh-identity-no-operator.md) (no operator).
+Status: Accepted (v1 baseline). From archive 0013, 0017, 0025, 0032. Amended by [0036](0036-no-mesh-identity-no-operator.md) (no operator) and [0045](0045-leadership-in-the-state-document.md) (leadership is a lease in the state document).
 
 ## Decision
 
