@@ -48,6 +48,17 @@ Services: `ConfigService` (effective config, explain, overrides),
 `SnapshotBuilder` (which also publishes known spend). Jobs call the same services; nothing
 writes the document except through them.
 
+**Built (slice 1):** `control/service` with the org and key methods:
+`CreateScope` (admins), `AddMember` and `RemoveMember` (the scope's
+managers or admins; a removal revokes the member's keys in the scope and
+its role there), `BindManager` (admins), `MintKey` (a member its own keys,
+a scope's managers its services' keys, admins any; within the scope's
+models; the plaintext returned once, the hash stored) and `RevokeKey`
+(the key's owner, its scope's managers, admins). Each writes its audit
+event with its change in one update; the store numbers events and refuses
+an outbox that loses anything but its oldest or skips a number. The
+transport (`control/api`, Connect) and the Entra caller come next.
+
 `validate_only` on every mutating method lets `golemctl` and the console
 show errors with field paths before anything is written. Config CRDs are
 validated by their schemas' CEL rules and offline by `golemctl config

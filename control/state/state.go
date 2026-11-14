@@ -67,6 +67,21 @@ type Document struct {
 	Scopes      map[string]Scope     `json:"scopes,omitempty"`     // by scope ID
 	Keys        map[string]Key       `json:"keys,omitempty"`       // by hex SHA-256 of the key
 	Revocations []Revocation         `json:"revocations,omitempty"`
+	Roles       []RoleBinding        `json:"roles,omitempty"`
+	// Audit is the outbox (§3): a write's events go in with it; the leader
+	// ships them and trims only what is durably archived.
+	Audit    []AuditEvent `json:"audit,omitempty"`
+	AuditSeq uint64       `json:"auditSeq,omitempty"` // the last event's number
+}
+
+// number gives each new audit event (Seq 0) the next number.
+func (d *Document) number() {
+	for i := range d.Audit {
+		if d.Audit[i].Seq == 0 {
+			d.AuditSeq++
+			d.Audit[i].Seq = d.AuditSeq
+		}
+	}
 }
 
 func (d *Document) clone() *Document {
@@ -76,6 +91,8 @@ func (d *Document) clone() *Document {
 	c.Scopes = maps.Clone(d.Scopes)
 	c.Keys = maps.Clone(d.Keys)
 	c.Revocations = slices.Clone(d.Revocations)
+	c.Roles = slices.Clone(d.Roles)
+	c.Audit = slices.Clone(d.Audit)
 	if d.Leader != nil {
 		l := *d.Leader
 		c.Leader = &l
@@ -180,6 +197,7 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 		if err := change(next); err != nil {
 			return nil, err
 		}
+		next.number()
 		if err := check(base, next); err != nil {
 			return nil, err
 		}
@@ -202,6 +220,26 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 		return next.clone(), nil
 	}
 	return nil, ErrContended
+}
+
+// Validate applies change to a copy of the current document and checks the
+// invariants, writing nothing: validate_only (control-plane.md §2).
+func (s *Store) Validate(ctx context.Context, change func(*Document) error) error {
+	s.mu.Lock()
+	loaded := s.cur != nil
+	s.mu.Unlock()
+	if !loaded {
+		if err := s.Load(ctx); err != nil {
+			return err
+		}
+	}
+	base := s.Current()
+	next := base.clone()
+	if err := change(next); err != nil {
+		return err
+	}
+	next.number()
+	return check(base, next)
 }
 
 // check is what every write must keep: the lease's epoch never goes back

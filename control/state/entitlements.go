@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"time"
 
@@ -54,6 +55,31 @@ type Revocation struct {
 	At  time.Time `json:"at"`
 }
 
+// RoleBinding gives a principal a role on a scope (org-model.md §2):
+// "manager" for now. Admins hold the Entra app role golem.admin, not a
+// binding.
+type RoleBinding struct {
+	Principal string `json:"principal"`
+	Role      string `json:"role"`
+	Scope     string `json:"scope"`
+}
+
+// AuditEvent is one change, written with it (control-plane.md §3). Seq
+// is the store's: assigned at the write, it names the event in the outbox.
+type AuditEvent struct {
+	Seq    uint64            `json:"seq"`
+	At     time.Time         `json:"at"`
+	Actor  string            `json:"actor"`
+	Action string            `json:"action"` // e.g. key.mint
+	Target string            `json:"target"`
+	Detail map[string]string `json:"detail,omitempty"`
+}
+
+// Has reports whether principal holds role on scope.
+func (d *Document) Has(principal, role, scope string) bool {
+	return slices.Contains(d.Roles, RoleBinding{principal, role, scope})
+}
+
 // Default in-flight limits when a scope sets none (lib/compile's).
 const (
 	DefaultPrincipalInFlight = 8
@@ -61,7 +87,7 @@ const (
 )
 
 // checkEntitlements is what every write keeps of the entitlements: every
-// key's owner and scope exist and the owner is a member of it; a
+// key's owner exists, and a live key's owner is a member of its scope; a
 // principal's scopes exist and its default is one of them; no two
 // principals share an Entra ID; and a revocation is never dropped nor its
 // key revived.
@@ -92,9 +118,24 @@ func checkEntitlements(old, next *Document) error {
 		switch {
 		case !ok:
 			return bad("key %s's owner %s does not exist", k.Display, k.Owner)
-		case !slices.Contains(owner.Scopes, k.Scope):
+		case k.RevokedAt.IsZero() && !slices.Contains(owner.Scopes, k.Scope):
+			// A live key's owner must be a member; a revoked key keeps its
+			// record after its owner leaves.
 			return bad("key %s's owner %s is not a member of its scope %s", k.Display, k.Owner, k.Scope)
 		}
+	}
+	for _, r := range next.Roles {
+		switch {
+		case r.Role != "manager":
+			return bad("role %q is not one golem binds (manager)", r.Role)
+		case next.Principals[r.Principal].Kind == "":
+			return bad("a role for %s, who does not exist", r.Principal)
+		case !hasScope(next, r.Scope):
+			return bad("a role on %s, which does not exist", r.Scope)
+		}
+	}
+	if !outboxFollows(old, next) {
+		return bad("the audit outbox may lose only its oldest events (shipped and archived) and gain new ones")
 	}
 	if len(next.Revocations) < len(old.Revocations) || !slices.Equal(next.Revocations[:len(old.Revocations)], old.Revocations) {
 		return bad("revocations are append-only")
@@ -180,4 +221,45 @@ func firstOr(s []string) string {
 		return ""
 	}
 	return s[0]
+}
+
+func hasScope(d *Document, id string) bool { _, ok := d.Scopes[id]; return ok }
+
+// outboxFollows reports whether next's outbox is old's with some of its
+// oldest events trimmed (shipped and archived) and new ones appended: the
+// events kept are unchanged and a contiguous run ending at old's newest,
+// and the new ones are numbered on from old's last, without a gap.
+func outboxFollows(old, next *Document) bool {
+	var oldAt = map[uint64]AuditEvent{}
+	for _, e := range old.Audit {
+		oldAt[e.Seq] = e
+	}
+	want := uint64(0) // the next seq expected; 0 until the first kept or new event
+	for _, e := range next.Audit {
+		switch {
+		case e.Seq <= old.AuditSeq:
+			o, ok := oldAt[e.Seq]
+			if !ok || !reflect.DeepEqual(o, e) || (want != 0 && e.Seq != want) {
+				return false
+			}
+		case want == 0 && e.Seq != old.AuditSeq+1, want != 0 && e.Seq != want:
+			return false
+		}
+		want = e.Seq + 1
+	}
+	// The kept run must reach old's newest event: nothing kept may be
+	// followed by a gap where old events were dropped.
+	if len(next.Audit) > 0 && next.Audit[0].Seq <= old.AuditSeq {
+		last := next.Audit[0].Seq
+		for _, e := range next.Audit {
+			if e.Seq > old.AuditSeq {
+				break
+			}
+			last = e.Seq
+		}
+		if len(old.Audit) > 0 && last != old.Audit[len(old.Audit)-1].Seq {
+			return false
+		}
+	}
+	return next.AuditSeq >= old.AuditSeq
 }

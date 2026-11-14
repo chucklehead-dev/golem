@@ -76,3 +76,40 @@ func TestEntitlementsView(t *testing.T) {
 		t.Fatalf("keys %+v", e.Keys)
 	}
 }
+
+// TestRolesAndAudit: a role binds an existing principal to an existing
+// scope as a manager; the audit outbox loses only its oldest events.
+func TestRolesAndAudit(t *testing.T) {
+	s := seeded(t)
+	ctx := t.Context()
+	ev := func(a string) AuditEvent { return AuditEvent{At: time.Unix(1, 0), Actor: "root", Action: a} }
+	if _, err := s.Update(ctx, func(d *Document) error {
+		d.Roles = append(d.Roles, RoleBinding{"alice", "manager", "a"})
+		d.Audit = append(d.Audit, ev("one"), ev("two"), ev("three"))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*Document){
+		"a role for no one":       func(d *Document) { d.Roles = append(d.Roles, RoleBinding{"nobody", "manager", "a"}) },
+		"a role on no scope":      func(d *Document) { d.Roles = append(d.Roles, RoleBinding{"alice", "manager", "z"}) },
+		"a role golem has not":    func(d *Document) { d.Roles = append(d.Roles, RoleBinding{"alice", "owner", "a"}) },
+		"an event rewritten":      func(d *Document) { d.Audit[1].Actor = "eve" },
+		"an event dropped midway": func(d *Document) { d.Audit = []AuditEvent{d.Audit[0], d.Audit[2]} },
+		"the newest dropped":      func(d *Document) { d.Audit = d.Audit[:2] },
+		"a number skipped": func(d *Document) {
+			d.Audit = append(d.Audit, AuditEvent{Seq: d.AuditSeq + 2, Action: "x"})
+		},
+		"the counter set back": func(d *Document) { d.AuditSeq = 0; d.Audit = nil },
+	} {
+		if _, err := s.Update(ctx, func(d *Document) error { change(d); return nil }); !errors.Is(err, ErrInvariant) {
+			t.Errorf("%s: %v, want ErrInvariant", name, err)
+		}
+	}
+	if _, err := s.Update(ctx, func(d *Document) error { d.Audit = append(d.Audit[2:], ev("four")); return nil }); err != nil {
+		t.Fatalf("the oldest shipped and trimmed, a new one added: %v", err)
+	}
+	if !s.Current().Has("alice", "manager", "a") || len(s.Current().Audit) != 2 {
+		t.Fatalf("roles %v, audit %v", s.Current().Roles, s.Current().Audit)
+	}
+}
