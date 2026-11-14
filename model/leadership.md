@@ -313,9 +313,12 @@ after a takeover.
 
 ## 6. What the search shows
 
-`check-leadership.sh` explores every run of the small instance to depth 10
-(two replicas, a directory of three values, one rollback), for each design
-and each rollback, and shows each mechanism necessary by turning it off:
+`check-leadership.sh` explores every run of the small instance (two
+replicas, a directory of three values, one rollback): each design with its
+mechanisms holds under each rollback it is shown with, in every run of up
+to nine steps (100,000 to 416,000 states each; ten needs more than 4 GiB of
+stored graph), and each mechanism is shown necessary by turning it off,
+the counterexample found within ten:
 
 | Design | Holds, with | Breaks without |
 |---|---|---|
