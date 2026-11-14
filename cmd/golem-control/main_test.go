@@ -51,3 +51,9 @@ func TestOpenSigner(t *testing.T) {
 		t.Error("an s3 URL without a bucket accepted")
 	}
 }
+
+func TestAPINeedsTenant(t *testing.T) {
+	if _, err := apiServer(t.Context(), "127.0.0.1:0", "", "api://golem", nil); err == nil || !strings.Contains(err.Error(), "-entra-tenant") {
+		t.Fatalf("an API without a tenant: %v", err)
+	}
+}

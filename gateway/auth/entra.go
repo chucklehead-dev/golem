@@ -58,12 +58,16 @@ const Leeway = time.Minute
 const (
 	ScopeAccess = "golem.access"
 	RoleService = "golem.service"
+	// RoleAdmin is the app role that makes a caller a golem admin
+	// (org-model.md §2): the control API's, not the gateway's.
+	RoleAdmin = "golem.admin"
 )
 
 // Identity is who a token says is calling.
 type Identity struct {
 	Service bool   // a service (client credentials, workload identity), else a user
 	ID      string // the user's oid, or the service's app ID (azp)
+	Admin   bool   // the token carries the golem.admin app role
 }
 
 type entraClaims struct {
@@ -126,9 +130,9 @@ func (e *Entra) Verify(raw string) (Identity, *Refusal) {
 	}
 	switch {
 	case slices.Contains(strings.Fields(c.Scp), ScopeAccess) && c.Oid != "":
-		return Identity{ID: c.Oid}, nil
+		return Identity{ID: c.Oid, Admin: slices.Contains(c.Roles, RoleAdmin)}, nil
 	case c.Scp == "" && slices.Contains(c.Roles, RoleService) && c.Azp != "":
-		return Identity{Service: true, ID: c.Azp}, nil
+		return Identity{Service: true, ID: c.Azp, Admin: slices.Contains(c.Roles, RoleAdmin)}, nil
 	}
 	return invalid("it carries neither the " + ScopeAccess + " scope (a user) nor the " + RoleService + " role (a service)")
 }

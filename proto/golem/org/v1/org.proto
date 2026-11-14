@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+// The org API (architecture.md §3): scopes, memberships and role
+// bindings. Authorization is the service layer's (org-model.md §2).
+package golem.org.v1;
+
+option go_package = "github.com/chucklehead-dev/golem/gen/golem/org/v1;orgv1";
+
+service OrgService {
+  // Creates a top-level scope: admins.
+  rpc CreateScope(CreateScopeRequest) returns (CreateScopeResponse);
+  // Adds a member, creating the user or service on its first add: the
+  // scope's managers, or admins.
+  rpc AddMember(AddMemberRequest) returns (AddMemberResponse);
+  // Removes a member, revoking its keys in the scope and its role there.
+  rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+  // Makes a principal a manager of a scope: admins.
+  rpc BindManager(BindManagerRequest) returns (BindManagerResponse);
+}
+
+// A scope's policy (org-model.md §3).
+message ScopePolicy {
+  // Route aliases the scope's members may call.
+  repeated string models = 1;
+  int64 budget_micros = 2;
+  bool declared_worst_case_check = 3;
+  int32 principal_in_flight = 4;
+  int32 scope_in_flight = 5;
+  bool storage_allowed = 6;
+  int64 max_output_tokens = 7;
+  int64 max_input_bytes = 8;
+  // restricted, compatible, or empty (by the route's kind).
+  string features = 9;
+}
+
+message CreateScopeRequest {
+  string id = 1;
+  ScopePolicy policy = 2;
+  bool validate_only = 3;
+}
+
+message CreateScopeResponse {}
+
+message Member {
+  string id = 1;
+  // user or service.
+  string kind = 2;
+  // The user's Entra object ID, or the service's app ID; empty: keys only.
+  string entra = 3;
+}
+
+message AddMemberRequest {
+  string scope = 1;
+  Member member = 2;
+  bool validate_only = 3;
+}
+
+message AddMemberResponse {}
+
+message RemoveMemberRequest {
+  string scope = 1;
+  string principal = 2;
+  bool validate_only = 3;
+}
+
+message RemoveMemberResponse {}
+
+message BindManagerRequest {
+  string scope = 1;
+  string principal = 2;
+  bool validate_only = 3;
+}
+
+message BindManagerResponse {}

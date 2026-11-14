@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,10 +28,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/chucklehead-dev/golem/control/api"
 	"github.com/chucklehead-dev/golem/control/controller"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
+	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
 	"github.com/chucklehead-dev/golem/lib/sign"
@@ -53,6 +57,9 @@ func main() {
 	pools := flag.String("pools", "internal", "the gateway pools to publish to, comma-separated")
 	id := flag.String("id", "", "this replica's name (default: the host name)")
 	authLease := flag.Duration("lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
+	listen := flag.String("listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
+	tenant := flag.String("entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
+	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated")
 	flag.Parse()
 	if *cfg == "" || *bkt == "" || *key == "" {
 		fail("-config, -bucket and -signing-key are required")
@@ -86,7 +93,44 @@ func main() {
 	}
 	slog.Info("golem-control: running", "replica", replica, "pools", *pools, "signing key", signer.KeyID())
 	go st.Run(ctx) //qenv:ok the state refresh loop, ended by ctx
+	if *listen != "" {
+		srv, err := apiServer(ctx, *listen, *tenant, *audience, st)
+		if err != nil {
+			fail("-listen: %v", err)
+		}
+		go func() { //qenv:ok the API server, shut down below
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fail("the control API: %v", err)
+			}
+		}()
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			srv.Shutdown(sctx)
+		}()
+		slog.Info("golem-control: the control API is listening", "addr", *listen)
+	}
 	c.Run(ctx)
+}
+
+// apiServer serves the control API, authenticated by Entra tokens: no
+// API without a tenant, since an unauthenticated one would let anyone
+// mint keys.
+func apiServer(ctx context.Context, listen, tenant, audience string, st *state.Store) (*http.Server, error) {
+	if tenant == "" {
+		return nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
+	}
+	e := &auth.Entra{Tenant: tenant, Audiences: strings.Split(audience, ",")}
+	if err := e.Refresh(ctx); err != nil {
+		return nil, fmt.Errorf("Entra's signing keys: %w", err)
+	}
+	go e.Run(ctx) //qenv:ok the key refresh loop, ended by ctx
+	h := (&api.Server{Service: &service.Service{State: st}, Auth: api.EntraAuth{Entra: e, State: st}}).Handler()
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true) // gRPC behind the mesh, which ends TLS
+	return &http.Server{Addr: listen, Handler: h, Protocols: &protocols, ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, nil
 }
 
 // openBucket is a directory, or an S3 bucket with the default AWS

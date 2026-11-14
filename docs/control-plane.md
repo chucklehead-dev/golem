@@ -57,7 +57,13 @@ models; the plaintext returned once, the hash stored) and `RevokeKey`
 (the key's owner, its scope's managers, admins). Each writes its audit
 event with its change in one update; the store numbers events and refuses
 an outbox that loses anything but its oldest or skips a number. The
-transport (`control/api`, Connect) and the Entra caller come next.
+transport is `control/api`: `golem.org.v1.OrgService` and
+`golem.keys.v1.KeyService` (proto/golem, generated into gen/), served by
+connect-go as gRPC, gRPC-Web and HTTP/JSON, every call authenticated by an
+Entra token (`EntraAuth`: the token's user or service is the principal
+with that Entra ID; `golem.admin` makes it an admin; one with no principal
+yet is `entra:<id>`), errors mapped to Connect codes with the field path.
+`golem-control -listen` serves it, and only with `-entra-tenant`.
 
 `validate_only` on every mutating method lets `golemctl` and the console
 show errors with field paths before anything is written. Config CRDs are

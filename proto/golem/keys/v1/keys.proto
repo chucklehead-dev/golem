@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+// The keys API (architecture.md §3).
+package golem.keys.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/chucklehead-dev/golem/gen/golem/keys/v1;keysv1";
+
+service KeyService {
+  // Mints a key: a member its own, a scope's managers its services', admins
+  // any. The key is in the response once; golem keeps only its hash.
+  rpc MintKey(MintKeyRequest) returns (MintKeyResponse);
+  // Revokes a key: its owner, its scope's managers, or admins.
+  rpc RevokeKey(RevokeKeyRequest) returns (RevokeKeyResponse);
+}
+
+message MintKeyRequest {
+  // The principal the key acts as.
+  string owner = 1;
+  string scope = 2;
+  // Narrows the scope's models; empty: all of them.
+  repeated string models = 3;
+  google.protobuf.Timestamp expires = 4;
+  bool validate_only = 5;
+}
+
+message MintKeyResponse {
+  // The key itself: shown once, never stored.
+  string key = 1;
+  // Its hex SHA-256, which names it from now on.
+  string hash = 2;
+  // The shown prefix.
+  string display = 3;
+}
+
+message RevokeKeyRequest {
+  string hash = 1;
+  bool validate_only = 2;
+}
+
+message RevokeKeyResponse {}
