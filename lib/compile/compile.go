@@ -117,6 +117,52 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 	return s, nil
 }
 
+// Renew is a published snapshot rebuilt as a new publication: its config
+// part (backends, routes, currency and prices, which Compile built from
+// the config alone) kept as published, and o's sequence, time, lease and
+// entitlements, checked for unpriced scopes as Compile checks them. A
+// published snapshot's entitlements are the state's alone (Compile refuses
+// a LocalIdentity outside standalone mode), so nothing of the config is
+// lost: this is what golem-control renews from when no config in its
+// directory has compiled since it started (a restart over a broken edit).
+func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
+	var ps Problems
+	add := func(obj, path, msg string, args ...any) {
+		ps = append(ps, Problem{obj, path, fmt.Sprintf(msg, args...)})
+	}
+	if o.Standalone || o.Lease <= 0 {
+		add("compile", "options", "a renewed publication needs an authorization lease (ADR 0030), and is never standalone")
+	}
+	if prev.Entitlements.Implicit || prev.ValidUntil.IsZero() {
+		add("snapshot", "entitlements", "publication %d is a standalone snapshot, not one golem-control published", prev.PublishSeq)
+	}
+	cat := catalog{dialect: map[string]string{}, models: map[target][]string{}}
+	for _, b := range prev.Backends {
+		cat.add(b)
+	}
+	var aliases []string
+	for _, r := range prev.Routes {
+		aliases = append(aliases, r.Alias)
+	}
+	slices.Sort(aliases)
+	var ents snapshot.Entitlements
+	if o.Entitlements != nil {
+		ents = o.Entitlements(aliases)
+	}
+	if o.Unpriced != nil {
+		ents.Scopes = withoutUnpriced(ents.Scopes, prev.Routes, cat, prev.Prices, o.Unpriced)
+	} else {
+		checkPriced(ents.Scopes, prev.Routes, cat, prev.Prices, add)
+	}
+	if len(ps) > 0 {
+		return nil, ps
+	}
+	s := &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: o.PublishSeq, IssuedAt: o.Now.UTC(), ValidUntil: o.Now.Add(o.Lease).UTC(),
+		Backends: prev.Backends, Routes: prev.Routes, Entitlements: ents, Currency: prev.Currency, Prices: prev.Prices}
+	s.Source.ConfigDigest = digest(s.Backends, s.Routes)
+	return s, nil
+}
+
 // objectName names an object in a problem: its kind and name, and where it
 // was read.
 func objectName(kind, name, where string) string { return kind + "/" + name + " (" + where + ")" }

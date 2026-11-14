@@ -235,6 +235,43 @@ func (p *Publisher) finish(ctx context.Context, pr prepared, lease Lease, source
 	return ptr, nil
 }
 
+// Published is the pool's current publication as a gateway would take it:
+// the pointer verified (with the signer's own public half or Keys) as this
+// pool's, then the snapshot it names, its hash and sequence checked
+// against the pointer. bucket.ErrNotFound if nothing is published yet.
+func (p *Publisher) Published(ctx context.Context) (*snapshot.Snapshot, error) {
+	keys := p.keys()
+	if keys == nil {
+		return nil, errors.New("publish: no Keys to verify the pool's pointer with: set Publisher.Keys to the publishing key's public half")
+	}
+	raw, _, err := p.Bucket.Get(ctx, snapshot.PointerKey(p.Pool), "")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", snapshot.PointerKey(p.Pool), err)
+	}
+	ptr, err := snapshot.OpenPointer(raw, keys)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", snapshot.PointerKey(p.Pool), err)
+	}
+	if ptr.Pool != p.Pool {
+		return nil, fmt.Errorf("%s names pool %q", snapshot.PointerKey(p.Pool), ptr.Pool)
+	}
+	body, _, err := p.Bucket.Get(ctx, snapshot.ObjectKey(p.Pool, ptr.Hash), "")
+	if err != nil {
+		return nil, fmt.Errorf("snapshot %s: %w", ptr.Hash, err)
+	}
+	if got := snapshot.Hash(body); got != ptr.Hash {
+		return nil, fmt.Errorf("snapshot %s hashes to %s: not the object the pointer signed", ptr.Hash, got)
+	}
+	s, err := snapshot.Decode(body)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot %s: %w", ptr.Hash, err)
+	}
+	if s.PublishSeq != ptr.PublishSeq {
+		return nil, fmt.Errorf("snapshot %s is publication %d, its pointer says %d", ptr.Hash, s.PublishSeq, ptr.PublishSeq)
+	}
+	return s, nil
+}
+
 // holds refuses a publication unless the document's fence, l, is want.
 func holds(l *state.Fence, want Lease) error {
 	if l == nil || *l != want {

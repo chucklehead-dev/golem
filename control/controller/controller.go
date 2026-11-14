@@ -66,7 +66,11 @@ type Controller struct {
 	// unpriced is what the last publication left out of scopes, by
 	// Options.Unpriced (under mu): each scope's aliases that reach a model
 	// no PriceList prices.
-	unpriced  []compile.Problem
+	unpriced []compile.Problem
+	// renewing is each pool's publication as found in the bucket, renewed
+	// (compile.Renew) while no config has compiled since this replica
+	// started; nil once one has.
+	renewing  map[string]*snapshot.Snapshot
 	published struct { // the last publication that reached every pool
 		sum   [32]byte // its config's
 		ents  [32]byte // the state's entitlements published
@@ -114,7 +118,15 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	doc := c.Elector.State.Current()
 	cfgErr := c.load(doc)
 	if c.goodSum == ([32]byte{}) {
-		return false, fmt.Errorf("no config has compiled yet: %w", cfgErr)
+		// No config has compiled since this replica started: renew what is
+		// published (it compiled when it was), so a restart over a broken
+		// edit cannot let every gateway's authorization lapse either.
+		if err := c.loadPublished(ctx); err != nil {
+			return false, fmt.Errorf("no config has compiled yet, and nothing published can be renewed: fix the config directory: %w", errors.Join(cfgErr, err))
+		}
+		cfgErr = fmt.Errorf("renewing the published config: the config directory does not compile, and none has since golem-control started; fix it: %w", cfgErr)
+	} else {
+		c.renewing = nil
 	}
 	ents, err := entitlementsSum(doc)
 	if err != nil {
@@ -215,9 +227,19 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	}
 	built, unpriced := false, map[string]compile.Problem{} // every pool's build leaves out the same
 	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, fence, doc.StateVersion, pubs,
-		func(_ *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
-			s, err := compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
-				Entitlements: c.entitlements(doc), Unpriced: func(p compile.Problem) { unpriced[p.String()] = p }})
+		func(p *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
+			o := compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
+				Entitlements: c.entitlements(doc), Unpriced: func(q compile.Problem) { unpriced[q.String()] = q }}
+			var s *snapshot.Snapshot
+			var err error
+			switch prev, renewing := c.renewing[p.Pool]; {
+			case c.goodSum != ([32]byte{}):
+				s, err = compile.Compile(c.good, o)
+			case renewing:
+				s, err = compile.Renew(prev, o)
+			default:
+				err = fmt.Errorf("nothing published to renew, and no config has compiled: fix the config directory")
+			}
 			built = built || err == nil
 			return s, err
 		})
@@ -306,6 +328,34 @@ func (c *Controller) load(doc *state.Document) error {
 	c.mu.Lock()
 	c.good, c.goodSum = objs, sum
 	c.mu.Unlock()
+	return nil
+}
+
+// loadPublished reads each pool's current publication from the bucket,
+// verified as a gateway verifies it (publish.Publisher.Published), to be
+// renewed while no config has compiled since this replica started. It is
+// read once; this replica's renewals keep its config part. It fails only
+// if no pool has a publication to renew.
+func (c *Controller) loadPublished(ctx context.Context) error {
+	if c.renewing != nil {
+		return nil
+	}
+	found := map[string]*snapshot.Snapshot{}
+	var errs []error
+	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
+		s, err := c.Publishers[pool].Published(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
+			continue
+		}
+		found[pool] = s
+		c.log().Error("golem-control: renewing the published config: the config directory does not compile, and none has since this replica started; fix it",
+			"pool", pool, "seq", s.PublishSeq, "configDigest", s.Source.ConfigDigest)
+	}
+	if len(found) == 0 {
+		return errors.Join(errs...)
+	}
+	c.renewing = found
 	return nil
 }
 

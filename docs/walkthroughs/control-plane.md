@@ -322,8 +322,25 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    cannot let every gateway's authorization lapse. That includes an edit
    that, against the state's scopes, leaves a budgeted scope reaching a
    model no PriceList prices where the last good config priced it (a price
-   removed, a route moved): the edit is the config's mistake. Until some
-   config has compiled, nothing is published.
+   removed, a route moved): the edit is the config's mistake.
+   **Until some config has compiled** since this replica started (a
+   restart, or a takeover, while the directory is broken), the last good
+   config is the published one: `loadPublished` reads each pool's current
+   pointer and snapshot once, verified as a gateway verifies them
+   (`Publisher.Published`: the pointer's signature and pool, the
+   snapshot's hash and sequence), and each publication renews it
+   (`compile.Renew`). A published snapshot decomposes exactly: its
+   backends, routes, currency and prices are the config's alone (its
+   entitlements are always the state's, a `LocalIdentity` being refused
+   outside standalone mode), so `Renew` keeps them as published and gives
+   the publication a new sequence, lease and the current entitlements,
+   checked for unpriced scopes as `Compile` checks them. The step's error
+   says so (`renewing the published config: the config directory does not
+   compile`, with the directory's problems) every step until the
+   directory compiles; then that config is published. With nothing
+   published to renew either, nothing is published. Before this, the last
+   good config lived only in memory, and a restarted leader over a broken
+   directory published nothing until every gateway's lease lapsed.
 4. **Due?** (`due`, `controller.go:130`) A publication is due when the good
    config's hash, the entitlements' hash or the epoch differs from the last
    publication's, or the renewal interval (`Renew`, default a minute) has
@@ -525,8 +542,11 @@ path with a real gateway source over one bucket.
   broken edit renews the last good config, a paused leader is fenced), the
   revocation path (`TestEntitlements`), the group sync reaching the
   gateway (`TestGroupSync`), known spend reaching it (`TestKnownSpend`),
-  and an unpriced budgeted scope failing closed alone while every pool is
-  published, an edit leaving one unpriced refused (`TestUnpricedScope`).
+  an unpriced budgeted scope failing closed alone while every pool is
+  published, an edit leaving one unpriced refused (`TestUnpricedScope`),
+  and a leader started over a broken directory renewing the published
+  config (`TestRestartOverBrokenConfig`; `lib/compile`'s `TestRenew`:
+  a renewal is what compiling the config again would publish).
 - `control/audit`: archive, emit, trim; a retry after a crash; a mismatch;
   batches.
 - `cmd/golem-control`: `TestKeygen`, `TestOpenSigner`, `TestAPINeedsTenant`,

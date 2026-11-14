@@ -208,7 +208,10 @@ control plane.
     the config changes, when it becomes leader, and every minute to renew
     the authorization lease; a config that does not compile, trial-compiled
     with the state's entitlements, is reported and the last good one
-    renewed. A budgeted scope of the state's that reaches a model no
+    renewed; a leader with none compiled since it started (a restart over
+    a broken edit) renews the publication in the bucket, verified as a
+    gateway verifies it, with the current entitlements, and says so. A
+    budgeted scope of the state's that reaches a model no
     PriceList prices is published without that alias (it fails closed)
     and reported, never stopping the publication; the control API refuses
     to create one. Every pool gets the same snapshot, its
