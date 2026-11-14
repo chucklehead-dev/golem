@@ -29,16 +29,12 @@ type exchange struct {
 	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
 	tail       []byte     // a non-streamed response, for its usage
 	callerGone bool       // a write to the caller failed
-	received   int64      // the response's bytes so far (MaxResponse)
+	received   int64      // the response's bytes so far (MaxResponse; an estimate's bound)
 
 	// The usage readers' methods, bound once: a method value allocates
 	// each time it is taken, and the readers stay at these addresses.
-	msgWant func([]byte) bool
-	// The bytes of skipped Anthropic content deltas, for an estimate: the
-	// parser's skipped bytes since the last event, when that was a delta.
-	deltaBytes, skipMark int64
-	inDelta              bool
-	msgOn, chatOn        func(event, data []byte)
+	msgWant       func([]byte) bool
+	msgOn, chatOn func(event, data []byte)
 
 	// The caller's side of the response: each write has a deadline, set
 	// before it and cleared after (net/http's idiom, as nginx's
@@ -54,7 +50,7 @@ type exchange struct {
 
 var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
-	ex.msgWant, ex.msgOn, ex.chatOn = ex.wantMsg, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
+	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
 	ex.filter.Drop = dropUsageOnly
 	ex.lim = newBounds()
 	return ex
@@ -100,8 +96,7 @@ func dropUsageOnly(_, data []byte) bool { return chat.UsageOnly(data) }
 
 func getExchange() *exchange {
 	ex := exchanges.Get().(*exchange)
-	ex.callerGone = false
-	ex.received = 0
+	ex.callerGone, ex.received = false, 0
 	return ex
 }
 
@@ -185,21 +180,4 @@ func (u *upstreamBody) Close() error {
 		u.buf = nil
 	}
 	return nil
-}
-
-// wantMsg is the Anthropic stream's Want: the reader's, which skips content
-// deltas, with each skipped delta's bytes kept for an estimate.
-func (ex *exchange) wantMsg(event []byte) bool {
-	ex.closeDelta()
-	ex.inDelta = string(event) == "content_block_delta"
-	return ex.msgUsage.Want(event)
-}
-
-// closeDelta attributes the bytes skipped since the last event to it, if
-// it was a content delta.
-func (ex *exchange) closeDelta() {
-	if ex.inDelta {
-		ex.deltaBytes += ex.parser.Skipped - ex.skipMark
-	}
-	ex.skipMark, ex.inDelta = ex.parser.Skipped, false
 }

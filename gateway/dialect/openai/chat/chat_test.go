@@ -112,6 +112,20 @@ func TestStreamUsage(t *testing.T) {
 	}
 }
 
+func TestInvalidUsageDoesNotBecomeFinal(t *testing.T) {
+	for _, body := range []string{
+		`{"usage":{}}`,
+		`{"usage":{"prompt_tokens":1}}`,
+		`{"usage":{"prompt_tokens":1,"completion_tokens":-1}}`,
+	} {
+		var u StreamUsage
+		u.Response([]byte(body))
+		if u.Final || u.Err == nil {
+			t.Errorf("%s: Final=%v Err=%v, want a non-final invalid report", body, u.Final, u.Err)
+		}
+	}
+}
+
 func TestMayHaveUsage(t *testing.T) {
 	for in, want := range map[string]bool{
 		`{"choices":[{"delta":{"content":"hi"}}],"usage":null}`:                       false,

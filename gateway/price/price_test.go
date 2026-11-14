@@ -1,6 +1,7 @@
 package price
 
 import (
+	"math"
 	"testing"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -17,5 +18,11 @@ func TestCost(t *testing.T) {
 		if got := halfEven(tc.n, 1_000_000); got != tc.want {
 			t.Errorf("halfEven(%d) = %d, want %d", tc.n, got, tc.want)
 		}
+	}
+	if _, ok := Worst(1, math.MaxInt64, 2, p); ok {
+		t.Error("Worst accepted maxOutput * completions overflow")
+	}
+	if c := Cost(canon.Usage{Output: 1 << 40}, snapshot.Price{OutputPerMTok: 75_000_000}); c != MaxCost {
+		t.Errorf("an absurd usage report costs %d, want MaxCost: it must saturate, not wrap", c)
 	}
 }

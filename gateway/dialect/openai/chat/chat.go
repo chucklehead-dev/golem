@@ -252,17 +252,10 @@ func (r *Request) Rewrite(dst, body []byte, model string) []byte {
 type StreamUsage struct {
 	Usage canon.Usage
 	Err   error
-	// Final: the usage is the provider's. Else a cut stream's output is
-	// estimated from the content seen: a whole response's ContentBytes, or
-	// a stream's Deltas chunks (about a token each).
-	Final        bool
-	ContentBytes int64
-	Deltas       int64
+	// Final: the usage is the provider's. Else the gateway estimates it
+	// from the response's bytes (proxy's estimate).
+	Final bool
 }
-
-// contentKeys hold a chunk's or a response's content: text, reasoning, a
-// refusal and a tool call's arguments.
-var contentKeys = []string{"content", "reasoning_content", "refusal", "arguments"}
 
 var usageKey = []byte(`"usage"`)
 
@@ -295,7 +288,6 @@ func mayHaveUsage(data []byte) bool {
 
 // OnEvent reads one chunk; only a chunk that may carry usage is scanned.
 func (u *StreamUsage) OnEvent(_, data []byte) {
-	u.Deltas++
 	if mayHaveUsage(data) {
 		u.Response(data)
 	}
@@ -304,9 +296,8 @@ func (u *StreamUsage) OnEvent(_, data []byte) {
 // Response reads usage from a JSON object (a chunk or a whole response).
 // OpenAI's prompt_tokens include the cached ones; canon.Usage.Input does not.
 func (u *StreamUsage) Response(body []byte) {
-	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
 	var got canon.Usage
-	seen := false
+	seen, input, output := false, false, false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
 		if string(name) != "usage" {
 			return d.SkipValue()
@@ -316,13 +307,16 @@ func (u *StreamUsage) Response(body []byte) {
 			return err // null usage: an ordinary chunk
 		}
 		seen = true
-		u.Final = true
 		return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
 			switch string(name) {
 			case "prompt_tokens":
-				return readInt(d, &got.Input)
+				err := readInt(d, &got.Input)
+				input = err == nil
+				return err
 			case "completion_tokens":
-				return readInt(d, &got.Output)
+				err := readInt(d, &got.Output)
+				output = err == nil
+				return err
 			case "prompt_tokens_details":
 				return readDetail(d, "cached_tokens", &got.CacheRead)
 			case "completion_tokens_details":
@@ -331,6 +325,9 @@ func (u *StreamUsage) Response(body []byte) {
 			return d.SkipValue()
 		})
 	})
+	if err == nil && seen && (!input || !output) {
+		err = ErrField // a partial report must not suppress estimation
+	}
 	if err != nil {
 		if u.Err == nil {
 			u.Err = err
@@ -340,6 +337,7 @@ func (u *StreamUsage) Response(body []byte) {
 	if seen {
 		got.Input -= min(got.CacheRead, got.Input)
 		u.Usage = got
+		u.Final = true
 	}
 }
 
@@ -349,7 +347,7 @@ func readInt(d *jsonscan.Decoder, dst *int64) error {
 		return err
 	}
 	n, ok := jsonscan.Int(v)
-	if !ok {
+	if !ok || n < 0 {
 		return ErrField
 	}
 	*dst = n

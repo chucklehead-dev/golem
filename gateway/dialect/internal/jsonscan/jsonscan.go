@@ -15,6 +15,9 @@ import (
 // ErrNotObject is returned when the body is not a single JSON object.
 var ErrNotObject = errors.New("jsonscan: the request body must be one JSON object")
 
+// ErrNotArray is a value that should be an array and is not.
+var ErrNotArray = errors.New("jsonscan: expected a JSON array")
+
 // Span is a value's position in the body: body[Start:End] is its raw JSON.
 type Span struct{ Start, End int }
 
@@ -131,48 +134,32 @@ func Splice(dst, body []byte, s Span, value string) []byte {
 	return append(dst, body[s.End:]...)
 }
 
-// StringBytes is the total length, escapes counted as written, of the
-// string values of the given keys anywhere in data ("text", "arguments"):
-// the content of a delta or a response, for estimating its tokens when the
-// provider reported none. It is a byte search, not a parse: a raw quote
-// cannot occur inside a JSON string, so each `"key":"` found is a key's
-// string value (a provider's compact JSON; an estimate tolerates the rest).
-func StringBytes(data []byte, keys ...string) int {
-	n := 0
-	for _, k := range keys {
-		for rest := data; ; {
-			i := indexKey(rest, k)
-			if i < 0 {
-				break
-			}
-			rest = rest[i:]
-			end := stringEnd(rest)
-			n += end
-			rest = rest[end:]
+// Elements calls visit for each element of data, which must be exactly one
+// JSON array.
+func Elements(data []byte, visit func(elem jsontext.Value) error) error {
+	d := pool.Get().(*Decoder)
+	d.buf = *bytes.NewBuffer(data)
+	d.dec.Reset(&d.buf)
+	defer func() {
+		d.buf = bytes.Buffer{}
+		d.dec.Reset(&d.buf)
+		pool.Put(d)
+	}()
+	if d.dec.PeekKind() != '[' {
+		return ErrNotArray
+	}
+	if _, err := d.dec.ReadToken(); err != nil {
+		return err
+	}
+	for d.dec.PeekKind() != ']' {
+		v, err := d.dec.ReadValue()
+		if err != nil {
+			return err
+		}
+		if err := visit(v); err != nil {
+			return err
 		}
 	}
-	return n
-}
-
-// indexKey finds `"k":"` and returns where the value's characters begin.
-func indexKey(b []byte, k string) int {
-	i := bytes.Index(b, []byte(`"`+k+`":"`))
-	if i < 0 {
-		return -1
-	}
-	return i + len(k) + 4
-}
-
-// stringEnd is the length of a JSON string's characters up to its closing
-// quote.
-func stringEnd(b []byte) int {
-	for i := 0; i < len(b); i++ {
-		switch b[i] {
-		case '\\':
-			i++
-		case '"':
-			return i
-		}
-	}
-	return len(b)
+	_, err := d.dec.ReadToken() // ']'
+	return err
 }

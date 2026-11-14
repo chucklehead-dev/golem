@@ -5,6 +5,7 @@ package messages
 
 import (
 	"bytes"
+	"encoding/json/jsontext"
 	"errors"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -20,9 +21,46 @@ const (
 	FlagServerTools                   // a server tool (web search or fetch, code execution): egress, unbounded cost
 )
 
-// serverTools are the tool types the provider runs itself, by prefix of
-// their versioned type names ("web_search_20250305").
-var serverTools = []string{`"type":"web_search`, `"type":"web_fetch`, `"type":"code_execution`}
+// serverTools are the prefixes of versioned tool types the provider runs
+// itself ("web_search_20250305"). Tool objects are decoded below: byte
+// searches are unsafe for policy because insignificant whitespace and JSON
+// escapes would bypass them.
+var serverTools = []string{"web_search", "web_fetch", "code_execution"}
+
+// serverTool reports whether tools (a request's tools array of objects)
+// has a tool the provider runs itself. Each tool's type is read decoded
+// (whitespace and escapes cannot hide it) and its member name compared
+// without regard to case, as encoding/json would: a policy check fails
+// closed.
+func serverTool(tools []byte) (found bool, err error) {
+	err = jsonscan.Elements(tools, func(t jsontext.Value) error {
+		if t.Kind() != '{' {
+			return ErrField
+		}
+		return jsonscan.Object(t, func(name []byte, d *jsonscan.Decoder) error {
+			if !bytes.EqualFold(name, []byte("type")) {
+				return d.SkipValue()
+			}
+			v, _, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			if v.Kind() != '"' {
+				return ErrField
+			}
+			var buf [64]byte
+			typ, err := jsontext.AppendUnquote(buf[:0], v)
+			if err != nil {
+				return err
+			}
+			for _, prefix := range serverTools {
+				found = found || bytes.HasPrefix(typ, []byte(prefix))
+			}
+			return nil
+		})
+	})
+	return found, err
+}
 
 // known lists the request members golem forwards without comment; others
 // are forwarded and counted (and logged by name, ADR 0037).
@@ -94,10 +132,12 @@ func (r *Request) Scan(body []byte) error {
 			if err != nil {
 				return err
 			}
-			for _, t := range serverTools {
-				if bytes.Contains(v, []byte(t)) {
-					r.Flags |= FlagServerTools
-				}
+			server, err := serverTool(v)
+			if err != nil {
+				return ErrField // a shape the check could not read must not pass as no server tool
+			}
+			if server {
+				r.Flags |= FlagServerTools
 			}
 		default:
 			switch string(name) {
@@ -134,30 +174,17 @@ type StreamUsage struct {
 	Usage canon.Usage
 	Err   error // the first malformed usage event, if any
 	// Final: the output count is the provider's (a message_delta, or a
-	// whole response's usage). Else a cut stream's output is estimated
-	// from the content seen: a whole response's ContentBytes, or Deltas
-	// events whose data the parser skipped (and measured).
-	Final        bool
-	ContentBytes int64
-	Deltas       int64
+	// whole response's usage). Else the gateway estimates it from the
+	// response's bytes (proxy's estimate).
+	Final bool
 }
 
-// DeltaEnvelope is a content delta's data without its content: what an
-// estimate takes off each skipped delta's bytes.
-var DeltaEnvelope = int64(len(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`))
-
-// contentKeys hold a delta's or a response's content: text, thinking and a
-// tool call's JSON.
-var contentKeys = []string{"text", "thinking", "partial_json"}
-
 // Want skips the data of events that carry no usage: content deltas are
-// counted, and their data measured by the parser, not copied or scanned.
+// neither copied nor scanned.
 func (u *StreamUsage) Want(event []byte) bool {
 	switch string(event) {
 	case "message_start", "message_delta":
 		return true
-	case "content_block_delta":
-		u.Deltas++
 	}
 	return false
 }
@@ -179,7 +206,8 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 				if string(name) != "usage" {
 					return d.SkipValue()
 				}
-				return u.readUsage(d)
+				_, err = u.readUsage(d)
+				return err
 			})
 		})
 	case "message_delta":
@@ -187,8 +215,13 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 			if string(name) != "usage" {
 				return d.SkipValue()
 			}
-			u.Final = true
-			return u.readUsage(d)
+			var output bool
+			output, err = u.readUsage(d)
+			if err == nil && !output {
+				return ErrField
+			}
+			u.Final = err == nil
+			return err
 		})
 	}
 	if err != nil && u.Err == nil {
@@ -198,32 +231,43 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 
 // Response reads usage from a whole (non-streamed) response body.
 func (u *StreamUsage) Response(body []byte) {
-	u.ContentBytes = int64(jsonscan.StringBytes(body, contentKeys...))
+	seen := false
 	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
 		if string(name) != "usage" {
 			return d.SkipValue()
 		}
-		u.Final = true
-		return u.readUsage(d)
+		seen = true
+		var output bool
+		output, err := u.readUsage(d)
+		if err == nil && !output {
+			return ErrField
+		}
+		u.Final = err == nil
+		return err
 	})
+	if err == nil && !seen {
+		u.Final = false
+	}
 	if err != nil && u.Err == nil {
 		u.Err = err
 	}
 }
 
 // readUsage reads a usage object; counts are cumulative, so the last wins.
-func (u *StreamUsage) readUsage(d *jsonscan.Decoder) error {
+func (u *StreamUsage) readUsage(d *jsonscan.Decoder) (hasOutput bool, err error) {
 	v, _, err := d.ReadValue()
 	if err != nil {
-		return err
+		return false, err
 	}
-	return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
+	err = jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
 		var dst *int64
+		isOutput := false
 		switch string(name) {
 		case "input_tokens":
 			dst = &u.Usage.Input
 		case "output_tokens":
 			dst = &u.Usage.Output
+			isOutput = true
 		case "cache_read_input_tokens":
 			dst = &u.Usage.CacheRead
 		case "cache_creation_input_tokens":
@@ -239,10 +283,12 @@ func (u *StreamUsage) readUsage(d *jsonscan.Decoder) error {
 			return nil
 		}
 		n, ok := jsonscan.Int(v)
-		if !ok {
+		if !ok || n < 0 {
 			return ErrField
 		}
 		*dst = n
+		hasOutput = hasOutput || isOutput
 		return nil
 	})
+	return hasOutput, err
 }

@@ -181,7 +181,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt.MaxDuration > 0 {
 		deadline = started.Add(rt.MaxDuration)
 	}
-	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, price.Worst(int64(len(body)), req.maxTokens*req.n, pr))
+	worst, ok := price.Worst(int64(len(body)), req.maxTokens, req.n, pr)
+	if !ok {
+		h.fail(ctx, w, &refusal{contract.RequestInvalid, "the request's token count is too large to price safely: lower max_tokens or n"})
+		return
+	}
+	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, worst)
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
@@ -230,10 +235,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case !reachedProvider(err):
 		case r.Context().Err() != nil: // the caller left first: its input, at least, was read
 			call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
-			cost = price.Cost(canon.Usage{Input: requestBytes / bytesPerToken}, pr)
+			cost = price.Cost(canon.Usage{Input: requestBytes}, pr) // a token a byte, as Worst bounds it
 		default: // a timeout or a reset after the request went out: the worst it may have cost
 			call.Outcome = "uncertain"
-			cost = price.Worst(requestBytes, cmp.Or(req.maxTokens, uncertainOutput)*req.n, pr)
+			var ok bool
+			if cost, ok = price.Worst(requestBytes, cmp.Or(req.maxTokens, uncertainOutput), req.n, pr); !ok {
+				cost = price.MaxCost // too large to price: the most a call is charged
+			}
 		}
 		if cost > 0 {
 			call.Cost, call.EstimatedFraction = cost, 1
@@ -275,7 +283,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// from what was seen (ADR 0012), and its row says how much of its
 		// cost is estimated; never zero for work the provider did.
 		var estimated canon.Usage
-		res.Usage, estimated = ex.estimate(h.Dialect, requestBytes)
+		res.Usage, estimated = ex.estimate(h.Dialect, requestBytes, outputCeiling(req))
 		if est := price.Cost(estimated, pr); est > 0 {
 			call.EstimatedFraction = float64(est) / float64(max(price.Cost(res.Usage, pr), 1))
 		}

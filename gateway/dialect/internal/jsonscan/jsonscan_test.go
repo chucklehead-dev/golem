@@ -101,13 +101,3 @@ func FuzzObject(f *testing.F) {
 		}
 	})
 }
-
-func TestStringBytes(t *testing.T) {
-	data := []byte(`{"delta":{"type":"text_delta","text":"Hello, \"world\""},"x":{"text":"ab"},"arguments":"{\"a\":1}"}`)
-	if got := StringBytes(data, "text", "arguments"); got != len(`Hello, \"world\"`)+2+len(`{\"a\":1}`) {
-		t.Fatalf("StringBytes = %d", got)
-	}
-	if StringBytes([]byte(`{"text":"unterminated`), "text") != len("unterminated") {
-		t.Fatal("an unterminated string counts to the end")
-	}
-}
