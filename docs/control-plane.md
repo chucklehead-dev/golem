@@ -86,7 +86,14 @@ validate` (the snapshot compiler as a library), not by a live API call
 - **Audit outbox** (ADR 0006): a write's audit events go into the document
   with it; the leader ships them to ClickHouse as OTel log records and
   trims them only after durable separate-account Object Lock archival.
-  Collector acceptance is not the durability boundary.
+  Collector acceptance is not the durability boundary. Built:
+  `control/audit`'s Shipper, run by the leader (`golem-control
+  -audit-archive`, with `-telemetry` for the log records): each event
+  archived create-only as `audit/<seq>.json` (a retry after a crash finds
+  it archived and goes on; an archived object that differs stops shipping,
+  untrimmed), then emitted as a `golem.audit` log record (at least once:
+  ClickHouse keeps one row per seq, and fills a gap from the archive),
+  then trimmed from the outbox up to the last event shipped.
 - **Schema evolution**: additive protobuf changes need nothing. A breaking
   change takes two releases: release N reads the new schema and keeps
   writing the old; release N+1 writes the new. Mixed replicas during a

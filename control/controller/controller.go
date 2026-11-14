@@ -23,6 +23,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/chucklehead-dev/golem/control/audit"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -42,6 +43,9 @@ type Controller struct {
 	Lease, Renew time.Duration
 	Now          func() time.Time
 	Log          *slog.Logger
+	// Audit, if set, ships the state's audit outbox while this replica
+	// leads (control/audit).
+	Audit *audit.Shipper
 
 	good      v1.Objects // the last config that compiled
 	goodSum   [32]byte
@@ -157,6 +161,11 @@ func (c *Controller) Run(ctx context.Context) {
 		case <-t.C:
 		}
 		_, err := c.Step(ctx)
+		if c.Audit != nil && c.Elector.Epoch() != 0 {
+			if _, aerr := c.Audit.Step(ctx); aerr != nil {
+				err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
+			}
+		}
 		if msg := fmt.Sprint(err); err != nil && msg != last {
 			c.log().Error("golem-control", "err", err)
 			last = msg

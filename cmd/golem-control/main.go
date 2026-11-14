@@ -27,14 +27,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
 
 	"github.com/chucklehead-dev/golem/control/api"
+	"github.com/chucklehead-dev/golem/control/audit"
 	"github.com/chucklehead-dev/golem/control/controller"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/gateway/auth"
+	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
 	"github.com/chucklehead-dev/golem/lib/sign"
@@ -58,6 +62,8 @@ func main() {
 	id := flag.String("id", "", "this replica's name (default: the host name)")
 	authLease := flag.Duration("lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
 	listen := flag.String("listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
+	archive := flag.String("audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
+	telem := flag.String("telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for the audit's log records (TLS unless a literal loopback address)")
 	tenant := flag.String("entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated")
 	flag.Parse()
@@ -90,6 +96,27 @@ func main() {
 		if p = strings.TrimSpace(p); p != "" {
 			c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Pool: p}
 		}
+	}
+	if *archive != "" {
+		ab, err := openBucket(ctx, *archive)
+		if err != nil {
+			fail("-audit-archive: %v", err)
+		}
+		c.Audit = &audit.Shipper{State: st, Archive: ab}
+		if *telem != "off" {
+			p, shutdown, err := telemetry.OTLP(ctx, *telem, resource.NewSchemaless(attribute.String("service.name", "golem-control")))
+			if err != nil {
+				fail("-telemetry: %v", err)
+			}
+			defer func() {
+				sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				shutdown(sctx)
+			}()
+			c.Audit.Logger = p.Logger.Logger("golem-control")
+		}
+	} else {
+		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped, and grows in the state document")
 	}
 	slog.Info("golem-control: running", "replica", replica, "pools", *pools, "signing key", signer.KeyID())
 	go st.Run(ctx) //qenv:ok the state refresh loop, ended by ctx
