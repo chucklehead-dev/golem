@@ -47,6 +47,10 @@ type Problem struct {
 
 func (p Problem) String() string { return p.Object + ": " + p.Path + ": " + p.Msg }
 
+// adder records a Problem: the object, the field path, and a message
+// formatted as by fmt.Sprintf.
+type adder func(obj, path, msg string, args ...any)
+
 // Problems is every failure of one compile.
 type Problems []Problem
 
@@ -59,7 +63,9 @@ func (ps Problems) Error() string {
 }
 
 // Compile validates objs and builds a snapshot, sorted so that equal configs
-// give equal bytes.
+// give equal bytes. Problems are reported in the order of the objects'
+// kinds (backends, routes, entitlements, prices) and, within a kind, of
+// the objects.
 func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 	var ps Problems
 	add := func(obj, path, msg string, args ...any) {
@@ -68,39 +74,67 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 	if !o.Standalone && o.Lease <= 0 {
 		add("compile", "options", "a published snapshot needs an authorization lease (ADR 0030)")
 	}
+	backends, cat := compileBackends(objs.Backends, o.Standalone, add)
+	routes, aliases := compileRoutes(objs.Routes, cat, add)
+	// entitlements also refuses a LocalIdentity outside standalone mode, so
+	// it runs even when the state document's entitlements replace its own.
+	ents := entitlements(objs, o, aliases, add)
+	if !o.Standalone && o.Entitlements != nil {
+		ents = o.Entitlements(slices.Sorted(maps.Keys(aliases)))
+	}
+	currency, prices := priceList(objs, add)
+	checkPriced(ents.Scopes, routes, cat, prices, add)
+	if len(ps) > 0 {
+		return nil, ps
+	}
 
-	dialectOf := map[string]string{} // backend name to dialect
-	deployments := map[string]map[string]bool{}
+	slices.SortFunc(backends, func(x, y snapshot.Backend) int { return cmp.Compare(x.Name, y.Name) })
+	slices.SortFunc(routes, func(x, y snapshot.Route) int { return cmp.Compare(x.Alias, y.Alias) })
+	s := &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: o.PublishSeq, IssuedAt: o.Now.UTC(),
+		Backends: backends, Routes: routes, Entitlements: ents, Currency: currency, Prices: prices}
+	if o.Lease > 0 {
+		s.ValidUntil = o.Now.Add(o.Lease).UTC()
+	}
+	s.Source.ConfigDigest = digest(s.Backends, s.Routes)
+	return s, nil
+}
+
+// objectName names an object in a problem: its kind and name, and where it
+// was read.
+func objectName(kind, name, where string) string { return kind + "/" + name + " (" + where + ")" }
+
+// target is one deployment of one backend, as a pool names it.
+type target struct{ backend, deployment string }
+
+// catalog is what routes may refer to: the backends compiled, each
+// backend's first definition only.
+type catalog struct {
+	dialect map[string]string   // backend name to dialect
+	models  map[target][]string // a deployment's provider models: one, unless its name is repeated
+}
+
+// compileBackends validates the Backends. Every backend with a usable name
+// enters the catalog, problems or not, so that routes are checked against
+// it rather than reported as dangling too.
+func compileBackends(srcs []v1.Source[v1.Backend], standalone bool, add adder) ([]snapshot.Backend, catalog) {
+	cat := catalog{dialect: map[string]string{}, models: map[target][]string{}}
 	var out []snapshot.Backend
-	for _, src := range objs.Backends {
+	for _, src := range srcs {
 		b := src.Object
-		obj := "Backend/" + b.Metadata.Name + " (" + src.Where() + ")"
+		obj := objectName("Backend", b.Metadata.Name, src.Where())
 		if b.Metadata.Name == "" {
 			add(obj, "metadata.name", "required")
 			continue
 		}
-		if _, dup := dialectOf[b.Metadata.Name]; dup {
+		if _, dup := cat.dialect[b.Metadata.Name]; dup {
 			add(obj, "metadata.name", "another Backend has this name")
 			continue
 		}
 		if !slices.Contains(Dialects, b.Spec.Dialect) {
 			add(obj, "spec.dialect", "%q is not a dialect golem serves (%s)", b.Spec.Dialect, strings.Join(Dialects, ", "))
 		}
-		a := b.Spec.Auth
 		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect, AllowPrivate: b.Spec.Network.AllowPrivateAddresses,
-			Auth: snapshot.Auth{Header: strings.ToLower(a.Header), Scheme: a.Scheme, Env: a.Env}}
-		switch {
-		case a.Header == "":
-			add(obj, "spec.auth.header", "required: the header that carries the provider credential")
-		case (a.SecretRef == nil) == (a.Env == ""):
-			add(obj, "spec.auth", "give exactly one of secretRef and env")
-		case a.Env != "" && !o.Standalone:
-			add(obj, "spec.auth.env", "environment credentials are for standalone mode only; use secretRef (ADR 0023)")
-		case a.SecretRef != nil && (a.SecretRef.Name == "" || a.SecretRef.Key == ""):
-			add(obj, "spec.auth.secretRef", "needs name and key")
-		case a.SecretRef != nil:
-			sb.Auth.SecretRef = a.SecretRef.Name + "/" + a.SecretRef.Key
-		}
+			Auth: backendAuth(b.Spec.Auth, standalone, func(path, msg string) { add(obj, path, "%s", msg) })}
 		if len(b.Spec.Deployments) == 0 {
 			add(obj, "spec.deployments", "a Backend needs at least one deployment")
 		}
@@ -117,22 +151,49 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 			if d.Model == "" {
 				add(obj, at+".model", "required: the provider's name for the model")
 			}
-			if msg := checkURL(d.URL, o.Standalone); msg != "" {
+			if msg := checkURL(d.URL, standalone); msg != "" {
 				add(obj, at+".url", "%s", msg)
 			}
 			sb.Deployments = append(sb.Deployments, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model})
 		}
 		slices.SortFunc(sb.Deployments, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 		out = append(out, sb)
-		dialectOf[sb.Name] = sb.Dialect
-		deployments[sb.Name] = names
+		cat.dialect[sb.Name] = sb.Dialect
+		for _, d := range sb.Deployments {
+			t := target{sb.Name, d.Name}
+			cat.models[t] = append(cat.models[t], d.Model)
+		}
 	}
+	return out, cat
+}
 
+// backendAuth validates a Backend's spec.auth and compiles it: the secret
+// as a reference, never a value (ADR 0005). It reports at most one problem.
+func backendAuth(a v1.Auth, standalone bool, bad func(path, msg string)) snapshot.Auth {
+	sa := snapshot.Auth{Header: strings.ToLower(a.Header), Scheme: a.Scheme, Env: a.Env}
+	switch {
+	case a.Header == "":
+		bad("spec.auth.header", "required: the header that carries the provider credential")
+	case (a.SecretRef == nil) == (a.Env == ""):
+		bad("spec.auth", "give exactly one of secretRef and env")
+	case a.Env != "" && !standalone:
+		bad("spec.auth.env", "environment credentials are for standalone mode only; use secretRef (ADR 0023)")
+	case a.SecretRef != nil && (a.SecretRef.Name == "" || a.SecretRef.Key == ""):
+		bad("spec.auth.secretRef", "needs name and key")
+	case a.SecretRef != nil:
+		sa.SecretRef = a.SecretRef.Name + "/" + a.SecretRef.Key
+	}
+	return sa
+}
+
+// compileRoutes validates the ModelRoutes against the catalog. It returns
+// the routes and their aliases, each with the ModelRoute that routes it.
+func compileRoutes(srcs []v1.Source[v1.ModelRoute], cat catalog, add adder) ([]snapshot.Route, map[string]string) {
 	aliases := map[string]string{}
 	var routes []snapshot.Route
-	for _, src := range objs.Routes {
+	for _, src := range srcs {
 		r := src.Object
-		obj := "ModelRoute/" + r.Metadata.Name + " (" + src.Where() + ")"
+		obj := objectName("ModelRoute", r.Metadata.Name, src.Where())
 		if r.Spec.Alias == "" {
 			add(obj, "spec.alias", "required: the model name callers send")
 			continue
@@ -149,12 +210,12 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 		sr.MaxDurationMs, sr.HeadersMs, sr.IdleMs = timeouts(r.Spec.Timeouts, func(field, msg string) { add(obj, "spec.timeouts."+field, "%s", msg) })
 		for i, m := range r.Spec.Pool {
 			at := fmt.Sprintf("spec.pool[%d]", i)
-			dialect, ok := dialectOf[m.Backend]
+			dialect, ok := cat.dialect[m.Backend]
 			switch {
 			case !ok:
 				add(obj, at+".backend", "no Backend named %q", m.Backend)
 				continue
-			case !deployments[m.Backend][m.Deployment]:
+			case cat.models[target{m.Backend, m.Deployment}] == nil:
 				add(obj, at+".deployment", "Backend %q has no deployment %q", m.Backend, m.Deployment)
 				continue
 			case m.Weight < 0:
@@ -168,38 +229,28 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 				add(obj, at+".backend", "Backend %q speaks %s, the pool's first member %s: a route's pool has one dialect (ADR 0033)",
 					m.Backend, dialect, sr.Dialect)
 			}
-			w := m.Weight
-			if w == 0 {
-				w = 1
-			}
-			sr.Pool = append(sr.Pool, snapshot.Target{Backend: m.Backend, Deployment: m.Deployment, Weight: w})
+			sr.Pool = append(sr.Pool, snapshot.Target{Backend: m.Backend, Deployment: m.Deployment, Weight: cmp.Or(m.Weight, 1)})
 		}
 		routes = append(routes, sr)
 	}
-	ents := entitlements(objs, o, aliases, add)
-	if !o.Standalone && o.Entitlements != nil {
-		ents = o.Entitlements(slices.Sorted(maps.Keys(aliases)))
-	}
-	currency, prices := priceList(objs, add)
-	// A scope with a budget is charged by price: every model it can reach
-	// needs one, or its budget could never be spent (contracts.md §4).
+	return routes, aliases
+}
+
+// checkPriced refuses a scope with a budget that can reach an unpriced
+// model: a scope with a budget is charged by price, so every model it can
+// reach needs one, or its budget could never be spent (contracts.md §4).
+func checkPriced(scopes []snapshot.Scope, routes []snapshot.Route, cat catalog, prices []snapshot.Price, add adder) {
 	priced := map[string]bool{}
 	for _, p := range prices {
 		priced[p.Model] = true
 	}
-	modelsOf := map[string][]string{} // alias -> provider models
+	modelsOf := map[string][]string{} // alias to provider models
 	for _, r := range routes {
 		for _, m := range r.Pool {
-			for _, b := range out {
-				for _, d := range b.Deployments {
-					if b.Name == m.Backend && d.Name == m.Deployment {
-						modelsOf[r.Alias] = append(modelsOf[r.Alias], d.Model)
-					}
-				}
-			}
+			modelsOf[r.Alias] = append(modelsOf[r.Alias], cat.models[target{m.Backend, m.Deployment}]...)
 		}
 	}
-	for _, sc := range ents.Scopes {
+	for _, sc := range scopes {
 		if sc.BudgetMicros == 0 {
 			continue
 		}
@@ -211,19 +262,6 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 			}
 		}
 	}
-	if len(ps) > 0 {
-		return nil, ps
-	}
-
-	slices.SortFunc(out, func(x, y snapshot.Backend) int { return cmp.Compare(x.Name, y.Name) })
-	slices.SortFunc(routes, func(x, y snapshot.Route) int { return cmp.Compare(x.Alias, y.Alias) })
-	s := &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: o.PublishSeq, IssuedAt: o.Now.UTC(),
-		Backends: out, Routes: routes, Entitlements: ents, Currency: currency, Prices: prices}
-	if o.Lease > 0 {
-		s.ValidUntil = o.Now.Add(o.Lease).UTC()
-	}
-	s.Source.ConfigDigest = digest(s.Backends, s.Routes)
-	return s, nil
 }
 
 // digest names the accepted config: equal configs, equal digests.

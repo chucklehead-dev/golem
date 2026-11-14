@@ -1,6 +1,6 @@
-// Package snapshot is the format of what the gateway runs on: routes and,
-// later, entitlements, compiled from the config CRDs and the state
-// (ADR 0006), and the signed lease that bounds how long it may be used
+// Package snapshot is the format of what the gateway runs on: backends,
+// routes, entitlements and prices, compiled from the config CRDs and the
+// state (ADR 0006), and the signed lease that bounds how long it may be used
 // (ADR 0030). It is data only; lib/compile builds it, the gateway compiles
 // it into lookup structures.
 //
@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
+	"strconv"
 	"time"
 )
 
@@ -159,13 +160,15 @@ type Route struct {
 	Alias   string   `json:"alias"`
 	Dialect string   `json:"dialect"`
 	Pool    []Target `json:"pool"`
-	// The call's bounds in milliseconds, the compiler's defaults filled in
-	// (ModelRoute spec.timeouts).
+	// Agent and ApprovedBetas are the ModelRoute's (spec.agent,
+	// spec.approvedBetas).
 	Agent         bool     `json:"agent,omitempty"`
 	ApprovedBetas []string `json:"approvedBetas,omitempty"`
-	MaxDurationMs int64    `json:"maxDurationMs"`
-	HeadersMs     int64    `json:"headersMs"`
-	IdleMs        int64    `json:"idleMs"`
+	// The call's bounds in milliseconds, the compiler's defaults filled in
+	// (ModelRoute spec.timeouts).
+	MaxDurationMs int64 `json:"maxDurationMs"`
+	HeadersMs     int64 `json:"headersMs"`
+	IdleMs        int64 `json:"idleMs"`
 }
 
 // Target is a pool member.
@@ -198,10 +201,8 @@ func Decode(b []byte) (*Snapshot, error) {
 type SchemaError struct{ Got int }
 
 func (e *SchemaError) Error() string {
-	return "snapshot schema " + itoa(e.Got) + ", this gateway reads " + itoa(Schema) + ": upgrade the gateway before the publisher"
+	return "snapshot schema " + strconv.Itoa(e.Got) + ", this gateway reads " + strconv.Itoa(Schema) + ": upgrade the gateway before the publisher"
 }
-
-func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
 // Hash is the hex SHA-256 of encoded bytes: a snapshot's name in the bucket
 // and in status.

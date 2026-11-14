@@ -35,6 +35,9 @@ type Bucket struct {
 	MaxObject int64
 }
 
+// defaultMaxObject is MaxObject's default.
+const defaultMaxObject = 256 << 20
+
 var _ bucket.Bucket = (*Bucket)(nil)
 
 func (b *Bucket) Get(ctx context.Context, key, ifNoneMatch string) ([]byte, string, error) {
@@ -49,7 +52,7 @@ func (b *Bucket) Get(ctx context.Context, key, ifNoneMatch string) ([]byte, stri
 	defer out.Body.Close()
 	limit := b.MaxObject
 	if limit <= 0 {
-		limit = 256 << 20
+		limit = defaultMaxObject
 	}
 	body, err := io.ReadAll(io.LimitReader(out.Body, limit+1))
 	if err != nil {
@@ -83,8 +86,7 @@ func (b *Bucket) Put(ctx context.Context, key string, body []byte, ifMatch strin
 // conditional write racing another: S3's ConditionalRequestConflict, which
 // is the same outcome for a compare-and-swap).
 func mapErr(key string, err error) error {
-	var re *smithyhttp.ResponseError
-	if errors.As(err, &re) {
+	if re, ok := errors.AsType[*smithyhttp.ResponseError](err); ok {
 		switch re.HTTPStatusCode() {
 		case http.StatusNotFound:
 			return bucket.ErrNotFound

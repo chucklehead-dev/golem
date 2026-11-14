@@ -1,8 +1,8 @@
 // Package v1alpha1 holds golem's config CRDs (group golem.dev, ADR 0005) as
 // Go types, and reads them from YAML. It has no Kubernetes client
 // dependency, so the gateway, golemctl and golem-control share it
-// (ADR 0023). This first version has Backend and ModelRoute; ScopePolicy,
-// Hook and PriceList follow.
+// (ADR 0023). This version has Backend, ModelRoute, PriceList and
+// LocalIdentity; ScopePolicy and Hook follow.
 package v1alpha1
 
 // APIVersion is the apiVersion of every golem config object.
@@ -10,8 +10,10 @@ const APIVersion = "golem.dev/v1alpha1"
 
 // Kinds this package reads.
 const (
-	KindBackend    = "Backend"
-	KindModelRoute = "ModelRoute"
+	KindBackend       = "Backend"
+	KindModelRoute    = "ModelRoute"
+	KindLocalIdentity = "LocalIdentity"
+	KindPriceList     = "PriceList"
 )
 
 // TypeMeta is an object's apiVersion and kind.
@@ -125,12 +127,6 @@ type PoolMember struct {
 	Deployment string `json:"deployment"`
 	Weight     int    `json:"weight,omitempty"`
 }
-
-// Kinds added with authentication.
-const (
-	KindLocalIdentity = "LocalIdentity"
-	KindPriceList     = "PriceList"
-)
 
 // LocalIdentity is standalone mode's stand-in for the state document's
 // entitlements (ADR 0023): scopes, their limits, and dev keys, for testing

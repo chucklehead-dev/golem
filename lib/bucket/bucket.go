@@ -63,11 +63,14 @@ func OpenDir(dir string) (*Dir, error) {
 // Close closes the directory.
 func (d *Dir) Close() error { return d.root.Close() }
 
+// etag is Dir's entity tag: a quoted digest of the contents, so equal
+// bodies have equal tags, as S3's do for a single-part put.
 func etag(b []byte) string {
 	h := sha256.Sum256(b)
 	return `"` + hex.EncodeToString(h[:16]) + `"`
 }
 
+// checkKey refuses a key that is not a clean relative slash path.
 func checkKey(key string) error {
 	if key == "" || strings.HasPrefix(key, "/") || path.Clean(key) != key || strings.Contains(key, "\\") {
 		return fmt.Errorf("bucket: invalid key %q", key)
@@ -75,6 +78,7 @@ func checkKey(key string) error {
 	return nil
 }
 
+// Get implements Bucket.Get. With ErrNotModified it returns the current tag.
 func (d *Dir) Get(_ context.Context, key, ifNoneMatch string) ([]byte, string, error) {
 	if err := checkKey(key); err != nil {
 		return nil, "", err
@@ -93,36 +97,54 @@ func (d *Dir) Get(_ context.Context, key, ifNoneMatch string) ([]byte, string, e
 	return b, t, nil
 }
 
+// Put implements Bucket.Put. Its mutex makes the condition's check and the
+// write one step, within this process.
 func (d *Dir) Put(_ context.Context, key string, body []byte, ifMatch string) (string, error) {
 	if err := checkKey(key); err != nil {
 		return "", err
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if ifMatch != "" {
-		cur, err := d.root.ReadFile(key)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			if ifMatch != Absent {
-				return "", ErrPrecondition
-			}
-		case err != nil:
-			return "", err
-		case ifMatch == Absent || etag(cur) != ifMatch:
-			return "", ErrPrecondition
-		}
+	if err := d.check(key, ifMatch); err != nil {
+		return "", err
 	}
+	if err := d.replace(key, body); err != nil {
+		return "", err
+	}
+	return etag(body), nil
+}
+
+// check tests a put's condition against the object as it is now.
+func (d *Dir) check(key, ifMatch string) error {
+	if ifMatch == "" {
+		return nil
+	}
+	cur, err := d.root.ReadFile(key)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if ifMatch != Absent {
+			return ErrPrecondition
+		}
+	case err != nil:
+		return err
+	case ifMatch == Absent || etag(cur) != ifMatch:
+		return ErrPrecondition
+	}
+	return nil
+}
+
+// replace writes body whole to a temporary file, then renames it over the
+// old object: a reader sees one or the other, never a torn object.
+func (d *Dir) replace(key string, body []byte) error {
 	if dir := path.Dir(key); dir != "." {
 		if err := d.root.MkdirAll(dir, 0o700); err != nil {
-			return "", err
+			return err
 		}
 	}
-	// Written whole, then renamed over the old: a reader sees one or the
-	// other, never a torn object.
 	tmp := key + ".tmp-" + rand.Text()
 	f, err := d.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return "", err
+		return err
 	}
 	_, err = f.Write(body)
 	if err == nil {
@@ -136,7 +158,6 @@ func (d *Dir) Put(_ context.Context, key string, body []byte, ifMatch string) (s
 	}
 	if err != nil {
 		d.root.Remove(tmp)
-		return "", err
 	}
-	return etag(body), nil
+	return err
 }

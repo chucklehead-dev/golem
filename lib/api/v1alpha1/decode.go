@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// Objects is a config set: every Backend and ModelRoute read, with where
+// Objects is a config set: every golem object read, by kind, with where
 // each came from.
 type Objects struct {
 	Backends   []Source[Backend]
@@ -37,16 +37,7 @@ func (s Source[T]) Where() string { return fmt.Sprintf("%s#%d", s.File, s.Doc) }
 // kustomization, a Secret) are skipped.
 func DecodeFS(fsys fs.FS) (Objects, error) {
 	var objs Objects
-	var files []string
-	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ext := path.Ext(p); !d.IsDir() && (ext == ".yaml" || ext == ".yml") {
-			files = append(files, p)
-		}
-		return nil
-	})
+	files, err := yamlFiles(fsys)
 	if err != nil {
 		return objs, err
 	}
@@ -63,11 +54,27 @@ func DecodeFS(fsys fs.FS) (Objects, error) {
 	return objs, nil
 }
 
+// yamlFiles lists fsys's YAML files in fs.WalkDir's order.
+func yamlFiles(fsys fs.FS) ([]string, error) {
+	var files []string
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ext := path.Ext(p); !d.IsDir() && (ext == ".yaml" || ext == ".yml") {
+			files = append(files, p)
+		}
+		return nil
+	})
+	return files, err
+}
+
 func (objs *Objects) decode(file string, b []byte) error {
 	for i, doc := range documents(b) {
+		n := i + 1
 		var tm TypeMeta
 		if err := yaml.Unmarshal(doc, &tm); err != nil {
-			return fmt.Errorf("%s#%d: %w", file, i+1, err)
+			return fmt.Errorf("%s#%d: %w", file, n, err)
 		}
 		if tm.APIVersion == "" && tm.Kind == "" {
 			continue // an empty document
@@ -76,37 +83,36 @@ func (objs *Objects) decode(file string, b []byte) error {
 			continue
 		}
 		if tm.APIVersion != APIVersion {
-			return fmt.Errorf("%s#%d: apiVersion %q: this version of golem reads %s", file, i+1, tm.APIVersion, APIVersion)
+			return fmt.Errorf("%s#%d: apiVersion %q: this version of golem reads %s", file, n, tm.APIVersion, APIVersion)
 		}
+		var err error
 		switch tm.Kind {
 		case KindBackend:
-			var o Backend
-			if err := yaml.UnmarshalStrict(doc, &o); err != nil {
-				return fmt.Errorf("%s#%d: Backend: %w", file, i+1, err)
-			}
-			objs.Backends = append(objs.Backends, Source[Backend]{o, file, i + 1})
+			err = decodeInto(&objs.Backends, doc, file, n)
 		case KindModelRoute:
-			var o ModelRoute
-			if err := yaml.UnmarshalStrict(doc, &o); err != nil {
-				return fmt.Errorf("%s#%d: ModelRoute: %w", file, i+1, err)
-			}
-			objs.Routes = append(objs.Routes, Source[ModelRoute]{o, file, i + 1})
+			err = decodeInto(&objs.Routes, doc, file, n)
 		case KindLocalIdentity:
-			var o LocalIdentity
-			if err := yaml.UnmarshalStrict(doc, &o); err != nil {
-				return fmt.Errorf("%s#%d: LocalIdentity: %w", file, i+1, err)
-			}
-			objs.Identities = append(objs.Identities, Source[LocalIdentity]{o, file, i + 1})
+			err = decodeInto(&objs.Identities, doc, file, n)
 		case KindPriceList:
-			var o PriceList
-			if err := yaml.UnmarshalStrict(doc, &o); err != nil {
-				return fmt.Errorf("%s#%d: PriceList: %w", file, i+1, err)
-			}
-			objs.Prices = append(objs.Prices, Source[PriceList]{o, file, i + 1})
+			err = decodeInto(&objs.Prices, doc, file, n)
 		default:
-			return fmt.Errorf("%s#%d: kind %q is not a golem config kind (Backend, ModelRoute, PriceList, LocalIdentity)", file, i+1, tm.Kind)
+			return fmt.Errorf("%s#%d: kind %q is not a golem config kind (Backend, ModelRoute, PriceList, LocalIdentity)", file, n, tm.Kind)
+		}
+		if err != nil {
+			return fmt.Errorf("%s#%d: %s: %w", file, n, tm.Kind, err)
 		}
 	}
+	return nil
+}
+
+// decodeInto decodes doc strictly, refusing unknown fields, and appends it
+// to list with where it was read.
+func decodeInto[T any](list *[]Source[T], doc []byte, file string, n int) error {
+	var o T
+	if err := yaml.UnmarshalStrict(doc, &o); err != nil {
+		return err
+	}
+	*list = append(*list, Source[T]{o, file, n})
 	return nil
 }
 
@@ -128,23 +134,20 @@ func documents(b []byte) [][]byte {
 // ContentHash hashes every YAML file's name and contents, as DecodeFS reads
 // them: a cheap test of whether a config directory changed.
 func ContentHash(fsys fs.FS) ([32]byte, error) {
+	var sum [32]byte
+	files, err := yamlFiles(fsys)
+	if err != nil {
+		return sum, err
+	}
 	h := sha256.New()
-	err := fs.WalkDir(fsys, ".", func(p string, e fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ext := path.Ext(p); e.IsDir() || (ext != ".yaml" && ext != ".yml") {
-			return nil
-		}
+	for _, p := range files {
 		b, err := fs.ReadFile(fsys, p)
 		if err != nil {
-			return err
+			return sum, err
 		}
 		fmt.Fprintf(h, "%s\x00%d\x00", p, len(b))
 		h.Write(b)
-		return nil
-	})
-	var sum [32]byte
+	}
 	copy(sum[:], h.Sum(nil))
-	return sum, err
+	return sum, nil
 }

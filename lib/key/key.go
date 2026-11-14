@@ -34,6 +34,8 @@ const (
 	DisplayLen = 16
 )
 
+// Parse's errors: a string that is not a golem key, and one whose checksum
+// fails.
 var (
 	ErrFormat   = errors.New("key: not a golem key (glm_live_ or glm_dev_ and 49 base62 characters)")
 	ErrChecksum = errors.New("key: the checksum does not match: the key is mistyped or truncated")
@@ -44,41 +46,36 @@ func New(env Env) string {
 	var b [36]byte
 	rand.Read(b[:32])
 	binary.BigEndian.PutUint32(b[32:], crc32.ChecksumIEEE(b[:32]))
-	return "glm_" + string(env) + "_" + encode(b[:])
+	return env.prefix() + encode(b[:])
 }
+
+// prefix is what a key of env starts with: "glm_live_" or "glm_dev_".
+func (env Env) prefix() string { return "glm_" + string(env) + "_" }
 
 // Parse checks a key's shape and checksum and returns its installation.
 func Parse(s string) (Env, error) {
-	var env Env
-	var body string
-	switch {
-	case strings.HasPrefix(s, "glm_live_"):
-		env, body = Live, s[len("glm_live_"):]
-	case strings.HasPrefix(s, "glm_dev_"):
-		env, body = Dev, s[len("glm_dev_"):]
-	default:
-		return "", ErrFormat
+	for _, env := range []Env{Live, Dev} {
+		body, ok := strings.CutPrefix(s, env.prefix())
+		if !ok {
+			continue
+		}
+		b, ok := decode(body)
+		if !ok {
+			return "", ErrFormat
+		}
+		if crc32.ChecksumIEEE(b[:32]) != binary.BigEndian.Uint32(b[32:]) {
+			return "", ErrChecksum
+		}
+		return env, nil
 	}
-	b, ok := decode(body)
-	if !ok {
-		return "", ErrFormat
-	}
-	if crc32.ChecksumIEEE(b[:32]) != binary.BigEndian.Uint32(b[32:]) {
-		return "", ErrChecksum
-	}
-	return env, nil
+	return "", ErrFormat
 }
 
 // Hash is what golem stores and looks a key up by.
 func Hash(s string) [32]byte { return sha256.Sum256([]byte(s)) }
 
 // Display is the part of a key that may be shown and logged.
-func Display(s string) string {
-	if len(s) > DisplayLen {
-		return s[:DisplayLen]
-	}
-	return s
-}
+func Display(s string) string { return s[:min(len(s), DisplayLen)] }
 
 var sixtyTwo = big.NewInt(62)
 
