@@ -4,10 +4,12 @@
 // copy, checks the store's invariants, increments state_version and writes
 // it with If-Match, re-reading and retrying when another writer won.
 //
-// This slice holds what publication needs: each pool's publication record
-// (control/publish numbers and fences by it). The rest of the outline in
-// §3.1 joins it as it is built. The encoding is JSON, decoded strictly; the
-// design's protobuf and zstd replace it behind Encode and Decode.
+// It holds golem-control's lease (control/lead), each pool's publication
+// record (control/publish numbers and fences by it), the entitlements
+// (entitlements.go) and the audit outbox (control/audit ships it). The
+// rest of the outline in §3.1 joins it as it is built. The encoding is
+// JSON, decoded strictly; the design's protobuf and zstd replace it behind
+// Encode and Decode.
 package state
 
 import (
@@ -177,13 +179,8 @@ func (s *Store) Current() *Document {
 // won. change may run more than once; an error from it ends the update
 // and is returned as it is. It returns the document written.
 func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Document, error) {
-	s.mu.Lock()
-	loaded := s.cur != nil
-	s.mu.Unlock()
-	if !loaded {
-		if err := s.Load(ctx); err != nil {
-			return nil, err
-		}
+	if err := s.loaded(ctx); err != nil {
+		return nil, err
 	}
 	attempts := s.Attempts
 	if attempts <= 0 {
@@ -191,14 +188,10 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 	}
 	for range attempts {
 		s.mu.Lock()
-		base, tag := s.cur.clone(), s.tag
+		base, tag := s.cur, s.tag
 		s.mu.Unlock()
-		next := base.clone()
-		if err := change(next); err != nil {
-			return nil, err
-		}
-		next.number()
-		if err := check(base, next); err != nil {
+		next, err := apply(base, change)
+		if err != nil {
 			return nil, err
 		}
 		next.Schema, next.StateVersion = Schema, base.StateVersion+1
@@ -208,6 +201,7 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 		}
 		newTag, err := s.Bucket.Put(ctx, DocumentKey, body, tag)
 		if errors.Is(err, bucket.ErrPrecondition) {
+			// Another writer won: read what it wrote and try again on that.
 			if err := s.Load(ctx); err != nil {
 				return nil, err
 			}
@@ -225,41 +219,80 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 // Validate applies change to a copy of the current document and checks the
 // invariants, writing nothing: validate_only (control-plane.md §2).
 func (s *Store) Validate(ctx context.Context, change func(*Document) error) error {
-	s.mu.Lock()
-	loaded := s.cur != nil
-	s.mu.Unlock()
-	if !loaded {
-		if err := s.Load(ctx); err != nil {
-			return err
-		}
-	}
-	base := s.Current()
-	next := base.clone()
-	if err := change(next); err != nil {
+	if err := s.loaded(ctx); err != nil {
 		return err
 	}
-	next.number()
-	return check(base, next)
+	s.mu.Lock()
+	base := s.cur
+	s.mu.Unlock()
+	_, err := apply(base, change)
+	return err
 }
 
-// check is what every write must keep: the lease's epoch never goes back
-// and is never dropped, and no pool's publication record is removed or
-// goes back in sequence, epoch or source (a publisher fenced by them must
-// stay fenced; model/publication.md).
+// loaded loads the document unless the store has read or written it.
+func (s *Store) loaded(ctx context.Context) error {
+	s.mu.Lock()
+	ok := s.cur != nil
+	s.mu.Unlock()
+	if ok {
+		return nil
+	}
+	return s.Load(ctx)
+}
+
+// apply is the part of a write that touches no bucket: change on a copy of
+// base, its new audit events numbered, the invariants checked. base is
+// read, never changed: the documents a store holds are replaced, never
+// edited in place.
+func apply(base *Document, change func(*Document) error) (*Document, error) {
+	next := base.clone()
+	if err := change(next); err != nil {
+		return nil, err
+	}
+	next.number()
+	if err := check(base, next); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// broken is an ErrInvariant naming what the change breaks.
+func broken(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrInvariant}, args...)...)
+}
+
+// check is what every write must keep, the lease's and the publication
+// records' here and the entitlements' in checkEntitlements.
 func check(old, next *Document) error {
-	if old.Leader != nil && (next.Leader == nil || next.Leader.Epoch < old.Leader.Epoch) {
-		return fmt.Errorf("%w: the lease's epoch goes back", ErrInvariant)
+	if err := checkLease(old, next); err != nil {
+		return err
 	}
 	if err := checkEntitlements(old, next); err != nil {
 		return err
 	}
+	return checkPublications(old, next)
+}
+
+// checkLease: the lease's epoch never goes back and the lease is never
+// dropped, so a fenced epoch stays fenced (control/lead).
+func checkLease(old, next *Document) error {
+	if old.Leader != nil && (next.Leader == nil || next.Leader.Epoch < old.Leader.Epoch) {
+		return broken("the lease's epoch goes back")
+	}
+	return nil
+}
+
+// checkPublications: no pool's publication record is removed or goes back
+// in sequence, epoch or source, so a publisher fenced by them stays fenced
+// (model/publication.md).
+func checkPublications(old, next *Document) error {
 	for pool, r := range old.Publications {
 		n, ok := next.Publications[pool]
 		if !ok {
-			return fmt.Errorf("%w: pool %s's publication record removed", ErrInvariant, pool)
+			return broken("pool %s's publication record removed", pool)
 		}
 		if n.Seq < r.Seq || n.Epoch < r.Epoch || n.Source < r.Source {
-			return fmt.Errorf("%w: pool %s's publication record goes back, %+v to %+v", ErrInvariant, pool, r, n)
+			return broken("pool %s's publication record goes back, %+v to %+v", pool, r, n)
 		}
 	}
 	return nil

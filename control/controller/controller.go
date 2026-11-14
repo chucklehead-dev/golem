@@ -64,6 +64,9 @@ func (c *Controller) now() time.Time {
 	return time.Now()
 }
 
+// lease is the snapshots' authorization lease: four hours unless set.
+func (c *Controller) lease() time.Duration { return cmp.Or(c.Lease, 4*time.Hour) }
+
 func (c *Controller) log() *slog.Logger {
 	if c.Log != nil {
 		return c.Log
@@ -105,7 +108,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	var errs []error
 	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
 		ptr, err := c.Publishers[pool].Publish(ctx, epoch, source, func(seq uint64) (*snapshot.Snapshot, error) {
-			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: cmp.Or(c.Lease, 4*time.Hour),
+			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
 				Entitlements: doc.Entitlements})
 		})
 		if err != nil {
@@ -121,7 +124,9 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	return true, cfgErr
 }
 
-// load reads the directory, keeping it as the good config if it compiles.
+// load reads the directory, keeping it as the good config if it compiles
+// (a trial compile with no entitlements). An unchanged directory costs a
+// content hash.
 func (c *Controller) load() error {
 	root, err := os.OpenRoot(c.Dir)
 	if err != nil {
@@ -140,7 +145,7 @@ func (c *Controller) load() error {
 	if err != nil {
 		return fmt.Errorf("config not applied, the last good one is published: %w", err)
 	}
-	if _, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: cmp.Or(c.Lease, 4*time.Hour)}); err != nil {
+	if _, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease()}); err != nil {
 		return fmt.Errorf("config not applied, the last good one is published: %w", err)
 	}
 	c.good, c.goodSum = objs, sum
@@ -166,11 +171,12 @@ func (c *Controller) Run(ctx context.Context) {
 				err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
 			}
 		}
-		if msg := fmt.Sprint(err); err != nil && msg != last {
-			c.log().Error("golem-control", "err", err)
-			last = msg
-		} else if err == nil {
+		switch {
+		case err == nil:
 			last = ""
+		case err.Error() != last:
+			c.log().Error("golem-control", "err", err)
+			last = err.Error()
 		}
 	}
 }

@@ -65,7 +65,8 @@ func (s *Shipper) Step(ctx context.Context) (int, error) {
 	}
 	last := events[len(events)-1].Seq
 	if _, err := s.State.Update(ctx, func(d *state.Document) error {
-		d.Audit = slices.DeleteFunc(slices.Clone(d.Audit), func(e state.AuditEvent) bool { return e.Seq <= last })
+		// d is the store's copy: its outbox may be edited in place.
+		d.Audit = slices.DeleteFunc(d.Audit, func(e state.AuditEvent) bool { return e.Seq <= last })
 		return nil
 	}); err != nil {
 		return 0, fmt.Errorf("audit: trimming the outbox to after %d: %w", last, err)

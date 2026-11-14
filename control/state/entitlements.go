@@ -80,71 +80,99 @@ func (d *Document) Has(principal, role, scope string) bool {
 	return slices.Contains(d.Roles, RoleBinding{principal, role, scope})
 }
 
-// Default in-flight limits when a scope sets none (lib/compile's).
+// Default in-flight limits when a state document's scope sets none.
+// lib/compile's defaults for a config CRD's scope are its own (4 and 16).
 const (
 	DefaultPrincipalInFlight = 8
 	DefaultScopeInFlight     = 64
 )
 
-// checkEntitlements is what every write keeps of the entitlements: every
-// key's owner exists, and a live key's owner is a member of its scope; a
-// principal's scopes exist and its default is one of them; no two
-// principals share an Entra ID; and a revocation is never dropped nor its
-// key revived.
+// checkEntitlements is what every write keeps of the entitlements and the
+// audit outbox.
 func checkEntitlements(old, next *Document) error {
-	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrInvariant}, a...)...) }
-	entra := map[string]string{}
-	for id, p := range next.Principals {
+	if err := checkPrincipals(next); err != nil {
+		return err
+	}
+	if err := checkKeys(next); err != nil {
+		return err
+	}
+	if err := checkRoles(next); err != nil {
+		return err
+	}
+	if !outboxFollows(old, next) {
+		return broken("the audit outbox may lose only its oldest events (shipped and archived) and gain new ones")
+	}
+	return checkRevocations(old, next)
+}
+
+// checkPrincipals: every principal is a user or a service, its scopes
+// exist and its default is one of them, and no two share an Entra ID.
+func checkPrincipals(d *Document) error {
+	entra := map[string]string{} // Entra ID to the principal that has it
+	for id, p := range d.Principals {
 		if p.Kind != "user" && p.Kind != "service" {
-			return bad("principal %s is a %q, not a user or service", id, p.Kind)
+			return broken("principal %s is a %q, not a user or service", id, p.Kind)
 		}
 		for _, s := range p.Scopes {
-			if _, ok := next.Scopes[s]; !ok {
-				return bad("principal %s is a member of %s, which does not exist", id, s)
+			if _, ok := d.Scopes[s]; !ok {
+				return broken("principal %s is a member of %s, which does not exist", id, s)
 			}
 		}
 		if p.Default != "" && !slices.Contains(p.Scopes, p.Default) {
-			return bad("principal %s's default scope %s is not one of its scopes", id, p.Default)
+			return broken("principal %s's default scope %s is not one of its scopes", id, p.Default)
 		}
 		if p.Entra != "" {
 			if other, dup := entra[p.Entra]; dup {
-				return bad("principals %s and %s share Entra ID %s", other, id, p.Entra)
+				return broken("principals %s and %s share Entra ID %s", other, id, p.Entra)
 			}
 			entra[p.Entra] = id
 		}
 	}
-	for _, k := range next.Keys {
-		owner, ok := next.Principals[k.Owner]
+	return nil
+}
+
+// checkKeys: every key's owner exists, and a live key's owner is a member
+// of its scope. A revoked key keeps its record after its owner leaves.
+func checkKeys(d *Document) error {
+	for _, k := range d.Keys {
+		owner, ok := d.Principals[k.Owner]
 		switch {
 		case !ok:
-			return bad("key %s's owner %s does not exist", k.Display, k.Owner)
+			return broken("key %s's owner %s does not exist", k.Display, k.Owner)
 		case k.RevokedAt.IsZero() && !slices.Contains(owner.Scopes, k.Scope):
-			// A live key's owner must be a member; a revoked key keeps its
-			// record after its owner leaves.
-			return bad("key %s's owner %s is not a member of its scope %s", k.Display, k.Owner, k.Scope)
+			return broken("key %s's owner %s is not a member of its scope %s", k.Display, k.Owner, k.Scope)
 		}
 	}
-	for _, r := range next.Roles {
+	return nil
+}
+
+// checkRoles: a role binding is a manager's, of a principal and on a scope
+// that exist.
+func checkRoles(d *Document) error {
+	for _, r := range d.Roles {
+		_, principal := d.Principals[r.Principal]
+		_, scope := d.Scopes[r.Scope]
 		switch {
 		case r.Role != "manager":
-			return bad("role %q is not one golem binds (manager)", r.Role)
-		case next.Principals[r.Principal].Kind == "":
-			return bad("a role for %s, who does not exist", r.Principal)
-		case !hasScope(next, r.Scope):
-			return bad("a role on %s, which does not exist", r.Scope)
+			return broken("role %q is not one golem binds (manager)", r.Role)
+		case !principal:
+			return broken("a role for %s, who does not exist", r.Principal)
+		case !scope:
+			return broken("a role on %s, which does not exist", r.Scope)
 		}
 	}
-	if !outboxFollows(old, next) {
-		return bad("the audit outbox may lose only its oldest events (shipped and archived) and gain new ones")
-	}
+	return nil
+}
+
+// checkRevocations: the revocations only grow, old ones unchanged, and a
+// key in them stays revoked: a revocation is never undone.
+func checkRevocations(old, next *Document) error {
 	if len(next.Revocations) < len(old.Revocations) || !slices.Equal(next.Revocations[:len(old.Revocations)], old.Revocations) {
-		return bad("revocations are append-only")
+		return broken("revocations are append-only")
 	}
-	// A revocation is never undone: every key revoked is in the
-	// revocations, which only grow, and a key in them stays revoked.
 	for _, r := range next.Revocations {
 		if k, ok := next.Keys[r.Key]; ok && k.RevokedAt.IsZero() {
-			return bad("key %s was revoked; a revocation is never undone", k.Display)
+			return broken("key %s was revoked; a revocation is never undone", k.Display)
 		}
 	}
 	return nil
@@ -173,13 +201,14 @@ func (d *Document) Revoke(hash string, at time.Time) error {
 func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 	var e snapshot.Entitlements
 	known := func(ms []string) []string {
-		return slices.Sorted(func(yield func(string) bool) {
-			for _, m := range ms {
-				if slices.Contains(aliases, m) && !yield(m) {
-					return
-				}
+		var in []string
+		for _, m := range ms {
+			if slices.Contains(aliases, m) {
+				in = append(in, m)
 			}
-		})
+		}
+		slices.Sort(in)
+		return in
 	}
 	for _, id := range slices.Sorted(maps.Keys(d.Scopes)) {
 		s := d.Scopes[id]
@@ -223,43 +252,47 @@ func firstOr(s []string) string {
 	return s[0]
 }
 
-func hasScope(d *Document, id string) bool { _, ok := d.Scopes[id]; return ok }
-
 // outboxFollows reports whether next's outbox is old's with some of its
 // oldest events trimmed (shipped and archived) and new ones appended: the
 // events kept are unchanged and a contiguous run ending at old's newest,
-// and the new ones are numbered on from old's last, without a gap.
+// and the new ones are numbered on from old's last, without a gap. The
+// counter never goes back.
 func outboxFollows(old, next *Document) bool {
-	var oldAt = map[uint64]AuditEvent{}
-	for _, e := range old.Audit {
-		oldAt[e.Seq] = e
+	if next.AuditSeq < old.AuditSeq {
+		return false
 	}
-	want := uint64(0) // the next seq expected; 0 until the first kept or new event
-	for _, e := range next.Audit {
-		switch {
-		case e.Seq <= old.AuditSeq:
+	// Kept events (numbered up to old's counter) come first; anything after
+	// the first new event must be new.
+	n := 0
+	for n < len(next.Audit) && next.Audit[n].Seq <= old.AuditSeq {
+		n++
+	}
+	kept, added := next.Audit[:n], next.Audit[n:]
+	want := old.AuditSeq + 1 // the first new event's number
+	if len(kept) > 0 {
+		oldAt := map[uint64]AuditEvent{}
+		for _, e := range old.Audit {
+			oldAt[e.Seq] = e
+		}
+		for i, e := range kept {
 			o, ok := oldAt[e.Seq]
-			if !ok || !reflect.DeepEqual(o, e) || (want != 0 && e.Seq != want) {
+			if !ok || !reflect.DeepEqual(o, e) || (i > 0 && e.Seq != kept[i-1].Seq+1) {
 				return false
 			}
-		case want == 0 && e.Seq != old.AuditSeq+1, want != 0 && e.Seq != want:
+		}
+		// The run must reach old's newest event: nothing kept may be
+		// followed by a gap where old events were dropped.
+		last := kept[len(kept)-1].Seq
+		if last != old.Audit[len(old.Audit)-1].Seq {
 			return false
 		}
-		want = e.Seq + 1
+		want = last + 1
 	}
-	// The kept run must reach old's newest event: nothing kept may be
-	// followed by a gap where old events were dropped.
-	if len(next.Audit) > 0 && next.Audit[0].Seq <= old.AuditSeq {
-		last := next.Audit[0].Seq
-		for _, e := range next.Audit {
-			if e.Seq > old.AuditSeq {
-				break
-			}
-			last = e.Seq
-		}
-		if len(old.Audit) > 0 && last != old.Audit[len(old.Audit)-1].Seq {
+	for _, e := range added {
+		if e.Seq != want {
 			return false
 		}
+		want++
 	}
-	return next.AuditSeq >= old.AuditSeq
+	return true
 }

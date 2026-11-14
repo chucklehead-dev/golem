@@ -1,5 +1,5 @@
 // Package lead elects golem-control's leader (control-plane.md §1, ADR
-// 0003): a lease in the state document, taken when it is free or has
+// 0045): a lease in the state document, taken when it is free or has
 // lapsed, renewed by its holder. Each change of hands increases the
 // lease's epoch, and the publisher is fenced by it (model/publication.md
 // §4.2, §6.4): a paused leader that publishes after losing the lease is

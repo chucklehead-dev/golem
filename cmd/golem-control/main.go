@@ -98,23 +98,12 @@ func main() {
 		}
 	}
 	if *archive != "" {
-		ab, err := openBucket(ctx, *archive)
+		shipper, shutdown, err := openAudit(ctx, st, *archive, *telem)
 		if err != nil {
-			fail("-audit-archive: %v", err)
+			fail("%v", err)
 		}
-		c.Audit = &audit.Shipper{State: st, Archive: ab}
-		if *telem != "off" {
-			p, shutdown, err := telemetry.OTLP(ctx, *telem, resource.NewSchemaless(attribute.String("service.name", "golem-control")))
-			if err != nil {
-				fail("-telemetry: %v", err)
-			}
-			defer func() {
-				sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				shutdown(sctx)
-			}()
-			c.Audit.Logger = p.Logger.Logger("golem-control")
-		}
+		defer shutdown()
+		c.Audit = shipper
 	} else {
 		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped, and grows in the state document")
 	}
@@ -158,6 +147,30 @@ func apiServer(ctx context.Context, listen, tenant, audience string, st *state.S
 	protocols.SetUnencryptedHTTP2(true) // gRPC behind the mesh, which ends TLS
 	return &http.Server{Addr: listen, Handler: h, Protocols: &protocols, ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, nil
+}
+
+// openAudit is the audit shipper over the archive, emitting log records to
+// the collector at telem unless it is "off". shutdown flushes the log
+// records, waiting at most five seconds.
+func openAudit(ctx context.Context, st *state.Store, archive, telem string) (_ *audit.Shipper, shutdown func(), _ error) {
+	ab, err := openBucket(ctx, archive)
+	if err != nil {
+		return nil, nil, fmt.Errorf("-audit-archive: %w", err)
+	}
+	s := &audit.Shipper{State: st, Archive: ab}
+	if telem == "off" {
+		return s, func() {}, nil
+	}
+	p, stop, err := telemetry.OTLP(ctx, telem, resource.NewSchemaless(attribute.String("service.name", "golem-control")))
+	if err != nil {
+		return nil, nil, fmt.Errorf("-telemetry: %w", err)
+	}
+	s.Logger = p.Logger.Logger("golem-control")
+	return s, func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stop(sctx)
+	}, nil
 }
 
 // openBucket is a directory, or an S3 bucket with the default AWS
