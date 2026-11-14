@@ -16,7 +16,7 @@ the one modelled), and rollbacks of each stored object.
 
 ## 1. The designs
 
-Three placements are compared (`DESIGN`):
+Four placements are compared (`DESIGN`):
 
 - `"doc"`, today (ADR 0045): the lease and every pool's publication record
   are fields of the state document. Taking the lease and winning a record
@@ -31,6 +31,9 @@ Three placements are compared (`DESIGN`):
   records move together into a lead object; the document keeps a copy of
   the epoch, bumped by a new leader before its first job, for the jobs to
   check. Publication checks the lead object.
+- `"hybrid"`, the specialist's revision: the records stay in the lead
+  object, but taking leadership is the architect's two steps, the claim in
+  the document, and a replica believes only after it.
 
 And the mechanisms each may need, as switches:
 
@@ -40,7 +43,11 @@ And the mechanisms each may need, as switches:
 | `GUARD` | a trusted checkpoint above the record means the record went back: publish above the checkpoint, never replace it with a lower one (today's `advance` replaces it) |
 | `CROSS_CHECK` | a new epoch is one more than the higher of the lease object's and the document's, not the lease object's alone |
 | `JOBS_AFTER_CLAIM` | a leader's jobs start (read the directory) only once its epoch is in the document: after the claim in `"fence"`, the bump in `"object"` (in `"fence"` belief begins at the claim, so this holds by construction) |
-| `ROLLBACK` | which stored object may be put back to an earlier version, once: `"none"`, `"doc"` or `"lead"` |
+| `ROLLBACK` | which stored object may be put back to an earlier version, once each: `"none"`, `"doc"`, `"lead"` or `"both"` |
+| `VERIFY` | the guard counts the stored checkpoint only if its signature verifies, refuses to publish (and alarms) when it is there unsigned or gone though a record or pointer says something was published, and numbers above the signed pointer too |
+| `CP_ATTACK` | someone who can write the bucket but not sign forges an unsigned checkpoint, copies an older signed one back, or deletes it |
+| `RESTORE` | the restore procedure: `"preserve"` writes an older document's contents above the current version keeping the fence and records, `"naive"` puts the old document back whole |
+| `LOST_REPLY` | a claim, or a record's write, lands but its writer is not told: the claimer re-reads the document (`adopt`); the publisher, seeing a conflict, writes neither checkpoint nor pointer |
 
 ```quint leadership.qnt +=
 // Generated from leadership.md by lmt. Edit the markdown, not this file.
@@ -214,9 +221,20 @@ today's `advance` replaces one it takes for not golem-control's.
     // GUARD: number above the stored checkpoint too, counting it only if
     // it verifies (VERIFY); an unverified one is not golem-control's.
     val counted = if (GUARD and (cpSigned or not(VERIFY))) checkpoint else 0
-    val s = maxOf(base, counted) + 1
+    // ...and above the current signed pointer: an older signed checkpoint
+    // copied back beside a rolled-back record is a consistent old pair, and
+    // only the pointer still carries the newer number. (An attacker who also
+    // copies an old pointer back makes all three agree: no design can tell,
+    // and the bucket policy is what stops it; see §6.)
+    val s = maxOf(base, maxOf(counted, if (GUARD and VERIFY) pointer else 0)) + 1
+    // VERIFY also refuses to publish, and alarms, when the checkpoint is
+    // there but does not verify, or is gone though the record or a pointer
+    // says a publication was made (the gateway's own rule for a missing
+    // checkpoint): either means someone other than golem-control wrote the
+    // bucket. Deleting the pointer too is beyond this model's attacker.
+    val tampered = VERIFY and (not(cpSigned) and (checkpoint > 0 or base > 0 or pointer > 0))
     all {
-      e > 0, fenced, not(lost) or LOST_REPLY,
+      e > 0, fenced, not(lost) or LOST_REPLY, not(tampered),
       if (recordsInDoc) all { writeDoc(doc.with("seq", s)), keepLead }
       else all { writeLead(lead.with("seq", s)), keepDoc },
       if (lost) all { checkpoint' = checkpoint, cpSigned' = cpSigned, cpHist' = cpHist, pointer' = pointer,
@@ -399,17 +417,32 @@ after a takeover.
 ## 6. What the search shows
 
 `check-leadership.sh` explores every run of the small instance (two
-replicas, a directory of three values, one rollback): each design with its
-mechanisms holds under each rollback it is shown with, in every run of up
-to nine steps (100,000 to 416,000 states each; ten needs more than 4 GiB of
-stored graph), and each mechanism is shown necessary by turning it off,
-the counterexample found within ten:
+replicas, a directory of three values). Each design with its mechanisms is
+shown holding to a depth (nine steps, eight with the checkpoint attacker,
+whose runs are longer; ten would need more than 4 GiB of stored graph), and
+each mechanism necessary by a counterexample found when it is off.
 
 | Design | Holds, with | Breaks without |
 |---|---|---|
-| today (`"doc"`) | jobs fenced in the document's write; the checkpoint guard | an unfenced sync (`noStaleSync`, the gap in today's group sync); without the guard, a rolled-back document lowers the floor (`floorNeverDrops`, today's `advance`); a rolled-back document lets an epoch be claimed twice, which a single object cannot prevent |
-| the architect's (`"fence"`) | jobs fenced in the document's write; the guard | an unfenced sync, or one fenced by reading the lease object first (`"readLease"`: check then act across two objects); without the guard, a rolled-back document lowers the floor. Without the cross-check nothing breaks: a rolled-back lease object only delays a takeover, since the claim still needs a higher epoch than the fence |
-| the specialist's (`"object"`) | jobs fenced by the epoch copy; jobs start only after the bump; the guard | jobs started before the bump let a deposed leader's sync land after the new leader read (`noStaleSync`); a rolled-back lead object lets an epoch be claimed twice even with the cross-check, when the new leader has not bumped the copy yet (`epochsUnique`); without the guard a rolled-back lead object lowers the floor |
+| today (`"doc"`) | jobs fenced in the document's write; the guard | an unfenced sync (`noStaleSync`: today's group sync); without the guard, a rolled-back document lowers the floor (`floorNeverDrops`: today's `advance`); a rolled-back document lets an epoch be claimed twice, which one object cannot prevent |
+| the architect's (`"fence"`) | jobs fenced in the document's write; the verifying guard; under each single rollback, the checkpoint attacker, the restore procedure and lost replies | an unfenced sync, or one fenced by reading the lease object first (check then act across two objects); without the guard, a rolled-back document lowers the floor; a guard that numbers above an unsigned checkpoint is inflated by a forgery (`noInflation`); one that ignores a missing or unsigned checkpoint, or counts only the checkpoint, lowers the floor when a rolled-back record meets a deleted, forged or replayed checkpoint. The cross-check is liveness only: a rolled-back lease object delays a takeover, since the claim still needs an epoch above the fence |
+| the specialist's first (`"object"`) | jobs fenced by the epoch copy; jobs only after the bump; the guard; no lead-object rollback | jobs started before the bump let a deposed leader's sync land after the new leader read; a rolled-back lead object lets an epoch be claimed twice even with the cross-check, the copy lagging the acquire |
+| the hybrid (`"hybrid"`) | as the architect's, under each single rollback, the checkpoint attacker and lost replies | as the architect's: an unfenced sync, no guard, an unverifying guard |
+
+Both remaining designs reuse an epoch when **both** objects are rolled
+back in one run (`ROLLBACK="both"`): with every stored copy of the epochs
+put back, nothing durable remains to number above. That, and an attacker
+who rolls the record back and copies back an older checkpoint *and* pointer
+so all three agree, are beyond any placement: the bucket policy (only
+golem-control's role writes `state/`, `control/` and the lease object) is
+what prevents them, and the document's versions, replicated under Object
+Lock, are what detects and recovers them. Running gateways refuse the
+lower publications either way (availability, not safety); only one
+restarting with an empty disk would take the lower floor.
+
+What the model leaves out: write volume, timing, and the lease object's
+lapse by clocks (any replica may acquire at any time, which only widens the
+behaviours checked).
 
 ## 7. The instances
 

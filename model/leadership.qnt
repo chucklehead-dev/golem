@@ -123,9 +123,20 @@ module leadership {
     // GUARD: number above the stored checkpoint too, counting it only if
     // it verifies (VERIFY); an unverified one is not golem-control's.
     val counted = if (GUARD and (cpSigned or not(VERIFY))) checkpoint else 0
-    val s = maxOf(base, counted) + 1
+    // ...and above the current signed pointer: an older signed checkpoint
+    // copied back beside a rolled-back record is a consistent old pair, and
+    // only the pointer still carries the newer number. (An attacker who also
+    // copies an old pointer back makes all three agree: no design can tell,
+    // and the bucket policy is what stops it; see §6.)
+    val s = maxOf(base, maxOf(counted, if (GUARD and VERIFY) pointer else 0)) + 1
+    // VERIFY also refuses to publish, and alarms, when the checkpoint is
+    // there but does not verify, or is gone though the record or a pointer
+    // says a publication was made (the gateway's own rule for a missing
+    // checkpoint): either means someone other than golem-control wrote the
+    // bucket. Deleting the pointer too is beyond this model's attacker.
+    val tampered = VERIFY and (not(cpSigned) and (checkpoint > 0 or base > 0 or pointer > 0))
     all {
-      e > 0, fenced, not(lost) or LOST_REPLY,
+      e > 0, fenced, not(lost) or LOST_REPLY, not(tampered),
       if (recordsInDoc) all { writeDoc(doc.with("seq", s)), keepLead }
       else all { writeLead(lead.with("seq", s)), keepDoc },
       if (lost) all { checkpoint' = checkpoint, cpSigned' = cpSigned, cpHist' = cpHist, pointer' = pointer,
