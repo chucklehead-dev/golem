@@ -108,6 +108,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqID, reqIDs := newRequestID()
 	w.Header()[contract.HeaderRequestID] = []string{reqIDs}
 
+	// Before authentication: a credential sent twice must not be judged by
+	// its first copy alone.
+	if err := contract.CheckSingleHeaders(r.Header); err != nil {
+		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: err.Error()})
+		return
+	}
 	snap, principal, no := h.authenticate(r)
 	if no != nil {
 		h.fail(ctx, w, no)

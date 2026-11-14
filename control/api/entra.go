@@ -45,8 +45,13 @@ func (a EntraAuth) Authenticate(_ context.Context, h http.Header) (service.Calle
 	return c, nil
 }
 
-// bearer is an Authorization header's token, if it has a non-empty one.
+// bearer is an Authorization header's token, if it has exactly one
+// Authorization header and a non-empty token in it: a second header is not
+// a credential to choose from.
 func bearer(h http.Header) (string, bool) {
+	if len(h.Values("Authorization")) != 1 {
+		return "", false
+	}
 	tok, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
 	tok = strings.TrimSpace(tok)
 	return tok, ok && tok != ""

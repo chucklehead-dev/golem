@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -185,5 +186,42 @@ spec:
 	time.Sleep(h.ProviderTail + 50*time.Millisecond) // the tail's timer: real time
 	if w := send(h, alice, body); w.Code == 429 {
 		t.Fatalf("after the provider's tail the slot is free: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestRepeatedCredential: a valid key followed by a second Authorization
+// header is refused before authentication, not judged by its first copy;
+// the key alone is admitted.
+func TestRepeatedCredential(t *testing.T) {
+	alice := key.New(key.Dev)
+	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: LocalIdentity
+metadata: {name: local}
+spec:
+  scopes:
+  - {name: team-a, models: [claude], inFlight: {principal: 1}}
+  keys:
+  - {key: `+alice+`, principal: alice, scope: team-a}
+`, &stub{events: anthropicStream(1)})
+	body := `{"model":"claude","max_tokens":10,"stream":true,"messages":[]}`
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+		code   int
+		err    string
+	}{
+		{"one key", http.Header{"Authorization": {"Bearer " + alice}}, 200, ""},
+		{"the key, then another", http.Header{"Authorization": {"Bearer " + alice, "Bearer glm_dev_other"}}, 400, "request.invalid"},
+		{"two keys joined", http.Header{"X-Api-Key": {alice + ", glm_dev_other"}}, 400, "request.invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+			maps.Copy(r.Header, tc.header)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.code || (tc.err != "" && errorCode(t, w) != tc.err) {
+				t.Fatalf("%d %s, want %d %s", w.Code, w.Body, tc.code, tc.err)
+			}
+		})
 	}
 }

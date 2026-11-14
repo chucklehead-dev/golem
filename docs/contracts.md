@@ -144,6 +144,19 @@ scheduled PR (PRD §9.7); enterprise rates override it.
   in base62. A production gateway refuses `glm_dev_` keys and a standalone
   one refuses `glm_live_` keys. Both prefixes are registered for secret
   scanning.
+- **Repeated headers**: a header golem reads as one value
+  (`Authorization`, `x-api-key`, `content-type`, `golem-scope`,
+  `golem-session`, `golem-end-user`, `anthropic-version`,
+  `openai-organization`) sent more than once is refused
+  (`request.invalid`, naming it), before authentication: golem would read
+  the first copy, a proxy in front or the provider behind perhaps the
+  last. Those whose values never hold a comma (`x-api-key`, `golem-scope`,
+  `anthropic-version`, `openai-organization`) are refused holding one too,
+  as an intermediary may join two copies into one line. `anthropic-beta`
+  and `golem-tags` are lists and may repeat. The lists are
+  `lib/contract.SingleHeaders` and `ListHeaders`; a header the code reads
+  must be in one (`TestHeadersDeclared`). The control API takes exactly
+  one `Authorization` header.
 - **Request IDs**: golem's request ID (UUIDv7) is returned on every
   response as `golem-request-id`, and in error bodies; an incoming
   `x-request-id` is recorded as the caller's. The provider's request ID

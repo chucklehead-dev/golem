@@ -84,3 +84,14 @@ func TestEntraAuth(t *testing.T) {
 		t.Error("no token accepted")
 	}
 }
+
+// TestBearerOnce: one Authorization header is a credential; two are none,
+// whatever the first holds.
+func TestBearerOnce(t *testing.T) {
+	if tok, ok := bearer(http.Header{"Authorization": {"Bearer t1"}}); !ok || tok != "t1" {
+		t.Fatalf("one header: %q %v", tok, ok)
+	}
+	if _, ok := bearer(http.Header{"Authorization": {"Bearer t1", "Bearer t2"}}); ok {
+		t.Fatal("two Authorization headers taken as a credential")
+	}
+}
