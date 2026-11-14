@@ -21,6 +21,12 @@ import (
 // Schema is this format's version; a reader refuses any other.
 const Schema = 1
 
+// MaxMicros bounds a budget, and the cost one call adds to a counter, in
+// micro-units (2^50: about 1.1 billion units of currency). Valkey's scripts
+// sum in Lua numbers, doubles, exact only below 2^53: under this bound a
+// period's sums stay exact there as they are in memory.
+const MaxMicros = 1 << 50
+
 // Snapshot is one pool's complete configuration at one moment.
 type Snapshot struct {
 	Schema int `json:"schema"`

@@ -82,6 +82,7 @@ func TestEntitlementProblems(t *testing.T) {
 		{"unknown scope", strings.Replace(identity(""), "scope: team-a", "scope: team-b", 1), standalone, `no scope named "team-b"`},
 		{"unknown alias", strings.Replace(identity(""), "models: [claude]", "models: [claude, opus]", 1), standalone, `no ModelRoute has alias "opus"`},
 		{"unpriced budget", strings.Replace(identity(""), "model: claude-sonnet-4-5,", "model: other,", 1), standalone, "no PriceList prices"},
+		{"budget past the store's exact sums", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMicros: 1125899906842625", 1), standalone, "at most 1125899906842624"},
 		{"outside standalone", identity(""), published, "for standalone mode only"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

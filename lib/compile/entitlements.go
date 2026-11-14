@@ -73,6 +73,8 @@ func localScopes(obj string, in []v1.LocalScope, aliases map[string]string, add 
 			continue
 		case sc.BudgetMicros < 0:
 			add(obj, at+".budgetMicros", "must not be negative")
+		case sc.BudgetMicros > snapshot.MaxMicros:
+			add(obj, at+".budgetMicros", "at most %d (2^50): larger sums are not exact in the site store", int64(snapshot.MaxMicros))
 		case sc.InFlight.Principal < 0 || sc.InFlight.Scope < 0:
 			add(obj, at+".inFlight", "limits must not be negative")
 		case sc.MaxOutputTokens < 0 || sc.MaxInputBytes < 0:

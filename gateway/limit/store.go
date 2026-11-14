@@ -279,8 +279,13 @@ func (m *Mem) since(scope, period string, since time.Time) int64 {
 	if from == 0 {
 		return c.total
 	}
+	// Valkey's window (its since): no further back than the retention,
+	// though a minute past it may not be trimmed yet, and no further ahead
+	// than a peer's clock skew.
+	now := minuteOf(m.Now())
+	lo, hi := max(from, now-int64(m.Retain/time.Minute)), now+1
 	for minute, spend := range c.minutes {
-		if minute >= from {
+		if minute >= lo && minute <= hi {
 			total += spend
 		}
 	}

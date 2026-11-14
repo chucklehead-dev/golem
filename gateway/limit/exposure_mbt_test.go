@@ -96,7 +96,13 @@ func (d *expDriver) Step(s *connect.Step) error {
 			return nil
 		},
 		"admit": func(s *connect.Step) error {
-			t, err := d.gws[gw()].Admit(ctx, call(req()))
+			c := call(req())
+			if b, ok := s.Picks["budget"]; ok { // a varied budget (TestStoresAgreeVaried)
+				if err := itf.Decode(b, &c.Budget); err != nil {
+					return err
+				}
+			}
+			t, err := d.gws[gw()].Admit(ctx, c)
 			if err != nil {
 				return err // the model admitted it: so must the gateway
 			}
@@ -106,9 +112,9 @@ func (d *expDriver) Step(s *connect.Step) error {
 			}
 			return nil
 		},
-		"complete":     func(*connect.Step) error { d.tickets[req()].Complete(ctx, cost()); return nil },
-		"cancel":       func(*connect.Step) error { d.tickets[req()].Cancel(ctx, cost()); return nil },
-		"providerEnds": func(*connect.Step) error { d.tickets[req()].Ended(ctx); return nil },
+		"complete":     func(*connect.Step) error { return d.ticket(req(), func(t *Ticket) { t.Complete(ctx, cost()) }) },
+		"cancel":       func(*connect.Step) error { return d.ticket(req(), func(t *Ticket) { t.Cancel(ctx, cost()) }) },
+		"providerEnds": func(*connect.Step) error { return d.ticket(req(), func(t *Ticket) { t.Ended(ctx) }) },
 		"tick":         func(*connect.Step) error { d.clock++; return nil },
 		// The ledger and golem-control: the environment.
 		"deliver": connect.Skip, "publishSnapshot": connect.Skip,
@@ -154,6 +160,17 @@ func (d *expDriver) Step(s *connect.Step) error {
 			return nil
 		},
 	}.Step(s)
+}
+
+// ticket runs f on the request's ticket; a request with none (its
+// admission refused, under a varied budget) is an error, not a panic.
+func (d *expDriver) ticket(req string, f func(*Ticket)) error {
+	t := d.tickets[req]
+	if t == nil {
+		return fmt.Errorf("request %s was not admitted", req)
+	}
+	f(t)
+	return nil
 }
 
 // expState projects the model's variables the limiter has.

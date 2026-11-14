@@ -12,6 +12,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/lib/contract"
 	budget "github.com/chucklehead-dev/golem/lib/period"
+	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 // Refusals (contracts.md §1), matched with errors.Is.
@@ -323,7 +324,10 @@ func (t *Ticket) cancel(ctx context.Context, seen int64) bool {
 // races a recovery is sent again rather than held where no replay will
 // find it.
 func (l *Limiter) account(ctx context.Context, t *Ticket, cost int64, release bool) {
-	in := Increment{Scope: t.call.Scope, Period: t.period, Call: t.call.ID, Cost: cost, At: l.now()}
+	// A cost is never negative (it would take spend back) nor past
+	// MaxMicros (Valkey's sums would no longer be exact): only a garbled
+	// usage report gives one, and it is counted as the bound.
+	in := Increment{Scope: t.call.Scope, Period: t.period, Call: t.call.ID, Cost: min(max(cost, 0), snapshot.MaxMicros), At: l.now()}
 	for {
 		if !l.Down() {
 			sctx, cancel := l.storeContext(ctx)

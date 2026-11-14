@@ -44,6 +44,10 @@ type Valkey struct {
 	TTL time.Duration
 	// Retain is how long the counter keeps a minute (default 6 hours).
 	Retain time.Duration
+	// Now is the gateway's clock, for a read's last minute and an
+	// admission that names none (default time.Now): Mem's, so the two
+	// stores read the same window.
+	Now func() time.Time
 	// ReplicaAcks, if positive, makes each add wait for that many replicas
 	// to acknowledge it (WAIT), so a failover cannot lose it before the
 	// ledger has it (ADR 0048). An add is at completion, after
@@ -182,7 +186,7 @@ end
 var admitScript = valkey.NewLuaScript(nowMillis + slotsTake + sinceOf + `
 local known = tonumber(ARGV[6]) + since(KEYS[3], tonumber(ARGV[5]), tonumber(ARGV[11]), tonumber(ARGV[10]))
 local budget, worst = tonumber(ARGV[7]), tonumber(ARGV[9])
-if budget > 0 then
+if budget ~= 0 then -- 0 is none; a negative one refuses, as overBudget does
   if ARGV[8] == '1' and known + worst > budget then return {1, known} end
   if ARGV[8] ~= '1' and known >= budget then return {1, known} end
 end
@@ -237,6 +241,13 @@ func (v *Valkey) principalKey(p string) string           { return v.prefix + "sl
 func (v *Valkey) scopeKey(s string) string               { return v.prefix + "slots:s:" + s }
 func (v *Valkey) counterKey(scope, period string) string { return v.keysOf(scope, period).counter }
 
+func (v *Valkey) now() time.Time {
+	if v.Now != nil {
+		return v.Now()
+	}
+	return time.Now()
+}
+
 // retainMinutes is the retention in whole minutes, for the scripts.
 func (v *Valkey) retainMinutes() string { return strconv.FormatInt(int64(v.Retain/time.Minute), 10) }
 
@@ -250,7 +261,7 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, error)
 	ks := v.keysOf(a.Scope, a.Period)
 	keys := []string{v.principalKey(a.Principal), ks.slots, ks.counter}
 	r, err := admitScript.Exec(ctx, v.c, keys, []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.durations().ttlMs,
-		i64(fromMinute(a.Since)), i64(a.Spend), i64(a.Budget), check, i64(a.Worst), v.retainMinutes(), i64(minuteOf(cmp.Or(a.Now, time.Now())))}).AsIntSlice()
+		i64(fromMinute(a.Since)), i64(a.Spend), i64(a.Budget), check, i64(a.Worst), v.retainMinutes(), i64(minuteOf(cmp.Or(a.Now, v.now())))}).AsIntSlice()
 	if err != nil {
 		return 0, 0, wrap(err)
 	}
@@ -389,7 +400,7 @@ const addChunk = 256
 
 func (v *Valkey) Since(ctx context.Context, scope, period string, since time.Time) (int64, error) {
 	n, err := sinceScript.Exec(ctx, v.c, []string{v.counterKey(scope, period)},
-		[]string{i64(fromMinute(since)), i64(minuteOf(time.Now())), v.retainMinutes()}).AsInt64()
+		[]string{i64(fromMinute(since)), i64(minuteOf(v.now())), v.retainMinutes()}).AsInt64()
 	return n, wrap(err)
 }
 
