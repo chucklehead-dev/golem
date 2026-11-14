@@ -168,7 +168,7 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 			id := fmt.Sprint(b.Name, "/", d.Name, " ", u.Scheme, "://", u.Host, " private:", b.AllowPrivate)
 			t := h.transports[id]
 			if t == nil {
-				t = upstreamTransport(b.AllowPrivate)
+				t = upstreamTransport(b.AllowPrivate, nil)
 				h.transports[id] = t
 			}
 			used[id] = true
@@ -253,9 +253,13 @@ func (e EnvSecrets) Secret(ref, env string) (string, error) {
 //     found under a long stream rather than at the next request;
 //   - no response-header timeout here: a non-streamed answer's headers come
 //     when the model has finished, which for a long answer is minutes; that
-//     bound is the route's (ModelRoute spec.timeouts: headers, maxDuration).
-func upstreamTransport(allowPrivate bool) *http.Transport {
-	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second,
+//     bound is the route's (ModelRoute spec.timeouts: headers, maxDuration);
+//   - every dial's resolved address checked (checkDestination), so a name
+//     that re-resolves somewhere forbidden is refused at its next
+//     connection. A connection already open stays on the address it was
+//     checked at. resolver is nil but in tests (the system's).
+func upstreamTransport(allowPrivate bool, resolver *net.Resolver) *http.Transport {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Resolver: resolver,
 		ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
 			return checkDestination(address, allowPrivate)
 		}}

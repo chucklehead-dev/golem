@@ -1,13 +1,18 @@
 package snapshot
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
@@ -135,7 +140,7 @@ spec: {alias: local, pool: [{backend: local, deployment: qwen}]}
 // TestUpstreamTransport: the settings the pool depends on under load, so a
 // change to them is a decision, not an accident.
 func TestUpstreamTransport(t *testing.T) {
-	tr := upstreamTransport(false)
+	tr := upstreamTransport(false, nil)
 	switch {
 	case tr.Proxy != nil:
 		t.Error("a proxy from the environment: egress is the mesh's (ADR 0004)")
@@ -181,12 +186,90 @@ func TestDialRefused(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	req, _ := http.NewRequest("GET", srv.URL, nil)
-	if _, err := upstreamTransport(false).RoundTrip(req); err == nil || !strings.Contains(err.Error(), "refusing to dial") {
+	if _, err := upstreamTransport(false, nil).RoundTrip(req); err == nil || !strings.Contains(err.Error(), "refusing to dial") {
 		t.Fatalf("%v: a loopback server without the grant", err)
 	}
-	if resp, err := upstreamTransport(true).RoundTrip(req); err != nil {
+	if resp, err := upstreamTransport(true, nil).RoundTrip(req); err != nil {
 		t.Fatalf("%v: with the grant", err)
 	} else {
 		resp.Body.Close()
 	}
+}
+
+// TestDialReresolved: a deployment's name that re-resolves to a forbidden
+// address between connections is refused at the next dial, not trusted
+// for having resolved well once (golem#7). The name first points at the
+// provider (a loopback server, granted), then at cloud metadata.
+func TestDialReresolved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	var answer atomic.Value // the A record the name resolves to now
+	answer.Store([4]byte{127, 0, 0, 1})
+	dns := fakeDNS(t, func() [4]byte { return answer.Load().([4]byte) })
+	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "udp", dns)
+	}}
+	tr := upstreamTransport(true, resolver)
+	get := func() error {
+		req, _ := http.NewRequest("GET", "http://provider.golem-test:"+port+"/", nil)
+		resp, err := tr.RoundTrip(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	if err := get(); err != nil {
+		t.Fatalf("%v: the name at the provider, granted", err)
+	}
+	answer.Store([4]byte{100, 100, 100, 200}) // cloud metadata (Alibaba's): never dialled
+	tr.CloseIdleConnections()                 // the next request dials again
+	if err := get(); err == nil || !strings.Contains(err.Error(), "refusing to dial") {
+		t.Fatalf("%v: the name re-resolved to metadata must be refused at the dial", err)
+	}
+	answer.Store([4]byte{169, 254, 169, 254}) // link-local metadata (AWS, GCP, Azure)
+	if err := get(); err == nil || !strings.Contains(err.Error(), "refusing to dial") {
+		t.Fatalf("%v: the name re-resolved to link-local must be refused at the dial", err)
+	}
+}
+
+// fakeDNS answers every A query with a(), on a local UDP port it returns.
+func fakeDNS(t *testing.T, a func() [4]byte) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() { //qenv:ok a test's DNS responder, not simulated code
+		buf := make([]byte, 512)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var p dnsmessage.Parser
+			h, err := p.Start(buf[:n])
+			if err != nil {
+				continue
+			}
+			q, err := p.Question()
+			if err != nil {
+				continue
+			}
+			b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, Authoritative: true})
+			b.EnableCompression()
+			b.StartQuestions()
+			b.Question(q)
+			b.StartAnswers()
+			if q.Type == dnsmessage.TypeA {
+				b.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 0}, dnsmessage.AResource{A: a()})
+			}
+			if msg, err := b.Finish(); err == nil {
+				pc.WriteTo(msg, from)
+			}
+		}
+	}()
+	return pc.LocalAddr().String()
 }

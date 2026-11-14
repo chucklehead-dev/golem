@@ -39,7 +39,7 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
 | Restricted feature mode (the default) refuses unknown members, unapproved betas and API versions; compatible and agent routes forward them | `gateway/proxy` `TestFeatureModes` | — | 8165990 |
 | A request body must arrive within BodyTimeout | `TestRequestBoundary` (a trickling body) | yes (hangs) | 8165990 |
 | A response past MaxResponse is cut | `TestRequestBoundary` (past the ceiling) | — | 8165990 |
-| Upstream connections to metadata, link-local, unspecified or multicast addresses are refused always; to loopback or private ones unless granted | `gateway/snapshot` `TestCheckDestination` (IPv4-mapped and CGNAT included), `TestDialRefused` (on a real dial) | — | 79e0d0a |
+| Upstream connections to metadata, link-local, unspecified or multicast addresses are refused always; to loopback or private ones unless granted | `gateway/snapshot` `TestCheckDestination` (IPv4-mapped and CGNAT included), `TestDialRefused` (on a real dial); `TestDialReresolved` (a name re-resolved to metadata, then link-local, between connections: refused at the next dial) | yes (the dial check removed: it connects) | 79e0d0a; re-resolution this commit |
 | OTLP export uses TLS unless the collector is a literal loopback address (a name, localhost included, gets TLS) | `gateway/telemetry` `TestPlaintextOK` (the decision; no live collector) | — | 79e0d0a; names 2c0d42e |
 | A snapshot the reader cannot interpret is refused, never read with weaker policy: unknown members (`strict` included), duplicate names, names in another case | `lib/snapshot` `TestDecodeFailsClosed` | yes | this commit |
 | Production publication stays disabled: the gateway runs standalone only, on loopback | `cmd/golem-gateway` `TestReleaseGate` | — | 434c819 |
@@ -47,8 +47,6 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
 ## Not yet shown
 
 - OTLP's TLS is tested at the decision, not against a collector.
-- DNS rebinding is covered by checking the resolved address at each dial
-  (`ControlContext`), but no test re-resolves a name between dials.
 - Restricted mode's approved lists cover Anthropic's beta header and API
   version; OpenAI has no equivalent header to approve.
 - OTLP export requires server-authenticated TLS to any non-loopback
@@ -61,8 +59,7 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
   checklist's record of each account's limit, not a test.
 
 Deployment evidence that tests cannot give (provider spending limits,
-OTLP TLS against the real collector, the mTLS owner of each hop, DNS
-re-resolution between connections) is tracked in golem#7, a prerequisite
+OTLP TLS against the real collector, the mTLS owner of each hop) is tracked in golem#7, a prerequisite
 for lifting `releaseGate`.
 
 ## Validation of this record
