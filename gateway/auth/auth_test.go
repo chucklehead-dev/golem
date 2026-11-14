@@ -11,6 +11,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/chucklehead-dev/golem/lib/contract"
+	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
@@ -122,7 +123,7 @@ func TestImplicit(t *testing.T) {
 // snapshot allows; a bad edit keeps the list in force; clearing it lets
 // them in again.
 func TestDenylist(t *testing.T) {
-	e := &Entra{Tenant: tenant, Audiences: []string{apiID}, Now: func() time.Time { return now }}
+	e := &entra.Verifier{Tenant: tenant, Audiences: []string{apiID}, Now: func() time.Time { return now }}
 	e.SetKeys(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &signingKey.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
 	plain := key.New(key.Live)
 	hash := key.Hash(plain)

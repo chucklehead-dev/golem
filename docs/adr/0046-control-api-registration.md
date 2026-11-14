@@ -22,7 +22,7 @@ tell them apart.
   `golem.manage` and app roles `golem.admin` and `golem.service`. The
   gateway accepts only #1's audience, golem-control only #1b's
   (`-entra-audience`, default `api://golem-control`), each with its own
-  scope (`auth.Entra.Scope`); a token for one is invalid at the other.
+  scope (`entra.Verifier.Scope`); a token for one is invalid at the other.
 - **`golem.admin` is #1b's role.** An admin is an admin of the control
   API; the gateway gives the role no meaning.
 - **golemctl signs in once.** Its device-code sign-in asks for

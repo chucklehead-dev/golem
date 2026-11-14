@@ -31,6 +31,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/proxy"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
+	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -145,11 +146,11 @@ func main() {
 // newEntra is the verifier of tenant's Entra tokens, its signing keys
 // fetched before the gateway starts; nil (golem keys only) without a
 // tenant.
-func newEntra(tenant, audiences string) *auth.Entra {
+func newEntra(tenant, audiences string) *entra.Verifier {
 	if tenant == "" {
 		return nil
 	}
-	e := &auth.Entra{Tenant: tenant, Audiences: strings.Split(audiences, ",")}
+	e := &entra.Verifier{Tenant: tenant, Audiences: strings.Split(audiences, ",")}
 	if err := e.Refresh(context.Background()); err != nil {
 		fail("Entra's signing keys: %v", err)
 	}

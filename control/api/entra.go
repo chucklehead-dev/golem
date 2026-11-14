@@ -8,7 +8,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
-	"github.com/chucklehead-dev/golem/gateway/auth"
+	"github.com/chucklehead-dev/golem/lib/entra"
 )
 
 // EntraAuth authenticates callers by an Entra access token for golem's
@@ -18,7 +18,7 @@ import (
 // user before their first membership) is "entra:<id>" in the audit, with
 // no rights but an admin's.
 type EntraAuth struct {
-	Entra *auth.Entra
+	Entra *entra.Verifier
 	State *state.Store
 }
 
@@ -32,7 +32,7 @@ func (a EntraAuth) Authenticate(_ context.Context, h http.Header) (service.Calle
 	}
 	id, refused := a.Entra.Verify(tok)
 	if refused != nil {
-		return service.Caller{}, errors.New(refused.Msg)
+		return service.Caller{}, refused
 	}
 	c := service.Caller{Principal: "entra:" + id.ID, Admin: id.Admin}
 	// The store keeps Entra IDs unique, so at most one principal matches.

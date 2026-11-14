@@ -1,4 +1,8 @@
-package auth
+// Package entra verifies Entra ID v2 access tokens, locally (ADR 0009,
+// entra.md): the gateway's (golem API's registration) and the control
+// API's (its own, ADR 0046), each a Verifier for its audience and scope.
+// It names who calls; rights are the caller's business.
+package entra
 
 import (
 	"cmp"
@@ -18,15 +22,13 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
-
-	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
-// Entra verifies Entra ID v2 access tokens for golem's API (ADR 0009,
+// Verifier verifies Entra ID v2 access tokens for one golem API (ADR 0009,
 // entra.md #1), locally: the signing keys are cached and refreshed in the
 // background, so the request path makes no network call. A token proves
 // who is calling, nothing more: rights come from the snapshot.
-type Entra struct {
+type Verifier struct {
 	// Tenant is the directory (tenant) ID tokens must come from.
 	Tenant string
 	// Audiences are the resource's identifiers: its Application ID URI and
@@ -90,10 +92,19 @@ type entraClaims struct {
 	Idtyp string `json:"idtyp"`
 }
 
-// Verify checks a token and says who it names.
-func (e *Entra) Verify(raw string) (Identity, *Refusal) {
-	invalid := func(why string) (Identity, *Refusal) {
-		return Identity{}, &Refusal{contract.AuthTokenInvalid, "the Entra token is not valid for golem: " + why}
+// Error is a token refused: Expired, or invalid for Msg's reason (said
+// so the caller can act on it).
+type Error struct {
+	Expired bool
+	Msg     string
+}
+
+func (e *Error) Error() string { return e.Msg }
+
+// Verify checks a token and says who it names; a refusal is an *Error.
+func (e *Verifier) Verify(raw string) (Identity, error) {
+	invalid := func(why string) (Identity, error) {
+		return Identity{}, &Error{Msg: "the Entra token is not valid for golem: " + why}
 	}
 	// RS256 only: anything else (none, HMAC with a public key as its
 	// secret) is refused before a key is looked at.
@@ -127,7 +138,7 @@ func (e *Entra) Verify(raw string) (Identity, *Refusal) {
 	}, Leeway)
 	switch {
 	case errors.Is(err, jwt.ErrExpired):
-		return Identity{}, &Refusal{contract.AuthTokenExpired, "the Entra token has expired: get a new one (golemctl token)"}
+		return Identity{}, &Error{Expired: true, Msg: "the Entra token has expired: get a new one (golemctl token)"}
 	case errors.Is(err, jwt.ErrInvalidIssuer):
 		return invalid("issued by another tenant or not a v2 token")
 	case errors.Is(err, jwt.ErrInvalidAudience):
@@ -149,14 +160,14 @@ func (e *Entra) Verify(raw string) (Identity, *Refusal) {
 	return invalid("it carries neither the " + scope + " scope (a user) nor the " + RoleService + " role (a service)")
 }
 
-func (e *Entra) now() time.Time {
+func (e *Verifier) now() time.Time {
 	if e.Now != nil {
 		return e.Now()
 	}
 	return time.Now()
 }
 
-func (e *Entra) key(kid string) *rsa.PublicKey {
+func (e *Verifier) key(kid string) *rsa.PublicKey {
 	m := e.keys.Load()
 	if m == nil {
 		return nil
@@ -165,7 +176,7 @@ func (e *Entra) key(kid string) *rsa.PublicKey {
 }
 
 // SetKeys replaces the cached key set (Refresh's, or a test's).
-func (e *Entra) SetKeys(set jose.JSONWebKeySet) {
+func (e *Verifier) SetKeys(set jose.JSONWebKeySet) {
 	m := map[string]*rsa.PublicKey{}
 	for _, k := range set.Keys {
 		if pk, ok := k.Key.(*rsa.PublicKey); ok && k.KeyID != "" && (k.Use == "" || k.Use == "sig") {
@@ -184,7 +195,7 @@ var keysClient = &http.Client{Timeout: 10 * time.Second}
 const maxKeySet = 1 << 20
 
 // Refresh fetches the tenant's key set.
-func (e *Entra) Refresh(ctx context.Context) error {
+func (e *Verifier) Refresh(ctx context.Context) error {
 	url := e.JWKS
 	if url == "" {
 		url = "https://login.microsoftonline.com/" + e.Tenant + "/discovery/v2.0/keys"
@@ -214,13 +225,13 @@ func (e *Entra) Refresh(ctx context.Context) error {
 }
 
 // wakeup is the channel requestRefresh wakes Run by, made on first use.
-func (e *Entra) wakeup() chan struct{} {
+func (e *Verifier) wakeup() chan struct{} {
 	e.wakeOne.Do(func() { e.wake = make(chan struct{}, 1) })
 	return e.wake
 }
 
 // requestRefresh asks Run for a refresh; one already asked for absorbs it.
-func (e *Entra) requestRefresh() {
+func (e *Verifier) requestRefresh() {
 	select {
 	case e.wakeup() <- struct{}{}:
 	default:
@@ -229,7 +240,7 @@ func (e *Entra) requestRefresh() {
 
 // Run keeps the key set fresh: hourly, and when a token names an unknown
 // key (at most once a minute).
-func (e *Entra) Run(ctx context.Context) {
+func (e *Verifier) Run(ctx context.Context) {
 	wake := e.wakeup()
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
@@ -249,10 +260,4 @@ func (e *Entra) Run(ctx context.Context) {
 			slog.Warn("could not refresh Entra's signing keys; using the cached ones", "err", err)
 		}
 	}
-}
-
-// looksLikeJWS is the chain's test for an Entra token: three base64url
-// parts, the first a JSON object.
-func looksLikeJWS(s string) bool {
-	return strings.Count(s, ".") == 2 && strings.HasPrefix(s, "eyJ")
 }

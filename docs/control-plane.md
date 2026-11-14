@@ -32,7 +32,7 @@ Components and APIs at a glance: architecture.md §1–3.
 service method:
 
 1. authenticates the caller (an Entra token for the control API's own
-   registration, ADR 0046, validated by `gateway/auth`'s `Entra`;
+   registration, ADR 0046, validated by `lib/entra`'s `Verifier`;
    jobs run as a service principal),
 2. loads what it needs and checks authorization against org-model §2,
 3. validates the change (a key's models within its scope's policy; a cap's

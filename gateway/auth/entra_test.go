@@ -15,6 +15,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/chucklehead-dev/golem/lib/contract"
+	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
@@ -74,8 +75,8 @@ func with(c map[string]any, kv ...any) map[string]any {
 	return c
 }
 
-func entraKeys() (*Keys, *Entra) {
-	e := &Entra{Tenant: tenant, Audiences: []string{apiID, "golem-api-client-id"}, Now: func() time.Time { return now }}
+func entraKeys() (*Keys, *entra.Verifier) {
+	e := &entra.Verifier{Tenant: tenant, Audiences: []string{apiID, "golem-api-client-id"}, Now: func() time.Time { return now }}
 	e.SetKeys(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &signingKey.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
 	ents := snapshot.Entitlements{
 		Scopes: []snapshot.Scope{

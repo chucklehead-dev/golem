@@ -49,7 +49,7 @@ minute.
 `EntraAuth.Authenticate` (control/api/entra.go):
 
 1. reads `Authorization: Bearer <token>` (`bearer`);
-2. verifies the token with `gateway/auth`'s `Entra.Verify`: RS256 only,
+2. verifies the token with `lib/entra`'s `Verifier.Verify`: RS256 only,
    golem's tenant, the control API registration's audience
    (`api://golem-control`, ADR 0046; a gateway token's `api://golem` is
    refused), and `scp` `golem.manage` for a user or app role

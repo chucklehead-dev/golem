@@ -28,6 +28,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/lib/key"
+	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
@@ -56,7 +57,7 @@ type Holder struct {
 	// Env is the key prefix this gateway accepts: Live, or Dev standalone.
 	Env key.Env
 	// Entra verifies Entra tokens; nil: the gateway takes golem keys only.
-	Entra *auth.Entra
+	Entra *entra.Verifier
 	// LocalKey is the standalone gateway's generated key, the one credential
 	// its implicit principal takes (golem#5).
 	LocalKey string

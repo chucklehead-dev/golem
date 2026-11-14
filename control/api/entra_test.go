@@ -11,7 +11,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/chucklehead-dev/golem/control/state"
-	"github.com/chucklehead-dev/golem/gateway/auth"
+	"github.com/chucklehead-dev/golem/lib/entra"
 )
 
 const tenant = "11111111-2222-3333-4444-555555555555"
@@ -23,7 +23,7 @@ const tenant = "11111111-2222-3333-4444-555555555555"
 func TestEntraAuth(t *testing.T) {
 	k, _ := rsa.GenerateKey(rand.Reader, 2048)
 	now := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
-	e := &auth.Entra{Tenant: tenant, Audiences: []string{"api://golem-control"}, Scope: auth.ScopeManage, Now: func() time.Time { return now }}
+	e := &entra.Verifier{Tenant: tenant, Audiences: []string{"api://golem-control"}, Scope: entra.ScopeManage, Now: func() time.Time { return now }}
 	e.SetKeys(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &k.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
 	signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: k}, (&jose.SignerOptions{}).WithHeader("kid", "k1").WithType("JWT"))
 	token := func(extra map[string]any) string {

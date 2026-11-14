@@ -39,10 +39,10 @@ import (
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
-	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
+	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/sign/kmssign"
 )
@@ -182,7 +182,7 @@ func apiServer(ctx context.Context, listen, tenant, audience string, st *state.S
 	if tenant == "" {
 		return nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
 	}
-	e := &auth.Entra{Tenant: tenant, Audiences: audiences(audience), Scope: auth.ScopeManage}
+	e := &entra.Verifier{Tenant: tenant, Audiences: audiences(audience), Scope: entra.ScopeManage}
 	if err := e.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("Entra's signing keys: %w", err)
 	}

@@ -23,7 +23,7 @@ durability lives in the collector), [ADR 0044](../adr/0044-budgets-are-controls-
 | File | What it holds |
 |---|---|
 | `gateway/auth/auth.go` | `Compile` (a snapshot's entitlements indexed for lookup), `Keys.Authenticate`, `Principal`, `Refusal` |
-| `gateway/auth/entra.go` | `Entra`: local verification of Entra v2 tokens over a cached key set |
+| `lib/entra/entra.go` | `Verifier`: local verification of Entra v2 tokens over a cached key set (shared with the control API) |
 | `gateway/snapshot/holder.go` | `Holder` (the current `Compiled` snapshot behind an atomic pointer, the floor), compilation, upstream transports and the dial check |
 | `gateway/snapshot/file.go` | `Dir`, the standalone source: CRD YAML in a directory |
 | `gateway/snapshot/bucket.go` | `Bucket`, the published source: a signed pointer in object storage |
@@ -67,7 +67,7 @@ calls `auth.Compile` (`gateway/auth/auth.go:89`), which builds a `Keys`:
    local key, compared by hash in constant time (`auth.go:208`). Without
    `RequireLocalKey` it admits no one.
 3. An Entra token, recognised by shape (`looksLikeJWS`, `entra.go:242`),
-   goes to `Keys.token` (`auth.go:254`): `Entra.Verify` proves who is
+   goes to `Keys.token` (`auth.go:254`): `entra.Verifier.Verify` proves who is
    calling, the snapshot says in which scope (`golem-scope` header, else
    the default) and with which rights; a user's token cannot act as a
    service's principal or the reverse (`auth.go:271`).
@@ -76,7 +76,7 @@ calls `auth.Compile` (`gateway/auth/auth.go:89`), which builds a `Keys`:
    mistake must not let another installation's key in. Parsing a key is
    needed only to explain why an unknown one is refused.
 
-`Entra.Verify` (`entra.go:83`) takes RS256 only, refuses tokens once the
+`Verifier.Verify` (lib/entra) takes RS256 only, refuses tokens once the
 cached key set is older than `MaxKeyAge` (24 hours by default,
 `entra.go:96`), checks issuer, audience, expiry (a minute's `Leeway`),
 tenant and version, and then requires either the `golem.access` scope
@@ -290,7 +290,7 @@ row with outcome `cancelled` and its numbering record.
 | A key is honoured only for a listed owner of its kind in its scope; a missing scope fails closed | `keyEntry` | `TestAuthenticate` |
 | Two different credentials are refused | `credential` | `TestAuthenticate` |
 | The implicit principal exists only for dev, and takes only the local key | `Compile`, `Authenticate` | `TestImplicit`, `TestLocalKey` |
-| Entra tokens are refused once the key set is too old | `Entra.Verify` | `TestStaleKeys` |
+| Entra tokens are refused once the key set is too old | `entra.Verifier.Verify` | `TestStaleKeys` |
 | Every ledger row is delivered, dropped or failed, and counted | `LedgerQueue` | `TestLedgerQueue*` (shutdown races, emission during shutdown, flush during shutdown, retries, partial delivery) |
 | OTLP uses TLS unless the collector is a literal loopback address | `plaintextOK` | `TestPlaintextOK` |
 | A stream cut at shutdown still leaves its row and counter add | `lifecycle.shutdown`, the order in `main` | `TestShutdownAccounts` |

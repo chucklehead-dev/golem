@@ -8,12 +8,14 @@ import (
 	"cmp"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/chucklehead-dev/golem/lib/contract"
+	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
@@ -57,7 +59,7 @@ type Keys struct {
 	implicit *Principal
 	local    [32]byte // the implicit principal's key, hashed (RequireLocalKey)
 	now      func() time.Time
-	entra    *Entra
+	entra    *entra.Verifier
 	deny     *DenyFile // the site's emergency denylist, applied over the snapshot
 	// byEntra: a user's oid or a service's app ID, then a scope, to the
 	// principal acting there; the empty scope is the default's.
@@ -85,11 +87,11 @@ type rights struct {
 
 // Compile indexes a snapshot's entitlements for an installation: env is the
 // key prefix this gateway accepts (Live in production, Dev standalone), and
-// entra verifies Entra tokens (nil: they are refused). Whatever names a
+// v verifies Entra tokens (nil: they are refused). Whatever names a
 // scope the snapshot lacks is refused, never given a zero (unlimited)
 // budget.
-func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, entra *Entra) *Keys {
-	k := &Keys{env: env, prefix: "glm_" + string(env) + "_", byHash: map[[32]byte]*entry{}, now: now, entra: entra, byEntra: map[string]map[string]*Principal{}}
+func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, v *entra.Verifier) *Keys {
+	k := &Keys{env: env, prefix: "glm_" + string(env) + "_", byHash: map[[32]byte]*entry{}, now: now, entra: v, byEntra: map[string]map[string]*Principal{}}
 	if e.Implicit && env == key.Dev { // never for a live installation (golem#5)
 		k.implicit = &Principal{ID: "local", Kind: "user", Scope: "local",
 			Limits: Limits{PrincipalInFlight: implicitInFlight}}
@@ -281,9 +283,13 @@ func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 	if k.entra == nil {
 		return nil, &Refusal{contract.AuthTokenInvalid, "this gateway does not take Entra tokens; use a golem key"}
 	}
-	id, r := k.entra.Verify(raw)
-	if r != nil {
-		return nil, r
+	id, err := k.entra.Verify(raw)
+	if err != nil {
+		code := contract.AuthTokenInvalid
+		if e, ok := errors.AsType[*entra.Error](err); ok && e.Expired {
+			code = contract.AuthTokenExpired
+		}
+		return nil, &Refusal{code, err.Error()}
 	}
 	byScope := k.byEntra[id.ID]
 	if byScope == nil {
@@ -318,3 +324,9 @@ func credential(h http.Header) (cred string, conflict bool) {
 // RequireLocalKey sets the standalone implicit principal's key: without
 // one the implicit principal admits no one.
 func (k *Keys) RequireLocalKey(local string) { k.local = key.Hash(local) }
+
+// looksLikeJWS is the chain's test for an Entra token: three base64url
+// parts, the first a JSON object.
+func looksLikeJWS(s string) bool {
+	return strings.Count(s, ".") == 2 && strings.HasPrefix(s, "eyJ")
+}
