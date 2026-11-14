@@ -92,3 +92,52 @@ func TestJob(t *testing.T) {
 		t.Fatal("November's spend was kept as December's")
 	}
 }
+
+// TestJobReportsStaleResult: a result kept through a ledger outage stays
+// published (gateways floor known spend at their counter's period total,
+// so a stale result never counts less than none would), but once its
+// boundary is more than MaxAge old (here 6h - 4h - 10m) a gateway on a
+// snapshot carrying it, for its whole lease, reads past its retention:
+// Stale and Step's error say so, for an alert.
+func TestJobReportsStaleResult(t *testing.T) {
+	now := time.Date(2026, 11, 14, 10, 0, 30, 0, time.UTC)
+	l := &fakeLedger{spend: map[string]int64{"team-a": 7}}
+	j := &Job{Ledger: l, Now: func() time.Time { return now }}
+	if j.MaxAge() != 6*time.Hour-4*time.Hour-10*time.Minute || j.Validate() != nil {
+		t.Fatalf("max age %v, %v by default", j.MaxAge(), j.Validate())
+	}
+	if j.Stale() {
+		t.Fatal("stale with no result")
+	}
+	if err := j.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if age, ok := j.Age(); !ok || age != 5*time.Minute+30*time.Second || j.Stale() {
+		t.Fatalf("age %v, %v, stale %v: want the allowance and the half minute truncated", age, ok, j.Stale())
+	}
+	l.fail = errors.New("connection refused")
+	now = now.Add(time.Hour)
+	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "the last result is kept)") {
+		t.Fatalf("an hour into the outage: %v", err)
+	}
+	if k, ok := j.Current(); !ok || k.Spend["team-a"] != 7 || j.Stale() {
+		t.Fatalf("an hour into the outage: %+v, %v, stale %v", k, ok, j.Stale())
+	}
+	now = now.Add(time.Hour)
+	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("two hours into the outage: %v", err)
+	}
+	if k, ok := j.Current(); !ok || k.Spend["team-a"] != 7 || !j.Stale() {
+		t.Fatalf("two hours into the outage: %+v, %v, stale %v: want the result kept, and reported stale", k, ok, j.Stale())
+	}
+	// The ledger answers: fresh again.
+	l.fail = nil
+	if err := j.Step(t.Context()); err != nil || j.Stale() {
+		t.Fatalf("%v, stale %v after the ledger answered", err, j.Stale())
+	}
+	// A configuration under which every result is stale.
+	j = &Job{Ledger: l, Now: func() time.Time { return now }, Lease: 6 * time.Hour}
+	if err := j.Validate(); err == nil || !strings.Contains(err.Error(), "shorten the lease") {
+		t.Fatalf("a lease as long as the retention: %v", err)
+	}
+}

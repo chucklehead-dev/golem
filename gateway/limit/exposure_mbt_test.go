@@ -139,12 +139,13 @@ func (d *expDriver) Step(s *connect.Step) error {
 		"replayOne": func(s *connect.Step) error {
 			l := d.gws[gw()]
 			// The model picks which held increment; the gateway replays in
-			// its own order, so bring the model's to the front.
+			// its own order, so bring the model's to the front (the seqs
+			// stay in place: they order what is held).
 			e := connect.MustPick[event](s, "e")
 			l.mu.Lock()
-			i := slices.IndexFunc(l.pending, func(in Increment) bool { return in.Call == e.ID })
+			i := slices.IndexFunc(l.pending, func(h held) bool { return h.Call == e.ID })
 			if i >= 0 {
-				l.pending[0], l.pending[i] = l.pending[i], l.pending[0]
+				l.pending[0].Increment, l.pending[i].Increment = l.pending[i].Increment, l.pending[0].Increment
 			}
 			l.mu.Unlock()
 			if i < 0 {

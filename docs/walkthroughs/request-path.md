@@ -122,7 +122,7 @@ forbidden).
 token, the output cap times `n`); a product that would overflow is refused.
 `admit` (`proxy.go:490`) fills an `admission.Call` with the scope's limits
 and calls the `Admitter`: golem's is `Limiter.Admitter`
-(`gateway/limit/limit.go:674`). A `*admission.Refusal` is rendered with its
+(`gateway/limit/limit.go:731`). A `*admission.Refusal` is rendered with its
 code and Retry-After; an error with the caller gone is a silent end. The
 admitted ticket goes into a `settlement` (`proxy.go:169`, type at
 `proxy.go:293`) with a context that is never cancelled, and a deferred
@@ -166,7 +166,11 @@ crash on it. Each read goes through `ex.forward` (`exchange.go:113`) into
 line ends with `bytes.IndexByte` and dispatches each event (`sse.go:170`)
 to `chat.StreamUsage.OnEvent` (`chat/chat.go:315`). That checks
 `mayHaveUsage` (`chat.go:294`) before scanning, since every chunk but the
-last carries `"usage":null`. What the filter passes is written by
+last carries `"usage":null`. A usage object is the provider's final
+report only with both `prompt_tokens` and `completion_tokens` present and
+not null (`readInt` reports presence): a null count is not reported, and
+the call is estimated rather than charged nothing
+(`TestNullCountsAreNotFinal`). What the filter passes is written by
 `ex.send` (`exchange.go:89`) under a write deadline (`WriteStall`) and
 flushed; a failed or stalled write marks the caller gone and ends the
 loop. At EOF `Filter.End` forwards an unterminated last event, and

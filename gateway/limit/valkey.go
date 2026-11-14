@@ -200,7 +200,9 @@ end
 
 // admitScript is one admission: the budget check and the slots in one
 // atomic step, so two gateways cannot both pass the check and then both
-// take the last slot or the last of the budget. The check is overBudget's.
+// take the last slot or the last of the budget. The check is overBudget's;
+// known spend is Mem.known's, never below the counter's total (a boundary
+// older than the retention reads only the minutes retained).
 //
 //	KEYS: principal slots, scope slots, counter
 //	ARGV: call, principal limit, scope limit, TTL (ms), from minute,
@@ -216,6 +218,7 @@ local worstCaseCheck, worst = ARGV[8] == '1', tonumber(ARGV[9])
 local retain, minute = tonumber(ARGV[10]), tonumber(ARGV[11])
 
 local known = spend + since(counter, from, minute, retain)
+if from ~= 0 then known = math.max(known, tonumber(redis.call('HGET', counter, 'total') or '0')) end
 if budget ~= 0 then -- 0 is none; a negative one refuses, as overBudget does
   local over
   if worstCaseCheck then over = known + worst > budget else over = known >= budget end

@@ -105,9 +105,10 @@ func TestBoundary(t *testing.T) {
 	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 10 || b != 10 {
 		t.Fatalf("known %d on the new snapshot, %d on none: both must be 10", a, b)
 	}
-	// A minute past retention is gone: a snapshot that old undercounts it,
-	// the stated limit (ADR 0048), and the counter stays bounded. A gateway
-	// with no boundary reads the period's whole total, which keeps it.
+	// A minute past retention is gone, and the counter stays bounded: a
+	// snapshot that old no longer reads it, but known spend is never below
+	// the period's whole total, which keeps it (as a gateway with no
+	// boundary reads it).
 	now = now.Add(st.Retain)
 	late := scopeCall("late", "p1")
 	late.Budget = 0
@@ -116,8 +117,8 @@ func TestBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk.Complete(ctx, 1)
-	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 9 || b != 11 || len(st.Buckets("s", "2026-11")) != 1 {
-		t.Fatalf("known %d (want 9: 12:02's minute gone), %d (want 11, the total), minutes %v", a, b, st.Buckets("s", "2026-11"))
+	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 11 || b != 11 || len(st.Buckets("s", "2026-11")) != 1 {
+		t.Fatalf("known %d (want 11: 12:02's minute gone, the total kept), %d (want 11, the total), minutes %v", a, b, st.Buckets("s", "2026-11"))
 	}
 }
 
@@ -381,6 +382,40 @@ func TestCompletionRacingRecovery(t *testing.T) {
 	}
 }
 
+// TestStaleBoundary: a snapshot whose boundary is older than the counter's
+// retention (golem-control's known-spend job unable to read the ledger for
+// hours, its last result stamped into each renewed snapshot) reads only
+// the minutes retained; the spend between its boundary and the retention's
+// start would vanish, and the budget stop refusing. Known spend is never
+// below this site's counter total.
+func TestStaleBoundary(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	// One fixed clock for the limiter and the store, mid-month, so the
+	// call seven hours back and the stale boundary are of this period.
+	now := time.Date(2026, 11, 14, 12, 0, 30, 0, time.UTC)
+	clock := now.Add(-7 * time.Hour)
+	l.Now, st.Now = func() time.Time { return clock }, func() time.Time { return clock }
+	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Since: now.Add(-8 * time.Hour).Truncate(time.Minute)})
+	c := scopeCall("a", "p1")
+	c.Started = clock
+	tk, err := l.Admit(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk.Complete(ctx, 10) // seven hours ago: the budget spent
+	clock = now
+	if k := l.snapshotFor("s", l.period(now)); k.Since.IsZero() {
+		t.Fatal("the stale snapshot is not this period's: the test would not read from its boundary")
+	}
+	c = scopeCall("b", "p2")
+	c.Started = now
+	if _, err := l.Admit(ctx, c); !errors.Is(err, ErrBudget) || l.Known(ctx, "s") != 10 {
+		t.Fatalf("admit %v, known %d: a boundary older than the retention must not hide this site's 10", err, l.Known(ctx, "s"))
+	}
+}
+
 // TestPeriodOfStart: a call belongs to the period it started in, though
 // admitted after midnight (its body still arriving): the counter it is
 // added to is the one its ledger row names.
@@ -534,5 +569,108 @@ func TestOverlappingReplays(t *testing.T) {
 	}
 	if p := l.Pending("s"); len(p) != 1 || p[0].Call != "b" {
 		t.Fatalf("held %+v after two replays of a: want b still held", p)
+	}
+}
+
+// atCap is a store at which, at every replayed batch while the limiter is
+// still down, more of its calls complete first (each held, the oldest
+// dropped at MaxPending), and which counts each call's increments.
+type atCap struct {
+	*Mem
+	l       *Limiter
+	perAdd  int // completions arriving during each replayed batch
+	left    int // completions still to arrive (negative: no end)
+	n       int
+	batches int
+	counted map[string]int
+}
+
+func (s *atCap) arrive(ctx context.Context) {
+	for range s.perAdd {
+		if s.left == 0 || !s.l.Down() {
+			return
+		}
+		s.left--
+		s.n++
+		c := scopeCall(fmt.Sprint("busy", s.n), fmt.Sprint("busy", s.n))
+		c.ScopeLimit, c.Budget = 0, 0
+		if tk, err := s.l.Admit(ctx, c); err == nil {
+			tk.Complete(ctx, 1)
+		}
+	}
+}
+
+func (s *atCap) AddAll(ctx context.Context, incs []Increment) error {
+	if s.batches++; s.batches > 1000 {
+		return errors.New("the replay does not converge")
+	}
+	s.arrive(ctx)
+	if err := s.Mem.AddAll(ctx, incs); err != nil {
+		return err
+	}
+	for _, in := range incs {
+		s.counted[in.Call]++
+	}
+	return nil
+}
+
+func (s *atCap) Complete(ctx context.Context, in Increment, sl Slot) error {
+	if err := s.Mem.Complete(ctx, in, sl); err != nil {
+		return err
+	}
+	s.counted[in.Call]++
+	return nil
+}
+
+// TestRecoverAtTheCap: completions held while a replay is in flight, at
+// MaxPending, drop the oldest held increments; the batch in flight is
+// still taken off once sent, so no increment is counted twice, and the
+// recovery converges however many complete meanwhile. Taking a batch off
+// only while it was still the held list's prefix re-sent it every round
+// (1580 counted of 350 completed) and, under steady traffic, never ended.
+func TestRecoverAtTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		perAdd, left int
+	}{
+		{"a burst during the replay", 10, 50},
+		{"steady traffic past a batch per replay", 300, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			st := &atCap{Mem: NewMem(), perAdd: tc.perAdd, left: tc.left, counted: map[string]int{}}
+			l := New(st)
+			st.l = l
+			l.MaxPending = 300
+			st.SetDown(true)
+			for i := range 300 {
+				c := scopeCall(fmt.Sprint(i), fmt.Sprint("p", i))
+				c.ScopeLimit = 0
+				tk, err := l.Admit(ctx, c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tk.Complete(ctx, 1)
+			}
+			st.SetDown(false)
+			if err := l.Recover(ctx); err != nil || l.Down() {
+				t.Fatalf("Recover = %v, down %v: it must converge at the cap", err, l.Down())
+			}
+			twice := 0
+			for _, n := range st.counted {
+				if n > 1 {
+					twice++
+				}
+			}
+			completed := int64(300 + st.n)
+			held, known := len(l.Pending("s")), l.Known(ctx, "s")
+			if twice > 0 || held != 0 || known != int64(len(st.counted)) || known > completed {
+				t.Fatalf("held %d, known %d, %d calls counted (%d more than once), of %d completed (%d dropped): each must be counted at most once",
+					held, known, len(st.counted), twice, completed, l.Dropped.Load())
+			}
+			if known+l.Dropped.Load() < completed {
+				t.Fatalf("known %d + dropped %d < %d completed: an increment lost uncounted", known, l.Dropped.Load(), completed)
+			}
+		})
 	}
 }

@@ -80,9 +80,20 @@ prevented:
   the boundary passes them (the ledger has their rows): at most the
   allowance plus a minute's spend at the site. `ReplicaAcks` (`WAIT`)
   narrows it.
-- **A snapshot older than the retention** (a gateway cut off from the
-  bucket for longer than its lease could hold) counts only the minutes
-  retained. Its lease ends first.
+- **A boundary older than the retention.** The lease does not prevent
+  one: golem-control keeps its last known-spend result through a
+  ClickHouse outage and stamps its boundary into every renewed snapshot,
+  so after about two hours a fresh snapshot can carry a B whose minutes
+  the gateways no longer retain, and the spend between B and the
+  retention's start was counted nowhere, silently. The guard: a
+  gateway's known spend is never below its counter's period total, so
+  even a stale snapshot cannot undercount this site's own calls, and its
+  spend still adds other sites' calls before B (more than no known spend
+  would give, so the job keeps the stale result). What remains, while
+  the ledger is unreachable for longer than retention − lease − margin,
+  is other sites' spend since B: missing until it answers. It is not
+  silent: the job reports the result stale (`Job.Stale`, its age, and
+  each failed step's error), for an alert.
 - **Other sites' spend** after B, as before: the next snapshot carries it.
 
 ## Consequences

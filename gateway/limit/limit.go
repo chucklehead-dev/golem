@@ -77,7 +77,8 @@ type Limiter struct {
 	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer
 	byPrincipal map[string]int          // running calls, counted: an outage's local check is O(1)
 	byScope     map[string]int
-	pending     []Increment // increments held while the store is down, in order
+	pending     []held // increments held while the store is down, in order of seq
+	heldSeq     uint64 // the last held increment's seq
 	graceUntil  time.Time
 	// A renewal copies the running calls' slots, then registers them
 	// outside the lock: a call that ends meanwhile would be registered
@@ -88,6 +89,15 @@ type Limiter struct {
 	// beforeHold, if set, runs before an increment is held (tests: a
 	// recovery between a completion's look and its hold).
 	beforeHold func()
+}
+
+// held is an increment held for replay, with its seq: increasing with each
+// increment held, so a replay takes off what it sent by identity, not by
+// position (holds at MaxPending drop the oldest while a batch is in
+// flight) nor by value (two equal increments are two).
+type held struct {
+	seq uint64
+	Increment
 }
 
 // keyOf is a scope in a budget period.
@@ -407,7 +417,8 @@ func (l *Limiter) hold(in Increment) bool {
 	if !l.down.Load() {
 		return false
 	}
-	l.pending = append(l.pending, in)
+	l.heldSeq++
+	l.pending = append(l.pending, held{l.heldSeq, in})
 	if len(l.pending) > cmp.Or(l.MaxPending, defaultMaxPending) {
 		l.pending = l.pending[1:]
 		l.Dropped.Add(1)
@@ -495,11 +506,16 @@ func (l *Limiter) renewable() []Slot {
 // still count. No lock is held across a store call.
 //
 // It converges under load: while it replays, completions are still held,
-// so it replays until little is left, re-registers the slots, marks the
-// limiter up (from then on hold refuses, and completions go to the store
-// themselves), and drains the rest, which can only shrink.
+// so it replays until little is left, or until it has replayed what was
+// held when it began (completions at MaxPending can hold more than a batch
+// per round), re-registers the slots, marks the limiter up (from then on
+// hold refuses, and completions go to the store themselves), and drains
+// the rest, which can only shrink.
 func (l *Limiter) Recover(ctx context.Context) error {
-	for l.held() > replayBatchSize {
+	l.mu.Lock()
+	began := l.heldSeq
+	l.mu.Unlock()
+	for l.heldBefore(began) {
 		if _, err := l.replayBatch(ctx); err != nil {
 			return err
 		}
@@ -523,11 +539,13 @@ func (l *Limiter) Recover(ctx context.Context) error {
 	}
 }
 
-// held is how many increments are held.
-func (l *Limiter) held() int {
+// heldBefore reports whether more than a batch is held and the oldest was
+// held by seq last: Recover's replay while down. Each round takes off the
+// oldest (sent, or dropped at MaxPending), so it ends.
+func (l *Limiter) heldBefore(last uint64) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.pending)
+	return len(l.pending) > replayBatchSize && l.pending[0].seq <= last
 }
 
 // replayBatch replays up to replayBatchSize of the oldest held increments
@@ -535,9 +553,17 @@ func (l *Limiter) held() int {
 // completions (held while it replays) could outpace the replay.
 func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
 	l.mu.Lock()
-	batch := slices.Clone(l.pending[:min(len(l.pending), replayBatchSize)])
+	n := min(len(l.pending), replayBatchSize)
+	batch := make([]Increment, n)
+	for i, h := range l.pending[:n] {
+		batch[i] = h.Increment
+	}
+	var last uint64
+	if n > 0 {
+		last = l.pending[n-1].seq
+	}
 	l.mu.Unlock()
-	if len(batch) == 0 {
+	if n == 0 {
 		return 0, nil
 	}
 	sctx, cancel := l.storeContext(ctx)
@@ -546,19 +572,23 @@ func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	l.dropReplayed(batch)
-	return len(batch), nil
+	l.dropReplayed(last)
+	return n, nil
 }
 
-// dropReplayed takes a replayed batch off the front of the held
-// increments, unless another replay took it meanwhile. Only Recover and
-// ReplayOne take from the front; holds append.
-func (l *Limiter) dropReplayed(batch []Increment) {
+// dropReplayed takes a replayed batch off the held increments: every one
+// held by seq last. A batch is the oldest held when it was sent, so those
+// still held are at the front; those gone meanwhile were taken by another
+// replay, or dropped at MaxPending (and counted in Dropped). Only Recover
+// and ReplayOne take from the front; holds append.
+func (l *Limiter) dropReplayed(last uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.pending) >= len(batch) && slices.Equal(l.pending[:len(batch)], batch) {
-		l.pending = l.pending[len(batch):]
+	i, _ := slices.BinarySearchFunc(l.pending, last, func(h held, seq uint64) int { return cmp.Compare(h.seq, seq) })
+	if i < len(l.pending) && l.pending[i].seq == last {
+		i++
 	}
+	l.pending = l.pending[i:]
 }
 
 // replayBatchSize is the increments one replay sends: one add script
@@ -573,7 +603,7 @@ func (l *Limiter) ReplayOne(ctx context.Context) (in Increment, ok bool, err err
 		l.mu.Unlock()
 		return Increment{}, false, nil
 	}
-	in = l.pending[0]
+	in, seq := l.pending[0].Increment, l.pending[0].seq
 	l.mu.Unlock()
 	sctx, cancel := l.storeContext(ctx)
 	err = l.store.Add(sctx, in)
@@ -581,7 +611,7 @@ func (l *Limiter) ReplayOne(ctx context.Context) (in Increment, ok bool, err err
 	if err != nil {
 		return in, false, err
 	}
-	l.dropReplayed([]Increment{in})
+	l.dropReplayed(seq)
 	return in, true, nil
 }
 
@@ -607,7 +637,8 @@ func (l *Limiter) EndGrace() {
 }
 
 // Known is a scope's known spend now, for the current period, read afresh
-// when the store answers (else the last computed). It does not change what
+// when the store answers (else the last computed): as admission computes
+// it, never below the counter's whole total. It does not change what
 // admission decides from: only an admission's own read does, as in
 // model/exposure.md.
 func (l *Limiter) Known(ctx context.Context, scope string) int64 {
@@ -616,9 +647,13 @@ func (l *Limiter) Known(ctx context.Context, scope string) int64 {
 		k := l.snapshotFor(scope, period)
 		sctx, cancel := l.storeContext(ctx)
 		since, err := l.store.Since(sctx, scope, period, k.Since)
+		total := since
+		if err == nil && !k.Since.IsZero() {
+			total, err = l.store.Since(sctx, scope, period, time.Time{})
+		}
 		cancel()
 		if err == nil {
-			return k.Spend + since
+			return max(k.Spend+since, total)
 		}
 	}
 	l.mu.Lock()
@@ -633,7 +668,7 @@ func (l *Limiter) Pending(scope string) []Increment {
 	var out []Increment
 	for _, h := range l.pending {
 		if h.Scope == scope {
-			out = append(out, h)
+			out = append(out, h.Increment)
 		}
 	}
 	return out
