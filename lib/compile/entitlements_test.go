@@ -83,6 +83,10 @@ func TestEntitlementProblems(t *testing.T) {
 		{"unknown alias", strings.Replace(identity(""), "models: [claude]", "models: [claude, opus]", 1), standalone, `no ModelRoute has alias "opus"`},
 		{"unpriced budget", strings.Replace(identity(""), "model: claude-sonnet-4-5,", "model: other,", 1), standalone, "no PriceList prices"},
 		{"budget past the store's exact sums", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMicros: 1125899906842625", 1), standalone, "at most 1125899906842624"},
+		{"negative principal limit", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: -1}", 1), standalone, "spec.scopes[0].inFlight.principal: must not be negative"},
+		{"negative scope limit", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2, scope: -1}", 1), standalone, "spec.scopes[0].inFlight.scope: must not be negative"},
+		{"negative ceiling", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, maxInputBytes: -1", 1), standalone, "spec.scopes[0].maxInputBytes: must not be negative"},
+		{"unknown feature mode", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, features: loose", 1), standalone, `spec.scopes[0].features: restricted or compatible, not "loose"`},
 		{"outside standalone", identity(""), published, "for standalone mode only"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

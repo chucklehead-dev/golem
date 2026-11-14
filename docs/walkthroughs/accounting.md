@@ -160,7 +160,7 @@ A ticket ends once (`claimEnd`, `limit.go:144`; TestTicketEndsOnce).
 `limit.go:357`): a negative cost would take spend back, and sums past 2^53
 are no longer exact in Valkey's Lua numbers. Only a garbled usage report
 gives either; config refuses a budget above the same bound
-(`lib/compile/entitlements.go:76`).
+(`scopePolicy`, `lib/compile/policy.go:39`).
 
 ### 3.3 Renewal
 

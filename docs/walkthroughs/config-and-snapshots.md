@@ -130,7 +130,7 @@ The passes, in order:
    **one dialect per pool**, the first member's (ADR 0033: conversion is
    explicit, never implied by a mixed pool).
 4. **Entitlements** (`entitlements`, `entitlements.go:26`), below.
-5. **Prices** (`priceList`, `entitlements.go:202`): a three-letter
+5. **Prices** (`priceList`, `entitlements.go:189`): a three-letter
    currency, one per installation; each model priced once; no negative
    rates.
 6. **Budgets are chargeable** (`checkPriced`, `compile.go:267`): a scope
@@ -164,19 +164,23 @@ LocalIdentity in a published config is reported.
 
 A **standalone** LocalIdentity is compiled by three helpers:
 
-- `localScopes` (`entitlements.go:68`): unique names; a budget not
-  negative and at most `snapshot.MaxMicros` (`entitlements.go:81`); in-flight
-  limits and ceilings not negative; `features` restricted or compatible;
-  `providerStorage` forbidden or allowed; every model alias routed.
-  In-flight limits default to `DefaultPrincipalInFlight` (4) and
-  `DefaultScopeInFlight` (16).
-- `localKeys` (`entitlements.go:109`): each key must parse (`key.Parse`)
+- `localScopes` (`entitlements.go:68`): unique names; every model alias
+  routed; and the policy by `scopePolicy` (`lib/compile/policy.go:39`), the
+  one check of a scope's policy, for the coming ScopePolicy CRD too: a
+  budget not negative and at most `snapshot.MaxMicros`; in-flight limits
+  and ceilings not negative (the gateway applies a limit only above zero,
+  so a negative one would be none); `features` restricted or compatible;
+  `providerStorage` forbidden or allowed. Each field fails at its own path
+  (`spec.scopes[0].inFlight.scope`), every one reported. It returns the
+  snapshot's scope with its defaults explicit: an in-flight limit of 0 or
+  unset is `DefaultPrincipalInFlight` (4) or `DefaultScopeInFlight` (16).
+- `localKeys` (`entitlements.go:96`): each key must parse (`key.Parse`)
   and be a `glm_dev_` key (a live key never belongs in a file); its scope
   must exist and its models only narrow the scope's. Only the key's SHA-256
   and its display prefix enter the snapshot (`TestEntitlements` checks the
   key itself does not). Each key's principal becomes a `KeyOwner`, a
   member of its keys' scopes: a key is honoured only for a listed owner.
-- `localMembers` (`entitlements.go:166`): users and services share one
+- `localMembers` (`entitlements.go:153`): users and services share one
   namespace of Entra IDs, since gateway/auth finds both by it; each needs
   at least one scope, and a default among them (the first if unset).
 
@@ -442,8 +446,8 @@ publishing the last good config.
 | A misspelt CRD field or unknown kind is refused, naming file, document and field | `decodeInto`, `decode.go:111`; `Objects.decode`, `:73` | `TestDecodeStrict`, `lib/compile/compile_test.go:154` |
 | Every compile problem names object, field path and fix | `adder` and the passes, `lib/compile` | `TestProblems`, `compile_test.go:86`; `TestEntitlementProblems`, `entitlements_test.go:73` |
 | Equal configs give equal snapshot bytes, whatever their file layout | sorting in `Compile`, `compile.go:94`, and the passes; `Encode` | `TestDeterministic`, `compile_test.go:72` |
-| No secret value or API key reaches a snapshot | `backendAuth`, `compile.go:189`; `localKeys`, `entitlements.go:109` | `TestCompile`, `compile_test.go:51`; `TestEntitlements`, `entitlements_test.go:35` |
-| A budget above 2^50 micro-units is refused | `localScopes`, `entitlements.go:81` | `entitlements_test.go:85` |
+| No secret value or API key reaches a snapshot | `backendAuth`, `compile.go:189`; `localKeys`, `entitlements.go:96` | `TestCompile`, `compile_test.go:51`; `TestEntitlements`, `entitlements_test.go:35` |
+| A scope's policy is refused field by field: a budget above 2^50 micro-units or negative, a negative in-flight limit or ceiling, an unknown `features` or `providerStorage` | `scopePolicy`, `policy.go:39` | `TestScopePolicyCheck`, `policy_test.go:16`; `TestEntitlementProblems`, `entitlements_test.go:73` |
 | An unknown, duplicate or miscased snapshot member, or another schema, is refused; another schema says to upgrade the gateway | `Decode`, `snapshot.go:196` | `TestDecodeFailsClosed`, `lib/snapshot/snapshot_test.go:35` |
 | Only a pointer or checkpoint signed by a trusted key, in its own context, opens | `open`, `pointer.go:110` | `TestPointer`, `lib/snapshot/pointer_test.go:37`; `TestCheckpoint`, `:67`; `TestKMSPointer`, `lib/sign/kmssign/kmssign_test.go:48` |
 | A gateway trusts the keys of its key directory, by Key-ID header or file name, and refuses an empty one | `LoadKeys`, `lib/sign/keys.go:38` | `TestLoadKeys`, `lib/sign/keys_test.go:19` |

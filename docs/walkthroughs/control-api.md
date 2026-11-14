@@ -342,6 +342,11 @@ end against a fake Entra and a real `api.Server`.
 - Most of the org model is still to come: sub-teams and projects, the
   services entity, member and service caps, budgets and grants, capture
   settings, unbinding a manager, and rotating or constraining keys.
+- `CreateScope` stores the policy it is given unchecked: a negative
+  in-flight limit or ceiling would be none at the gateway. Scope policy
+  moves out of the state document into a ScopePolicy CRD, checked by
+  lib/compile's `scopePolicy` as a LocalScope's is; until then, give
+  policies through golemctl with care.
 - `BindManager` checks neither that the scope nor the principal exists:
   the store's invariants refuse the write, so the caller gets
   `failed_precondition` rather than `not found`.

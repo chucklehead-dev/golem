@@ -63,8 +63,8 @@ func identityName(src v1.Source[v1.LocalIdentity]) string {
 	return objectName("LocalIdentity", src.Object.Metadata.Name, src.Where())
 }
 
-// localScopes validates a LocalIdentity's scopes, by name. Each reports at
-// most one problem of its own fields, then any alias no route has.
+// localScopes validates a LocalIdentity's scopes, by name: a scope's name,
+// its policy (scopePolicy, every problem) and any alias no route has.
 func localScopes(obj string, in []v1.LocalScope, aliases map[string]string, add adder) map[string]*snapshot.Scope {
 	scopes := map[string]*snapshot.Scope{}
 	for i, sc := range in {
@@ -76,28 +76,15 @@ func localScopes(obj string, in []v1.LocalScope, aliases map[string]string, add 
 		case scopes[sc.Name] != nil:
 			add(obj, at+".name", "another scope is named %q", sc.Name)
 			continue
-		case sc.BudgetMicros < 0:
-			add(obj, at+".budgetMicros", "must not be negative")
-		case sc.BudgetMicros > snapshot.MaxMicros:
-			add(obj, at+".budgetMicros", "at most %d (2^50): larger sums are not exact in the site store", int64(snapshot.MaxMicros))
-		case sc.InFlight.Principal < 0 || sc.InFlight.Scope < 0:
-			add(obj, at+".inFlight", "limits must not be negative")
-		case sc.MaxOutputTokens < 0 || sc.MaxInputBytes < 0:
-			add(obj, at, "ceilings must not be negative")
-		case sc.Features != "" && sc.Features != "restricted" && sc.Features != "compatible":
-			add(obj, at+".features", "%q: restricted or compatible (unset: restricted, compatible on agent routes)", sc.Features)
-		case sc.ProviderStorage != "" && sc.ProviderStorage != "forbidden" && sc.ProviderStorage != "allowed":
-			add(obj, at+".providerStorage", "%q: forbidden (the default) or allowed", sc.ProviderStorage)
 		}
 		for j, m := range sc.Models {
 			if _, ok := aliases[m]; !ok {
 				add(obj, fmt.Sprintf("%s.models[%d]", at, j), "no ModelRoute has alias %q", m)
 			}
 		}
-		scopes[sc.Name] = &snapshot.Scope{ID: sc.Name, Models: slices.Sorted(slices.Values(sc.Models)), BudgetMicros: sc.BudgetMicros,
-			DeclaredWorstCaseCheck: sc.DeclaredWorstCaseCheck, PrincipalInFlight: cmp.Or(sc.InFlight.Principal, DefaultPrincipalInFlight),
-			ScopeInFlight: cmp.Or(sc.InFlight.Scope, DefaultScopeInFlight), StorageAllowed: sc.ProviderStorage == "allowed",
-			MaxOutputTokens: sc.MaxOutputTokens, MaxInputBytes: sc.MaxInputBytes, Features: sc.Features}
+		scope := scopePolicy(obj, at, localPolicy(sc), add)
+		scope.ID, scope.Models = sc.Name, slices.Sorted(slices.Values(sc.Models))
+		scopes[sc.Name] = &scope
 	}
 	return scopes
 }
