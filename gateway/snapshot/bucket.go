@@ -37,6 +37,12 @@ type Bucket struct {
 	// bucket (snapshot.CheckpointKey, which only golem-control writes): a
 	// restart with an empty disk still has the publisher's floor.
 	Checkpoint string
+	// LastGood, if set, is a file on the same disk holding the last
+	// publication applied, its signed pointer and snapshot, written before
+	// the checkpoint. Start applies it, verified as a publication read from
+	// the bucket is, so a gateway restarted while the bucket is
+	// unreachable serves until the snapshot's lease ends (gateway.md §6).
+	LastGood string
 	// GatewayID, if set, names the status object written after each apply
 	// (status/<pool>/<id>): diagnostic only, never trusted (anyone with the
 	// pool's credentials can overwrite it).
@@ -74,7 +80,45 @@ func (b *Bucket) Start(ctx context.Context) error {
 		return fmt.Errorf("no local checkpoint, and the pool's trusted one is unreadable: %w", err)
 	}
 	b.Holder.RaiseFloor(max(local, trusted))
+	b.loadLastGood()
 	return nil
+}
+
+// lastGood is the last-good file: the publication as the bucket held it.
+type lastGood struct {
+	Pointer  []byte `json:"pointer"`
+	Snapshot []byte `json:"snapshot"`
+}
+
+// loadLastGood applies the last-good publication, if there is one that
+// verifies, is at or above the floor and whose lease has not ended. One
+// that does not is reported and left: the bucket's next publication
+// replaces it.
+func (b *Bucket) loadLastGood() {
+	if b.LastGood == "" {
+		return
+	}
+	raw, err := os.ReadFile(b.LastGood)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	var lg lastGood
+	if err == nil {
+		err = json.Unmarshal(raw, &lg)
+	}
+	var ptr snapshot.Pointer
+	var s *snapshot.Snapshot
+	if err == nil {
+		ptr, s, err = b.verify(lg.Pointer, lg.Snapshot)
+	}
+	if err == nil {
+		err = b.Holder.Apply(s, ptr.Hash, b.Secrets)
+	}
+	if err != nil {
+		b.log().Warn("the last-good snapshot on disk was not applied; waiting for the bucket", "path", b.LastGood, "err", err)
+		return
+	}
+	b.log().Info("the last-good snapshot applied from disk", "pool", b.Pool, "seq", ptr.PublishSeq, "hash", ptr.Hash[:12])
 }
 
 func (b *Bucket) localCheckpoint() (uint64, bool, error) {
@@ -180,23 +224,58 @@ type applyError struct{ error }
 
 func (e applyError) Unwrap() error { return e.error }
 
-// read judges a pointer and applies the publication it names, unless the
-// gateway holds it already.
-func (b *Bucket) read(ctx context.Context, raw []byte) error {
+// openPointer verifies a pointer, names this pool and is at or above the
+// floor.
+func (b *Bucket) openPointer(raw []byte) (snapshot.Pointer, error) {
 	ptr, err := snapshot.OpenPointer(raw, b.Keys)
 	if err != nil {
-		return err
+		return ptr, err
 	}
 	if ptr.Pool != b.Pool {
-		return fmt.Errorf("pointer for pool %q in pool %q's place: refused", ptr.Pool, b.Pool)
-	}
-	if ptr.Expires.After(b.expires) {
-		b.expires = ptr.Expires
+		return ptr, fmt.Errorf("pointer for pool %q in pool %q's place: refused", ptr.Pool, b.Pool)
 	}
 	// Holder.Apply checks the floor too; checking it here as well refuses a
 	// replayed pointer before its snapshot is fetched.
 	if floor := b.Holder.Floor(); ptr.PublishSeq < floor {
-		return fmt.Errorf("pointer %d is below the floor %d: refused (a replayed pointer, or a stale publisher)", ptr.PublishSeq, floor)
+		return ptr, fmt.Errorf("pointer %d is below the floor %d: refused (a replayed pointer, or a stale publisher)", ptr.PublishSeq, floor)
+	}
+	return ptr, nil
+}
+
+// openSnapshot checks a snapshot object is the one its pointer signed.
+func openSnapshot(ptr snapshot.Pointer, body []byte) (*snapshot.Snapshot, error) {
+	if got := snapshot.Hash(body); got != ptr.Hash {
+		return nil, fmt.Errorf("snapshot %s hashes to %s: refused (not the object the pointer signed)", ptr.Hash, got)
+	}
+	s, err := snapshot.Decode(body)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot %s: %w", ptr.Hash, err)
+	}
+	if s.PublishSeq != ptr.PublishSeq {
+		return nil, fmt.Errorf("snapshot %s is publication %d, its pointer says %d: refused", ptr.Hash, s.PublishSeq, ptr.PublishSeq)
+	}
+	return s, nil
+}
+
+// verify is openPointer and openSnapshot together.
+func (b *Bucket) verify(rawPtr, body []byte) (snapshot.Pointer, *snapshot.Snapshot, error) {
+	ptr, err := b.openPointer(rawPtr)
+	if err != nil {
+		return ptr, nil, err
+	}
+	s, err := openSnapshot(ptr, body)
+	return ptr, s, err
+}
+
+// read judges a pointer and applies the publication it names, unless the
+// gateway holds it already.
+func (b *Bucket) read(ctx context.Context, raw []byte) error {
+	ptr, err := b.openPointer(raw)
+	if err != nil {
+		return err
+	}
+	if ptr.Expires.After(b.expires) {
+		b.expires = ptr.Expires
 	}
 	if c := b.Holder.cur.Load(); c != nil && ptr.PublishSeq == c.Snapshot.PublishSeq && ptr.Hash == c.Hash {
 		return nil
@@ -205,18 +284,17 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 	if err != nil {
 		return fetchError{fmt.Errorf("snapshot %s: %w", ptr.Hash, err)}
 	}
-	if got := snapshot.Hash(body); got != ptr.Hash {
-		return fmt.Errorf("snapshot %s hashes to %s: refused (not the object the pointer signed)", ptr.Hash, got)
-	}
-	s, err := snapshot.Decode(body)
+	s, err := openSnapshot(ptr, body)
 	if err != nil {
-		return fmt.Errorf("snapshot %s: %w", ptr.Hash, err)
-	}
-	if s.PublishSeq != ptr.PublishSeq {
-		return fmt.Errorf("snapshot %s is publication %d, its pointer says %d: refused", ptr.Hash, s.PublishSeq, ptr.PublishSeq)
+		return err
 	}
 	if err := b.Holder.Apply(s, ptr.Hash, b.Secrets); err != nil {
 		return err // an applyError if it may apply later
+	}
+	// The last-good copy before the checkpoint: a crash between leaves a
+	// copy at or above the floor, never one below it.
+	if err := b.saveLastGood(raw, body); err != nil {
+		b.log().Error("the last-good snapshot was not written", "path", b.LastGood, "err", err)
 	}
 	if err := b.saveCheckpoint(ptr.PublishSeq); err != nil {
 		// Applied but not persisted: a restart's floor is the older one.
@@ -227,16 +305,33 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-// saveCheckpoint writes the sequence whole, then renames it into place.
+// saveLastGood writes the publication applied to the last-good file.
+func (b *Bucket) saveLastGood(ptr, body []byte) error {
+	if b.LastGood == "" {
+		return nil
+	}
+	raw, err := json.Marshal(lastGood{Pointer: ptr, Snapshot: body})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(b.LastGood, raw)
+}
+
+// saveCheckpoint writes the sequence to the checkpoint file.
 func (b *Bucket) saveCheckpoint(seq uint64) error {
 	if b.Checkpoint == "" {
 		return nil
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(b.Checkpoint), ".checkpoint-*")
+	return writeAtomic(b.Checkpoint, []byte(strconv.FormatUint(seq, 10)+"\n"))
+}
+
+// writeAtomic writes a file whole, then renames it into place.
+func writeAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return err
 	}
-	_, err = tmp.WriteString(strconv.FormatUint(seq, 10) + "\n")
+	_, err = tmp.Write(data)
 	if err == nil {
 		err = tmp.Sync()
 	}
@@ -244,7 +339,7 @@ func (b *Bucket) saveCheckpoint(seq uint64) error {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Rename(tmp.Name(), b.Checkpoint)
+		err = os.Rename(tmp.Name(), path)
 	}
 	if err != nil {
 		os.Remove(tmp.Name())
@@ -252,7 +347,7 @@ func (b *Bucket) saveCheckpoint(seq uint64) error {
 	}
 	// The rename is durable once the directory is: without this, a power
 	// loss can bring back the previous checkpoint, a lower floor.
-	dir, err := os.Open(filepath.Dir(b.Checkpoint))
+	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}

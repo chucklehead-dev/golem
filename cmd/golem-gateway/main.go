@@ -77,7 +77,7 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.pool, "pool", "", "pool mode: the gateway pool whose snapshots this gateway serves")
 	fs.StringVar(&o.bucket, "bucket", "", "pool mode: the state bucket, s3://<bucket>/<prefix> (or a directory, for tests)")
 	fs.StringVar(&o.keys, "keys", "", "pool mode: a directory of the publishing keys this gateway trusts (*.pub, PEM; a KMS key's with a Key-ID header)")
-	fs.StringVar(&o.checkpoint, "checkpoint", "", "pool mode: a file on this gateway's own disk for the last publication applied (its floor across restarts); empty: the trusted checkpoint alone")
+	fs.StringVar(&o.checkpoint, "checkpoint", "", "pool mode: a file on this gateway's own disk for the last publication applied (its floor across restarts), with last-good.json beside it (the publication itself, served at a restart while the bucket is unreachable); empty: the trusted checkpoint alone")
 	fs.StringVar(&o.gatewayID, "id", "", "pool mode: this gateway's name, for its status object (default the host name)")
 	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey (host:port) for the limiter")
 	fs.IntVar(&o.replicaAcks, "valkey-replica-acks", 0, "pool mode: replicas each spend add waits for (WAIT), so a failover cannot lose it")
@@ -251,14 +251,14 @@ func poolSource(ctx context.Context, o options, holder *snapshot.Holder) (*snaps
 		}
 	}
 	src := &snapshot.Bucket{Bucket: b, Keys: keys, Pool: o.pool, Holder: holder, Secrets: snapshot.FileSecrets{Root: root},
-		Checkpoint: o.checkpoint, GatewayID: id, Log: slog.Default()}
+		Checkpoint: o.checkpoint, LastGood: lastGoodPath(o.checkpoint), GatewayID: id, Log: slog.Default()}
 	if err := src.Start(ctx); err != nil {
 		return nil, fmt.Errorf("pool %s: %w", o.pool, err)
 	}
 	if err := src.Poll(ctx); err != nil {
-		// Not fatal: the gateway is not ready until a publication applies,
-		// and polls on.
-		slog.Error("golem-gateway: no publication applied yet", "pool", o.pool, "err", err)
+		// Not fatal: the gateway serves its last-good publication if it
+		// had one (Start), is not ready until one applies, and polls on.
+		slog.Error("golem-gateway: the pool's publication was not read", "pool", o.pool, "err", err)
 	}
 	return src, nil
 }
@@ -404,4 +404,13 @@ func loadLocalKey(path string) (k, at string, err error) {
 func failed(format string, args ...any) int {
 	fmt.Fprintf(os.Stderr, "golem-gateway: "+format+"\n", args...)
 	return 1
+}
+
+// lastGoodPath is the last-good publication's file, beside the checkpoint;
+// none without one.
+func lastGoodPath(checkpoint string) string {
+	if checkpoint == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(checkpoint), "last-good.json")
 }

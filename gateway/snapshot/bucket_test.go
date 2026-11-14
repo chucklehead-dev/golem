@@ -1,9 +1,12 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"crypto/ed25519"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -297,4 +300,89 @@ func TestApplyRetried(t *testing.T) {
 	if err := gw.Poll(t.Context()); err != nil || applied(gw) != 1 {
 		t.Fatalf("after the retry interval: %v, applied %d; want 1", err, applied(gw))
 	}
+}
+
+// unreachable is a bucket that answers nothing.
+type unreachable struct{ bucket.Bucket }
+
+func (unreachable) Get(context.Context, string, string) ([]byte, string, error) {
+	return nil, "", errors.New("dial tcp: connection refused")
+}
+
+// TestLastGood: a gateway restarted while the bucket is unreachable serves
+// the last publication it applied, from its disk, verified as one from the
+// bucket is; a copy that was altered, is below the floor, or whose lease
+// has ended is not served.
+func TestLastGood(t *testing.T) {
+	p := newPublished(t)
+	path := filepath.Join(p.dir, "last-good.json")
+	gw := p.gateway(t)
+	gw.LastGood = path
+	p.publish(t)
+	if err := gw.Poll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	restart := func(now time.Time) *Bucket {
+		b := &Bucket{Bucket: unreachable{p.bucket}, Keys: p.keys, Pool: "internal", Holder: &Holder{Now: func() time.Time { return now }},
+			Checkpoint: filepath.Join(p.dir, "checkpoint"), LastGood: path}
+		if err := b.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if b := restart(time.Now()); applied(b) != 1 {
+		t.Fatalf("applied %d after a restart with the bucket down: want the last-good 1", applied(b))
+	}
+	if b := restart(time.Now().Add(2 * time.Hour)); applied(b) != 0 {
+		t.Fatal("a last-good copy whose lease has ended was served")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lg lastGood
+	if err := json.Unmarshal(raw, &lg); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(lastGood) lastGood{
+		"its snapshot altered": func(l lastGood) lastGood {
+			l.Snapshot = append(bytes.Clone(l.Snapshot[:len(l.Snapshot)-1]), ' ', '}')
+			return l
+		},
+		"its pointer's payload changed, not re-signed": func(l lastGood) lastGood {
+			var env struct {
+				Payload []byte `json:"payload"`
+				Key     string `json:"key"`
+				Sig     []byte `json:"sig"`
+			}
+			if err := json.Unmarshal(l.Pointer, &env); err != nil {
+				t.Fatal(err)
+			}
+			changed := bytes.Replace(env.Payload, []byte(`"publishSeq":1`), []byte(`"publishSeq":9`), 1)
+			if bytes.Equal(changed, env.Payload) {
+				t.Fatalf("the payload %s has no publishSeq 1 to change", env.Payload)
+			}
+			env.Payload = changed
+			l.Pointer, _ = json.Marshal(env)
+			return l
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad, _ := json.Marshal(change(lg))
+			if err := os.WriteFile(path, bad, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if b := restart(time.Now()); applied(b) != 0 {
+				t.Fatalf("applied %d from an altered last-good copy", applied(b))
+			}
+		})
+	}
+	t.Run("below the floor", func(t *testing.T) {
+		os.WriteFile(path, raw, 0o600)
+		os.WriteFile(filepath.Join(p.dir, "checkpoint"), []byte("5\n"), 0o600)
+		if b := restart(time.Now()); applied(b) != 0 {
+			t.Fatal("a last-good copy below the floor was served")
+		}
+	})
 }

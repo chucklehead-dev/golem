@@ -302,6 +302,7 @@ row with outcome `cancelled`, its cost in the counter.
 | A snapshot below the floor, or not newer than the one held, is never applied | `Holder.Apply` (`holder.go:111`, `:114`); `Bucket.read` (`bucket.go:146`) | `TestHolder`, `TestRaiseFloor`, `TestBucketSource`, `TestPublicationModel` |
 | A restart with an empty disk takes the trusted checkpoint as its floor; with no floor at all it does not start | `Bucket.Start` | `TestBucketSource` (restarts), `TestPublicationModel` (`restartEmpty`) |
 | Only a correctly signed pointer of this pool, naming an object with its hash and sequence, is applied | `Bucket.read` | `TestBucketSource` |
+| A restart while the bucket is unreachable serves the last publication applied, verified again; an altered copy, one below the floor or past its lease is not served | `Bucket.loadLastGood`, `Bucket.verify` | `TestLastGood` |
 | An expired lease serves nothing new | `Holder.Current`, `Holder.Apply` | `TestHolder`, `TestPublicationModel` (`serve`) |
 | A config that does not compile keeps the previous one | `Holder.Apply`, `Dir.Load` | `TestDir` |
 | Upstream dials to forbidden addresses are refused, at every connection | `checkDestination` in the dialer | `TestCheckDestination`, `TestDialRefused`, `TestDialReresolved` |
@@ -320,9 +321,7 @@ row with outcome `cancelled`, its cost in the counter.
 ## Known gaps
 
 - Pool mode runs only with `-accept-unreleased` until golem#7's evidence
-  is in. The on-disk last-good snapshot (gateway.md §6) is not built: a
-  gateway restarted while the bucket is unreachable is not ready until it
-  can read a publication.
+  is in.
 - A snapshot refused by `Holder.Apply` for a reason that may pass (a
   Secret not yet mounted) is still judged final for that pointer: the
   gateway retries only when the pointer changes, at the next publication

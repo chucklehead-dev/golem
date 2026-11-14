@@ -267,8 +267,11 @@ key (a dev key generated on first start into a file only its user may
 read, printed as an export line; `-local-key`): the browser guard keeps web
 pages out, the key keeps out the machine's other programs and users. With
 a LocalIdentity, its dev keys are required, each honoured only for a
-listed owner of its kind in its scope. The bucket source, the on-disk
-last-good copy, status writes and the denylist are next.
+listed owner of its kind in its scope. Pool mode reads the bucket source,
+writes status objects, applies the emergency denylist, and keeps the last
+publication applied on disk beside its checkpoint (`last-good.json`):
+restarted while the bucket is unreachable, it serves that copy, verified
+as a publication from the bucket is, until its lease ends.
 
 `golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop
 from the same CRD YAML as the GitOps repository, compiled in-process by
