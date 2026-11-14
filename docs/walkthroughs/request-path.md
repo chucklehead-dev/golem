@@ -166,7 +166,11 @@ crash on it. Each read goes through `ex.forward` (`exchange.go:113`) into
 line ends with `bytes.IndexByte` and dispatches each event (`sse.go:170`)
 to `chat.StreamUsage.OnEvent` (`chat/chat.go:315`). That checks
 `mayHaveUsage` (`chat.go:294`) before scanning, since every chunk but the
-last carries `"usage":null`. What the filter passes is written by
+last carries `"usage":null`. A usage object is the provider's final
+report only with both `prompt_tokens` and `completion_tokens` present and
+not null (`readInt` reports presence): a null count is not reported, and
+the call is estimated rather than charged nothing
+(`TestNullCountsAreNotFinal`). What the filter passes is written by
 `ex.send` (`exchange.go:89`) under a write deadline (`WriteStall`) and
 flushed; a failed or stalled write marks the caller gone and ends the
 loop. At EOF `Filter.End` forwards an unterminated last event, and

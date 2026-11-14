@@ -126,6 +126,39 @@ func TestInvalidUsageDoesNotBecomeFinal(t *testing.T) {
 	}
 }
 
+// TestNullCountsAreNotFinal: a usage object whose counts are null reports
+// nothing: it is not the provider's final report (the call would be
+// charged nothing), and the gateway estimates instead. Streamed and whole.
+func TestNullCountsAreNotFinal(t *testing.T) {
+	for _, usage := range []string{
+		`{"prompt_tokens":null,"completion_tokens":null}`,
+		`{"prompt_tokens":12,"completion_tokens":null}`,
+		`{"prompt_tokens":null,"completion_tokens":3,"total_tokens":null}`,
+	} {
+		whole := `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}],"usage":` + usage + `}`
+		var u StreamUsage
+		u.Response([]byte(whole))
+		if u.Final || u.Err == nil {
+			t.Errorf("whole response, usage %s: Final=%v Err=%v usage %+v, want a non-final report", usage, u.Final, u.Err, u.Usage)
+		}
+		streamed := `data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}],"usage":null}` + "\n\n" +
+			`data: {"id":"c1","object":"chat.completion.chunk","choices":[],"usage":` + usage + `}` + "\n\n" +
+			"data: [DONE]\n\n"
+		u = StreamUsage{}
+		p := sse.Parser{OnEvent: u.OnEvent}
+		p.Write([]byte(streamed))
+		if u.Final || u.Err == nil {
+			t.Errorf("stream, usage %s: Final=%v Err=%v usage %+v, want a non-final report", usage, u.Final, u.Err, u.Usage)
+		}
+	}
+	// A null detail is only not reported: the counts still make it final.
+	var u StreamUsage
+	u.Response([]byte(`{"usage":{"prompt_tokens":5,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":null}}}`))
+	if want := (canon.Usage{Input: 5, Output: 2}); !u.Final || u.Err != nil || u.Usage != want {
+		t.Errorf("a null detail: Final=%v Err=%v usage %+v, want final %+v", u.Final, u.Err, u.Usage, want)
+	}
+}
+
 func TestMayHaveUsage(t *testing.T) {
 	for in, want := range map[string]bool{
 		`{"choices":[{"delta":{"content":"hi"}}],"usage":null}`:                       false,

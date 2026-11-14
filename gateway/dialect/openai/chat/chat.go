@@ -334,13 +334,13 @@ func (u *StreamUsage) Response(body []byte) {
 		seen = true
 		return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
 			switch string(name) {
-			case "prompt_tokens":
-				err := readInt(d, &got.Input)
-				input = err == nil
+			case "prompt_tokens": // null is not reported: not final
+				var err error
+				input, err = readInt(d, &got.Input)
 				return err
 			case "completion_tokens":
-				err := readInt(d, &got.Output)
-				output = err == nil
+				var err error
+				output, err = readInt(d, &got.Output)
 				return err
 			case "prompt_tokens_details":
 				return readDetail(d, "cached_tokens", &got.CacheRead)
@@ -351,7 +351,7 @@ func (u *StreamUsage) Response(body []byte) {
 		})
 	})
 	if err == nil && seen && (!input || !output) {
-		err = ErrField // a partial report must not suppress estimation
+		err = ErrField // a partial report (a count absent or null) must not suppress estimation
 	}
 	if err != nil {
 		if u.Err == nil {
@@ -366,19 +366,19 @@ func (u *StreamUsage) Response(body []byte) {
 	}
 }
 
-// readInt reads a token count into dst: a non-negative integer, or null
-// (not reported, dst unchanged).
-func readInt(d *jsonscan.Decoder, dst *int64) error {
+// readInt reads a token count into dst: a non-negative integer (present),
+// or null (not reported: present false, dst unchanged).
+func readInt(d *jsonscan.Decoder, dst *int64) (present bool, err error) {
 	v, _, err := d.ReadValue()
 	if err != nil || v.Kind() == 'n' {
-		return err
+		return false, err
 	}
 	n, ok := jsonscan.Int(v)
 	if !ok || n < 0 {
-		return ErrField
+		return false, ErrField
 	}
 	*dst = n
-	return nil
+	return true, nil
 }
 
 // readDetail reads one count from a usage details object, if it is one.
@@ -391,6 +391,7 @@ func readDetail(d *jsonscan.Decoder, field string, dst *int64) error {
 		if string(name) != field {
 			return d.SkipValue()
 		}
-		return readInt(d, dst)
+		_, err := readInt(d, dst) // a null detail is only not reported
+		return err
 	})
 }
