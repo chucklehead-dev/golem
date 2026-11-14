@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,5 +64,33 @@ func TestBoundsRace(t *testing.T) {
 			}
 		}
 		b.end()
+	}
+}
+
+// TestIdleAlarm: reads within the idle period keep a call alive however
+// long it runs; a read after the alarm fired does not re-arm it, so the
+// fired alarm is replaced, not reused with a callback pending.
+func TestIdleAlarm(t *testing.T) {
+	b := newBounds()
+	ctx := b.bound(t.Context(), time.Now(), &route.Route{MaxDuration: time.Hour, Idle: 20 * time.Millisecond})
+	b.gotHeaders()
+	body := b.bodyOf(strings.NewReader(strings.Repeat("x", 100)))
+	one := make([]byte, 1)
+	for range 10 { // 50 ms of reads, 5 ms apart: never idle
+		time.Sleep(5 * time.Millisecond)
+		body.Read(one)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("a call reading every 5 ms was cut: %v", context.Cause(ctx))
+	}
+	<-ctx.Done()
+	if context.Cause(ctx) != errIdle {
+		t.Fatalf("cause %v", context.Cause(ctx))
+	}
+	idle := b.idle
+	body.Read(one) // a read after the cut, as a draining caller makes
+	b.end()
+	if b.idle == idle {
+		t.Fatal("the fired idle alarm was kept: a read re-armed it, and its stale callback could cancel the next call")
 	}
 }
