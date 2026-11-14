@@ -1,0 +1,6 @@
+# leadership.md's small instance, explored exhaustively to a depth
+# (check-leadership.sh): two replicas, a directory of three values.
+spec: leadership.qnt
+module: small
+actions: {}
+invariants: [safe, floorNeverDrops, noStaleSync, epochsUnique, forward]
