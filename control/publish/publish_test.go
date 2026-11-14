@@ -344,3 +344,38 @@ func (h *hidden) Get(ctx context.Context, key, inm string) ([]byte, string, erro
 	}
 	return h.Bucket.Get(ctx, key, inm)
 }
+
+// TestPublishAll: one cycle over several pools is one state write, every
+// pool's record won in it, and each pool's pointer moves; a pool that
+// cannot publish is left out without stopping the others.
+func TestPublishAll(t *testing.T) {
+	ctx := t.Context()
+	p, keys, d := setup(t)
+	l := leads(t, p.State, "r1", 1)
+	var pubs []*Publisher
+	for _, pool := range []string{"edge", "internal", "batch"} {
+		q := *p
+		q.Pool = pool
+		pubs = append(pubs, &q)
+	}
+	before := p.State.Current().StateVersion
+	ptrs, errs := PublishAll(ctx, p.State, l, 1, pubs, func(_ *Publisher, seq uint64) (*snapshot.Snapshot, error) { return build(seq) })
+	if len(errs) != 0 || p.State.Current().StateVersion != before+1 {
+		t.Fatalf("errors %v; %d state writes, want 1", errs, p.State.Current().StateVersion-before)
+	}
+	for _, q := range pubs {
+		raw, _, _ := d.Get(ctx, snapshot.PointerKey(q.Pool), "")
+		if got, err := snapshot.OpenPointer(raw, keys); err != nil || got != ptrs[q.Pool] || got.PublishSeq != 1 {
+			t.Fatalf("pool %s: pointer %+v %v", q.Pool, got, err)
+		}
+	}
+	// A tampered pool is left out; the others publish.
+	d.Put(ctx, snapshot.CheckpointKey("edge"), []byte(`{"pool":"edge","publishSeq":9}`), "")
+	ptrs, errs = PublishAll(ctx, p.State, l, 1, pubs, func(_ *Publisher, seq uint64) (*snapshot.Snapshot, error) { return build(seq) })
+	if !errors.Is(errs["edge"], ErrTampered) || len(errs) != 1 || ptrs["internal"].PublishSeq != 2 || ptrs["batch"].PublishSeq != 2 {
+		t.Fatalf("errors %v, pointers %v", errs, ptrs)
+	}
+	if rec := p.State.Current().Publications["edge"]; rec.Seq != 1 {
+		t.Fatalf("the tampered pool's record moved: %+v", rec)
+	}
+}

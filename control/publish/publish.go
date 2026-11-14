@@ -89,70 +89,138 @@ type Lease = state.Fence
 // none can have published, and a replica stops believing it leads before
 // its lease lapses by its own clock (lead.Elector.Epoch).
 func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, build func(seq uint64) (*snapshot.Snapshot, error)) (snapshot.Pointer, error) {
-	rec, err := p.Record(ctx)
-	if err != nil {
+	ptrs, errs := PublishAll(ctx, p.State, lease, source, []*Publisher{p}, func(_ *Publisher, seq uint64) (*snapshot.Snapshot, error) {
+		return build(seq)
+	})
+	if err := errs[p.Pool]; err != nil {
 		return snapshot.Pointer{}, err
 	}
-	if err := holds(p.State.Current().Fence, lease); err != nil {
-		return snapshot.Pointer{}, err
+	return ptrs[p.Pool], nil
+}
+
+// PublishAll publishes every pool's publication with one state write: each
+// pool's snapshot is numbered and written, then all their records are won
+// in a single fenced update (one document version a cycle, whatever the
+// number of pools, ADR 0049), then each pool's checkpoint and pointer. A
+// pool that fails before the record (tampering, a build error) is left out
+// and the others go on; its error is in errs. The publishers share st.
+func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64, pubs []*Publisher,
+	build func(p *Publisher, seq uint64) (*snapshot.Snapshot, error)) (ptrs map[string]snapshot.Pointer, errs map[string]error) {
+	ptrs, errs = map[string]snapshot.Pointer{}, map[string]error{}
+	fail := func(err error) (map[string]snapshot.Pointer, map[string]error) {
+		for _, p := range pubs {
+			if errs[p.Pool] == nil {
+				errs[p.Pool] = err
+			}
+		}
+		return ptrs, errs
 	}
-	epoch := lease.Epoch
-	if epoch < rec.Epoch || source < rec.Source {
-		return snapshot.Pointer{}, fmt.Errorf("%w: the record is at epoch %d, state %d; this publisher has epoch %d, state %d", ErrFenced, rec.Epoch, rec.Source, epoch, source)
+	if err := st.Refresh(ctx); err != nil {
+		return fail(err)
+	}
+	if err := holds(st.Current().Fence, lease); err != nil {
+		return fail(err)
+	}
+	var ready []prepared
+	for _, p := range pubs {
+		pr, err := p.prepare(ctx, st.Current().Publications[p.Pool], lease, source, build)
+		if err != nil {
+			errs[p.Pool] = err
+			continue
+		}
+		ready = append(ready, pr)
+	}
+	if len(ready) == 0 {
+		return ptrs, errs
+	}
+	if _, err := st.FencedUpdate(ctx, lease, func(d *state.Document) error {
+		for _, pr := range ready {
+			if d.Publications[pr.p.Pool] != pr.rec {
+				return ErrConflict // another publisher won since this one read the record
+			}
+		}
+		if d.Publications == nil {
+			d.Publications = map[string]state.Record{}
+		}
+		for _, pr := range ready {
+			d.Publications[pr.p.Pool] = state.Record{Epoch: lease.Epoch, Seq: pr.seq, Source: source}
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, state.ErrFenced) {
+			err = fmt.Errorf("%w: %w", ErrFenced, err)
+		}
+		return fail(err)
+	}
+	for _, pr := range ready {
+		ptr, err := pr.p.finish(ctx, pr, lease, source)
+		if err != nil {
+			errs[pr.p.Pool] = err
+			continue
+		}
+		ptrs[pr.p.Pool] = ptr
+	}
+	return ptrs, errs
+}
+
+// prepared is a pool's publication, numbered and its snapshot written,
+// waiting for its record.
+type prepared struct {
+	p    *Publisher
+	rec  state.Record // as read: the record update requires it unchanged
+	seq  uint64
+	hash string
+}
+
+// prepare numbers the pool's next publication and writes its snapshot.
+func (p *Publisher) prepare(ctx context.Context, rec state.Record, lease Lease, source uint64,
+	build func(*Publisher, uint64) (*snapshot.Snapshot, error)) (prepared, error) {
+	if lease.Epoch < rec.Epoch || source < rec.Source {
+		return prepared{}, fmt.Errorf("%w: the record is at epoch %d, state %d; this publisher has epoch %d, state %d", ErrFenced, rec.Epoch, rec.Source, lease.Epoch, source)
 	}
 	// Numbered above the record, the verified checkpoint and the signed
 	// pointer: a rolled-back record beside an older checkpoint copied back
 	// would otherwise publish below what gateways already trust.
 	floor, err := p.floor(ctx, rec)
 	if err != nil {
-		return snapshot.Pointer{}, err
+		return prepared{}, err
 	}
 	seq := max(rec.Seq, floor) + 1
-	s, err := build(seq)
+	s, err := build(p, seq)
 	if err != nil {
-		return snapshot.Pointer{}, err
+		return prepared{}, err
 	}
 	if s.PublishSeq != seq {
-		return snapshot.Pointer{}, fmt.Errorf("publish: built publication %d, want %d", s.PublishSeq, seq)
+		return prepared{}, fmt.Errorf("publish: built publication %d, want %d", s.PublishSeq, seq)
 	}
 	body, err := s.Encode()
 	if err != nil {
-		return snapshot.Pointer{}, err
+		return prepared{}, err
 	}
 	hash := snapshot.Hash(body)
 	if _, err := p.Bucket.Put(ctx, snapshot.ObjectKey(p.Pool, hash), body, ""); err != nil {
-		return snapshot.Pointer{}, err
+		return prepared{}, err
 	}
-	if _, err := p.State.Update(ctx, func(d *state.Document) error {
-		if err := holds(d.Fence, lease); err != nil {
-			return err
-		}
-		if d.Publications[p.Pool] != rec {
-			return ErrConflict // another publisher won since this one read the record
-		}
-		if d.Publications == nil {
-			d.Publications = map[string]state.Record{}
-		}
-		d.Publications[p.Pool] = state.Record{Epoch: epoch, Seq: seq, Source: source}
-		return nil
-	}); err != nil {
-		return snapshot.Pointer{}, err
-	}
-	cp, err := snapshot.SignCheckpoint(ctx, snapshot.Checkpoint{Pool: p.Pool, PublishSeq: seq}, p.Signer)
+	return prepared{p: p, rec: rec, seq: seq, hash: hash}, nil
+}
+
+// finish writes a pool's checkpoint, then its pointer, once its record is won.
+func (p *Publisher) finish(ctx context.Context, pr prepared, lease Lease, source uint64) (snapshot.Pointer, error) {
+	cp, err := snapshot.SignCheckpoint(ctx, snapshot.Checkpoint{Pool: p.Pool, PublishSeq: pr.seq}, p.Signer)
 	if err != nil {
 		return snapshot.Pointer{}, err
 	}
-	if err := p.advance(ctx, snapshot.CheckpointKey(p.Pool), seq, cp); err != nil {
+	if err := p.advance(ctx, snapshot.CheckpointKey(p.Pool), pr.seq, cp); err != nil {
 		return snapshot.Pointer{}, err
 	}
 	now := p.now()
-	ptr := snapshot.Pointer{Pool: p.Pool, PublishSeq: seq, Epoch: epoch, Source: source, IssuedAt: now,
-		Expires: now.Add(cmp.Or(p.PointerTTL, 10*time.Minute)), Hash: hash}
+	ptr := snapshot.Pointer{Pool: p.Pool, PublishSeq: pr.seq, Epoch: lease.Epoch, Source: source, IssuedAt: now,
+		Expires: now.Add(cmp.Or(p.PointerTTL, 10*time.Minute)), Hash: pr.hash}
 	signed, err := snapshot.SignPointer(ctx, ptr, p.Signer)
 	if err != nil {
 		return snapshot.Pointer{}, err
 	}
-	if err := p.advance(ctx, snapshot.PointerKey(p.Pool), seq, signed); err != nil {
+	if err := p.advance(ctx, snapshot.PointerKey(p.Pool), pr.seq, signed); err != nil {
 		return snapshot.Pointer{}, err
 	}
 	return ptr, nil

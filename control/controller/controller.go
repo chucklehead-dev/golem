@@ -112,16 +112,23 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		return false, cfgErr
 	}
 	source := doc.StateVersion
-	var errs []error
+	var pubs []*publish.Publisher
 	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
-		ptr, err := c.Publishers[pool].Publish(ctx, publish.Lease{Holder: c.Elector.ID, Epoch: epoch}, source, func(seq uint64) (*snapshot.Snapshot, error) {
+		pubs = append(pubs, c.Publishers[pool])
+	}
+	// Every pool's record in one state write (ADR 0049).
+	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, publish.Lease{Holder: c.Elector.ID, Epoch: epoch}, source, pubs,
+		func(_ *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
 			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
 				Entitlements: doc.Entitlements})
 		})
-		if err != nil {
+	var errs []error
+	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
+		if err := perrs[pool]; err != nil {
 			errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
 			continue
 		}
+		ptr := ptrs[pool]
 		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", epoch, "hash", ptr.Hash[:12])
 	}
 	if len(errs) > 0 {
