@@ -19,6 +19,7 @@ type Keys struct {
 	ECDSA   ECDSAKeys
 }
 
+// Verify implements Verifier, with whichever kind holds keyID.
 func (k Keys) Verify(keyID string, msg, sig []byte) error {
 	if _, ok := k.Ed25519[keyID]; ok {
 		return k.Ed25519.Verify(keyID, msg, sig)
@@ -26,7 +27,7 @@ func (k Keys) Verify(keyID string, msg, sig []byte) error {
 	if _, ok := k.ECDSA[keyID]; ok {
 		return k.ECDSA.Verify(keyID, msg, sig)
 	}
-	return fmt.Errorf("%w: key %q is not trusted by this gateway", ErrBadSignature, keyID)
+	return untrusted(keyID)
 }
 
 // LoadKeys reads the publishing keys a gateway trusts from dir: each
@@ -61,7 +62,7 @@ func LoadKeys(dir string) (Keys, error) {
 		case ed25519.PublicKey:
 			k.Ed25519[id] = pub
 		case *ecdsa.PublicKey:
-			if pub.Curve.Params().Name != "P-256" {
+			if !isP256(pub) {
 				return k, fmt.Errorf("%s: an ECDSA key not on P-256", p)
 			}
 			k.ECDSA[id] = pub

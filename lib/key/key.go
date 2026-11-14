@@ -22,6 +22,7 @@ import (
 // Env is the installation a key belongs to.
 type Env string
 
+// The installations: a production one, and standalone or development.
 const (
 	Live Env = "live"
 	Dev  Env = "dev"
@@ -79,6 +80,8 @@ func Display(s string) string { return s[:min(len(s), DisplayLen)] }
 
 var sixtyTwo = big.NewInt(62)
 
+// encode writes b, a key's 36 bytes, as width base62 digits, most
+// significant first.
 func encode(b []byte) string {
 	n := new(big.Int).SetBytes(b)
 	out := make([]byte, width)
@@ -90,6 +93,8 @@ func encode(b []byte) string {
 	return string(out)
 }
 
+// decode is encode's inverse; false for a body of the wrong length, a
+// character outside the alphabet, or a value over 36 bytes.
 func decode(s string) ([36]byte, bool) {
 	var b [36]byte
 	if len(s) != width {

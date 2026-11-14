@@ -30,6 +30,7 @@ type Signer struct {
 	Public *ecdsa.PublicKey // the key's public half, for Verifier; optional
 }
 
+// KeyID implements sign.Signer: the key's ARN.
 func (s Signer) KeyID() string { return s.Key }
 
 // Sign signs SHA-256(msg) as a digest: KMS caps a raw message at 4 KB, and

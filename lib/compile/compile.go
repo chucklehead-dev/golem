@@ -29,8 +29,8 @@ type Options struct {
 	// Standalone allows env credentials and plain-HTTP endpoints on any
 	// host, and produces a snapshot with no lease (ADR 0023).
 	Standalone bool
-	PublishSeq uint64
-	Now        time.Time
+	PublishSeq uint64        // the publication's sequence number
+	Now        time.Time     // the snapshot's IssuedAt, and its lease's start
 	Lease      time.Duration // zero: no lease (standalone only)
 	// Entitlements gives a published snapshot's entitlements (the state
 	// document's, control/state), told the route aliases that exist; nil:
@@ -45,15 +45,13 @@ type Problem struct {
 	Msg    string
 }
 
+// String is the problem as golemctl prints it: object, path, message.
 func (p Problem) String() string { return p.Object + ": " + p.Path + ": " + p.Msg }
-
-// adder records a Problem: the object, the field path, and a message
-// formatted as by fmt.Sprintf.
-type adder func(obj, path, msg string, args ...any)
 
 // Problems is every failure of one compile.
 type Problems []Problem
 
+// Error lists the problems, one per line.
 func (ps Problems) Error() string {
 	lines := make([]string, len(ps))
 	for i, p := range ps {
@@ -61,6 +59,11 @@ func (ps Problems) Error() string {
 	}
 	return fmt.Sprintf("%d problem(s) in the config:\n  %s", len(ps), strings.Join(lines, "\n  "))
 }
+
+// adder records a Problem: the object, the field path, and a message
+// formatted as by fmt.Sprintf. Every pass reports through one, so the
+// problems come out in the order the passes run.
+type adder func(obj, path, msg string, args ...any)
 
 // Compile validates objs and builds a snapshot, sorted so that equal configs
 // give equal bytes. Problems are reported in the order of the objects'
@@ -135,36 +138,50 @@ func compileBackends(srcs []v1.Source[v1.Backend], standalone bool, add adder) (
 		}
 		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect, AllowPrivate: b.Spec.Network.AllowPrivateAddresses,
 			Auth: backendAuth(b.Spec.Auth, standalone, func(path, msg string) { add(obj, path, "%s", msg) })}
-		if len(b.Spec.Deployments) == 0 {
-			add(obj, "spec.deployments", "a Backend needs at least one deployment")
-		}
-		names := map[string]bool{}
-		for i, d := range b.Spec.Deployments {
-			at := fmt.Sprintf("spec.deployments[%d]", i)
-			switch {
-			case d.Name == "":
-				add(obj, at+".name", "required")
-			case names[d.Name]:
-				add(obj, at+".name", "another deployment of this Backend is named %q", d.Name)
-			}
-			names[d.Name] = true
-			if d.Model == "" {
-				add(obj, at+".model", "required: the provider's name for the model")
-			}
-			if msg := checkURL(d.URL, standalone); msg != "" {
-				add(obj, at+".url", "%s", msg)
-			}
-			sb.Deployments = append(sb.Deployments, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model})
-		}
-		slices.SortFunc(sb.Deployments, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
+		sb.Deployments = deployments(obj, b.Spec.Deployments, standalone, add)
 		out = append(out, sb)
-		cat.dialect[sb.Name] = sb.Dialect
-		for _, d := range sb.Deployments {
-			t := target{sb.Name, d.Name}
-			cat.models[t] = append(cat.models[t], d.Model)
-		}
+		cat.add(sb)
 	}
 	return out, cat
+}
+
+// add enters a compiled backend in the catalog.
+func (cat catalog) add(b snapshot.Backend) {
+	cat.dialect[b.Name] = b.Dialect
+	for _, d := range b.Deployments {
+		t := target{b.Name, d.Name}
+		cat.models[t] = append(cat.models[t], d.Model)
+	}
+}
+
+// deployments validates a Backend's spec.deployments and compiles them,
+// sorted by name. Each is compiled, problems or not, so that the catalog
+// knows it.
+func deployments(obj string, ds []v1.Deployment, standalone bool, add adder) []snapshot.Deployment {
+	if len(ds) == 0 {
+		add(obj, "spec.deployments", "a Backend needs at least one deployment")
+	}
+	var out []snapshot.Deployment
+	names := map[string]bool{}
+	for i, d := range ds {
+		at := fmt.Sprintf("spec.deployments[%d]", i)
+		switch {
+		case d.Name == "":
+			add(obj, at+".name", "required")
+		case names[d.Name]:
+			add(obj, at+".name", "another deployment of this Backend is named %q", d.Name)
+		}
+		names[d.Name] = true
+		if d.Model == "" {
+			add(obj, at+".model", "required: the provider's name for the model")
+		}
+		if msg := checkURL(d.URL, standalone); msg != "" {
+			add(obj, at+".url", "%s", msg)
+		}
+		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model})
+	}
+	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
+	return out
 }
 
 // backendAuth validates a Backend's spec.auth and compiles it: the secret
@@ -208,32 +225,40 @@ func compileRoutes(srcs []v1.Source[v1.ModelRoute], cat catalog, add adder) ([]s
 		}
 		sr := snapshot.Route{Alias: r.Spec.Alias, Agent: r.Spec.Agent, ApprovedBetas: slices.Clone(r.Spec.ApprovedBetas)}
 		sr.MaxDurationMs, sr.HeadersMs, sr.IdleMs = timeouts(r.Spec.Timeouts, func(field, msg string) { add(obj, "spec.timeouts."+field, "%s", msg) })
-		for i, m := range r.Spec.Pool {
-			at := fmt.Sprintf("spec.pool[%d]", i)
-			dialect, ok := cat.dialect[m.Backend]
-			switch {
-			case !ok:
-				add(obj, at+".backend", "no Backend named %q", m.Backend)
-				continue
-			case cat.models[target{m.Backend, m.Deployment}] == nil:
-				add(obj, at+".deployment", "Backend %q has no deployment %q", m.Backend, m.Deployment)
-				continue
-			case m.Weight < 0:
-				add(obj, at+".weight", "must not be negative")
-			}
-			// One dialect per route: conversion is explicit, never implied by a
-			// mixed pool (ADR 0033).
-			if sr.Dialect == "" {
-				sr.Dialect = dialect
-			} else if dialect != sr.Dialect {
-				add(obj, at+".backend", "Backend %q speaks %s, the pool's first member %s: a route's pool has one dialect (ADR 0033)",
-					m.Backend, dialect, sr.Dialect)
-			}
-			sr.Pool = append(sr.Pool, snapshot.Target{Backend: m.Backend, Deployment: m.Deployment, Weight: cmp.Or(m.Weight, 1)})
-		}
+		sr.Dialect, sr.Pool = pool(obj, r.Spec.Pool, cat, add)
 		routes = append(routes, sr)
 	}
 	return routes, aliases
+}
+
+// pool validates a route's spec.pool against the catalog and compiles it,
+// with the pool's dialect, its first member's. A member that names no
+// catalogued deployment is left out.
+func pool(obj string, members []v1.PoolMember, cat catalog, add adder) (dialect string, out []snapshot.Target) {
+	for i, m := range members {
+		at := fmt.Sprintf("spec.pool[%d]", i)
+		d, ok := cat.dialect[m.Backend]
+		switch {
+		case !ok:
+			add(obj, at+".backend", "no Backend named %q", m.Backend)
+			continue
+		case cat.models[target{m.Backend, m.Deployment}] == nil:
+			add(obj, at+".deployment", "Backend %q has no deployment %q", m.Backend, m.Deployment)
+			continue
+		case m.Weight < 0:
+			add(obj, at+".weight", "must not be negative")
+		}
+		// One dialect per route: conversion is explicit, never implied by a
+		// mixed pool (ADR 0033).
+		if dialect == "" {
+			dialect = d
+		} else if d != dialect {
+			add(obj, at+".backend", "Backend %q speaks %s, the pool's first member %s: a route's pool has one dialect (ADR 0033)",
+				m.Backend, d, dialect)
+		}
+		out = append(out, snapshot.Target{Backend: m.Backend, Deployment: m.Deployment, Weight: cmp.Or(m.Weight, 1)})
+	}
+	return dialect, out
 }
 
 // checkPriced refuses a scope with a budget that can reach an unpriced
@@ -274,8 +299,9 @@ func digest(b []snapshot.Backend, r []snapshot.Route) string {
 	return hex.EncodeToString(h[:])
 }
 
-// checkURL: https everywhere, plain http only to a loopback address (a TLS
-// proxy in front of a local model server) or in standalone mode.
+// checkURL says why a deployment's URL is refused, or "" if it is not:
+// https everywhere, plain http only to a loopback address (a TLS proxy in
+// front of a local model server) or in standalone mode.
 func checkURL(raw string, standalone bool) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {

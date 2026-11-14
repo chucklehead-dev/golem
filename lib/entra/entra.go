@@ -79,6 +79,8 @@ type Identity struct {
 	Admin   bool   // the token carries the golem.admin app role
 }
 
+// entraClaims are the Entra-specific claims Verify reads, beside the
+// registered ones (jwt.Claims).
 type entraClaims struct {
 	Tid   string   `json:"tid"`
 	Oid   string   `json:"oid"`
@@ -99,6 +101,7 @@ type Error struct {
 	Msg     string
 }
 
+// Error implements error.
 func (e *Error) Error() string { return e.Msg }
 
 // Verify checks a token and says who it names; a refusal is an *Error.
@@ -187,7 +190,7 @@ func (e *Verifier) SetKeys(set jose.JSONWebKeySet) {
 	e.keysAt.Store(e.now().UnixNano())
 }
 
-// keysClient fetches key sets when Entra.Client is nil (read-only): a hung
+// keysClient fetches key sets when Verifier.Client is nil (read-only): a hung
 // endpoint must not hold a gateway's start, nor its refresh loop.
 var keysClient = &http.Client{Timeout: 10 * time.Second}
 

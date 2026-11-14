@@ -55,7 +55,9 @@ const (
 )
 
 // signedBytes is what a signature covers: the payload in its context.
-func signedBytes(context string, payload []byte) []byte { return append([]byte(context), payload...) }
+func signedBytes(sigContext string, payload []byte) []byte {
+	return append([]byte(sigContext), payload...)
+}
 
 // PointerKey is the pointer's object key in the bucket.
 func PointerKey(pool string) string { return "snapshots/" + pool + "/current" }
@@ -90,24 +92,27 @@ func OpenCheckpoint(b []byte, v sign.Verifier) (Checkpoint, error) {
 	return c, open(b, checkpointContext, v, &c, "checkpoint")
 }
 
-func seal(ctx context.Context, context string, v any, s sign.Signer) ([]byte, error) {
+// seal encodes v and signs it in sigContext, as signed's envelope.
+func seal(ctx context.Context, sigContext string, v any, s sign.Signer) ([]byte, error) {
 	payload, err := jsonv2.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := s.Sign(ctx, signedBytes(context, payload))
+	sig, err := s.Sign(ctx, signedBytes(sigContext, payload))
 	if err != nil {
 		return nil, err
 	}
 	return jsonv2.Marshal(signed{Payload: payload, Key: s.KeyID(), Sig: sig})
 }
 
-func open(b []byte, context string, ver sign.Verifier, v any, what string) error {
+// open verifies an envelope in sigContext and only then decodes its payload
+// into v, strictly. what names the object in errors.
+func open(b []byte, sigContext string, ver sign.Verifier, v any, what string) error {
 	var s signed
 	if err := jsonv2.Unmarshal(b, &s, jsonv2.RejectUnknownMembers(true)); err != nil {
 		return fmt.Errorf("%s: %w", what, err)
 	}
-	if err := ver.Verify(s.Key, signedBytes(context, s.Payload), s.Sig); err != nil {
+	if err := ver.Verify(s.Key, signedBytes(sigContext, s.Payload), s.Sig); err != nil {
 		return fmt.Errorf("%s: %w", what, err)
 	}
 	if err := jsonv2.Unmarshal(s.Payload, v, jsonv2.RejectUnknownMembers(true)); err != nil {

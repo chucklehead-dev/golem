@@ -69,6 +69,7 @@ func yamlFiles(fsys fs.FS) ([]string, error) {
 	return files, err
 }
 
+// decode adds file's golem objects to objs, document by document.
 func (objs *Objects) decode(file string, b []byte) error {
 	for i, doc := range documents(b) {
 		n := i + 1
@@ -131,8 +132,8 @@ func documents(b []byte) [][]byte {
 	return append(docs, cur.Bytes())
 }
 
-// ContentHash hashes every YAML file's name and contents, as DecodeFS reads
-// them: a cheap test of whether a config directory changed.
+// ContentHash hashes every YAML file DecodeFS reads, its name and contents,
+// in walk order: a cheap test of whether a config directory changed.
 func ContentHash(fsys fs.FS) ([32]byte, error) {
 	var sum [32]byte
 	files, err := yamlFiles(fsys)
