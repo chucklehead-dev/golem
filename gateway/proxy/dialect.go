@@ -3,10 +3,13 @@ package proxy
 import (
 	"encoding/json/jsontext"
 	"errors"
+	"net/http"
+	"strings"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
 	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
+	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
@@ -43,6 +46,36 @@ var (
 	anthropicForward = []string{"Anthropic-Version", "Anthropic-Beta"} // read-only
 	openAIForward    = []string{"Openai-Organization"}                 // read-only
 )
+
+// approvedVersions are the anthropic-version values restricted mode
+// forwards. 2026-10-21 (the default of the SDKs' 2026-10 majors) was
+// reviewed against what golem reads and enforces: it changes no usage,
+// stop or stream field, and no policy field of contracts.md §8; its
+// removals (temperature, top_p, top_k; documents in assistant turns;
+// citations in user turns) are the provider's refusals, forwarded as such.
+// Its SDKs send the key as Authorization: Bearer, which auth accepts.
+var approvedVersions = map[string]bool{"2023-06-01": true, "2026-10-21": true} // read-only
+
+// restrictedHeaders checks, in restricted mode, the feature headers the
+// dialect forwards: an Anthropic call's betas must be approved on the
+// route and its API version approved here. Another API forwards no
+// anthropic-* header (forwardRequest), so it checks none.
+func (d Dialect) restrictedHeaders(hdr http.Header, rt *route.Route) *refusal {
+	if d != AnthropicMessages {
+		return nil
+	}
+	for _, v := range hdr.Values("Anthropic-Beta") {
+		for b := range strings.SplitSeq(v, ",") {
+			if b = strings.TrimSpace(b); b != "" && !rt.Betas[b] {
+				return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
+			}
+		}
+	}
+	if v := hdr.Get("Anthropic-Version"); v != "" && !approvedVersions[v] {
+		return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-version " + v + " is not approved (restricted mode)"}
+	}
+	return nil
+}
 
 // scanned is what routing and admission need of a request body.
 type scanned struct {
@@ -115,31 +148,34 @@ func (ex *exchange) startStream(d Dialect) (filter bool) {
 // response larger than those has its usage unread (errResponseUnread), and
 // is charged its estimate.
 func (ex *exchange) readWhole(d Dialect) {
-	if d == AnthropicMessages {
-		ex.msgUsage = messages.StreamUsage{}
-		if ex.overflow {
-			ex.msgUsage.Err = errResponseUnread
-			return
-		}
-		ex.msgUsage.Response(ex.kept)
-		return
-	}
-	ex.chatUsage = chat.StreamUsage{}
-	if ex.overflow {
+	ex.msgUsage, ex.chatUsage = messages.StreamUsage{}, chat.StreamUsage{}
+	switch {
+	case ex.overflow && d == AnthropicMessages:
+		ex.msgUsage.Err = errResponseUnread
+	case ex.overflow:
 		ex.chatUsage.Err = errResponseUnread
-		return
+	case d == AnthropicMessages:
+		ex.msgUsage.Response(ex.kept)
+	default:
+		ex.chatUsage.Response(ex.kept)
 	}
-	ex.chatUsage.Response(ex.kept)
 }
 
 var errResponseUnread = errors.New("proxy: a whole response over 1 MiB: its usage was not read")
 
+// reported is what the dialect's usage reader has read: the usage so far,
+// whether it is the provider's final report, and the first malformed one.
+func (ex *exchange) reported(d Dialect) (u canon.Usage, final bool, err error) {
+	if d == AnthropicMessages {
+		return ex.msgUsage.Usage, ex.msgUsage.Final, ex.msgUsage.Err
+	}
+	return ex.chatUsage.Usage, ex.chatUsage.Final, ex.chatUsage.Err
+}
+
 // usage is the response's usage and any error reading it, joined with cut.
 func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
-	if d == AnthropicMessages {
-		return ex.msgUsage.Usage, errors.Join(cut, ex.msgUsage.Err)
-	}
-	return ex.chatUsage.Usage, errors.Join(cut, ex.chatUsage.Err)
+	u, _, err := ex.reported(d)
+	return u, errors.Join(cut, err)
 }
 
 // estimate completes a response's usage when the provider's report is
@@ -155,10 +191,7 @@ func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
 // 0031). It returns the usage to charge and the estimated part of it (zero
 // when the report was whole).
 func (ex *exchange) estimate(d Dialect, requestBytes, ceiling int64) (total, estimated canon.Usage) {
-	u, final := ex.chatUsage.Usage, ex.chatUsage.Final
-	if d == AnthropicMessages {
-		u, final = ex.msgUsage.Usage, ex.msgUsage.Final
-	}
+	u, final, _ := ex.reported(d)
 	if final {
 		return u, canon.Usage{}
 	}

@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 	"uuid"
 
@@ -53,8 +52,8 @@ type Result struct {
 
 // Handler serves one dialect's endpoint.
 type Handler struct {
-	Dialect   Dialect
-	Snapshots Snapshots
+	Dialect   Dialect   // the API served: its body, headers and error shapes
+	Snapshots Snapshots // the configuration, taken once per request
 	// Limiter admits calls against budgets and in-flight limits (golem's:
 	// limit.Limiter.Admitter); nil admits everything uncounted.
 	Limiter admission.Admitter
@@ -106,10 +105,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	ctx, span := h.Telemetry.Start(r.Context(), h.Dialect.Name())
 	defer span.End()
-	reqID := uuid.NewV7() // time-ordered: the ledger and logs sort by it (contracts.md §5)
-	var idBuf [36]byte
-	text, _ := reqID.AppendText(idBuf[:0]) // never fails
-	reqIDs := string(text)
+	reqID, reqIDs := newRequestID()
 	w.Header()[contract.HeaderRequestID] = []string{reqIDs}
 
 	snap, principal, no := h.authenticate(r)
@@ -209,10 +205,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
-		c, msg := contract.UpstreamUnavailable, "the provider could not be reached; retry shortly"
-		if cause := context.Cause(upCtx); cause == errHeadersTimeout || cause == errMaxDuration {
-			msg = cause.Error() + "; retry, or ask the platform team about this route's timeouts"
-		}
+		c, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(upCtx)) // the cause as the call failed
 		call.Ended, call.Status = time.Now(), c.Status
 		cost := chargeUnanswered(&call, err, r.Context().Err() != nil, requestBytes, req, pr)
 		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
@@ -285,6 +278,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// newRequestID mints a call's ID, a UUIDv7: time-ordered, so the ledger and
+// logs sort by it (contracts.md §5); and its text.
+func newRequestID() (uuid.UUID, string) {
+	id := uuid.NewV7()
+	var buf [36]byte
+	text, _ := id.AppendText(buf[:0]) // never fails
+	return id, string(text)
+}
+
 // settlement ends an admitted call's ticket, exactly once: by Complete when
 // the call's end is clear, else by Cancel, which holds the slot for the
 // provider's tail. With no ticket (no limiter) it counts nothing.
@@ -341,6 +343,15 @@ func chargeUnanswered(call *telemetry.Call, err error, callerLeft bool, requestB
 		call.Cost, call.EstimatedFraction = cost, 1
 	}
 	return cost
+}
+
+// unavailableMessage is upstream.unavailable's message: the route's
+// timeout, if one cut the call, else a retry.
+func unavailableMessage(cause error) string {
+	if cause == errHeadersTimeout || cause == errMaxDuration {
+		return cause.Error() + "; retry, or ask the platform team about this route's timeouts"
+	}
+	return "the provider could not be reached; retry shortly"
 }
 
 // uncertainOutput is the output assumed of an uncertain call that set no
@@ -419,15 +430,6 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 	return rt, nil
 }
 
-// approvedVersions are the anthropic-version values restricted mode
-// forwards. 2026-10-21 (the default of the SDKs' 2026-10 majors) was
-// reviewed against what golem reads and enforces: it changes no usage,
-// stop or stream field, and no policy field of contracts.md §8; its
-// removals (temperature, top_p, top_k; documents in assistant turns;
-// citations in user turns) are the provider's refusals, forwarded as such.
-// Its SDKs send the key as Authorization: Bearer, which auth accepts.
-var approvedVersions = map[string]bool{"2023-06-01": true, "2026-10-21": true} // read-only
-
 // features applies the request-feature mode (ADR 0037, 0041 §3, §7.1):
 // in restricted mode (the default, but for agent routes) only approved
 // request members, betas and API versions are forwarded; compatible mode
@@ -446,20 +448,7 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 	if req.unknown > 0 {
 		return &refusal{code: contract.AuthzFeatureForbidden, msg: fmt.Sprintf("%d request member(s) golem does not know: this route forwards approved features only (restricted mode); its managers can approve them", req.unknown)}
 	}
-	if h.Dialect != AnthropicMessages {
-		return nil // anthropic-* headers are neither checked nor forwarded on another API
-	}
-	for _, v := range hdr.Values("Anthropic-Beta") {
-		for b := range strings.SplitSeq(v, ",") {
-			if b = strings.TrimSpace(b); b != "" && !rt.Betas[b] {
-				return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
-			}
-		}
-	}
-	if v := hdr.Get("Anthropic-Version"); v != "" && !approvedVersions[v] {
-		return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-version " + v + " is not approved (restricted mode)"}
-	}
-	return nil
+	return h.Dialect.restrictedHeaders(hdr, rt)
 }
 
 // policy applies the scope's request policy (contracts.md §8): its

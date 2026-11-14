@@ -74,4 +74,5 @@ type Refusal struct {
 	RetryAfter time.Duration
 }
 
+// Error is the refusal's code and message.
 func (r *Refusal) Error() string { return r.Code.Name + ": " + r.Msg }
