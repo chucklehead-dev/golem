@@ -41,6 +41,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/controller"
 	"github.com/chucklehead-dev/golem/control/entrasync"
 	"github.com/chucklehead-dev/golem/control/lead"
+	"github.com/chucklehead-dev/golem/control/metrics"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/spend"
@@ -242,7 +243,7 @@ func parseFlags() (options, error) {
 	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
 	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
 	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
-	flag.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for the audit's log records (TLS unless a literal loopback address)")
+	flag.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for golem-control's metrics and, with -audit-archive, the audit's log records (TLS unless a literal loopback address)")
 	flag.StringVar(&o.tenant, "entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
 	flag.StringVar(&o.audience, "entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
 	flag.StringVar(&o.syncClient, "entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
@@ -257,9 +258,6 @@ func parseFlags() (options, error) {
 	if o.config == "" || o.bucket == "" || o.signingKey == "" {
 		return o, errors.New("-config, -bucket and -signing-key are required")
 	}
-	if o.archive == "" && o.telemetry != "off" {
-		return o, errors.New("-telemetry carries the audit's log records, which need -audit-archive: set both, or neither")
-	}
 	return o, nil
 }
 
@@ -267,8 +265,9 @@ func parseFlags() (options, error) {
 // fails. Shutdown is in order: the publishing loop stops (no publication
 // left half-done), the lease is given up so another replica publishes at
 // once rather than after the lease lapses, the API drains, and the audit's
-// log records are flushed. Errors are returned, never an exit from a
-// goroutine, so every deferred step runs.
+// log records are flushed, then the metrics' last collection is exported.
+// Errors are returned, never an exit from a goroutine, so every deferred
+// step runs.
 func run() error {
 	o, err := parseFlags()
 	if err != nil {
@@ -298,7 +297,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer closeAudit()
+	closeMetrics, err := openMetrics(ctx, o.telemetry, replica, c)
+	if err != nil {
+		closeAudit()
+		return err
+	}
+	defer func() { closeAudit(); closeMetrics() }() // the audit's records, then the metrics' last collection
 	slog.Info("golem-control: running", "replica", replica, "pools", o.pools, "signing key", signer.KeyID())
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -368,7 +372,7 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 		}
 	}
 	if o.archive != "" {
-		if c.Audit, closeAudit, err = openAudit(ctx, st, o.archive, o.telemetry); err != nil {
+		if c.Audit, closeAudit, err = openAudit(ctx, st, o.archive, o.telemetry, replica); err != nil {
 			closeAudit = func() {}
 			return nil, closeAudit, err
 		}
@@ -434,10 +438,39 @@ func audiences(list string) []string {
 	return out
 }
 
+// resourceOf is golem-control's telemetry resource: the service, and the
+// replica (each replica reports its own leadership and publications).
+func resourceOf(replica string) *resource.Resource {
+	return resource.NewSchemaless(attribute.String("service.name", "golem-control"), attribute.String("service.instance.id", replica))
+}
+
+// openMetrics exports golem-control's metrics (control/metrics) to the
+// collector at telem, unless it is "off". shutdown exports a last
+// collection, waiting at most five seconds.
+func openMetrics(ctx context.Context, telem, replica string, c *controller.Controller) (shutdown func(), _ error) {
+	if telem == "off" {
+		return func() {}, nil
+	}
+	mp, stop, err := otlp.MeterProvider(ctx, telem, resourceOf(replica))
+	if err != nil {
+		return nil, fmt.Errorf("-telemetry: %w", err)
+	}
+	if err := metrics.Register(mp, c); err != nil {
+		return nil, errors.Join(fmt.Errorf("metrics: %w", err), stop(ctx))
+	}
+	return func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := stop(sctx); err != nil {
+			slog.Warn("golem-control: the last metrics were not exported", "err", err)
+		}
+	}, nil
+}
+
 // openAudit is the audit shipper over the archive, emitting log records to
 // the collector at telem unless it is "off". shutdown flushes the log
 // records, waiting at most five seconds.
-func openAudit(ctx context.Context, st *state.Store, archive, telem string) (_ *audit.Shipper, shutdown func(), _ error) {
+func openAudit(ctx context.Context, st *state.Store, archive, telem, replica string) (_ *audit.Shipper, shutdown func(), _ error) {
 	ab, err := openBucket(ctx, archive)
 	if err != nil {
 		return nil, nil, fmt.Errorf("-audit-archive: %w", err)
@@ -446,7 +479,7 @@ func openAudit(ctx context.Context, st *state.Store, archive, telem string) (_ *
 	if telem == "off" {
 		return s, func() {}, nil
 	}
-	lp, stop, err := otlp.LoggerProvider(ctx, telem, resource.NewSchemaless(attribute.String("service.name", "golem-control")))
+	lp, stop, err := otlp.LoggerProvider(ctx, telem, resourceOf(replica))
 	if err != nil {
 		return nil, nil, fmt.Errorf("-telemetry: %w", err)
 	}

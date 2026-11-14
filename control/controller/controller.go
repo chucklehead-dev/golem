@@ -77,6 +77,165 @@ type Controller struct {
 		epoch uint64
 		at    time.Time
 	}
+	// status is what the loop has done, for its metrics (control/metrics),
+	// under mu: written by the loop, read at a collection.
+	status status
+}
+
+// status is the controller's record of its own work, for its metrics.
+type status struct {
+	pools        map[string]Publication // each pool's last successful publication by this replica
+	failures     map[Failure]int64      // publication attempts failed or degraded
+	configBroken bool                   // the last step found the directory not what is published
+	synced       time.Time              // the last group sync that succeeded
+	guardTrips   int64                  // group syncs refused by their removal guard
+	shipped      time.Time              // the last audit step that succeeded
+}
+
+// Publication is a pool's last successful publication by this replica:
+// when it was made (by the controller's clock), its sequence, and the
+// authorization lease it issued (the snapshot's ValidUntil).
+type Publication struct {
+	At         time.Time
+	Seq        uint64
+	ValidUntil time.Time
+}
+
+// Failure is a kind of publication failure of a pool: Reason is one of
+// the Reason constants.
+type Failure struct{ Pool, Reason string }
+
+// The reasons a publication attempt failed or was degraded (Failures).
+const (
+	// ReasonTampered: the pool's checkpoint does not verify, or is missing
+	// (publish.ErrTampered); the pool is not published until a person looks.
+	ReasonTampered = "tampered"
+	// ReasonRegressed: the state document went back (publish.ErrRegressed,
+	// state.ErrRegressed, state.ErrMissing).
+	ReasonRegressed = "regressed"
+	// ReasonFenced: this replica no longer leads at its epoch
+	// (publish.ErrFenced, state.ErrFenced).
+	ReasonFenced = "fenced"
+	// ReasonConflict: another writer won the record or the document
+	// (publish.ErrConflict, state.ErrContended).
+	ReasonConflict = "conflict"
+	// ReasonUnpriced: the publication left aliases out of scopes their
+	// budgets could not be charged for (ErrUnpriced).
+	ReasonUnpriced = "unpriced"
+	// ReasonConfigRenewing: the config directory does not compile, or an
+	// edit was refused: the last good config (or the bucket's) is renewed
+	// instead, or nothing can be.
+	ReasonConfigRenewing = "config_renewing"
+	// ReasonOther: anything else (the bucket refusing a write, the signer
+	// failing, a build error).
+	ReasonOther = "other"
+)
+
+// Reasons are every Reason, in a fixed order.
+var Reasons = []string{ReasonTampered, ReasonRegressed, ReasonFenced, ReasonConflict, ReasonUnpriced, ReasonConfigRenewing, ReasonOther} // read-only
+
+// FailureReason classifies a publication's error by the sentinel errors it
+// wraps.
+func FailureReason(err error) string {
+	switch {
+	case errors.Is(err, publish.ErrTampered):
+		return ReasonTampered
+	case errors.Is(err, publish.ErrRegressed), errors.Is(err, state.ErrRegressed), errors.Is(err, state.ErrMissing):
+		return ReasonRegressed
+	case errors.Is(err, publish.ErrFenced), errors.Is(err, state.ErrFenced):
+		return ReasonFenced
+	case errors.Is(err, publish.ErrConflict), errors.Is(err, state.ErrContended):
+		return ReasonConflict
+	case errors.Is(err, ErrUnpriced):
+		return ReasonUnpriced
+	}
+	return ReasonOther
+}
+
+// count adds a failure of reason to each of pools (every pool if none is
+// named).
+func (c *Controller) count(reason string, pools ...string) {
+	if len(pools) == 0 {
+		pools = slices.Collect(maps.Keys(c.Publishers))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.status.failures == nil {
+		c.status.failures = map[Failure]int64{}
+	}
+	for _, p := range pools {
+		c.status.failures[Failure{p, reason}]++
+	}
+}
+
+// degraded counts what made a publication attempt less than the
+// directory's config with every scope whole: a config not applied
+// (cfgErr), and aliases left out of scopes.
+func (c *Controller) degraded(cfgErr error) {
+	if cfgErr != nil {
+		c.count(ReasonConfigRenewing)
+	}
+	if len(c.Unpriced()) > 0 {
+		c.count(ReasonUnpriced)
+	}
+}
+
+// setConfigBroken records whether the directory is what is published.
+func (c *Controller) setConfigBroken(broken bool) {
+	c.mu.Lock()
+	c.status.configBroken = broken
+	c.mu.Unlock()
+}
+
+// Publications is each pool's last successful publication by this
+// replica; a pool it has not published to is absent. For a metric.
+func (c *Controller) Publications() map[string]Publication {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.status.pools)
+}
+
+// Failures counts this replica's publication attempts that failed or were
+// degraded, by pool and reason: one for each attempt (a due step, or a
+// step that could not read the state, every second while it cannot). For
+// a metric.
+func (c *Controller) Failures() map[Failure]int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.status.failures)
+}
+
+// ConfigRenewing reports whether the last step, while leading, found the
+// config directory not what is published: it does not compile, or an edit
+// was refused, and the last good config (or the bucket's) is renewed.
+func (c *Controller) ConfigRenewing() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.status.configBroken
+}
+
+// SyncedAt is when the group sync last succeeded on this replica; zero if
+// it has not.
+func (c *Controller) SyncedAt() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.status.synced
+}
+
+// GuardTrips counts the group syncs refused by their removal guard
+// (entrasync.ErrTooManyRemovals) on this replica.
+func (c *Controller) GuardTrips() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.status.guardTrips
+}
+
+// ShippedAt is when an audit step last succeeded on this replica (the
+// outbox shipped up to its batch, or found empty); zero if none has.
+func (c *Controller) ShippedAt() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.status.shipped
 }
 
 func (c *Controller) now() time.Time {
@@ -113,6 +272,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	// write (the store's own loop refreshes it too). The config is
 	// trial-compiled against it.
 	if err := c.Elector.State.Refresh(ctx); err != nil {
+		c.count(FailureReason(err))
 		return false, err
 	}
 	doc := c.Elector.State.Current()
@@ -122,14 +282,18 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		// published (it compiled when it was), so a restart over a broken
 		// edit cannot let every gateway's authorization lapse either.
 		if err := c.loadPublished(ctx); err != nil {
+			c.setConfigBroken(true)
+			c.count(ReasonConfigRenewing)
 			return false, fmt.Errorf("no config has compiled yet, and nothing published can be renewed: fix the config directory: %w", errors.Join(cfgErr, err))
 		}
 		cfgErr = fmt.Errorf("renewing the published config: the config directory does not compile, and none has since golem-control started; fix it: %w", cfgErr)
 	} else {
 		c.renewing = nil
 	}
+	c.setConfigBroken(cfgErr != nil)
 	ents, err := entitlementsSum(doc)
 	if err != nil {
+		c.count(FailureReason(err))
 		return false, err
 	}
 	if !c.due(ents, fence.Epoch) {
@@ -139,7 +303,9 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	if c.Spend != nil {
 		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
 	}
-	if errs := c.publish(ctx, fence, doc); len(errs) > 0 {
+	errs := c.publish(ctx, fence, doc) // counts each pool's failure
+	c.degraded(cfgErr)
+	if len(errs) > 0 {
 		return false, errors.Join(append(errs, cfgErr, spendErr, c.unpricedErr())...)
 	}
 	c.published.sum, c.published.ents, c.published.epoch, c.published.at = c.goodSum, ents, fence.Epoch, c.now()
@@ -226,6 +392,7 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 		pubs = append(pubs, c.Publishers[pool])
 	}
 	built, unpriced := false, map[string]compile.Problem{} // every pool's build leaves out the same
+	validUntil := map[string]time.Time{}                   // each pool's lease, as built
 	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, fence, doc.StateVersion, pubs,
 		func(p *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
 			o := compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
@@ -241,6 +408,9 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 				err = fmt.Errorf("nothing published to renew, and no config has compiled: fix the config directory")
 			}
 			built = built || err == nil
+			if err == nil {
+				validUntil[p.Pool] = s.ValidUntil
+			}
 			return s, err
 		})
 	if built {
@@ -255,10 +425,17 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	var errs []error
 	for _, pool := range pools {
 		if err := perrs[pool]; err != nil {
+			c.count(FailureReason(err), pool)
 			errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
 			continue
 		}
 		ptr := ptrs[pool]
+		c.mu.Lock()
+		if c.status.pools == nil {
+			c.status.pools = map[string]Publication{}
+		}
+		c.status.pools[pool] = Publication{At: c.now(), Seq: ptr.PublishSeq, ValidUntil: validUntil[pool]}
+		c.mu.Unlock()
 		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", fence.Epoch, "hash", ptr.Hash[:12])
 	}
 	return errs
@@ -411,6 +588,10 @@ func (c *Controller) tick(ctx context.Context) error {
 	if c.Audit != nil && c.Elector.Epoch() != 0 {
 		if _, aerr := c.Audit.Step(ctx); aerr != nil {
 			err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
+		} else {
+			c.mu.Lock()
+			c.status.shipped = c.now()
+			c.mu.Unlock()
 		}
 	}
 	if serr := c.syncStep(ctx); serr != nil {
@@ -428,6 +609,14 @@ func (c *Controller) syncStep(ctx context.Context) error {
 	}
 	c.synced = c.now()
 	res, err := c.Sync.Step(ctx, fence)
+	c.mu.Lock()
+	switch {
+	case err == nil:
+		c.status.synced = c.now()
+	case errors.Is(err, entrasync.ErrTooManyRemovals):
+		c.status.guardTrips++
+	}
+	c.mu.Unlock()
 	if err == nil && res != (entrasync.Result{}) {
 		c.log().Info("entra sync", "created", res.Created, "added", res.Added, "removed", res.Removed, "keysRevoked", res.Revoked)
 	}

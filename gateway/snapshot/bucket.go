@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chucklehead-dev/golem/lib/bucket"
@@ -56,7 +57,12 @@ type Bucket struct {
 	tag     string    // the entity tag of the last pointer judged (Poll)
 	retry   time.Time // when to read a pointer whose publication failed to apply again
 	expires time.Time // the last verified pointer's Expires
-	overdue bool      // reported, until a pointer that is not overdue
+	// overdue is reported, until a pointer that is not overdue; written by
+	// Poll's goroutine, read by a metric's collection.
+	overdue atomic.Bool
+	// fromDisk: the snapshot served is the last-good copy Start applied,
+	// not yet replaced by one read from the bucket (for a metric).
+	fromDisk atomic.Bool
 }
 
 // Start raises the holder's floor to the local checkpoint and the pool's
@@ -110,6 +116,7 @@ func (b *Bucket) loadLastGood() {
 		b.log().Warn("the last-good snapshot on disk was not applied; waiting for the bucket", "path", b.LastGood, "err", err)
 		return
 	}
+	b.fromDisk.Store(true)
 	b.log().Info("the last-good snapshot applied from disk", "pool", b.Pool, "seq", ptr.PublishSeq, "hash", ptr.Hash[:12])
 }
 
@@ -212,16 +219,21 @@ func (b *Bucket) Poll(ctx context.Context) error {
 // pointer. The gateway goes on serving until its snapshot's ValidUntil.
 func (b *Bucket) checkOverdue() {
 	over := !b.expires.IsZero() && b.Holder.now().After(b.expires)
-	if over && !b.overdue {
+	if over && !b.overdue.Load() {
 		b.log().Error("the pool's pointer is overdue: no publication seen since it expired; serving the current snapshot until its lease ends",
 			"pool", b.Pool, "expired", b.expires)
 	}
-	b.overdue = over
+	b.overdue.Store(over)
 }
 
-// Overdue reports whether the newest pointer seen is past its Expires.
-// Poll's goroutine only.
-func (b *Bucket) Overdue() bool { return b.overdue }
+// Overdue reports whether the newest pointer seen is past its Expires, as
+// of the last poll.
+func (b *Bucket) Overdue() bool { return b.overdue.Load() }
+
+// ServingLastGood reports whether the snapshot served is the last-good
+// copy from disk (applied at Start, the bucket unread or refused since),
+// not a publication read from the bucket.
+func (b *Bucket) ServingLastGood() bool { return b.fromDisk.Load() }
 
 // fetchError is a snapshot object the bucket did not return: retried at
 // the next poll.
@@ -302,6 +314,7 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 	if err := b.Holder.Apply(s, ptr.Hash, b.Secrets); err != nil {
 		return err // an applyError if it may apply later
 	}
+	b.fromDisk.Store(false)
 	// The last-good copy before the checkpoint: a crash between leaves a
 	// copy at or above the floor, never one below it.
 	if err := b.saveLastGood(raw, body); err != nil {

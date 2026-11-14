@@ -87,6 +87,10 @@ func (h *Holder) Current() (*Compiled, error) {
 	return c, nil
 }
 
+// Applied is the snapshot applied, whether or not its lease holds; nil
+// before the first. For metrics (its age, the lease remaining).
+func (h *Holder) Applied() *Compiled { return h.cur.Load() }
+
 // Floor is the lowest publication the gateway may apply: the last one it
 // applied, or a trusted checkpoint.
 func (h *Holder) Floor() uint64 {

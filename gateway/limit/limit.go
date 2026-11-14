@@ -64,6 +64,9 @@ type Limiter struct {
 	// Dropped counts the increments dropped: held past MaxPending, or
 	// abandoned at shutdown with the store unreachable.
 	Dropped atomic.Int64
+	// Waived counts the calls admitted as waivers (Ticket.Waived): while
+	// the store was unreachable, or in the grace after a recovery.
+	Waived atomic.Int64
 
 	// down is read on every request, so without the lock; it is written
 	// under mu with the state it goes with.
@@ -272,6 +275,9 @@ func (l *Limiter) markDown(err error) {
 // track records a running call; mu is held.
 func (l *Limiter) track(c Call, period string, waived bool) *Ticket {
 	t := &Ticket{l: l, call: c, period: period, waived: waived}
+	if waived {
+		l.Waived.Add(1)
+	}
 	l.running[c.ID] = t
 	l.byPrincipal[c.Principal]++
 	l.byScope[c.Scope]++
@@ -672,6 +678,13 @@ func (l *Limiter) Pending(scope string) []Increment {
 		}
 	}
 	return out
+}
+
+// Held is the number of increments held for replay (Pending, every scope).
+func (l *Limiter) Held() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pending)
 }
 
 // Down reports whether this gateway believes the store unreachable.

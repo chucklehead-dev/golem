@@ -336,8 +336,19 @@ func TestLastGood(t *testing.T) {
 		}
 		return b
 	}
-	if b := restart(time.Now()); applied(b) != 1 {
-		t.Fatalf("applied %d after a restart with the bucket down: want the last-good 1", applied(b))
+	if gw.ServingLastGood() {
+		t.Fatal("serving the last-good copy reported for a publication read from the bucket")
+	}
+	if b := restart(time.Now()); applied(b) != 1 || !b.ServingLastGood() {
+		t.Fatalf("applied %d (from disk: %v) after a restart with the bucket down: want the last-good 1", applied(b), b.ServingLastGood())
+	} else {
+		// The bucket back, with a newer publication: served from it (the
+		// files on disk left as they are, for the cases below).
+		b.Bucket, b.LastGood, b.Checkpoint = p.bucket, "", ""
+		p.publish(t)
+		if err := b.Poll(t.Context()); err != nil || applied(b) != 2 || b.ServingLastGood() {
+			t.Fatalf("poll %v: applied %d, from disk %v; want 2 from the bucket", err, applied(b), b.ServingLastGood())
+		}
 	}
 	if b := restart(time.Now().Add(2 * time.Hour)); applied(b) != 0 {
 		t.Fatal("a last-good copy whose lease has ended was served")

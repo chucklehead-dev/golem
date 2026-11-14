@@ -36,12 +36,12 @@ func TestPlaintextOK(t *testing.T) {
 // TestOTLPIgnoresInsecureEnv: the SDK's environment variables cannot turn
 // TLS off, nor send telemetry elsewhere (golem#5). With every insecure and
 // endpoint variable set against it, a span (the gateway's exporters) and a
-// log record (golem-control's audit provider) still reach the TLS
-// collector named, over TLS.
+// log record (golem-control's audit provider) and a metric (golem-control's
+// meter provider) still reach the TLS collector named, over TLS.
 func TestOTLPIgnoresInsecureEnv(t *testing.T) {
 	var got atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS != nil && (r.URL.Path == "/v1/traces" || r.URL.Path == "/v1/logs") {
+		if r.TLS != nil && (r.URL.Path == "/v1/traces" || r.URL.Path == "/v1/logs" || r.URL.Path == "/v1/metrics") {
 			got.Add(1)
 		}
 	}))
@@ -56,8 +56,9 @@ func TestOTLPIgnoresInsecureEnv(t *testing.T) {
 	defer elsewhere.Close()
 	for k, v := range map[string]string{
 		"OTEL_EXPORTER_OTLP_INSECURE": "true", "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true",
-		"OTEL_EXPORTER_OTLP_LOGS_INSECURE": "true",
-		"OTEL_EXPORTER_OTLP_ENDPOINT":      elsewhere.URL, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": elsewhere.URL + "/v1/traces",
+		"OTEL_EXPORTER_OTLP_LOGS_INSECURE": "true", "OTEL_EXPORTER_OTLP_METRICS_INSECURE": "true",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": elsewhere.URL + "/v1/metrics",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":         elsewhere.URL, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": elsewhere.URL + "/v1/traces",
 		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": elsewhere.URL + "/v1/logs",
 		"OTEL_EXPORTER_OTLP_CERTIFICATE":   ca,
 	} {
@@ -86,8 +87,17 @@ func TestOTLPIgnoresInsecureEnv(t *testing.T) {
 	if err := stop(t.Context()); err != nil {
 		t.Fatalf("logs: %v", err)
 	}
-	if got.Load() != 2 {
-		t.Fatalf("%d of a span and a log record reached the collector over TLS", got.Load())
+	mp, stopMetrics, err := MeterProvider(t.Context(), endpoint, resource.Empty())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := mp.Meter("t").Int64Counter("c")
+	c.Add(context.Background(), 1)
+	if err := stopMetrics(t.Context()); err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if got.Load() != 3 {
+		t.Fatalf("%d of a span, a log record and a metric reached the collector over TLS", got.Load())
 	}
 }
 

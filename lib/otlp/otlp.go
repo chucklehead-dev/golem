@@ -1,6 +1,6 @@
 // Package otlp is golem's OTLP/HTTP transport to a collector, shared by the
-// gateway (spans, metrics, the ledger's rows) and golem-control (the
-// audit's log records). Telemetry carries billing and audit data, so it
+// gateway (spans, metrics, the ledger's rows) and golem-control (its
+// metrics, and the audit's log records). Telemetry carries billing and audit data, so it
 // goes over TLS unless the collector is on this machine: a node-local
 // agent at a literal loopback address, 127.0.0.1 or [::1] (ADR 0043,
 // golem#5).
@@ -46,7 +46,7 @@ func New(ctx context.Context, endpoint string) (Exporters, error) {
 	if err != nil {
 		return Exporters{}, err
 	}
-	me, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpointURL(base+"/v1/metrics"))
+	me, err := Metrics(ctx, endpoint)
 	if err != nil {
 		return Exporters{}, err
 	}
@@ -64,6 +64,27 @@ func Logs(ctx context.Context, endpoint string) (sdklog.Exporter, error) {
 		return nil, err
 	}
 	return otlploghttp.New(ctx, otlploghttp.WithEndpointURL(base+"/v1/logs"))
+}
+
+// Metrics is the metric exporter alone, to the collector at endpoint.
+func Metrics(ctx context.Context, endpoint string) (sdkmetric.Exporter, error) {
+	base, err := Base(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpointURL(base+"/v1/metrics"))
+}
+
+// MeterProvider is a meter provider over Metrics, read periodically (the
+// SDK's default, every minute), for a component that emits no spans
+// (golem-control), and its shutdown, which exports a last collection.
+func MeterProvider(ctx context.Context, endpoint string, res *resource.Resource) (*sdkmetric.MeterProvider, func(context.Context) error, error) {
+	me, err := Metrics(ctx, endpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(me)), sdkmetric.WithResource(res))
+	return mp, mp.Shutdown, nil
 }
 
 // LoggerProvider is a batching log provider over Logs, for a component

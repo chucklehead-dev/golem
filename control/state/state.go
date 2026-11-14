@@ -248,6 +248,18 @@ func (s *Store) Current() *Document {
 	return s.cur.clone()
 }
 
+// OutboxLen is the number of audit events in the document as last read or
+// written, waiting to be shipped (control/audit): for a metric, without
+// copying the document.
+func (s *Store) OutboxLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur == nil {
+		return 0
+	}
+	return len(s.cur.Audit)
+}
+
 // Update applies change to a copy of the document and writes it if it
 // keeps the invariants, retrying from a fresh read when another writer
 // won. change may run more than once; an error from it ends the update

@@ -46,6 +46,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
@@ -111,7 +112,7 @@ func run(ctx context.Context, args []string) int {
 	if o.standalone == "" {
 		site, pool = o.site, o.pool
 	}
-	tel, shutdownTelemetry, err := setupTelemetry(o.telem, site, pool)
+	tel, meter, shutdownTelemetry, err := setupTelemetry(o.telem, site, pool)
 	if err != nil {
 		return failed("%v", err)
 	}
@@ -153,6 +154,14 @@ func run(ctx context.Context, args []string) int {
 	src, keyPath, err := startSource(bg, o, holder)
 	if err != nil {
 		return failed("%v", err)
+	}
+	if meter != nil {
+		// Read at each collection: nothing on the request path.
+		state := telemetry.State{Holder: holder, Limiter: limiter, Deny: holder.Deny}
+		state.Source, _ = src.(*snapshot.Bucket)
+		if err := telemetry.ObserveState(meter, state); err != nil {
+			return failed("telemetry: %v", err)
+		}
 	}
 	wg.Go(func() { src.Run(bg) })
 	wg.Go(func() { limiter.Run(bg) })
@@ -350,27 +359,29 @@ func newServer(addr string, h http.Handler) *http.Server {
 }
 
 // setupTelemetry starts the gateway's telemetry: ledger rows on stdout, none,
-// or everything over OTLP to a collector. The returned func flushes it.
-func setupTelemetry(where, site, pool string) (*telemetry.Telemetry, func(), error) {
+// or everything over OTLP to a collector. meter is the meter provider for
+// the gateway's state gauges (no-op on stdout; nil when off). The returned
+// func flushes it.
+func setupTelemetry(where, site, pool string) (_ *telemetry.Telemetry, meter metric.MeterProvider, _ func(), _ error) {
 	var p telemetry.Providers
 	shutdown := func(context.Context) error { return nil }
 	switch where {
 	case "off":
-		return nil, func() {}, nil
+		return nil, nil, func() {}, nil
 	case "stdout":
 		p = telemetry.Stdout(os.Stdout)
 	default:
 		res := resource.NewSchemaless(attribute.String("service.name", "golem-gateway"), attribute.String("golem.site", site), attribute.String("golem.pool", pool))
 		var err error
 		if p, shutdown, err = telemetry.OTLP(context.Background(), where, res); err != nil {
-			return nil, nil, fmt.Errorf("telemetry to %s: %w", where, err)
+			return nil, nil, nil, fmt.Errorf("telemetry to %s: %w", where, err)
 		}
 	}
 	tel, err := telemetry.New(p, site, pool)
 	if err != nil {
-		return nil, nil, fmt.Errorf("telemetry: %w", err)
+		return nil, nil, nil, fmt.Errorf("telemetry: %w", err)
 	}
-	return tel, func() {
+	return tel, p.Meter, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := shutdown(ctx); err != nil {
