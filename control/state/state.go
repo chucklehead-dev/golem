@@ -4,12 +4,13 @@
 // copy, checks the store's invariants, increments state_version and writes
 // it with If-Match, re-reading and retrying when another writer won.
 //
-// It holds golem-control's lease (control/lead), each pool's publication
-// record (control/publish numbers and fences by it), the entitlements
-// (entitlements.go) and the audit outbox (control/audit ships it). The
-// rest of the outline in §3.1 joins it as it is built. The encoding is
-// JSON, decoded strictly; the design's protobuf and zstd replace it behind
-// Encode and Decode.
+// It holds golem-control's leadership fence (control/lead keeps the lease
+// itself in an object of its own), each pool's publication record
+// (control/publish numbers and fences by it), the entitlements
+// (entitlements.go, restored by restore.go) and the audit outbox
+// (control/audit ships it). The rest of the outline in §3.1 joins it as it
+// is built. The encoding is JSON, decoded strictly; the design's protobuf
+// and zstd replace it behind Encode and Decode.
 package state
 
 import (
@@ -40,6 +41,13 @@ type Record struct {
 	Epoch  uint64 `json:"epoch"`
 	Seq    uint64 `json:"seq"`
 	Source uint64 `json:"source"`
+}
+
+// Fence is a leadership: the replica that leads, and at which epoch. The
+// epoch increases whenever leadership changes hands (control/lead).
+type Fence struct {
+	Holder string `json:"holder"`
+	Epoch  uint64 `json:"epoch"`
 }
 
 // Document is the state.
@@ -105,6 +113,9 @@ var (
 	// neither (adopting would drop every later revocation, the naive
 	// restore model/publication.md shows unsafe) nor writes over it.
 	ErrRegressed = errors.New("state: the document in the bucket went back")
+	// ErrFenced: the document's leadership is not the writer's (it has lost
+	// the lease, or never held it at that epoch). Nothing was written.
+	ErrFenced = errors.New("state: fenced: this replica does not lead at that epoch")
 )
 
 // Store is the document in a bucket. The zero Store is not ready: Load it.
@@ -137,8 +148,8 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 	case errors.Is(err, bucket.ErrNotModified):
 		return nil
 	case errors.Is(err, bucket.ErrNotFound):
-		if cur := s.Current(); s.seen() && cur.StateVersion > 0 {
-			return regressed(cur.StateVersion, "none (deleted)")
+		if had, ok := s.version(); ok && had > 0 {
+			return regressed(had, "none (deleted)")
 		}
 		s.set(&Document{Schema: Schema}, bucket.Absent)
 		return nil
@@ -149,8 +160,8 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 	if err != nil {
 		return err
 	}
-	if cur := s.Current(); s.seen() && d.StateVersion < cur.StateVersion {
-		return regressed(cur.StateVersion, fmt.Sprintf("version %d", d.StateVersion))
+	if had, ok := s.version(); ok && d.StateVersion < had {
+		return regressed(had, fmt.Sprintf("version %d", d.StateVersion))
 	}
 	s.set(d, newTag)
 	return nil
@@ -161,11 +172,15 @@ func regressed(had uint64, now string) error {
 	return fmt.Errorf("%w: from version %d to %s. A restore goes through golemctl state restore, which keeps every later revocation and writes above the current version; restore that way, or put the newer version back (bucket versioning). Until then golem-control serves what it last read and writes nothing", ErrRegressed, had, now)
 }
 
-// seen reports whether the store has read or written a document.
-func (s *Store) seen() bool {
+// version is the state version the store last read or wrote; ok is false
+// before it has read or written any.
+func (s *Store) version() (v uint64, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cur != nil
+	if s.cur == nil {
+		return 0, false
+	}
+	return s.cur.StateVersion, true
 }
 
 func (s *Store) set(d *Document, tag string) {
@@ -237,17 +252,6 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 	return nil, ErrContended
 }
 
-// Fence is a leadership: the replica that leads, and at which epoch. The
-// epoch increases whenever leadership changes hands (control/lead).
-type Fence struct {
-	Holder string `json:"holder"`
-	Epoch  uint64 `json:"epoch"`
-}
-
-// ErrFenced: the document's leadership is not the writer's (it has lost
-// the lease, or never held it at that epoch). Nothing was written.
-var ErrFenced = errors.New("state: fenced: this replica does not lead at that epoch")
-
 // FencedUpdate is Update for a leader-only write (publication, the group
 // sync, the period and expiry jobs): change is applied only if the
 // document's leadership is still f, checked in the same compare-and-swap,
@@ -255,7 +259,7 @@ var ErrFenced = errors.New("state: fenced: this replica does not lead at that ep
 // JOBS "doc").
 func (s *Store) FencedUpdate(ctx context.Context, f Fence, change func(*Document) error) (*Document, error) {
 	return s.Update(ctx, func(d *Document) error {
-		if l := d.Fence; l == nil || l.Holder != f.Holder || l.Epoch != f.Epoch {
+		if l := d.Fence; l == nil || *l != f {
 			have := "no leader"
 			if l != nil {
 				have = fmt.Sprintf("%s leads at epoch %d", l.Holder, l.Epoch)
@@ -281,10 +285,7 @@ func (s *Store) Validate(ctx context.Context, change func(*Document) error) erro
 
 // loaded loads the document unless the store has read or written it.
 func (s *Store) loaded(ctx context.Context) error {
-	s.mu.Lock()
-	ok := s.cur != nil
-	s.mu.Unlock()
-	if ok {
+	if _, ok := s.version(); ok {
 		return nil
 	}
 	return s.Load(ctx)
@@ -311,10 +312,10 @@ func broken(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrInvariant}, args...)...)
 }
 
-// check is what every write must keep, the lease's and the publication
+// check is what every write must keep, the fence's and the publication
 // records' here and the entitlements' in checkEntitlements.
 func check(old, next *Document) error {
-	if err := checkLease(old, next); err != nil {
+	if err := checkFence(old, next); err != nil {
 		return err
 	}
 	if err := checkEntitlements(old, next); err != nil {
@@ -323,9 +324,9 @@ func check(old, next *Document) error {
 	return checkPublications(old, next)
 }
 
-// checkLease: the fence's epoch never goes back and the fence is never
+// checkFence: the fence's epoch never goes back and the fence is never
 // dropped, so a fenced epoch stays fenced (control/lead).
-func checkLease(old, next *Document) error {
+func checkFence(old, next *Document) error {
 	if old.Fence != nil && (next.Fence == nil || next.Fence.Epoch < old.Fence.Epoch) {
 		return broken("the fence's epoch goes back")
 	}

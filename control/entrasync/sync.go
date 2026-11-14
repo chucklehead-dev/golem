@@ -132,14 +132,11 @@ type want struct {
 	scopes  []string
 }
 
-// reconcile makes d's synced memberships those members imply: a member of
-// a group bound to a scope is a member of the scope while enabled. A user
-// not yet a principal is created (if enabled); one disabled or in no bound
-// group loses its synced memberships; every changed principal's keys
-// outside its memberships are revoked, and a disabled user's keys all.
-// Each change is an audit event by Actor.
-func reconcile(d *state.Document, members map[string][]User, at time.Time) Result {
-	wants := map[string]*want{} // by object ID
+// wanted is every group member's synced memberships, by object ID: a
+// member of a group bound to a scope is to be a member of the scope, and
+// is enabled only if every group reports it so.
+func wanted(d *state.Document, members map[string][]User) map[string]*want {
+	wants := map[string]*want{}
 	for _, sid := range slices.Sorted(maps.Keys(d.Scopes)) {
 		for _, g := range d.Scopes[sid].Groups {
 			for _, u := range members[g] {
@@ -153,45 +150,24 @@ func reconcile(d *state.Document, members map[string][]User, at time.Time) Resul
 			}
 		}
 	}
-	byEntra := map[string]string{}
+	return wants
+}
+
+// reconcile makes d's synced memberships those members imply: a member of
+// a group bound to a scope is a member of the scope while enabled. A user
+// not yet a principal is created (if enabled); one disabled or in no bound
+// group loses its synced memberships; every changed principal's keys
+// outside its memberships are revoked, and a disabled user's keys all.
+// Each change is an audit event by Actor.
+func reconcile(d *state.Document, members map[string][]User, at time.Time) Result {
+	wants := wanted(d, members)
+	byEntra := map[string]string{} // a user's object ID to its principal
 	for id, p := range d.Principals {
 		if p.Kind == "user" && p.Entra != "" {
 			byEntra[p.Entra] = id
 		}
 	}
-	var res Result
-	audit := func(action, target string, detail map[string]string) {
-		d.Audit = append(d.Audit, state.AuditEvent{At: at, Actor: Actor, Action: action, Target: target, Detail: detail})
-	}
-	set := func(id string, p state.Principal, synced []string, disabled bool) {
-		added, removed := diff(p.Synced, synced)
-		p.Synced = synced
-		before := live(d, id)
-		if disabled {
-			for _, h := range slices.Sorted(maps.Keys(d.Keys)) {
-				if k := d.Keys[h]; k.Owner == id && k.RevokedAt.IsZero() {
-					d.Revoke(h, at)
-				}
-			}
-		} else {
-			d.RevokeOutside(id, p, at)
-		}
-		revoked := before - live(d, id)
-		lostDefault := p.Default != "" && !p.MemberOf(p.Default)
-		if len(added)+len(removed)+revoked == 0 && !lostDefault {
-			return
-		}
-		if lostDefault {
-			p.Default = ""
-		}
-		d.Principals[id] = p
-		res.Added += len(added)
-		res.Removed += len(removed)
-		res.Revoked += revoked
-		res.changed = true
-		audit("membership.sync", id, map[string]string{"added": strings.Join(added, ","), "removed": strings.Join(removed, ","),
-			"keysRevoked": fmt.Sprint(revoked), "disabled": fmt.Sprint(disabled)})
-	}
+	r := &reconciler{d: d, at: at}
 	for _, oid := range slices.Sorted(maps.Keys(wants)) {
 		w := wants[oid]
 		id, exists := byEntra[oid]
@@ -199,36 +175,91 @@ func reconcile(d *state.Document, members map[string][]User, at time.Time) Resul
 			continue // never created for a disabled account
 		}
 		if !exists {
-			if d.Principals == nil {
-				d.Principals = map[string]state.Principal{}
-			}
-			id = principalID(d, w.upn, oid)
-			d.Principals[id] = state.Principal{Kind: "user", Entra: oid, UPN: w.upn, Scopes: []string{}}
-			res.Created++
-			res.changed = true
-			audit("principal.create", id, map[string]string{"entra": oid, "upn": w.upn})
+			id = r.create(w.upn, oid)
 		}
 		p := d.Principals[id]
 		if p.UPN != w.upn {
 			p.UPN = w.upn
 			d.Principals[id] = p
-			res.changed = true
+			r.res.changed = true
 		}
 		var synced []string
 		if w.enabled {
 			synced = slices.Compact(slices.Sorted(slices.Values(w.scopes)))
 		}
-		set(id, p, synced, !w.enabled)
+		r.setSynced(id, p, synced, !w.enabled)
 	}
+	// A user in no bound group any more keeps none of its synced
+	// memberships.
 	for _, oid := range slices.Sorted(maps.Keys(byEntra)) {
 		if _, seen := wants[oid]; !seen {
 			id := byEntra[oid]
 			if p := d.Principals[id]; len(p.Synced) > 0 {
-				set(id, p, nil, false)
+				r.setSynced(id, p, nil, false)
 			}
 		}
 	}
-	return res
+	return r.res
+}
+
+// reconciler is one reconcile's changes to d, counted in res.
+type reconciler struct {
+	d   *state.Document
+	at  time.Time
+	res Result
+}
+
+func (r *reconciler) audit(action, target string, detail map[string]string) {
+	r.d.Audit = append(r.d.Audit, state.AuditEvent{At: r.at, Actor: Actor, Action: action, Target: target, Detail: detail})
+}
+
+// create adds the user with object ID oid as a principal with no
+// memberships yet, and returns its ID.
+func (r *reconciler) create(upn, oid string) string {
+	if r.d.Principals == nil {
+		r.d.Principals = map[string]state.Principal{}
+	}
+	id := principalID(r.d, upn, oid)
+	r.d.Principals[id] = state.Principal{Kind: "user", Entra: oid, UPN: upn, Scopes: []string{}}
+	r.res.Created++
+	r.res.changed = true
+	r.audit("principal.create", id, map[string]string{"entra": oid, "upn": upn})
+	return id
+}
+
+// setSynced gives principal id (its record p) the synced memberships
+// synced, revoking its live keys outside its memberships (all of them if
+// the account is disabled) and dropping a default it is no longer a
+// member of. Nothing is written or audited if nothing changes.
+func (r *reconciler) setSynced(id string, p state.Principal, synced []string, disabled bool) {
+	d := r.d
+	added, removed := diff(p.Synced, synced)
+	p.Synced = synced
+	before := live(d, id)
+	if disabled {
+		for _, h := range slices.Sorted(maps.Keys(d.Keys)) {
+			if k := d.Keys[h]; k.Owner == id && k.RevokedAt.IsZero() {
+				d.Revoke(h, r.at)
+			}
+		}
+	} else {
+		d.RevokeOutside(id, p, r.at)
+	}
+	revoked := before - live(d, id)
+	lostDefault := p.Default != "" && !p.MemberOf(p.Default)
+	if len(added)+len(removed)+revoked == 0 && !lostDefault {
+		return
+	}
+	if lostDefault {
+		p.Default = ""
+	}
+	d.Principals[id] = p
+	r.res.Added += len(added)
+	r.res.Removed += len(removed)
+	r.res.Revoked += revoked
+	r.res.changed = true
+	r.audit("membership.sync", id, map[string]string{"added": strings.Join(added, ","), "removed": strings.Join(removed, ","),
+		"keysRevoked": fmt.Sprint(revoked), "disabled": fmt.Sprint(disabled)})
 }
 
 // principalID is a new user's ID: their sign-in name, lowercased (one in

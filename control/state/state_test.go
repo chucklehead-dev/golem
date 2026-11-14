@@ -86,6 +86,40 @@ func TestInvariants(t *testing.T) {
 	}
 }
 
+// TestFenceInvariant: the fence's epoch going back, or the fence dropped,
+// is refused, so a deposed epoch stays deposed; a later epoch is written,
+// and FencedUpdate writes only under the fence it names.
+func TestFenceInvariant(t *testing.T) {
+	ctx := t.Context()
+	s := &Store{Bucket: open(t)}
+	claim := func(holder string, epoch uint64) func(*Document) error {
+		return func(d *Document) error { d.Fence = &Fence{Holder: holder, Epoch: epoch}; return nil }
+	}
+	if _, err := s.Update(ctx, claim("a", 2)); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*Document) error{
+		"back in epoch": claim("b", 1),
+		"dropped":       func(d *Document) error { d.Fence = nil; return nil },
+	} {
+		if _, err := s.Update(ctx, change); !errors.Is(err, ErrInvariant) {
+			t.Errorf("%s: %v, want ErrInvariant", name, err)
+		}
+	}
+	if _, err := s.FencedUpdate(ctx, Fence{Holder: "b", Epoch: 2}, put("internal", 1)); !errors.Is(err, ErrFenced) {
+		t.Errorf("a write under another's fence: %v, want ErrFenced", err)
+	}
+	if _, err := s.Update(ctx, claim("b", 3)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.FencedUpdate(ctx, Fence{Holder: "b", Epoch: 3}, put("internal", 1)); err != nil {
+		t.Fatalf("a write under its own fence: %v", err)
+	}
+	if f := s.Current().Fence; *f != (Fence{Holder: "b", Epoch: 3}) {
+		t.Fatalf("fence %+v", f)
+	}
+}
+
 // TestConcurrentStores: replicas updating one bucket lose no update: each
 // retries from the document the winner wrote.
 func TestConcurrentStores(t *testing.T) {

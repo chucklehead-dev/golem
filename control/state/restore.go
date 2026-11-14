@@ -1,6 +1,7 @@
 package state
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -36,76 +37,104 @@ func Restore(cur, backup *Document, at time.Time) (*Document, Report, error) {
 	if backup.Schema != cur.Schema {
 		return nil, Report{}, fmt.Errorf("state: the backup is schema %d, the document %d: refused", backup.Schema, cur.Schema)
 	}
-	r := &restorer{next: cur.clone(), at: at.UTC()}
-	n := r.next
-	n.Scopes = map[string]Scope{}
-	for _, id := range slices.Sorted(maps.Keys(union(cur.Scopes, backup.Scopes))) {
-		c, inCur := cur.Scopes[id]
-		b, inBackup := backup.Scopes[id]
+	r := &restorer{cur: cur, backup: backup, next: cur.clone(), at: at.UTC()}
+	// In this order: memberships are kept only of the scopes restored,
+	// roles only of the principals and scopes restored, and the keys
+	// narrowed before their owners' memberships revoke what is outside them.
+	r.scopes()
+	r.principals()
+	r.roles()
+	r.keys()
+	// A live key is honoured only for a member of its scope.
+	for _, id := range slices.Sorted(maps.Keys(r.next.Principals)) {
+		r.next.RevokeOutside(id, r.next.Principals[id], r.at)
+	}
+	return r.next, r.report, nil
+}
+
+// scopes keeps the scopes both documents have, each with the narrower
+// policy.
+func (r *restorer) scopes() {
+	r.next.Scopes = map[string]Scope{}
+	for _, id := range slices.Sorted(maps.Keys(union(r.cur.Scopes, r.backup.Scopes))) {
+		c, inCur := r.cur.Scopes[id]
+		b, inBackup := r.backup.Scopes[id]
 		switch {
 		case !inCur:
 			r.withhold("scope %s (removed since the backup)", id)
 		case !inBackup:
 			r.remove("scope %s (created since the backup)", id)
 		default:
-			n.Scopes[id] = r.scope(id, b, c)
+			r.next.Scopes[id] = r.scope(id, b, c)
 		}
 	}
-	n.Principals = map[string]Principal{}
-	for _, id := range slices.Sorted(maps.Keys(union(cur.Principals, backup.Principals))) {
-		c, inCur := cur.Principals[id]
-		b, inBackup := backup.Principals[id]
+}
+
+// principals keeps the principals both documents have, each with the
+// memberships both have; one created since is kept, with no memberships,
+// only if it owns keys (their records name it).
+func (r *restorer) principals() {
+	r.next.Principals = map[string]Principal{}
+	for _, id := range slices.Sorted(maps.Keys(union(r.cur.Principals, r.backup.Principals))) {
+		c, inCur := r.cur.Principals[id]
+		b, inBackup := r.backup.Principals[id]
 		switch {
 		case !inCur:
 			r.withhold("principal %s (removed since the backup)", id)
-		case !inBackup && ownsKeys(cur, id):
-			n.Principals[id] = Principal{Kind: c.Kind, Entra: c.Entra, UPN: c.UPN}
+		case !inBackup && ownsKeys(r.cur, id):
+			r.next.Principals[id] = Principal{Kind: c.Kind, Entra: c.Entra, UPN: c.UPN}
 			r.remove("principal %s's memberships (created since the backup; kept for its keys' records)", id)
 		case !inBackup:
 			r.remove("principal %s (created since the backup)", id)
 		default:
-			n.Principals[id] = r.principal(id, b, c)
+			r.next.Principals[id] = r.principal(id, b, c)
 		}
 	}
-	n.Roles = nil
-	for _, rb := range cur.Roles {
-		_, p := n.Principals[rb.Principal]
-		_, s := n.Scopes[rb.Scope]
+}
+
+// roles keeps the role bindings both documents have, of a principal and on
+// a scope that were kept.
+func (r *restorer) roles() {
+	r.next.Roles = nil
+	for _, rb := range r.cur.Roles {
+		_, p := r.next.Principals[rb.Principal]
+		_, s := r.next.Scopes[rb.Scope]
 		switch {
-		case !slices.Contains(backup.Roles, rb):
+		case !slices.Contains(r.backup.Roles, rb):
 			r.remove("%s's %s role on %s (granted since the backup)", rb.Principal, rb.Role, rb.Scope)
 		case p && s:
-			n.Roles = append(n.Roles, rb)
+			r.next.Roles = append(r.next.Roles, rb)
 		}
 	}
-	for _, rb := range backup.Roles {
-		if !slices.Contains(cur.Roles, rb) {
+	for _, rb := range r.backup.Roles {
+		if !slices.Contains(r.cur.Roles, rb) {
 			r.withhold("%s's %s role on %s (removed since the backup)", rb.Principal, rb.Role, rb.Scope)
 		}
 	}
-	n.Keys = maps.Clone(cur.Keys)
-	for _, h := range slices.Sorted(maps.Keys(cur.Keys)) {
-		c := cur.Keys[h]
-		b, inBackup := backup.Keys[h]
+}
+
+// keys keeps every current key record: one minted since the backup is
+// revoked, one both have is narrowed (key). A key only the backup has is
+// not brought back.
+func (r *restorer) keys() {
+	r.next.Keys = maps.Clone(r.cur.Keys)
+	for _, h := range slices.Sorted(maps.Keys(r.cur.Keys)) {
+		c := r.cur.Keys[h]
+		b, inBackup := r.backup.Keys[h]
 		if !inBackup {
 			if c.RevokedAt.IsZero() {
 				r.remove("key %s (minted since the backup: revoked)", c.Display)
-				n.Revoke(h, r.at)
+				r.next.Revoke(h, r.at)
 			}
 			continue
 		}
 		r.key(h, b, c)
 	}
-	for _, h := range slices.Sorted(maps.Keys(backup.Keys)) {
-		if _, ok := cur.Keys[h]; !ok {
-			r.withhold("key %s (its record is gone)", backup.Keys[h].Display)
+	for _, h := range slices.Sorted(maps.Keys(r.backup.Keys)) {
+		if _, ok := r.cur.Keys[h]; !ok {
+			r.withhold("key %s (its record is gone)", r.backup.Keys[h].Display)
 		}
 	}
-	// A live key is honoured only for a member of its scope.
-	for _, id := range slices.Sorted(maps.Keys(n.Principals)) {
-		n.RevokeOutside(id, n.Principals[id], r.at)
-	}
-	return n, r.report, nil
 }
 
 // Report is what a restore did not bring back, and what it rolled back.
@@ -114,10 +143,13 @@ type Report struct {
 	Removed  []string `json:"removed,omitempty"`  // in the document, rolled back
 }
 
+// restorer builds a restore's document, next, from cur and backup (both
+// read, never changed), recording what it withholds and rolls back.
 type restorer struct {
-	next   *Document
-	at     time.Time
-	report Report
+	cur, backup *Document
+	next        *Document
+	at          time.Time
+	report      Report
 }
 
 func (r *restorer) withhold(f string, a ...any) {
@@ -158,7 +190,7 @@ func (r *restorer) scope(id string, b, c Scope) Scope {
 // identity (kind, Entra ID) is the current one's: only an admin or the
 // group sync binds it (ADR 0047).
 func (r *restorer) principal(id string, b, c Principal) Principal {
-	p := Principal{Kind: c.Kind, Entra: c.Entra, UPN: cmpOr(c.UPN, b.UPN)}
+	p := Principal{Kind: c.Kind, Entra: c.Entra, UPN: cmp.Or(c.UPN, b.UPN)}
 	if b.Kind != c.Kind || b.Entra != c.Entra {
 		r.withhold("principal %s's identity in the backup (%s %q; now %s %q)", id, b.Kind, b.Entra, c.Kind, c.Entra)
 	}
@@ -262,6 +294,8 @@ func features(b, c string) string {
 	return ""
 }
 
+// ownsKeys reports whether any key record, revoked or not, names principal
+// as its owner.
 func ownsKeys(d *Document, principal string) bool {
 	for _, k := range d.Keys {
 		if k.Owner == principal {
@@ -271,6 +305,7 @@ func ownsKeys(d *Document, principal string) bool {
 	return false
 }
 
+// union is the keys of a and b.
 func union[V any](a, b map[string]V) map[string]bool {
 	u := map[string]bool{}
 	for k := range a {
@@ -282,13 +317,6 @@ func union[V any](a, b map[string]V) map[string]bool {
 	return u
 }
 
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
 // Restore brings back backup's entitlements as the function Restore does,
 // written by Update with a state.restore audit event naming the actor; with
 // dryRun, only checked (Validate). It returns what the restore withheld
@@ -297,12 +325,13 @@ func cmpOr(a, b string) string {
 func (s *Store) Restore(ctx context.Context, backup *Document, actor string, dryRun bool) (Report, error) {
 	var report Report
 	change := func(d *Document) error {
-		next, r, err := Restore(d, backup, time.Now())
+		now := time.Now()
+		next, r, err := Restore(d, backup, now)
 		if err != nil {
 			return err
 		}
 		report = r
-		next.Audit = append(next.Audit, AuditEvent{At: time.Now().UTC(), Actor: actor, Action: "state.restore", Target: "document",
+		next.Audit = append(next.Audit, AuditEvent{At: now.UTC(), Actor: actor, Action: "state.restore", Target: "document",
 			Detail: map[string]string{"backupVersion": strconv.FormatUint(backup.StateVersion, 10),
 				"withheld": strconv.Itoa(len(r.Withheld)), "removed": strconv.Itoa(len(r.Removed))}})
 		*d = *next

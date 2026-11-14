@@ -67,27 +67,30 @@ func (p *Publisher) Record(ctx context.Context) (state.Record, error) {
 	return p.State.Current().Publications[p.Pool], nil
 }
 
-// Lease is the leadership a publication is made under (state.Fence).
+// Lease is the leadership a publication is made under: the fence its
+// elector claimed (state.Fence, lead.Elector.Fence).
 type Lease = state.Fence
 
 // Publish builds the next publication with build, given its sequence
-// number, and publishes it under lease from the state version source. The
-// number is one above the highest of the record, the verified checkpoint
-// and the signed pointer (model/leadership.md's GUARD and VERIFY), and a
-// checkpoint that does not verify, or is missing after a publication,
-// stops it with ErrTampered. The
-// snapshot is written first (content-addressed), then the record by the
-// state's compare-and-swap, which refuses it unless the state's lease is
-// still lease, then the checkpoint, then the pointer. A publisher that
-// dies after the record leaves the checkpoint and pointer behind it, and
-// the next publication (the lease renewal, within a minute) moves them on;
-// until then a gateway restarted with an empty disk takes the older
+// number, and publishes it under lease from the state version source: it
+// is PublishAll for one pool.
+//
+// The number is one above the highest of the record, the verified
+// checkpoint and the signed pointer (model/leadership.md's GUARD and
+// VERIFY), and a checkpoint that does not verify, or is missing after a
+// publication, stops it with ErrTampered. The snapshot is written first
+// (content-addressed), then the record by the state's fenced
+// compare-and-swap, which refuses it unless the document's fence is still
+// lease, then the checkpoint, then the pointer. A publisher that dies
+// after the record leaves the checkpoint and pointer behind it, and the
+// next publication (the controller's renewal, within a minute) moves them
+// on; until then a gateway restarted with an empty disk takes the older
 // checkpoint as its floor.
 //
-// The record's write checks the holder and epoch, not the lease's expiry:
-// while this replica is still the holder no other has taken the lease, so
-// none can have published, and a replica stops believing it leads before
-// its lease lapses by its own clock (lead.Elector.Epoch).
+// The record's write checks the fence's holder and epoch, not the lease's
+// expiry: while the fence names this replica no other has claimed a later
+// epoch, so none can have published, and a replica stops believing it
+// leads before its lease lapses by its own clock (lead.Elector.Epoch).
 func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, build func(seq uint64) (*snapshot.Snapshot, error)) (snapshot.Pointer, error) {
 	ptrs, errs := PublishAll(ctx, p.State, lease, source, []*Publisher{p}, func(_ *Publisher, seq uint64) (*snapshot.Snapshot, error) {
 		return build(seq)
@@ -118,6 +121,8 @@ func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64
 	if err := st.Refresh(ctx); err != nil {
 		return fail(err)
 	}
+	// Checked here as well as by the fenced update below, so a deposed
+	// publisher writes no snapshot either.
 	if err := holds(st.Current().Fence, lease); err != nil {
 		return fail(err)
 	}
@@ -226,9 +231,9 @@ func (p *Publisher) finish(ctx context.Context, pr prepared, lease Lease, source
 	return ptr, nil
 }
 
-// holds refuses a publication unless l is the state's lease.
+// holds refuses a publication unless the document's fence, l, is want.
 func holds(l *state.Fence, want Lease) error {
-	if l == nil || l.Holder != want.Holder || l.Epoch != want.Epoch {
+	if l == nil || *l != want {
 		have := "no lease"
 		if l != nil {
 			have = fmt.Sprintf("%s holds the lease at epoch %d", l.Holder, l.Epoch)
@@ -243,12 +248,8 @@ func holds(l *state.Fence, want Lease) error {
 // verify, or is missing though the record or a pointer shows one was
 // written, is ErrTampered.
 func (p *Publisher) floor(ctx context.Context, rec state.Record) (uint64, error) {
-	if p.Keys == nil {
-		if v, ok := p.Signer.(interface{ Verifier() sign.Verifier }); ok {
-			p.Keys = v.Verifier()
-		}
-	}
-	if p.Keys == nil {
+	keys := p.keys()
+	if keys == nil {
 		return 0, errors.New("publish: no Keys to verify the pool's checkpoint with: set Publisher.Keys to the publishing key's public half")
 	}
 	var ptrSeq uint64
@@ -260,9 +261,7 @@ func (p *Publisher) floor(ctx context.Context, rec state.Record) (uint64, error)
 	default:
 		// An unverifiable pointer proves nothing (gateways refuse it, and
 		// this publication replaces it).
-		if ptr, err := snapshot.OpenPointer(raw, p.Keys); err == nil && ptr.Pool == p.Pool {
-			ptrSeq, havePtr = ptr.PublishSeq, true
-		}
+		ptrSeq, havePtr = p.verifiedSeq(false, raw)
 	}
 	key := snapshot.CheckpointKey(p.Pool)
 	raw, _, err := p.Bucket.Get(ctx, key, "")
@@ -278,7 +277,7 @@ func (p *Publisher) floor(ctx context.Context, rec state.Record) (uint64, error)
 	case err != nil:
 		return 0, err
 	}
-	cp, err := snapshot.OpenCheckpoint(raw, p.Keys)
+	cp, err := snapshot.OpenCheckpoint(raw, keys)
 	if err != nil || cp.Pool != p.Pool {
 		return 0, fmt.Errorf("%w: %s does not verify as this pool's (%v); restore golem-control's from the bucket's versions, and find who wrote it", ErrTampered, key, err)
 	}
@@ -301,7 +300,7 @@ func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []
 		case err != nil:
 			return err
 		default:
-			stored, ok := p.verifiedSeq(key, cur)
+			stored, ok := p.verifiedSeq(isCheckpoint, cur)
 			switch {
 			case ok && stored >= seq && !bytes.Equal(cur, body):
 				return fmt.Errorf("%w: %s holds publication %d, this publisher wrote %d", ErrFenced, key, stored, seq)
@@ -317,15 +316,28 @@ func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []
 	return fmt.Errorf("%w: %s kept changing", ErrConflict, key)
 }
 
-// verifiedSeq is a stored checkpoint's or pointer's sequence, if it
+// verifiedSeq is a stored checkpoint's (or pointer's) sequence, if it
 // verifies as this pool's.
-func (p *Publisher) verifiedSeq(key string, b []byte) (uint64, bool) {
-	if key == snapshot.CheckpointKey(p.Pool) {
-		cp, err := snapshot.OpenCheckpoint(b, p.Keys)
+func (p *Publisher) verifiedSeq(isCheckpoint bool, b []byte) (uint64, bool) {
+	if isCheckpoint {
+		cp, err := snapshot.OpenCheckpoint(b, p.keys())
 		return cp.PublishSeq, err == nil && cp.Pool == p.Pool
 	}
-	ptr, err := snapshot.OpenPointer(b, p.Keys)
+	ptr, err := snapshot.OpenPointer(b, p.keys())
 	return ptr.PublishSeq, err == nil && ptr.Pool == p.Pool
+}
+
+// keys is what verifies the pool's checkpoint and pointer: Keys, or the
+// Signer's own public half; nil if neither is there (floor refuses then,
+// before anything is written).
+func (p *Publisher) keys() sign.Verifier {
+	if p.Keys != nil {
+		return p.Keys
+	}
+	if v, ok := p.Signer.(interface{ Verifier() sign.Verifier }); ok {
+		return v.Verifier()
+	}
+	return nil
 }
 
 func (p *Publisher) now() time.Time {

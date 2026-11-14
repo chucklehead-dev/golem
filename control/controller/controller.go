@@ -57,12 +57,12 @@ type Controller struct {
 	// replica leads, every SyncEvery (default five minutes; ADR 0047).
 	Sync      *entrasync.Sync
 	SyncEvery time.Duration
-	synced    time.Time
 
+	synced    time.Time  // when the group sync last ran
 	good      v1.Objects // the last config that compiled
 	goodSum   [32]byte
-	published struct {
-		sum   [32]byte
+	published struct { // the last publication that reached every pool
+		sum   [32]byte // its config's
 		ents  [32]byte // the state's entitlements published
 		epoch uint64
 		at    time.Time
@@ -92,8 +92,8 @@ func (c *Controller) log() *slog.Logger {
 // edit cannot let every gateway's authorization lapse. It reports whether
 // it published.
 func (c *Controller) Step(ctx context.Context) (bool, error) {
-	epoch := c.Elector.Epoch()
-	if epoch == 0 {
+	fence, leads := c.Elector.Fence()
+	if !leads {
 		return false, nil
 	}
 	cfgErr := c.load()
@@ -110,18 +110,60 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	renew := cmp.Or(c.Renew, time.Minute)
-	due := c.goodSum != c.published.sum || ents != c.published.ents || epoch != c.published.epoch ||
-		!c.now().Before(c.published.at.Add(renew))
-	if !due {
+	if !c.due(ents, fence.Epoch) {
 		return false, cfgErr
 	}
-	source := doc.StateVersion
 	var spendErr error
 	if c.Spend != nil {
 		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
 	}
-	entitlements := func(aliases []string) snapshot.Entitlements {
+	if errs := c.publish(ctx, fence, doc); len(errs) > 0 {
+		return false, errors.Join(append(errs, cfgErr, spendErr)...)
+	}
+	c.published.sum, c.published.ents, c.published.epoch, c.published.at = c.goodSum, ents, fence.Epoch, c.now()
+	return true, errors.Join(cfgErr, spendErr)
+}
+
+// due reports whether a publication is due: the good config, the
+// entitlements (their hash, ents) or the epoch differ from the last
+// publication's, or its renewal interval has passed.
+func (c *Controller) due(ents [32]byte, epoch uint64) bool {
+	renew := cmp.Or(c.Renew, time.Minute)
+	return c.goodSum != c.published.sum || ents != c.published.ents || epoch != c.published.epoch ||
+		!c.now().Before(c.published.at.Add(renew))
+}
+
+// publish publishes the good config with doc's entitlements to every pool,
+// all their records in one state write (ADR 0049), under fence and from
+// doc's version. It returns each pool's failure, in pool order.
+func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.Document) []error {
+	pools := slices.Sorted(maps.Keys(c.Publishers))
+	var pubs []*publish.Publisher
+	for _, pool := range pools {
+		pubs = append(pubs, c.Publishers[pool])
+	}
+	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, fence, doc.StateVersion, pubs,
+		func(_ *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
+			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
+				Entitlements: c.entitlements(doc)})
+		})
+	var errs []error
+	for _, pool := range pools {
+		if err := perrs[pool]; err != nil {
+			errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
+			continue
+		}
+		ptr := ptrs[pool]
+		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", fence.Epoch, "hash", ptr.Hash[:12])
+	}
+	return errs
+}
+
+// entitlements is the snapshot's entitlements for the routes that exist
+// (aliases): doc's, each scope with this period's known spend if the
+// known-spend job has a result (accounting.md).
+func (c *Controller) entitlements(doc *state.Document) func(aliases []string) snapshot.Entitlements {
+	return func(aliases []string) snapshot.Entitlements {
 		e := doc.Entitlements(aliases)
 		if c.Spend != nil {
 			if k, ok := c.Spend.Current(); ok {
@@ -133,30 +175,6 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		}
 		return e
 	}
-	var pubs []*publish.Publisher
-	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
-		pubs = append(pubs, c.Publishers[pool])
-	}
-	// Every pool's record in one state write (ADR 0049).
-	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, publish.Lease{Holder: c.Elector.ID, Epoch: epoch}, source, pubs,
-		func(_ *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
-			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
-				Entitlements: entitlements})
-		})
-	var errs []error
-	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
-		if err := perrs[pool]; err != nil {
-			errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
-			continue
-		}
-		ptr := ptrs[pool]
-		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", epoch, "hash", ptr.Hash[:12])
-	}
-	if len(errs) > 0 {
-		return false, errors.Join(append(errs, cfgErr, spendErr)...)
-	}
-	c.published.sum, c.published.ents, c.published.epoch, c.published.at = c.goodSum, ents, epoch, c.now()
-	return true, errors.Join(cfgErr, spendErr)
 }
 
 // load reads the directory, keeping it as the good config if it compiles
@@ -196,23 +214,14 @@ func (c *Controller) Run(ctx context.Context) {
 	wg.Go(func() { c.Elector.Run(ctx) })
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
-	var last string
+	var last string // the last error logged: each is logged once until it changes
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		_, err := c.Step(ctx)
-		if c.Audit != nil && c.Elector.Epoch() != 0 {
-			if _, aerr := c.Audit.Step(ctx); aerr != nil {
-				err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
-			}
-		}
-		if serr := c.syncStep(ctx); serr != nil {
-			err = errors.Join(err, fmt.Errorf("entra sync: %w", serr))
-		}
-		switch {
+		switch err := c.tick(ctx); {
 		case err == nil:
 			last = ""
 		case err.Error() != last:
@@ -222,15 +231,30 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
+// tick is one second's work: a publication if due, then, while this
+// replica leads, the audit outbox shipped and the group sync if due.
+func (c *Controller) tick(ctx context.Context) error {
+	_, err := c.Step(ctx)
+	if c.Audit != nil && c.Elector.Epoch() != 0 {
+		if _, aerr := c.Audit.Step(ctx); aerr != nil {
+			err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
+		}
+	}
+	if serr := c.syncStep(ctx); serr != nil {
+		err = errors.Join(err, fmt.Errorf("entra sync: %w", serr))
+	}
+	return err
+}
+
 // syncStep runs the group sync if this replica leads and it is due. A
 // failed step is retried at the next interval, not every second.
 func (c *Controller) syncStep(ctx context.Context) error {
-	epoch := c.Elector.Epoch()
-	if c.Sync == nil || epoch == 0 || c.now().Before(c.synced.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
+	fence, leads := c.Elector.Fence()
+	if c.Sync == nil || !leads || c.now().Before(c.synced.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
 		return nil
 	}
 	c.synced = c.now()
-	res, err := c.Sync.Step(ctx, state.Fence{Holder: c.Elector.ID, Epoch: epoch})
+	res, err := c.Sync.Step(ctx, fence)
 	if err == nil && res != (entrasync.Result{}) {
 		c.log().Info("entra sync", "created", res.Created, "added", res.Added, "removed", res.Removed, "keysRevoked", res.Revoked)
 	}

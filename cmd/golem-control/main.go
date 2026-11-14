@@ -51,33 +51,33 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "keygen" {
-		if len(os.Args) != 3 {
-			fail("usage: golem-control keygen <dir>")
-		}
-		if err := keygen(os.Args[2]); err != nil {
-			fail("%v", err)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "pubkey" {
-		if len(os.Args) != 3 {
-			fail("usage: golem-control pubkey file:<key> | kms:<arn>")
-		}
-		if err := pubkey(context.Background(), os.Stdout, os.Args[2]); err != nil {
-			fail("%v", err)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "restore" {
-		if err := restore(context.Background(), os.Stdout, os.Args[2:]); err != nil {
-			fail("%v", err)
-		}
-		return
-	}
-	if err := run(); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fail("%v", err)
 	}
+}
+
+// dispatch runs a subcommand (keygen, pubkey, restore), or golem-control
+// itself given anything else, flags included.
+func dispatch(args []string) error {
+	ctx := context.Background()
+	if len(args) == 0 {
+		return run()
+	}
+	switch args[0] {
+	case "keygen":
+		if len(args) != 2 {
+			return errors.New("usage: golem-control keygen <dir>")
+		}
+		return keygen(args[1])
+	case "pubkey":
+		if len(args) != 2 {
+			return errors.New("usage: golem-control pubkey file:<key> | kms:<arn>")
+		}
+		return pubkey(ctx, os.Stdout, args[1])
+	case "restore":
+		return restore(ctx, os.Stdout, args[1:])
+	}
+	return run()
 }
 
 // restore brings an older state document's entitlements back without
@@ -132,6 +132,53 @@ func restore(ctx context.Context, w io.Writer, args []string) error {
 	return nil
 }
 
+// options are golem-control's flags.
+type options struct {
+	config, bucket, signingKey, pools, id string
+	authLease                             time.Duration
+	listen                                string
+	archive, telemetry                    string
+	tenant, audience                      string
+	syncClient                            string
+	syncEvery                             time.Duration
+	syncMax                               int
+	clickhouse, clickhouseUser            string
+	allowance                             time.Duration
+	periodZone                            string
+}
+
+// parseFlags reads golem-control's flags and checks those that need each
+// other.
+func parseFlags() (options, error) {
+	var o options
+	flag.StringVar(&o.config, "config", "", "the config CRDs' directory")
+	flag.StringVar(&o.bucket, "bucket", "", "the bucket: a directory, or s3://<bucket>/<prefix>")
+	flag.StringVar(&o.signingKey, "signing-key", "", "the publishing key: file:<an Ed25519 PKCS#8 PEM> or kms:<a KMS key ARN, ECC_NIST_P256>")
+	flag.StringVar(&o.pools, "pools", "internal", "the gateway pools to publish to, comma-separated")
+	flag.StringVar(&o.id, "id", "", "this replica's name (default: the host name)")
+	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
+	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
+	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
+	flag.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for the audit's log records (TLS unless a literal loopback address)")
+	flag.StringVar(&o.tenant, "entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
+	flag.StringVar(&o.audience, "entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
+	flag.StringVar(&o.syncClient, "entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
+	flag.DurationVar(&o.syncEvery, "entra-sync-every", 5*time.Minute, "how often the group sync runs")
+	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
+	flag.StringVar(&o.clickhouse, "clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
+	flag.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
+	flag.DurationVar(&o.allowance, "spend-allowance", 5*time.Minute, "how long after a call's end its ledger row is surely in ClickHouse: known spend's boundary is this far back")
+	flag.StringVar(&o.periodZone, "period-zone", "UTC", "the budget periods' time zone (an IANA name): the gateways' -period-zone")
+	flag.Parse()
+	if o.config == "" || o.bucket == "" || o.signingKey == "" {
+		return o, errors.New("-config, -bucket and -signing-key are required")
+	}
+	if o.archive == "" && o.telemetry != "off" {
+		return o, errors.New("-telemetry carries the audit's log records, which need -audit-archive: set both, or neither")
+	}
+	return o, nil
+}
+
 // run is golem-control: set up, then run until SIGTERM or a component
 // fails. Shutdown is in order: the publishing loop stops (no publication
 // left half-done), the lease is given up so another replica publishes at
@@ -139,42 +186,21 @@ func restore(ctx context.Context, w io.Writer, args []string) error {
 // log records are flushed. Errors are returned, never an exit from a
 // goroutine, so every deferred step runs.
 func run() error {
-	cfg := flag.String("config", "", "the config CRDs' directory")
-	bkt := flag.String("bucket", "", "the bucket: a directory, or s3://<bucket>/<prefix>")
-	key := flag.String("signing-key", "", "the publishing key: file:<an Ed25519 PKCS#8 PEM> or kms:<a KMS key ARN, ECC_NIST_P256>")
-	pools := flag.String("pools", "internal", "the gateway pools to publish to, comma-separated")
-	id := flag.String("id", "", "this replica's name (default: the host name)")
-	authLease := flag.Duration("lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
-	listen := flag.String("listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
-	archive := flag.String("audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
-	telem := flag.String("telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for the audit's log records (TLS unless a literal loopback address)")
-	tenant := flag.String("entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
-	audience := flag.String("entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
-	syncClient := flag.String("entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
-	syncEvery := flag.Duration("entra-sync-every", 5*time.Minute, "how often the group sync runs")
-	syncMax := flag.Int("entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
-	clickhouse := flag.String("clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
-	clickhouseUser := flag.String("clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
-	allowance := flag.Duration("spend-allowance", 5*time.Minute, "how long after a call's end its ledger row is surely in ClickHouse: known spend's boundary is this far back")
-	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): the gateways' -period-zone")
-	flag.Parse()
-	if *cfg == "" || *bkt == "" || *key == "" {
-		return errors.New("-config, -bucket and -signing-key are required")
-	}
-	if *archive == "" && *telem != "off" {
-		return errors.New("-telemetry carries the audit's log records, which need -audit-archive: set both, or neither")
+	o, err := parseFlags()
+	if err != nil {
+		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	b, err := openBucket(ctx, *bkt)
+	b, err := openBucket(ctx, o.bucket)
 	if err != nil {
 		return fmt.Errorf("-bucket: %w", err)
 	}
-	signer, err := openSigner(ctx, *key)
+	signer, err := openSigner(ctx, o.signingKey)
 	if err != nil {
 		return fmt.Errorf("-signing-key: %w", err)
 	}
-	replica := *id
+	replica := o.id
 	if replica == "" {
 		if replica, err = os.Hostname(); err != nil {
 			return fmt.Errorf("-id: %w", err)
@@ -184,49 +210,19 @@ func run() error {
 	if err := st.Load(ctx); err != nil {
 		return fmt.Errorf("the state document: %w", err)
 	}
-	c := &controller.Controller{Dir: *cfg, Lease: *authLease,
-		Elector: &lead.Elector{State: st, ID: replica}, Publishers: map[string]*publish.Publisher{}}
-	for _, p := range strings.Split(*pools, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Pool: p}
-		}
+	c, closeAudit, err := newController(ctx, o, st, b, signer, replica)
+	if err != nil {
+		return err
 	}
-	if *archive != "" {
-		shipper, shutdown, err := openAudit(ctx, st, *archive, *telem)
-		if err != nil {
-			return err
-		}
-		defer shutdown()
-		c.Audit = shipper
-	} else {
-		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped, and grows in the state document")
-	}
-	if *clickhouse != "" {
-		zone, err := time.LoadLocation(*zoneName)
-		if err != nil {
-			return fmt.Errorf("-period-zone: %w", err)
-		}
-		c.Spend = &spend.Job{Ledger: spend.ClickHouse{URL: *clickhouse, User: *clickhouseUser, Password: os.Getenv("CLICKHOUSE_PASSWORD")},
-			Allowance: *allowance, Location: zone}
-	} else {
-		slog.Warn("golem-control: no -clickhouse: snapshots carry no known spend, and each site's gateways budget against their own counter alone")
-	}
-	if *syncClient != "" {
-		if *tenant == "" {
-			return errors.New("-entra-sync-client-id needs -entra-tenant")
-		}
-		tok := &entrasync.FederatedToken{Tenant: *tenant, ClientID: *syncClient}
-		c.Sync = &entrasync.Sync{State: st, Directory: &entrasync.Graph{Token: tok.Token}, MaxRemovals: *syncMax}
-		c.SyncEvery = *syncEvery
-	}
-	slog.Info("golem-control: running", "replica", replica, "pools", *pools, "signing key", signer.KeyID())
+	defer closeAudit()
+	slog.Info("golem-control: running", "replica", replica, "pools", o.pools, "signing key", signer.KeyID())
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
 	var failed error // a component's failure, which stops the rest
 	wg.Go(func() { st.Run(ctx) })
-	if *listen != "" {
-		srv, err := apiServer(ctx, *listen, *tenant, *audience, st)
+	if o.listen != "" {
+		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, st)
 		if err != nil {
 			return fmt.Errorf("-listen: %w", err)
 		}
@@ -236,7 +232,7 @@ func run() error {
 				cancel()
 			}
 		})
-		slog.Info("golem-control: the control API is listening", "addr", *listen)
+		slog.Info("golem-control: the control API is listening", "addr", o.listen)
 		// Drained when the context ends, so ListenAndServe returns and the
 		// wait below ends.
 		context.AfterFunc(ctx, func() {
@@ -257,6 +253,53 @@ func run() error {
 	}
 	slog.Info("golem-control: stopped")
 	return nil
+}
+
+// newController wires the publishing loop: an elector and a publisher per
+// pool over st, and the jobs the flags ask for (audit shipping, known
+// spend, the group sync). closeAudit flushes the audit's log records; it
+// is a no-op without them, and has run already when err is set.
+func newController(ctx context.Context, o options, st *state.Store, b bucket.Bucket, signer sign.Signer, replica string) (c *controller.Controller, closeAudit func(), err error) {
+	closeAudit = func() {}
+	defer func() {
+		if err != nil {
+			closeAudit()
+		}
+	}()
+	c = &controller.Controller{Dir: o.config, Lease: o.authLease,
+		Elector: &lead.Elector{State: st, ID: replica}, Publishers: map[string]*publish.Publisher{}}
+	for _, p := range strings.Split(o.pools, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Pool: p}
+		}
+	}
+	if o.archive != "" {
+		if c.Audit, closeAudit, err = openAudit(ctx, st, o.archive, o.telemetry); err != nil {
+			closeAudit = func() {}
+			return nil, closeAudit, err
+		}
+	} else {
+		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped, and grows in the state document")
+	}
+	if o.clickhouse != "" {
+		zone, err := time.LoadLocation(o.periodZone)
+		if err != nil {
+			return nil, closeAudit, fmt.Errorf("-period-zone: %w", err)
+		}
+		c.Spend = &spend.Job{Ledger: spend.ClickHouse{URL: o.clickhouse, User: o.clickhouseUser, Password: os.Getenv("CLICKHOUSE_PASSWORD")},
+			Allowance: o.allowance, Location: zone}
+	} else {
+		slog.Warn("golem-control: no -clickhouse: snapshots carry no known spend, and each site's gateways budget against their own counter alone")
+	}
+	if o.syncClient != "" {
+		if o.tenant == "" {
+			return nil, closeAudit, errors.New("-entra-sync-client-id needs -entra-tenant")
+		}
+		tok := &entrasync.FederatedToken{Tenant: o.tenant, ClientID: o.syncClient}
+		c.Sync = &entrasync.Sync{State: st, Directory: &entrasync.Graph{Token: tok.Token}, MaxRemovals: o.syncMax}
+		c.SyncEvery = o.syncEvery
+	}
+	return c, closeAudit, nil
 }
 
 // apiServer serves the control API, authenticated by Entra tokens: no
