@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"slices"
@@ -31,6 +32,10 @@ type Options struct {
 	PublishSeq uint64
 	Now        time.Time
 	Lease      time.Duration // zero: no lease (standalone only)
+	// Entitlements gives a published snapshot's entitlements (the state
+	// document's, control/state), told the route aliases that exist; nil:
+	// none, a snapshot that authorizes no one.
+	Entitlements func(aliases []string) snapshot.Entitlements
 }
 
 // Problem is one validation failure.
@@ -172,6 +177,9 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 		routes = append(routes, sr)
 	}
 	ents := entitlements(objs, o, aliases, add)
+	if !o.Standalone && o.Entitlements != nil {
+		ents = o.Entitlements(slices.Sorted(maps.Keys(aliases)))
+	}
 	currency, prices := priceList(objs, add)
 	// A scope with a budget is charged by price: every model it can reach
 	// needs one, or its budget could never be spent (contracts.md §4).

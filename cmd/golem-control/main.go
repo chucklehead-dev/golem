@@ -1,7 +1,6 @@
 // golem-control publishes the config's snapshots to the bucket while it
 // leads (control-plane.md §4; this slice: config CRDs from a directory,
-// every pool the same snapshot, entitlements empty until the state
-// document has them).
+// every pool the same snapshot, entitlements from the state document).
 //
 //	golem-control -config ./config -bucket ./bucket -signing-key file:publishing.key -pools internal
 //	golem-control -config ./config -bucket s3://golem-state/golem/ -signing-key kms:arn:aws:kms:... -pools internal,edge

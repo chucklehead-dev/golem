@@ -2,7 +2,9 @@ package controller
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/state"
 	gwsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/lib/bucket"
+	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/sign"
 )
 
@@ -73,7 +76,7 @@ func newWorld(t *testing.T) *world {
 		w.replicas[id] = r
 	}
 	w.gateway = &gwsnap.Bucket{Bucket: b, Keys: sign.Ed25519Keys{"k": pk}, Pool: "internal",
-		Holder: &gwsnap.Holder{Now: func() time.Time { return start }}, Secrets: secrets{}}
+		Holder: &gwsnap.Holder{Env: key.Live, Now: func() time.Time { return start }}, Secrets: secrets{}}
 	w.write("backend.yaml", backend)
 	w.write("claude.yaml", route("claude"))
 	return w
@@ -186,4 +189,57 @@ func TestPublishes(t *testing.T) {
 			t.Fatalf("the gateway holds %d %v: the leader's next publication carries the change", seq, aliases)
 		}
 	})
+}
+
+// TestEntitlements: a key written to the state reaches the gateway through
+// golem-control and authenticates there; revoked in the state, it is
+// refused by the gateway after the next step and poll.
+func TestEntitlements(t *testing.T) {
+	w := newWorld(t)
+	r1 := w.replicas["r1"]
+	w.lead("r1")
+	alice := key.New(key.Live)
+	h := key.Hash(alice)
+	hash := hex.EncodeToString(h[:])
+	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude", "gone"}}}
+		d.Principals = map[string]state.Principal{"alice": {Kind: "user", Scopes: []string{"team-a"}}}
+		d.Keys = map[string]state.Key{hash: {Display: key.Display(alice), Owner: "alice", Scope: "team-a"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	authenticate := func() (string, string) {
+		c, err := w.gateway.Holder.Current()
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdr := http.Header{"X-Api-Key": {alice}}
+		p, no := c.Auth.Authenticate(hdr)
+		if no != nil {
+			return "", no.Code.Name
+		}
+		return p.ID + "/" + p.Scope, ""
+	}
+	if p, _ := w.step("r1"); !p {
+		t.Fatal("not published")
+	}
+	if who, refused := authenticate(); who != "alice/team-a" {
+		t.Fatalf("the gateway: %q, refused %q; want alice in team-a", who, refused)
+	}
+	if c, _ := w.gateway.Holder.Current(); strings.Join(c.Snapshot.Entitlements.Scopes[0].Models, ",") != "claude" {
+		t.Fatalf("scope models %v: a route that does not exist is dropped", c.Snapshot.Entitlements.Scopes[0].Models)
+	}
+
+	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+		return d.Revoke(hash, r1.clock)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := w.step("r1"); !p {
+		t.Fatal("a revocation did not publish")
+	}
+	if who, refused := authenticate(); who != "" || refused != "auth.key_revoked" {
+		t.Fatalf("after the revocation: %q, refused %q; want auth.key_revoked", who, refused)
+	}
 }

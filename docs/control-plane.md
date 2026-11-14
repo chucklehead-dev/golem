@@ -92,6 +92,15 @@ validate` (the snapshot compiler as a library), not by a live API call
   publication record (`publications`), which no write may remove or move
   back. JSON, decoded strictly, for now; the rest of §3.1, protobuf with
   zstd, the audit outbox and restore come as they are built.
+  Entitlements (slice 2): `principals` (kind, Entra ID, memberships,
+  default scope), `scopes` (policy), `keys` (by hash: owner, scope, model
+  narrowing, expiry, revocation) and the append-only `revocations`. Every
+  write keeps: a key's owner exists and is a member of its scope; a
+  principal's scopes exist and its default is one; no two principals share
+  an Entra ID; a revocation is never dropped and its key never revived.
+  `Document.Entitlements` is the snapshot's view, a scope's models limited
+  to the routes that exist. Nothing writes them yet but tests: the control
+  API's first endpoints are next.
 
 ### 3.1 State outline
 
@@ -150,9 +159,9 @@ control plane.
     leads, it compiles the config directory and publishes every pool when
     the config changes, when it becomes leader, and every minute to renew
     the authorization lease; a config that does not compile is reported
-    and the last good one renewed. Every pool gets the same snapshot, with
-    empty entitlements until the state document carries them (it
-    authorizes no one); pool selectors and the CRD watch come later. Its
+    and the last good one renewed. Every pool gets the same snapshot, its
+    entitlements the state document's, republished at the next step when
+    they change; pool selectors and the CRD watch come later. Its
     end-to-end test runs two replicas and a gateway source over one
     bucket: a change reaches the gateway, a renewal extends its lease, a
     broken edit renews the last good config, a new leader publishes and a

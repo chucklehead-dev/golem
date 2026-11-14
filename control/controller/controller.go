@@ -5,14 +5,16 @@
 // (ADR 0030).
 //
 // This slice reads config CRDs from a directory and gives every pool the
-// same snapshot. Its entitlements are empty until the state document
-// carries them (a published snapshot authorizes no one: fail closed);
-// pool selectors and the CRD watch come later.
+// same snapshot, its entitlements the state document's (principals,
+// scopes, keys and revocations); a change to them is published at the next
+// step. Pool selectors and the CRD watch come later.
 package controller
 
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/state"
 	v1 "github.com/chucklehead-dev/golem/lib/api/v1alpha1"
 	"github.com/chucklehead-dev/golem/lib/compile"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
@@ -44,6 +47,7 @@ type Controller struct {
 	goodSum   [32]byte
 	published struct {
 		sum   [32]byte
+		ents  [32]byte // the state's entitlements published
 		epoch uint64
 		at    time.Time
 	}
@@ -77,16 +81,28 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	if c.goodSum == ([32]byte{}) {
 		return false, fmt.Errorf("no config has compiled yet: %w", cfgErr)
 	}
+	// The state as of now: a revocation is published within a step of its
+	// write (the store's own loop refreshes it too).
+	if err := c.Elector.State.Refresh(ctx); err != nil {
+		return false, errors.Join(err, cfgErr)
+	}
+	doc := c.Elector.State.Current()
+	ents, err := entitlementsSum(doc)
+	if err != nil {
+		return false, err
+	}
 	renew := cmp.Or(c.Renew, time.Minute)
-	due := c.goodSum != c.published.sum || epoch != c.published.epoch || !c.now().Before(c.published.at.Add(renew))
+	due := c.goodSum != c.published.sum || ents != c.published.ents || epoch != c.published.epoch ||
+		!c.now().Before(c.published.at.Add(renew))
 	if !due {
 		return false, cfgErr
 	}
-	source := c.Elector.State.Current().StateVersion
+	source := doc.StateVersion
 	var errs []error
 	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
 		ptr, err := c.Publishers[pool].Publish(ctx, epoch, source, func(seq uint64) (*snapshot.Snapshot, error) {
-			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: cmp.Or(c.Lease, 4*time.Hour)})
+			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: cmp.Or(c.Lease, 4*time.Hour),
+				Entitlements: doc.Entitlements})
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
@@ -97,7 +113,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	if len(errs) > 0 {
 		return false, errors.Join(append(errs, cfgErr)...)
 	}
-	c.published.sum, c.published.epoch, c.published.at = c.goodSum, epoch, c.now()
+	c.published.sum, c.published.ents, c.published.epoch, c.published.at = c.goodSum, ents, epoch, c.now()
 	return true, cfgErr
 }
 
@@ -148,4 +164,16 @@ func (c *Controller) Run(ctx context.Context) {
 			last = ""
 		}
 	}
+}
+
+// entitlementsSum hashes the state's entitlements: not its version, which
+// the publisher's own record update moves at every publication.
+func entitlementsSum(d *state.Document) ([32]byte, error) {
+	b, err := json.Marshal(struct {
+		P map[string]state.Principal
+		S map[string]state.Scope
+		K map[string]state.Key
+		R []state.Revocation
+	}{d.Principals, d.Scopes, d.Keys, d.Revocations})
+	return sha256.Sum256(b), err
 }

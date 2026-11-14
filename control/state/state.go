@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -26,8 +27,8 @@ import (
 // Schema is the document's format; a reader refuses any other.
 const Schema = 1
 
-// Key is the document's object key.
-const Key = "state/document.json"
+// DocumentKey is the document's object key.
+const DocumentKey = "state/document.json"
 
 // Record is a pool's publication record: the last publication's sequence,
 // and the leadership epoch and state version it was made under
@@ -61,11 +62,20 @@ type Document struct {
 	StateVersion uint64            `json:"stateVersion"`
 	Leader       *Lease            `json:"leader,omitempty"`
 	Publications map[string]Record `json:"publications,omitempty"`
+
+	Principals  map[string]Principal `json:"principals,omitempty"` // by principal ID
+	Scopes      map[string]Scope     `json:"scopes,omitempty"`     // by scope ID
+	Keys        map[string]Key       `json:"keys,omitempty"`       // by hex SHA-256 of the key
+	Revocations []Revocation         `json:"revocations,omitempty"`
 }
 
 func (d *Document) clone() *Document {
 	c := *d
 	c.Publications = maps.Clone(d.Publications)
+	c.Principals = maps.Clone(d.Principals) // values are copied; their slices are replaced, never edited in place
+	c.Scopes = maps.Clone(d.Scopes)
+	c.Keys = maps.Clone(d.Keys)
+	c.Revocations = slices.Clone(d.Revocations)
 	if d.Leader != nil {
 		l := *d.Leader
 		c.Leader = &l
@@ -106,7 +116,7 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 	if full || tag == bucket.Absent {
 		tag = ""
 	}
-	body, newTag, err := s.Bucket.Get(ctx, Key, tag)
+	body, newTag, err := s.Bucket.Get(ctx, DocumentKey, tag)
 	switch {
 	case errors.Is(err, bucket.ErrNotModified):
 		return nil
@@ -114,7 +124,7 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 		s.set(&Document{Schema: Schema}, bucket.Absent)
 		return nil
 	case err != nil:
-		return fmt.Errorf("state %s: %w", Key, err)
+		return fmt.Errorf("state %s: %w", DocumentKey, err)
 	}
 	d, err := Decode(body)
 	if err != nil {
@@ -178,7 +188,7 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 		if err != nil {
 			return nil, err
 		}
-		newTag, err := s.Bucket.Put(ctx, Key, body, tag)
+		newTag, err := s.Bucket.Put(ctx, DocumentKey, body, tag)
 		if errors.Is(err, bucket.ErrPrecondition) {
 			if err := s.Load(ctx); err != nil {
 				return nil, err
@@ -186,7 +196,7 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("state %s: %w", Key, err)
+			return nil, fmt.Errorf("state %s: %w", DocumentKey, err)
 		}
 		s.set(next, newTag)
 		return next.clone(), nil
@@ -201,6 +211,9 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 func check(old, next *Document) error {
 	if old.Leader != nil && (next.Leader == nil || next.Leader.Epoch < old.Leader.Epoch) {
 		return fmt.Errorf("%w: the lease's epoch goes back", ErrInvariant)
+	}
+	if err := checkEntitlements(old, next); err != nil {
+		return err
 	}
 	for pool, r := range old.Publications {
 		n, ok := next.Publications[pool]
@@ -222,10 +235,10 @@ func (d *Document) Encode() ([]byte, error) { return jsonv2.Marshal(d) }
 func Decode(b []byte) (*Document, error) {
 	var d Document
 	if err := jsonv2.Unmarshal(b, &d, jsonv2.RejectUnknownMembers(true)); err != nil {
-		return nil, fmt.Errorf("state %s: %w", Key, err)
+		return nil, fmt.Errorf("state %s: %w", DocumentKey, err)
 	}
 	if d.Schema != Schema {
-		return nil, fmt.Errorf("state %s: schema %d, this reader reads %d", Key, d.Schema, Schema)
+		return nil, fmt.Errorf("state %s: schema %d, this reader reads %d", DocumentKey, d.Schema, Schema)
 	}
 	return &d, nil
 }
