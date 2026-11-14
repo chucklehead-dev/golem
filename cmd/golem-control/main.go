@@ -39,6 +39,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/service"
+	"github.com/chucklehead-dev/golem/control/spend"
 	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
@@ -93,6 +94,10 @@ func run() error {
 	syncClient := flag.String("entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
 	syncEvery := flag.Duration("entra-sync-every", 5*time.Minute, "how often the group sync runs")
 	syncMax := flag.Int("entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
+	clickhouse := flag.String("clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
+	clickhouseUser := flag.String("clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
+	allowance := flag.Duration("spend-allowance", 5*time.Minute, "how long after a call's end its ledger row is surely in ClickHouse: known spend's boundary is this far back")
+	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): the gateways' -period-zone")
 	flag.Parse()
 	if *cfg == "" || *bkt == "" || *key == "" {
 		return errors.New("-config, -bucket and -signing-key are required")
@@ -136,6 +141,16 @@ func run() error {
 		c.Audit = shipper
 	} else {
 		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped, and grows in the state document")
+	}
+	if *clickhouse != "" {
+		zone, err := time.LoadLocation(*zoneName)
+		if err != nil {
+			return fmt.Errorf("-period-zone: %w", err)
+		}
+		c.Spend = &spend.Job{Ledger: spend.ClickHouse{URL: *clickhouse, User: *clickhouseUser, Password: os.Getenv("CLICKHOUSE_PASSWORD")},
+			Allowance: *allowance, Location: zone}
+	} else {
+		slog.Warn("golem-control: no -clickhouse: snapshots carry no known spend, and each site's gateways budget against their own counter alone")
 	}
 	if *syncClient != "" {
 		if *tenant == "" {

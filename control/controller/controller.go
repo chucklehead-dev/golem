@@ -28,6 +28,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/entrasync"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/spend"
 	"github.com/chucklehead-dev/golem/control/state"
 	v1 "github.com/chucklehead-dev/golem/lib/api/v1alpha1"
 	"github.com/chucklehead-dev/golem/lib/compile"
@@ -48,6 +49,10 @@ type Controller struct {
 	// Audit, if set, ships the state's audit outbox while this replica
 	// leads (control/audit).
 	Audit *audit.Shipper
+	// Spend, if set, is the known-spend job: each publication carries every
+	// scope's spend this period from the ledger, to a boundary (ADR 0048).
+	// It is read whenever a publication is due.
+	Spend *spend.Job
 	// Sync, if set, reconciles the bound Entra groups' members while this
 	// replica leads, every SyncEvery (default five minutes; ADR 0047).
 	Sync      *entrasync.Sync
@@ -112,6 +117,22 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		return false, cfgErr
 	}
 	source := doc.StateVersion
+	var spendErr error
+	if c.Spend != nil {
+		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
+	}
+	entitlements := func(aliases []string) snapshot.Entitlements {
+		e := doc.Entitlements(aliases)
+		if c.Spend != nil {
+			if k, ok := c.Spend.Current(); ok {
+				for i := range e.Scopes {
+					e.Scopes[i].Period, e.Scopes[i].Since = k.Period, k.Since
+					e.Scopes[i].KnownSpend = k.Spend[e.Scopes[i].ID]
+				}
+			}
+		}
+		return e
+	}
 	var pubs []*publish.Publisher
 	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
 		pubs = append(pubs, c.Publishers[pool])
@@ -120,7 +141,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, publish.Lease{Holder: c.Elector.ID, Epoch: epoch}, source, pubs,
 		func(_ *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
 			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
-				Entitlements: doc.Entitlements})
+				Entitlements: entitlements})
 		})
 	var errs []error
 	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
@@ -132,10 +153,10 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", epoch, "hash", ptr.Hash[:12])
 	}
 	if len(errs) > 0 {
-		return false, errors.Join(append(errs, cfgErr)...)
+		return false, errors.Join(append(errs, cfgErr, spendErr)...)
 	}
 	c.published.sum, c.published.ents, c.published.epoch, c.published.at = c.goodSum, ents, epoch, c.now()
-	return true, cfgErr
+	return true, errors.Join(cfgErr, spendErr)
 }
 
 // load reads the directory, keeping it as the good config if it compiles

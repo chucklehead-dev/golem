@@ -116,8 +116,8 @@ control/
   controller/              the leader's loop: compile, publish, renew; runs the jobs
   audit/                   audit shipping: archive, emit, trim
   entrasync/               Entra group sync (ADR 0047)
-  watermark/               known spend's ledger watermark (ADR 0042; being replaced)
-  config/, spend/          the CRD watch and ClickHouse queries (planned)
+  spend/                   known spend from the ledger in ClickHouse (ADR 0048)
+  config/                  the CRD watch (planned)
 console/                   web UI (Go html/template + htmx), a client of the control API (planned)
 plugins/backstage/         TypeScript, generated client (M3)
 lib/                       shared libraries with no control-plane or Kubernetes-client deps:

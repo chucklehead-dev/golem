@@ -227,6 +227,19 @@ the outbox's oldest events and, in order:
 The archive, not the collector, is the durability boundary: an event leaves
 the outbox only once it is durably archived.
 
+### 5.0 Known spend
+
+When a publication is due, `Controller.Step` runs `spend.Job.Step` and
+puts its result into every scope of the snapshot: `Period`, `Since` (the
+boundary B, the current minute less `Allowance`, five minutes) and
+`KnownSpend`, from `spend.ClickHouse`'s one query over
+`golem.spend_dedup` (one row per `event_id`; contracts.md §3) of the
+period's rows that ended before B. Gateways add their site counter's
+minutes from B on (ADR 0048). A failed query keeps the last result for its
+own period and is reported; a new period starts from nothing until B
+passes its first minute; with no result at all (no `-clickhouse`, or no
+read yet) a snapshot carries none and gateways count their site alone.
+
 ### 5.1 Entra group sync
 
 `Sync.Step` (`control/entrasync/sync.go`, ADR 0047) runs from the

@@ -15,6 +15,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/entrasync"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/spend"
 	"github.com/chucklehead-dev/golem/control/state"
 	gwsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/lib/bucket"
@@ -292,5 +293,41 @@ func TestGroupSync(t *testing.T) {
 	w.lead("r1")                             // renewed meanwhile
 	if s := member(); len(s) != 0 {
 		t.Fatalf("alice after leaving the group: %v", s)
+	}
+}
+
+// spendLedger is a ledger with fixed spend.
+type spendLedger map[string]int64
+
+func (s spendLedger) Spend(context.Context, string, time.Time) (map[string]int64, error) {
+	return s, nil
+}
+
+// TestKnownSpend: each publication carries every scope's spend this period
+// from the ledger, with its boundary, as far as the gateway's snapshot.
+func TestKnownSpend(t *testing.T) {
+	w := newWorld(t)
+	r1 := w.replicas["r1"]
+	w.lead("r1")
+	r1.Spend = &spend.Job{Ledger: spendLedger{"team-a": 1_250_000}, Now: r1.Now}
+	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude"}}, "team-b": {Models: []string{"claude"}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := w.step("r1"); !p || err != nil {
+		t.Fatalf("published %v %v", p, err)
+	}
+	c, err := w.gateway.Holder.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := r1.clock.Add(-5 * time.Minute).Truncate(time.Minute)
+	for _, s := range c.Snapshot.Entitlements.Scopes {
+		spent := map[string]int64{"team-a": 1_250_000}[s.ID]
+		if s.Period != "2026-11" || !s.Since.Equal(want) || s.KnownSpend != spent {
+			t.Fatalf("scope %s: period %q since %v spend %d; want 2026-11, %v, %d", s.ID, s.Period, s.Since, s.KnownSpend, want, spent)
+		}
 	}
 }
