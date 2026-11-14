@@ -216,6 +216,35 @@ the outbox's oldest events and, in order:
 The archive, not the collector, is the durability boundary: an event leaves
 the outbox only once it is durably archived.
 
+### 5.1 Entra group sync
+
+`Sync.Step` (`control/entrasync/sync.go`, ADR 0047) runs from the
+controller loop (`syncStep`) every `SyncEvery` (five minutes) while this
+replica leads:
+
+1. **Read every bound group first** (`boundGroups`: each scope's
+   `Groups`), through `Directory.Members`: `Graph` lists a group's
+   transitive user members (`id`, `userPrincipalName`, `accountEnabled`),
+   following `@odata.nextLink` only on Graph's own host, with a token from
+   `FederatedToken` (the pod's projected service account token as the
+   client assertion). Any failure but a deleted group (`ErrNoGroup`, no
+   members) ends the step with nothing written.
+2. **Reconcile** in one `Update` (`reconcile`): each enabled member of a
+   group bound to a scope has the scope in `Synced`; a user not yet a
+   principal is created (`principalID`: the sign-in name, lowercased; with
+   part of the object ID if taken; `user-<oid>` for a name in the reserved
+   `entra:` namespace); a user in no bound group, or disabled, has
+   `Synced` emptied. Each changed principal's keys outside its
+   memberships are revoked (`Document.RevokeOutside`), a disabled user's
+   all of them, and the change is audited by `system:entra-sync`.
+3. **Guard**: a step ending more than `MaxRemovals` (50) memberships
+   returns `ErrTooManyRemovals` and writes nothing; a step changing nothing
+   writes nothing either.
+
+Memberships granted in golem (`Scopes`) are never the sync's: a member by
+both ways keeps one when the other ends, and `members remove` refuses a
+membership that is only a group's.
+
 ## 6. The binary's flags
 
 `cmd/golem-control/main.go:58` onwards:
@@ -229,9 +258,11 @@ the outbox only once it is durably archived.
 | `-id` | this replica's name (default the host name): the lease holder |
 | `-lease` | the snapshots' authorization lease (default 4h) |
 | `-listen` | serve the control API here; needs `-entra-tenant` |
-| `-entra-tenant`, `-entra-audience` | the Entra tenant and audiences the API accepts |
+| `-entra-tenant`, `-entra-audience` | the Entra tenant, and the control API registration's audiences (default `api://golem-control`, ADR 0046) |
 | `-audit-archive` | the audit archive bucket; empty: the outbox is not shipped and grows |
 | `-telemetry` | `off`, or an OTLP/HTTP collector for the audit's log records (only with `-audit-archive`) |
+| `-entra-sync-client-id` | the jobs registration (entra.md #4): run the group sync by workload identity; needs `-entra-tenant` |
+| `-entra-sync-every`, `-entra-sync-max-removals` | the sync's interval (5m) and its removal guard (50) |
 
 `golem-control keygen <dir>` writes a development key pair
 (`publishing.key`, never overwritten, and `publishing.pub` for gateways).

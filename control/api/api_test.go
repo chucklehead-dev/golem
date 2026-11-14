@@ -93,7 +93,8 @@ func TestAPI(t *testing.T) {
 		Models: []string{"opus"}})); code(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "key.models[0]") {
 		t.Fatalf("a model outside the scope: %v", err)
 	}
-	if _, err := keys("eve").MintKey(ctx, connect.NewRequest(&keysv1.MintKeyRequest{Owner: "alice", Scope: "team-a"})); code(err) != connect.CodePermissionDenied {
+	// eve can see nothing of team-a: not even that it exists.
+	if _, err := keys("eve").MintKey(ctx, connect.NewRequest(&keysv1.MintKeyRequest{Owner: "alice", Scope: "team-a"})); code(err) != connect.CodeNotFound {
 		t.Fatalf("eve minting alice's key: %v", err)
 	}
 	res, err := keys("alice").MintKey(ctx, connect.NewRequest(&keysv1.MintKeyRequest{Owner: "alice", Scope: "team-a"}))

@@ -9,12 +9,20 @@ option go_package = "github.com/chucklehead-dev/golem/gen/golem/org/v1;orgv1";
 service OrgService {
   // Creates a top-level scope: admins.
   rpc CreateScope(CreateScopeRequest) returns (CreateScopeResponse);
-  // Adds a member, creating the user or service on its first add: the
-  // scope's managers, or admins.
+  // Adds a member: the scope's managers, or admins. A manager adds a
+  // principal that exists or creates a service that uses keys; only an
+  // admin creates a principal with an Entra ID (users come from the
+  // groups bound to scopes, ADR 0047).
   rpc AddMember(AddMemberRequest) returns (AddMemberResponse);
-  // Removes a member, revoking its keys in the scope and its role there:
+  // Removes a membership granted in golem, revoking its keys in the scope
+  // and its role there unless it is still a member through a bound group:
   // the scope's managers, or admins.
   rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+  // Binds an Entra group to a scope: its members, transitively, become
+  // the scope's members at the next sync. Admins.
+  rpc BindGroup(BindGroupRequest) returns (BindGroupResponse);
+  // Unbinds a group; the memberships it gave end at the next sync. Admins.
+  rpc UnbindGroup(UnbindGroupRequest) returns (UnbindGroupResponse);
   // Makes a principal a manager of a scope: admins.
   rpc BindManager(BindManagerRequest) returns (BindManagerResponse);
   // Who the caller is to golem: anyone signed in.
@@ -90,6 +98,27 @@ message BindManagerRequest {
 
 message BindManagerResponse {}
 
+message BindGroupRequest {
+  string scope = 1;
+  // The group's object ID in Entra.
+  string group = 2;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
+  bool validate_only = 3;
+}
+
+message BindGroupResponse {}
+
+message UnbindGroupRequest {
+  string scope = 1;
+  string group = 2;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
+  bool validate_only = 3;
+}
+
+message UnbindGroupResponse {}
+
 message WhoamiRequest {}
 
 message WhoamiResponse {
@@ -116,4 +145,6 @@ message GetScopeResponse {
   ScopePolicy policy = 2;
   repeated string members = 3;
   repeated string managers = 4;
+  // The Entra groups bound to it (object IDs).
+  repeated string groups = 5;
 }

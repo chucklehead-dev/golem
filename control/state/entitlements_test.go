@@ -42,6 +42,13 @@ func TestEntitlementInvariants(t *testing.T) {
 			d.Principals["eve"] = Principal{Kind: "user", Entra: "oid-1", Scopes: []string{"a"}}
 		},
 		"a kind that is neither": func(d *Document) { d.Principals["x"] = Principal{Kind: "robot", Scopes: []string{"a"}} },
+		"a principal in the reserved namespace": func(d *Document) {
+			d.Principals["entra:oid-9"] = Principal{Kind: "user", Scopes: []string{"a"}}
+		},
+		"a synced membership of a service": func(d *Document) { p := d.Principals["bot"]; p.Synced = []string{"a"}; d.Principals["bot"] = p },
+		"a synced membership of no scope": func(d *Document) {
+			d.Principals["syn"] = Principal{Kind: "user", Entra: "oid-9", Synced: []string{"z"}}
+		},
 		"a revocation undone":    func(d *Document) { k := d.Keys["h1"]; k.RevokedAt = time.Time{}; d.Keys["h1"] = k },
 		"a revocation dropped":   func(d *Document) { d.Revocations = nil },
 		"a revocation rewritten": func(d *Document) { d.Revocations = []Revocation{{Key: "h2", At: time.Unix(1, 0)}} },

@@ -56,3 +56,4 @@ baseline one, marked in both.
 | [0044](0044-budgets-are-controls-not-ceilings.md) | Budgets are admission and monitoring controls, not spending ceilings; provider-account limits are the financial backstop; reconciliation is authoritative; `strict` renamed `declaredWorstCaseCheck`, described by what it closes on |
 | [0045](0045-leadership-in-the-state-document.md) | golem-control's leadership is a lease in the state document, its epoch beside the publication record it fences |
 | [0046](0046-control-api-registration.md) | The control API has its own Entra registration (`api://golem-control`, `golem.manage`); a gateway token cannot call it; services recognised by `idtyp` |
+| [0047](0047-identity-from-entra-groups.md) | Users and their memberships come from the Entra groups bound to scopes, synced from Graph; only the sync and admins bind an Entra ID; `entra:` reserved |

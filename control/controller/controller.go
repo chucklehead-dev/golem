@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/chucklehead-dev/golem/control/audit"
+	"github.com/chucklehead-dev/golem/control/entrasync"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -46,6 +47,11 @@ type Controller struct {
 	// Audit, if set, ships the state's audit outbox while this replica
 	// leads (control/audit).
 	Audit *audit.Shipper
+	// Sync, if set, reconciles the bound Entra groups' members while this
+	// replica leads, every SyncEvery (default five minutes; ADR 0047).
+	Sync      *entrasync.Sync
+	SyncEvery time.Duration
+	synced    time.Time
 
 	good      v1.Objects // the last config that compiled
 	goodSum   [32]byte
@@ -171,6 +177,9 @@ func (c *Controller) Run(ctx context.Context) {
 				err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
 			}
 		}
+		if serr := c.syncStep(ctx); serr != nil {
+			err = errors.Join(err, fmt.Errorf("entra sync: %w", serr))
+		}
 		switch {
 		case err == nil:
 			last = ""
@@ -181,6 +190,20 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
+// syncStep runs the group sync if this replica leads and it is due. A
+// failed step is retried at the next interval, not every second.
+func (c *Controller) syncStep(ctx context.Context) error {
+	if c.Sync == nil || c.Elector.Epoch() == 0 || c.now().Before(c.synced.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
+		return nil
+	}
+	c.synced = c.now()
+	res, err := c.Sync.Step(ctx)
+	if err == nil && res != (entrasync.Result{}) {
+		c.log().Info("entra sync", "created", res.Created, "added", res.Added, "removed", res.Removed, "keysRevoked", res.Revoked)
+	}
+	return err
+}
+
 // entitlementsSum hashes the state's entitlements: not its version, which
 // the publisher's own record update moves at every publication.
 func entitlementsSum(d *state.Document) ([32]byte, error) {
@@ -189,6 +212,6 @@ func entitlementsSum(d *state.Document) ([32]byte, error) {
 		S map[string]state.Scope
 		K map[string]state.Key
 		R []state.Revocation
-	}{d.Principals, d.Scopes, d.Keys, d.Revocations})
+	}{d.Principals, d.Scopes, d.Keys, d.Revocations}) // synced memberships are the principals'
 	return sha256.Sum256(b), err
 }

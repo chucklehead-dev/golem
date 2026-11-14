@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chucklehead-dev/golem/control/entrasync"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -241,5 +243,50 @@ func TestEntitlements(t *testing.T) {
 	}
 	if who, refused := authenticate(); who != "" || refused != "auth.key_revoked" {
 		t.Fatalf("after the revocation: %q, refused %q; want auth.key_revoked", who, refused)
+	}
+}
+
+// groupDir is a directory with one group.
+type groupDir struct{ users []entrasync.User }
+
+func (g *groupDir) Members(context.Context, string) ([]entrasync.User, error) { return g.users, nil }
+
+// TestGroupSync: a member of a group bound to a scope reaches the gateway
+// as a member of the scope through the sync and the next publication;
+// removed from the group, they lose it at the next sync and publication.
+func TestGroupSync(t *testing.T) {
+	w := newWorld(t)
+	r1 := w.replicas["r1"]
+	w.lead("r1")
+	g := &groupDir{users: []entrasync.User{{ID: "oid-alice", UPN: "alice@example.com", Enabled: true}}}
+	r1.Sync = &entrasync.Sync{State: r1.Elector.State, Directory: g, Now: r1.Now}
+	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude"}, Groups: []string{"g1"}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	member := func() []string {
+		t.Helper()
+		if err := r1.syncStep(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		w.step("r1")
+		c, _ := w.gateway.Holder.Current()
+		for _, u := range c.Snapshot.Entitlements.Users {
+			if u.Entra == "oid-alice" {
+				return u.Scopes
+			}
+		}
+		return nil
+	}
+	if s := member(); len(s) != 1 || s[0] != "team-a" {
+		t.Fatalf("alice at the gateway: %v, want team-a", s)
+	}
+	g.users = nil
+	r1.clock = r1.clock.Add(5 * time.Minute) // the next sync
+	w.lead("r1")                             // renewed meanwhile
+	if s := member(); len(s) != 0 {
+		t.Fatalf("alice after leaving the group: %v", s)
 	}
 }

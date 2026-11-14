@@ -6,6 +6,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/chucklehead-dev/golem/lib/snapshot"
@@ -16,17 +17,44 @@ import (
 // append-only revocations that a restore must preserve (ADR 0041 §5).
 
 // Principal is a user or a service.
+//
+// Its memberships are of two kinds (ADR 0047): Scopes, granted in golem
+// (by a scope's managers or an admin), and Synced, from the Entra groups
+// bound to scopes, which only the group sync writes. A principal is a
+// member of a scope by either.
 type Principal struct {
 	Kind string `json:"kind"` // user or service
 	// Entra is the user's object ID or the service's app ID; empty for a
-	// principal that authenticates by key only.
+	// principal that authenticates by key only. Set by the group sync, or
+	// by an admin: never by a manager, who could otherwise claim another
+	// person's identity for a principal of theirs.
 	Entra   string   `json:"entra,omitempty"`
-	Scopes  []string `json:"scopes"`            // memberships
+	UPN     string   `json:"upn,omitempty"`     // a synced user's sign-in name, for display
+	Scopes  []string `json:"scopes"`            // memberships granted in golem
+	Synced  []string `json:"synced,omitempty"`  // memberships from bound groups
 	Default string   `json:"default,omitempty"` // the scope without a golem-scope header
 }
 
+// Members is every scope p is a member of, sorted, once each.
+func (p Principal) Members() []string {
+	return slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(p.Scopes), p.Synced...))))
+}
+
+// MemberOf reports whether p is a member of scope, by either kind.
+func (p Principal) MemberOf(scope string) bool {
+	return slices.Contains(p.Scopes, scope) || slices.Contains(p.Synced, scope)
+}
+
+// ReservedPrefix begins the caller ID of someone with no principal
+// (control/api's "entra:<id>"): no principal's ID may begin with it, so a
+// principal created now cannot be inherited by that person later.
+const ReservedPrefix = "entra:"
+
 // Scope is a scope's policy (org-model.md §3).
 type Scope struct {
+	// Groups are the Entra groups (object IDs) whose members, transitively,
+	// are the scope's synced members (ADR 0047): bound by admins.
+	Groups                 []string `json:"groups,omitempty"`
 	Models                 []string `json:"models"` // route aliases its members may call
 	BudgetMicros           int64    `json:"budgetMicros,omitempty"`
 	DeclaredWorstCaseCheck bool     `json:"declaredWorstCaseCheck,omitempty"`
@@ -105,20 +133,27 @@ func checkEntitlements(old, next *Document) error {
 	return checkRevocations(old, next)
 }
 
-// checkPrincipals: every principal is a user or a service, its scopes
-// exist and its default is one of them, and no two share an Entra ID.
+// checkPrincipals: every principal is a user or a service, its ID is not
+// reserved, its scopes exist and its default is one of them, only a user
+// with an Entra ID has synced memberships, and no two share an Entra ID.
 func checkPrincipals(d *Document) error {
 	entra := map[string]string{} // Entra ID to the principal that has it
 	for id, p := range d.Principals {
 		if p.Kind != "user" && p.Kind != "service" {
 			return broken("principal %s is a %q, not a user or service", id, p.Kind)
 		}
-		for _, s := range p.Scopes {
+		if strings.HasPrefix(id, ReservedPrefix) {
+			return broken("principal ID %s begins with %q, which names callers with no principal", id, ReservedPrefix)
+		}
+		for _, s := range append(slices.Clone(p.Scopes), p.Synced...) {
 			if _, ok := d.Scopes[s]; !ok {
 				return broken("principal %s is a member of %s, which does not exist", id, s)
 			}
 		}
-		if p.Default != "" && !slices.Contains(p.Scopes, p.Default) {
+		if len(p.Synced) > 0 && (p.Kind != "user" || p.Entra == "") {
+			return broken("principal %s has synced memberships but is not a user with an Entra ID", id)
+		}
+		if p.Default != "" && !p.MemberOf(p.Default) {
 			return broken("principal %s's default scope %s is not one of its scopes", id, p.Default)
 		}
 		if p.Entra != "" {
@@ -139,7 +174,7 @@ func checkKeys(d *Document) error {
 		switch {
 		case !ok:
 			return broken("key %s's owner %s does not exist", k.Display, k.Owner)
-		case k.RevokedAt.IsZero() && !slices.Contains(owner.Scopes, k.Scope):
+		case k.RevokedAt.IsZero() && !owner.MemberOf(k.Scope):
 			return broken("key %s's owner %s is not a member of its scope %s", k.Display, k.Owner, k.Scope)
 		}
 	}
@@ -193,6 +228,17 @@ func (d *Document) Revoke(hash string, at time.Time) error {
 	return nil
 }
 
+// RevokeOutside revokes principal's live keys in scopes p (its record as
+// it will be written) is not a member of: a key is honoured only for a
+// member. For use in Update.
+func (d *Document) RevokeOutside(principal string, p Principal, at time.Time) {
+	for _, h := range slices.Sorted(maps.Keys(d.Keys)) {
+		if k := d.Keys[h]; k.Owner == principal && k.RevokedAt.IsZero() && !p.MemberOf(k.Scope) {
+			d.Revoke(h, at) // the key exists: it cannot fail
+		}
+	}
+}
+
 // Entitlements is the snapshot's view of the state: keys revoked are
 // listed revoked (a gateway refuses them by name), principals with an
 // Entra ID are users or services, and every principal is a key owner of
@@ -221,7 +267,7 @@ func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 	}
 	for _, id := range slices.Sorted(maps.Keys(d.Principals)) {
 		p := d.Principals[id]
-		scopes := slices.Sorted(slices.Values(p.Scopes))
+		scopes := p.Members()
 		e.KeyOwners = append(e.KeyOwners, snapshot.Owner{ID: id, Kind: p.Kind, Scopes: scopes})
 		if p.Entra == "" {
 			continue

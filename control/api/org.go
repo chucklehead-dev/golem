@@ -38,6 +38,18 @@ func (o org) BindManager(ctx context.Context, r *connect.Request[orgv1.BindManag
 	return reply(o.Server, &orgv1.BindManagerResponse{}, err)
 }
 
+func (o org) BindGroup(ctx context.Context, r *connect.Request[orgv1.BindGroupRequest]) (*connect.Response[orgv1.BindGroupResponse], error) {
+	m := r.Msg
+	err := o.Service.BindGroup(ctx, caller(ctx), options(m.ValidateOnly), m.Scope, m.Group)
+	return reply(o.Server, &orgv1.BindGroupResponse{}, err)
+}
+
+func (o org) UnbindGroup(ctx context.Context, r *connect.Request[orgv1.UnbindGroupRequest]) (*connect.Response[orgv1.UnbindGroupResponse], error) {
+	m := r.Msg
+	err := o.Service.UnbindGroup(ctx, caller(ctx), options(m.ValidateOnly), m.Scope, m.Group)
+	return reply(o.Server, &orgv1.UnbindGroupResponse{}, err)
+}
+
 func (o org) Whoami(ctx context.Context, _ *connect.Request[orgv1.WhoamiRequest]) (*connect.Response[orgv1.WhoamiResponse], error) {
 	me, err := o.Service.Whoami(ctx, caller(ctx))
 	return reply(o.Server, &orgv1.WhoamiResponse{Principal: me.Principal, Admin: me.Admin, Kind: me.Kind,
@@ -52,7 +64,7 @@ func (o org) ListScopes(ctx context.Context, _ *connect.Request[orgv1.ListScopes
 func (o org) GetScope(ctx context.Context, r *connect.Request[orgv1.GetScopeRequest]) (*connect.Response[orgv1.GetScopeResponse], error) {
 	v, err := o.Service.GetScope(ctx, caller(ctx), r.Msg.Id)
 	return reply(o.Server, &orgv1.GetScopeResponse{Id: v.ID, Policy: policyFromState(v.Policy),
-		Members: v.Members, Managers: v.Managers}, err)
+		Members: v.Members, Managers: v.Managers, Groups: v.Policy.Groups}, err)
 }
 
 // policyToState is a scope's policy as the state stores it; a request

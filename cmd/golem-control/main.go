@@ -33,6 +33,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/api"
 	"github.com/chucklehead-dev/golem/control/audit"
 	"github.com/chucklehead-dev/golem/control/controller"
+	"github.com/chucklehead-dev/golem/control/entrasync"
 	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/service"
@@ -66,6 +67,9 @@ func main() {
 	telem := flag.String("telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for the audit's log records (TLS unless a literal loopback address)")
 	tenant := flag.String("entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
 	audience := flag.String("entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
+	syncClient := flag.String("entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
+	syncEvery := flag.Duration("entra-sync-every", 5*time.Minute, "how often the group sync runs")
+	syncMax := flag.Int("entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
 	flag.Parse()
 	if *cfg == "" || *bkt == "" || *key == "" {
 		fail("-config, -bucket and -signing-key are required")
@@ -106,6 +110,14 @@ func main() {
 		c.Audit = shipper
 	} else {
 		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped, and grows in the state document")
+	}
+	if *syncClient != "" {
+		if *tenant == "" {
+			fail("-entra-sync-client-id needs -entra-tenant")
+		}
+		tok := &entrasync.FederatedToken{Tenant: *tenant, ClientID: *syncClient}
+		c.Sync = &entrasync.Sync{State: st, Directory: &entrasync.Graph{Token: tok.Token}, MaxRemovals: *syncMax}
+		c.SyncEvery = *syncEvery
 	}
 	slog.Info("golem-control: running", "replica", replica, "pools", *pools, "signing key", signer.KeyID())
 	go st.Run(ctx) //qenv:ok the state refresh loop, ended by ctx

@@ -12,7 +12,7 @@ lives) and 0013 (multi-region enforcement).
 
 | Entity | Identity | Notes |
 |---|---|---|
-| **User** | Entra `oid` (+ `tid`) | Created on first sign-in. Display name and UPN from the token. |
+| **User** | Entra `oid` (+ `tid`) | Created by the Entra group sync when they are a member of a group bound to a scope, or by an admin; their `oid` and UPN are Graph's, never a manager's statement (ADR 0047). |
 | **Scope** | golem id; `kind: team \| project` | Where spend is charged and rights come from. A **team** may have a parent team (a sub-team; depth at most two, ADR 0021) and may be bound to Entra groups (membership synced from Graph) and/or managed in golem. A **project** is owned by exactly one team (its primary team); its members may be other teams (all their members), services and users. |
 | **Service** | golem id; Entra app (client id); service keys | Owned by one scope. A non-human principal. May be added to other projects. |
 | **Cost center** | external code (e.g. `CC-4410`) | Not managed by golem: a funding source referenced by budgets, with its budget managers. |
@@ -31,7 +31,7 @@ Four roles (ADR 0010):
 | Role | Held on | May |
 |---|---|---|
 | Member | a scope | Use the scope's models within their cap; mint personal keys in the scope; set capture and retention on their own keys, as far as the scope permits (§3.1). |
-| Manager | a scope (a binding may be narrowed to one service) | Manage membership (where not Entra-bound); create services; set caps for members and services; grant the scope's money to projects (a team's managers: to projects it owns or belongs to); create projects (a team's managers: owned by the team); request adjustments; set capture settings and the override mode; mint, rotate and revoke service keys. A project's owning team's managers, and a sub-team's parent team's managers, are its managers unless set otherwise. |
+| Manager | a scope (a binding may be narrowed to one service) | Manage membership granted in golem (members from bound Entra groups are Entra's; a manager adds existing principals and never binds an Entra ID, ADR 0047); create services; set caps for members and services; grant the scope's money to projects (a team's managers: to projects it owns or belongs to); create projects (a team's managers: owned by the team); request adjustments; set capture settings and the override mode; mint, rotate and revoke service keys. A project's owning team's managers, and a sub-team's parent team's managers, are its managers unless set otherwise. |
 | Budget manager | a cost center (or globally) | Grant from the cost center to scopes; approve or reject requests that draw on it (new grants, permanent and one-time adjustments). |
 | Admin | global | Everything, including operational overrides; break-glass. |
 

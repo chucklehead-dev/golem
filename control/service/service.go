@@ -6,7 +6,9 @@
 // transport (control/api) authenticates and calls these; nothing else
 // writes the document.
 //
-// This slice: scopes, memberships, the manager role, and keys.
+// This slice: scopes, memberships, the manager role, keys, and the Entra
+// groups bound to scopes, whose members the group sync (control/entrasync)
+// makes members (ADR 0047).
 package service
 
 import (
@@ -16,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/chucklehead-dev/golem/control/state"
@@ -132,26 +135,46 @@ type Member struct {
 	Entra string // the user's object ID or the service's app ID; empty: keys only
 }
 
-// AddMember makes m a member of scope, creating the principal if it is
-// new: the scope's managers, or admins. A principal that exists keeps its
-// kind and Entra ID; a different one given is refused.
+// unknownScope refuses c's change to scope: not found if c may not see
+// it (its existence is not theirs to learn), else denied for why.
+func unknownScope(d *state.Document, c Caller, scope, why string) error {
+	if _, ok := d.Scopes[scope]; !ok || !sees(d, c, scope) {
+		return notFound("scope %s", scope)
+	}
+	return denied("%s", why)
+}
+
+// AddMember makes m a member of scope: the scope's managers, or admins.
+// Who a principal is in Entra is never a manager's to say (ADR 0047): users
+// come from the groups bound to scopes, and an Entra ID is bound only by
+// the sync or an admin. So a manager adds a principal that exists, or
+// creates a service that authenticates by key only; an admin may also
+// create a user or service with its Entra ID. A principal that exists
+// keeps its kind and Entra ID; a different one given is refused.
 func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope string, m Member) error {
 	if m.ID == "" {
 		return invalid("member.id", "required")
 	}
+	if strings.HasPrefix(m.ID, state.ReservedPrefix) {
+		return invalid("member.id", "IDs beginning %q name callers with no principal; choose another", state.ReservedPrefix)
+	}
 	return s.apply(ctx, c, o, "membership.add", m.ID, map[string]string{"scope": scope}, func(d *state.Document) error {
-		if _, ok := d.Scopes[scope]; !ok {
-			return notFound("scope %s", scope)
-		}
-		if !manages(d, c, scope) {
-			return denied("only scope %s's managers add its members", scope)
+		if _, ok := d.Scopes[scope]; !ok || !manages(d, c, scope) {
+			return unknownScope(d, c, scope, "only scope "+scope+"'s managers add its members")
 		}
 		p, exists := d.Principals[m.ID]
 		switch {
-		case !exists:
-			p = state.Principal{Kind: m.Kind, Entra: m.Entra}
-		case m.Kind != "" && m.Kind != p.Kind, m.Entra != "" && m.Entra != p.Entra:
+		case exists && (m.Kind != "" && m.Kind != p.Kind || m.Entra != "" && m.Entra != p.Entra):
 			return invalid("member", "principal %s exists as a %s with another identity", m.ID, p.Kind)
+		case exists:
+		case c.Admin:
+			p = state.Principal{Kind: m.Kind, Entra: m.Entra}
+		case m.Entra != "":
+			return denied("an Entra ID is bound by the group sync or an admin, never by a manager: bind a group to the scope (golemctl groups bind), or ask an admin")
+		case m.Kind != "service":
+			return invalid("member", "no principal %s: users come from the Entra groups bound to a scope (ADR 0047); a manager can create only a service that uses keys", m.ID)
+		default:
+			p = state.Principal{Kind: "service"}
 		}
 		if slices.Contains(p.Scopes, scope) {
 			return nil
@@ -168,28 +191,74 @@ func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope stri
 // RemoveMember ends principal's membership of scope, and revokes its keys
 // in the scope (a key is honoured only for a member): the scope's
 // managers, or admins.
+//
+// A membership from a bound group is the group's: it is removed in Entra,
+// or by unbinding the group, not here. A principal that is a member both
+// ways keeps the synced membership, and its keys.
 func (s *Service) RemoveMember(ctx context.Context, c Caller, o Options, scope, principal string) error {
 	return s.apply(ctx, c, o, "membership.remove", principal, map[string]string{"scope": scope}, func(d *state.Document) error {
-		if !manages(d, c, scope) {
-			return denied("only scope %s's managers remove its members", scope)
+		if _, ok := d.Scopes[scope]; !ok || !manages(d, c, scope) {
+			return unknownScope(d, c, scope, "only scope "+scope+"'s managers remove its members")
 		}
 		p, ok := d.Principals[principal]
-		if !ok || !slices.Contains(p.Scopes, scope) {
+		switch {
+		case !ok || !p.MemberOf(scope):
 			return notFound("%s is not a member of %s", principal, scope)
-		}
-		for h, k := range d.Keys {
-			if k.Owner == principal && k.Scope == scope {
-				if err := d.Revoke(h, s.now()); err != nil {
-					return err
-				}
-			}
+		case !slices.Contains(p.Scopes, scope):
+			return invalid("member", "%s is a member of %s through an Entra group bound to it: remove them from the group in Entra, or unbind the group", principal, scope)
 		}
 		p.Scopes = slices.DeleteFunc(slices.Clone(p.Scopes), func(x string) bool { return x == scope })
+		if p.MemberOf(scope) {
+			d.Principals[principal] = p
+			return nil
+		}
+		d.RevokeOutside(principal, p, s.now())
 		if p.Default == scope {
 			p.Default = ""
 		}
 		d.Principals[principal] = p
 		d.Roles = slices.DeleteFunc(slices.Clone(d.Roles), func(r state.RoleBinding) bool { return r.Principal == principal && r.Scope == scope })
+		return nil
+	})
+}
+
+// BindGroup binds an Entra group to scope: its members, transitively,
+// become the scope's members at the next sync. Admins only: a group's
+// members are whoever Entra says, and binding one grants all of them.
+func (s *Service) BindGroup(ctx context.Context, c Caller, o Options, scope, group string) error {
+	if !c.Admin {
+		return denied("only admins bind Entra groups to scopes")
+	}
+	if group == "" {
+		return invalid("group", "required: the group's object ID")
+	}
+	return s.apply(ctx, c, o, "group.bind", group, map[string]string{"scope": scope}, func(d *state.Document) error {
+		sc, ok := d.Scopes[scope]
+		if !ok {
+			return notFound("scope %s", scope)
+		}
+		if !slices.Contains(sc.Groups, group) {
+			sc.Groups = slices.Sorted(slices.Values(append(slices.Clone(sc.Groups), group)))
+			d.Scopes[scope] = sc
+		}
+		return nil
+	})
+}
+
+// UnbindGroup unbinds an Entra group from scope: admins only. The
+// memberships it gave end at the next sync, which recomputes them from the
+// groups still bound.
+func (s *Service) UnbindGroup(ctx context.Context, c Caller, o Options, scope, group string) error {
+	if !c.Admin {
+		return denied("only admins unbind Entra groups")
+	}
+	return s.apply(ctx, c, o, "group.unbind", group, map[string]string{"scope": scope}, func(d *state.Document) error {
+		sc, ok := d.Scopes[scope]
+		if !ok || !slices.Contains(sc.Groups, group) {
+			return notFound("group %s is not bound to scope %s", group, scope)
+		}
+		sc.Groups = slices.DeleteFunc(slices.Clone(sc.Groups), func(g string) bool { return g == group })
+		d.Scopes[scope] = sc
 		return nil
 	})
 }
@@ -234,14 +303,14 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 	m := Minted{Key: plain, Hash: hex.EncodeToString(h[:]), Display: key.Display(plain)}
 	err := s.apply(ctx, c, o, "key.mint", m.Display, map[string]string{"owner": r.Owner, "scope": r.Scope}, func(d *state.Document) error {
 		sc, ok := d.Scopes[r.Scope]
-		if !ok {
+		if !ok || !sees(d, c, r.Scope) {
 			return notFound("scope %s", r.Scope)
 		}
 		owner, ok := d.Principals[r.Owner]
 		switch {
 		case !ok:
 			return notFound("principal %s", r.Owner)
-		case !slices.Contains(owner.Scopes, r.Scope):
+		case !owner.MemberOf(r.Scope):
 			return invalid("key.owner", "%s is not a member of %s: add them first", r.Owner, r.Scope)
 		case c.Admin:
 		case r.Owner == c.Principal:
@@ -301,7 +370,7 @@ func (s *Service) Whoami(ctx context.Context, c Caller) (Me, error) {
 		return Me{}, err
 	}
 	p := d.Principals[c.Principal]
-	me := Me{Principal: c.Principal, Admin: c.Admin, Kind: p.Kind, Scopes: slices.Sorted(slices.Values(p.Scopes))}
+	me := Me{Principal: c.Principal, Admin: c.Admin, Kind: p.Kind, Scopes: p.Members()}
 	for _, r := range d.Roles {
 		if r.Principal == c.Principal {
 			me.Manages = append(me.Manages, r.Scope)
@@ -321,7 +390,7 @@ func (s *Service) read(ctx context.Context) (*state.Document, error) {
 
 // sees reports whether c may read scope: a member, a manager or an admin.
 func sees(d *state.Document, c Caller, scope string) bool {
-	return manages(d, c, scope) || slices.Contains(d.Principals[c.Principal].Scopes, scope)
+	return manages(d, c, scope) || d.Principals[c.Principal].MemberOf(scope)
 }
 
 // ScopeView is a scope as its members see it.
@@ -362,7 +431,7 @@ func (s *Service) GetScope(ctx context.Context, c Caller, id string) (ScopeView,
 	}
 	v := ScopeView{ID: id, Policy: sc}
 	for _, pid := range slices.Sorted(maps.Keys(d.Principals)) {
-		if slices.Contains(d.Principals[pid].Scopes, id) {
+		if d.Principals[pid].MemberOf(id) {
 			v.Members = append(v.Members, pid)
 		}
 	}

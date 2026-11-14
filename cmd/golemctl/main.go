@@ -45,6 +45,8 @@ const usage = `usage:
   golemctl scopes create <id> --models a,b [--budget-micros n] [--dry-run]
   golemctl members add <scope> <principal> --kind user|service [--entra <id>] [--dry-run]
   golemctl members remove <scope> <principal> [--dry-run]
+  golemctl groups bind <scope> <entra-group-id> [--dry-run]
+  golemctl groups unbind <scope> <entra-group-id> [--dry-run]
   golemctl managers add <scope> <principal> [--dry-run]
   golemctl keys create --scope <scope> [--owner <principal>] [--models a,b] [--expires 30d] [--dry-run]
   golemctl keys revoke <hash> [--dry-run]`

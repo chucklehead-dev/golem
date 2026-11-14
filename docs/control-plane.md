@@ -231,9 +231,15 @@ control plane.
 
 ## 5. Identity, keys and bootstrap
 
-- **Users** enter the state through Entra group sync (members of bound
-  groups) or on their first control-API call; a user unknown to the
-  snapshot cannot use the gateway yet (seconds after their first sign-in).
+- **Users** enter the state through Entra group sync (ADR 0047): members
+  of the groups bound to scopes, with the Entra ID Graph gives; an admin
+  may add one by hand. Managers never bind an Entra ID, and no principal
+  ID may begin with `entra:`. A user unknown to the snapshot cannot use
+  the gateway yet (up to the sync interval after joining a bound group).
+  **Built:** `control/entrasync` (Graph's transitive members by workload
+  identity, a step reads every group before writing, a removal guard,
+  synced memberships kept apart from granted ones), run by the leader
+  (`-entra-sync-client-id`); `golemctl groups bind|unbind`.
 - **Coding agents**: `golemctl token` prints a cached Entra access token for
   agents with a credential helper (ADR 0009), for the gateway only: the
   control API has its own registration and scope (ADR 0046); others get a minted personal
@@ -263,7 +269,7 @@ Run by the leader; each an idempotent scan.
 
 | Job | Schedule | Notes |
 |---|---|---|
-| Entra group sync | every 5 min; change notifications in M2 | Membership diffs as service calls in batches; revokes disabled users' keys |
+| Entra group sync | every 5 min; change notifications in M2 | Bound groups' members as synced memberships, in one state update; revokes keys outside them and all of a disabled user's; refuses a step ending over 50 memberships (ADR 0047) |
 | Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps |
 | Known spend | with every authorization renewal | Reads per-key, member and scope spend for the period from ClickHouse into the snapshot (ADR 0031) |
 | Audit shipping | every few seconds | Archive before outbox trim; ClickHouse is a query projection |

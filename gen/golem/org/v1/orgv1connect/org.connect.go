@@ -41,6 +41,10 @@ const (
 	OrgServiceAddMemberProcedure = "/golem.org.v1.OrgService/AddMember"
 	// OrgServiceRemoveMemberProcedure is the fully-qualified name of the OrgService's RemoveMember RPC.
 	OrgServiceRemoveMemberProcedure = "/golem.org.v1.OrgService/RemoveMember"
+	// OrgServiceBindGroupProcedure is the fully-qualified name of the OrgService's BindGroup RPC.
+	OrgServiceBindGroupProcedure = "/golem.org.v1.OrgService/BindGroup"
+	// OrgServiceUnbindGroupProcedure is the fully-qualified name of the OrgService's UnbindGroup RPC.
+	OrgServiceUnbindGroupProcedure = "/golem.org.v1.OrgService/UnbindGroup"
 	// OrgServiceBindManagerProcedure is the fully-qualified name of the OrgService's BindManager RPC.
 	OrgServiceBindManagerProcedure = "/golem.org.v1.OrgService/BindManager"
 	// OrgServiceWhoamiProcedure is the fully-qualified name of the OrgService's Whoami RPC.
@@ -55,12 +59,20 @@ const (
 type OrgServiceClient interface {
 	// Creates a top-level scope: admins.
 	CreateScope(context.Context, *connect.Request[v1.CreateScopeRequest]) (*connect.Response[v1.CreateScopeResponse], error)
-	// Adds a member, creating the user or service on its first add: the
-	// scope's managers, or admins.
+	// Adds a member: the scope's managers, or admins. A manager adds a
+	// principal that exists or creates a service that uses keys; only an
+	// admin creates a principal with an Entra ID (users come from the
+	// groups bound to scopes, ADR 0047).
 	AddMember(context.Context, *connect.Request[v1.AddMemberRequest]) (*connect.Response[v1.AddMemberResponse], error)
-	// Removes a member, revoking its keys in the scope and its role there:
+	// Removes a membership granted in golem, revoking its keys in the scope
+	// and its role there unless it is still a member through a bound group:
 	// the scope's managers, or admins.
 	RemoveMember(context.Context, *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error)
+	// Binds an Entra group to a scope: its members, transitively, become
+	// the scope's members at the next sync. Admins.
+	BindGroup(context.Context, *connect.Request[v1.BindGroupRequest]) (*connect.Response[v1.BindGroupResponse], error)
+	// Unbinds a group; the memberships it gave end at the next sync. Admins.
+	UnbindGroup(context.Context, *connect.Request[v1.UnbindGroupRequest]) (*connect.Response[v1.UnbindGroupResponse], error)
 	// Makes a principal a manager of a scope: admins.
 	BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error)
 	// Who the caller is to golem: anyone signed in.
@@ -102,6 +114,18 @@ func NewOrgServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(orgServiceMethods.ByName("RemoveMember")),
 			connect.WithClientOptions(opts...),
 		),
+		bindGroup: connect.NewClient[v1.BindGroupRequest, v1.BindGroupResponse](
+			httpClient,
+			baseURL+OrgServiceBindGroupProcedure,
+			connect.WithSchema(orgServiceMethods.ByName("BindGroup")),
+			connect.WithClientOptions(opts...),
+		),
+		unbindGroup: connect.NewClient[v1.UnbindGroupRequest, v1.UnbindGroupResponse](
+			httpClient,
+			baseURL+OrgServiceUnbindGroupProcedure,
+			connect.WithSchema(orgServiceMethods.ByName("UnbindGroup")),
+			connect.WithClientOptions(opts...),
+		),
 		bindManager: connect.NewClient[v1.BindManagerRequest, v1.BindManagerResponse](
 			httpClient,
 			baseURL+OrgServiceBindManagerProcedure,
@@ -134,6 +158,8 @@ type orgServiceClient struct {
 	createScope  *connect.Client[v1.CreateScopeRequest, v1.CreateScopeResponse]
 	addMember    *connect.Client[v1.AddMemberRequest, v1.AddMemberResponse]
 	removeMember *connect.Client[v1.RemoveMemberRequest, v1.RemoveMemberResponse]
+	bindGroup    *connect.Client[v1.BindGroupRequest, v1.BindGroupResponse]
+	unbindGroup  *connect.Client[v1.UnbindGroupRequest, v1.UnbindGroupResponse]
 	bindManager  *connect.Client[v1.BindManagerRequest, v1.BindManagerResponse]
 	whoami       *connect.Client[v1.WhoamiRequest, v1.WhoamiResponse]
 	listScopes   *connect.Client[v1.ListScopesRequest, v1.ListScopesResponse]
@@ -153,6 +179,16 @@ func (c *orgServiceClient) AddMember(ctx context.Context, req *connect.Request[v
 // RemoveMember calls golem.org.v1.OrgService.RemoveMember.
 func (c *orgServiceClient) RemoveMember(ctx context.Context, req *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error) {
 	return c.removeMember.CallUnary(ctx, req)
+}
+
+// BindGroup calls golem.org.v1.OrgService.BindGroup.
+func (c *orgServiceClient) BindGroup(ctx context.Context, req *connect.Request[v1.BindGroupRequest]) (*connect.Response[v1.BindGroupResponse], error) {
+	return c.bindGroup.CallUnary(ctx, req)
+}
+
+// UnbindGroup calls golem.org.v1.OrgService.UnbindGroup.
+func (c *orgServiceClient) UnbindGroup(ctx context.Context, req *connect.Request[v1.UnbindGroupRequest]) (*connect.Response[v1.UnbindGroupResponse], error) {
+	return c.unbindGroup.CallUnary(ctx, req)
 }
 
 // BindManager calls golem.org.v1.OrgService.BindManager.
@@ -179,12 +215,20 @@ func (c *orgServiceClient) GetScope(ctx context.Context, req *connect.Request[v1
 type OrgServiceHandler interface {
 	// Creates a top-level scope: admins.
 	CreateScope(context.Context, *connect.Request[v1.CreateScopeRequest]) (*connect.Response[v1.CreateScopeResponse], error)
-	// Adds a member, creating the user or service on its first add: the
-	// scope's managers, or admins.
+	// Adds a member: the scope's managers, or admins. A manager adds a
+	// principal that exists or creates a service that uses keys; only an
+	// admin creates a principal with an Entra ID (users come from the
+	// groups bound to scopes, ADR 0047).
 	AddMember(context.Context, *connect.Request[v1.AddMemberRequest]) (*connect.Response[v1.AddMemberResponse], error)
-	// Removes a member, revoking its keys in the scope and its role there:
+	// Removes a membership granted in golem, revoking its keys in the scope
+	// and its role there unless it is still a member through a bound group:
 	// the scope's managers, or admins.
 	RemoveMember(context.Context, *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error)
+	// Binds an Entra group to a scope: its members, transitively, become
+	// the scope's members at the next sync. Admins.
+	BindGroup(context.Context, *connect.Request[v1.BindGroupRequest]) (*connect.Response[v1.BindGroupResponse], error)
+	// Unbinds a group; the memberships it gave end at the next sync. Admins.
+	UnbindGroup(context.Context, *connect.Request[v1.UnbindGroupRequest]) (*connect.Response[v1.UnbindGroupResponse], error)
 	// Makes a principal a manager of a scope: admins.
 	BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error)
 	// Who the caller is to golem: anyone signed in.
@@ -222,6 +266,18 @@ func NewOrgServiceHandler(svc OrgServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(orgServiceMethods.ByName("RemoveMember")),
 		connect.WithHandlerOptions(opts...),
 	)
+	orgServiceBindGroupHandler := connect.NewUnaryHandler(
+		OrgServiceBindGroupProcedure,
+		svc.BindGroup,
+		connect.WithSchema(orgServiceMethods.ByName("BindGroup")),
+		connect.WithHandlerOptions(opts...),
+	)
+	orgServiceUnbindGroupHandler := connect.NewUnaryHandler(
+		OrgServiceUnbindGroupProcedure,
+		svc.UnbindGroup,
+		connect.WithSchema(orgServiceMethods.ByName("UnbindGroup")),
+		connect.WithHandlerOptions(opts...),
+	)
 	orgServiceBindManagerHandler := connect.NewUnaryHandler(
 		OrgServiceBindManagerProcedure,
 		svc.BindManager,
@@ -254,6 +310,10 @@ func NewOrgServiceHandler(svc OrgServiceHandler, opts ...connect.HandlerOption) 
 			orgServiceAddMemberHandler.ServeHTTP(w, r)
 		case OrgServiceRemoveMemberProcedure:
 			orgServiceRemoveMemberHandler.ServeHTTP(w, r)
+		case OrgServiceBindGroupProcedure:
+			orgServiceBindGroupHandler.ServeHTTP(w, r)
+		case OrgServiceUnbindGroupProcedure:
+			orgServiceUnbindGroupHandler.ServeHTTP(w, r)
 		case OrgServiceBindManagerProcedure:
 			orgServiceBindManagerHandler.ServeHTTP(w, r)
 		case OrgServiceWhoamiProcedure:
@@ -281,6 +341,14 @@ func (UnimplementedOrgServiceHandler) AddMember(context.Context, *connect.Reques
 
 func (UnimplementedOrgServiceHandler) RemoveMember(context.Context, *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.RemoveMember is not implemented"))
+}
+
+func (UnimplementedOrgServiceHandler) BindGroup(context.Context, *connect.Request[v1.BindGroupRequest]) (*connect.Response[v1.BindGroupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.BindGroup is not implemented"))
+}
+
+func (UnimplementedOrgServiceHandler) UnbindGroup(context.Context, *connect.Request[v1.UnbindGroupRequest]) (*connect.Response[v1.UnbindGroupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.UnbindGroup is not implemented"))
 }
 
 func (UnimplementedOrgServiceHandler) BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error) {

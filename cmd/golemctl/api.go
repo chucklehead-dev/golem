@@ -88,7 +88,8 @@ var apiCommands = map[string]apiCommand{ // read-only
 			"models", joined(p.GetModels(), ", ", "-"),
 			"budget", fmt.Sprintf("%d micros", p.GetBudgetMicros()),
 			"members", joined(m.Members, ", ", "-"),
-			"managers", joined(m.Managers, ", ", "-"))
+			"managers", joined(m.Managers, ", ", "-"),
+			"groups", joined(m.Groups, ", ", "-"))
 	})},
 	"keys list": {flags: func(fs *flag.FlagSet) func(context.Context, *call) error {
 		scope := fs.String("scope", "", "only this scope's keys")
@@ -127,7 +128,7 @@ var apiCommands = map[string]apiCommand{ // read-only
 	}},
 	"members add": {args: 2, flags: func(fs *flag.FlagSet) func(context.Context, *call) error {
 		kind := fs.String("kind", "user", "user or service")
-		entra := fs.String("entra", "", "the user's Entra object ID, or the service's app ID")
+		entra := fs.String("entra", "", "the user's Entra object ID, or the service's app ID (admins only; users usually come from bound groups)")
 		return func(ctx context.Context, c *call) error {
 			if _, err := c.org.AddMember(ctx, connect.NewRequest(&orgv1.AddMemberRequest{Scope: c.pos[0], ValidateOnly: c.dry,
 				Member: &orgv1.Member{Id: c.pos[1], Kind: *kind, Entra: *entra}})); err != nil {
@@ -143,6 +144,22 @@ var apiCommands = map[string]apiCommand{ // read-only
 			return err
 		}
 		c.done(c.pos[1] + " removed from " + c.pos[0] + " (its keys there revoked)")
+		return nil
+	})},
+	"groups bind": {args: 2, flags: noFlags(func(ctx context.Context, c *call) error {
+		if _, err := c.org.BindGroup(ctx, connect.NewRequest(&orgv1.BindGroupRequest{Scope: c.pos[0], Group: c.pos[1],
+			ValidateOnly: c.dry})); err != nil {
+			return err
+		}
+		c.done("group " + c.pos[1] + " is bound to " + c.pos[0] + ": its members join at the next sync")
+		return nil
+	})},
+	"groups unbind": {args: 2, flags: noFlags(func(ctx context.Context, c *call) error {
+		if _, err := c.org.UnbindGroup(ctx, connect.NewRequest(&orgv1.UnbindGroupRequest{Scope: c.pos[0], Group: c.pos[1],
+			ValidateOnly: c.dry})); err != nil {
+			return err
+		}
+		c.done("group " + c.pos[1] + " is unbound from " + c.pos[0] + ": the memberships it gave end at the next sync")
 		return nil
 	})},
 	"managers add": {args: 2, flags: noFlags(func(ctx context.Context, c *call) error {

@@ -57,7 +57,7 @@ func TestAuthorization(t *testing.T) {
 			return s.CreateScope(t.Context(), c, Options{}, "new", state.Scope{})
 		},
 		"add a member to team-a": func(s *Service, c Caller) error {
-			return s.AddMember(t.Context(), c, Options{}, "team-a", Member{ID: "zed", Kind: "user"})
+			return s.AddMember(t.Context(), c, Options{}, "team-a", Member{ID: "zed", Kind: "service"})
 		},
 		"remove alice from team-a":  func(s *Service, c Caller) error { return s.RemoveMember(t.Context(), c, Options{}, "team-a", "alice") },
 		"bind a manager":            func(s *Service, c Caller) error { return s.BindManager(t.Context(), c, Options{}, "team-a", "alice") },
@@ -79,8 +79,14 @@ func TestAuthorization(t *testing.T) {
 			for _, p := range allowed[name] {
 				want = want || p == c.Principal
 			}
-			if got := err == nil; got != want || (!want && !errors.Is(err, ErrPermission)) {
-				t.Errorf("%s by %s: %v, want allowed=%v", name, c.Principal, err, want)
+			// A refusal is denied to whoever can see team-a, not found to
+			// whoever cannot (its existence is not theirs to learn).
+			refusal := ErrPermission
+			if (c == mgrB || c == eve) && name != "create a scope" && name != "bind a manager" {
+				refusal = ErrNotFound
+			}
+			if got := err == nil; got != want || (!want && !errors.Is(err, refusal)) {
+				t.Errorf("%s by %s: %v, want allowed=%v (refused: %v)", name, c.Principal, err, want, refusal)
 			}
 		}
 	}
@@ -265,5 +271,85 @@ func TestManagerReadsScope(t *testing.T) {
 	}
 	if v, err := s.GetScope(ctx, mgrA, "team-b"); err != nil || strings.Join(v.Managers, ",") != "bob,mona" {
 		t.Fatalf("team-b as its non-member manager: %+v %v", v, err)
+	}
+}
+
+// TestIdentityBinding: who a principal is in Entra is bound by an admin or
+// the group sync, never by a manager (ADR 0047): a manager cannot create a
+// user, bind an Entra ID, or create a principal another caller would
+// inherit; a membership from a group is removed in Entra, not here.
+func TestIdentityBinding(t *testing.T) {
+	ctx := t.Context()
+	s := setup(t)
+	for name, m := range map[string]Member{
+		"a user":                          {ID: "zed", Kind: "user"},
+		"a service with someone's app ID": {ID: "bot", Kind: "service", Entra: "app-of-someone-else"},
+		"a user with someone's oid":       {ID: "victim", Kind: "user", Entra: "oid-victim"},
+	} {
+		if err := s.AddMember(ctx, mgrA, Options{}, "team-a", m); err == nil {
+			t.Errorf("%s: a manager created it", name)
+		}
+	}
+	if err := s.AddMember(ctx, admin, Options{}, "team-a", Member{ID: "entra:oid-victim", Kind: "service"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("a principal in the reserved namespace: %v", err)
+	}
+	if err := s.AddMember(ctx, mgrA, Options{}, "team-a", Member{ID: "ci-2", Kind: "service"}); err != nil {
+		t.Errorf("a keys-only service by its manager: %v", err)
+	}
+	if err := s.AddMember(ctx, mgrA, Options{}, "team-a", Member{ID: "bob"}); err != nil {
+		t.Errorf("an existing principal by a manager: %v", err)
+	}
+	if err := s.AddMember(ctx, admin, Options{}, "team-a", Member{ID: "zoe", Kind: "user", Entra: "oid-zoe"}); err != nil {
+		t.Errorf("an admin binding a user: %v", err)
+	}
+
+	// A synced membership, as the sync writes it, is the group's.
+	if _, err := s.State.Update(ctx, func(d *state.Document) error {
+		p := d.Principals["zoe"]
+		p.Synced = []string{"team-b"}
+		d.Principals["zoe"] = p
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	k, err := s.MintKey(ctx, admin, Options{}, KeyRequest{Owner: "zoe", Scope: "team-b"})
+	if err != nil {
+		t.Fatalf("a key in a synced scope: %v", err)
+	}
+	if err := s.RemoveMember(ctx, admin, Options{}, "team-b", "zoe"); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "Entra group") {
+		t.Fatalf("removing a synced membership: %v", err)
+	}
+	// Both ways: removing the granted one keeps the synced one and its key.
+	if err := s.AddMember(ctx, admin, Options{}, "team-b", Member{ID: "zoe"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveMember(ctx, admin, Options{}, "team-b", "zoe"); err != nil {
+		t.Fatal(err)
+	}
+	if d := s.State.Current(); !d.Principals["zoe"].MemberOf("team-b") || !d.Keys[k.Hash].RevokedAt.IsZero() {
+		t.Fatalf("zoe %+v, key revoked %v", d.Principals["zoe"], !d.Keys[k.Hash].RevokedAt.IsZero())
+	}
+}
+
+// TestBindGroup: admins bind and unbind groups; nobody else.
+func TestBindGroup(t *testing.T) {
+	ctx := t.Context()
+	s := setup(t)
+	if err := s.BindGroup(ctx, mgrA, Options{}, "team-a", "g1"); !errors.Is(err, ErrPermission) {
+		t.Fatalf("a manager binding a group: %v", err)
+	}
+	for range 2 {
+		if err := s.BindGroup(ctx, admin, Options{}, "team-a", "g1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g := s.State.Current().Scopes["team-a"].Groups; len(g) != 1 || g[0] != "g1" {
+		t.Fatalf("groups %v", g)
+	}
+	if err := s.UnbindGroup(ctx, admin, Options{}, "team-a", "g1"); err != nil || len(s.State.Current().Scopes["team-a"].Groups) != 0 {
+		t.Fatalf("unbind: %v", err)
+	}
+	if err := s.UnbindGroup(ctx, admin, Options{}, "team-a", "g1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unbind again: %v", err)
 	}
 }
