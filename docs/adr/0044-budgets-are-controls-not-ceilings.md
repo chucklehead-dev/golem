@@ -90,8 +90,8 @@ admission mode. It refuses a call when:
 
 It is an admission check only: like every scope, one with the check
 never cancels calls already in flight, on a failed slot renewal or
-otherwise (the calls continue; the interval's exposure is recorded as a
-waiver). It does not cover input tokens that bytes do not bound (images, audio,
+otherwise: they continue, while new calls are admitted only within the
+gateway's own in-flight counts, as waivers, until the store recovers. It does not cover input tokens that bytes do not bound (images, audio,
 files, fetched URLs), units billed outside tokens, a provider's tail past
 a cut, prices out of date, spend lost in a crash, or spend at other sites
 within the refresh lag. It narrows exposure by about one call per

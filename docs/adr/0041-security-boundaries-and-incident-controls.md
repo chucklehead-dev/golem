@@ -175,7 +175,7 @@ TTL renewal scheduling is not proof that renewal succeeded.
 When slot renewal cannot be confirmed, stop admitting dependent work and
 attempt cancellation before lease expiry, reporting uncertain provider work.
 
-> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md):** no scope cancels calls in flight when renewal cannot be confirmed. New admissions stop; calls already running continue, and the interval's exposure is recorded as a waiver.
+> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md):** no scope cancels calls in flight when renewal cannot be confirmed. Until the store recovers, new calls are admitted only within the gateway's own in-flight counts, each recorded as a waiver; calls already running continue.
 Cancellation cannot guarantee that provider billing stops. Any fail-open mode
 explicitly waives the concurrency/spend bound and records its exposure.
 Strict mode accepts only modalities and billing categories with a verified
@@ -242,7 +242,7 @@ slot renewal (Valkey unreachable):
   for that interval;
 - in **strict** scopes, it attempts cancellation as §6 requires.
 
-  > **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** Decided: no scope cancels calls in flight on a failed renewal, `declaredWorstCaseCheck` included (an admission check only). Every scope behaves as the soft bullet above: new calls stop, calls already running continue, and the exposure is recorded as a waiver for the interval.
+  > **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** Decided: no scope cancels calls in flight on a failed renewal, `declaredWorstCaseCheck` included (an admission check only). Every scope behaves as the soft bullet above: until the store recovers, new calls are admitted only within the gateway's own in-flight counts, each recorded as a waiver, and calls already running continue.
 
 **7.4 A golem-owned capture collector (adapts §2).** The isolated capture
 pipeline is a separate OpenTelemetry collector Deployment owned by golem,
