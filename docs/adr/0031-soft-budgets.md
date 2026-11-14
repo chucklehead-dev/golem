@@ -40,6 +40,8 @@ security):
   plus the site's own counter in Valkey since that snapshot. The gateway
   adds a call's actual cost to the site counter when the call ends.
 - **Soft check** (default): admit if known spend is below the budget.
+> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** The strict check is the declared-worst-case check (`declaredWorstCaseCheck`): an admission check on what the request declares, not a bound on what a call can cost. The overshoot formulas below are expected exposure while calls cost at most `W`, not guarantees; `W` is a declaration, and "a hard ceiling on one site" does not hold of real spend.
+
 - **Strict check** (a `ScopePolicy` option): admit only if known spend plus
   the request's **worst-case cost** fits: input tokens estimated from the body
   at the full input price (no cache discount), plus `max_tokens` (or the
@@ -73,6 +75,8 @@ security):
 - The bound is checked by `model/accounting.md` (second version).
 
 ## Alternatives
+
+> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** Hard ceilings are out of scope by any mechanism: provider-account spending limits are the financial backstop.
 
 - Hard ceilings through a durable journal and reservations (the superseded
   design): far more machinery for a guarantee the enterprise does not need.
