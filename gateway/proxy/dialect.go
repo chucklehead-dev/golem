@@ -71,8 +71,14 @@ func (d Dialect) restrictedHeaders(hdr http.Header, rt *route.Route) *refusal {
 			}
 		}
 	}
-	if v := hdr.Get("Anthropic-Version"); v != "" && !approvedVersions[v] {
-		return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-version " + v + " is not approved (restricted mode)"}
+	// Every value, as every value is forwarded: an approved first value
+	// must not carry an unapproved second past the check.
+	for _, v := range hdr.Values("Anthropic-Version") {
+		for p := range strings.SplitSeq(v, ",") {
+			if p = strings.TrimSpace(p); !approvedVersions[p] {
+				return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-version " + p + " is not approved (restricted mode)"}
+			}
+		}
 	}
 	return nil
 }

@@ -35,6 +35,8 @@ func TestFeatureModes(t *testing.T) {
 		{"restricted: an unapproved version", known, "", "2099-01-01", false, "", 403},
 		{"restricted: the first version", known, "", "2023-06-01", false, "", 200},
 		{"restricted: the 2026-10 version", known, "", "2026-10-21", false, "", 200},
+		{"restricted: an approved version, then another", known, "", "2023-06-01|2099-01-01", false, "", 403},
+		{"restricted: two approved versions in one value", known, "", "2023-06-01, 2026-10-21", false, "", 200},
 		{"an agent route: compatible", unknown, "novel-2026", "", true, "", 200},
 		{"a compatible scope", unknown, "novel-2026", "", false, "compatible", 200},
 		{"a restricted scope on an agent route", unknown, "", "", true, "restricted", 403},
@@ -46,8 +48,10 @@ func TestFeatureModes(t *testing.T) {
 			if tc.beta != "" {
 				r.Header.Set("Anthropic-Beta", tc.beta)
 			}
-			if tc.version != "" {
-				r.Header.Set("Anthropic-Version", tc.version)
+			for v := range strings.SplitSeq(tc.version, "|") {
+				if v != "" {
+					r.Header.Add("Anthropic-Version", v)
+				}
 			}
 			ex := getExchange()
 			req, _ := ex.scan(AnthropicMessages, []byte(tc.body))
@@ -102,4 +106,18 @@ func TestRequestBoundary(t *testing.T) {
 			t.Fatalf("result %+v: the response is cut past the ceiling", res)
 		}
 	})
+}
+
+// TestClaimedLengthNotTrusted: a body claiming the largest size allowed but
+// sending a few bytes gets a buffer of at most preallocMax, not the claim.
+func TestClaimedLengthNotTrusted(t *testing.T) {
+	h := handler(AnthropicMessages, &stub{}, nil)
+	h.MaxBody = 32 << 20
+	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude"}`))
+	r.ContentLength = 32 << 20
+	in := make([]byte, 0, 16)
+	h.readBody(httptest.NewRecorder(), r, &in) // a test request does not hold the body to its claim
+	if cap(in) > preallocMax {
+		t.Fatalf("buffer of %d bytes for a claimed %d: want at most %d", cap(in), r.ContentLength, preallocMax)
+	}
 }

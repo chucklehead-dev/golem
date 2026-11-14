@@ -393,12 +393,20 @@ func (h *Handler) authenticate(r *http.Request) (*snapshot.Compiled, *auth.Princ
 	return snap, p, nil
 }
 
+// preallocMax is the most readBody allocates on a body's claimed length
+// alone: an agent's request (about 200 KB) in one allocation.
+const preallocMax = 1 << 20
+
 // readBody reads the request body into the pooled buffer in, at most
 // MaxBody bytes.
 func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) ([]byte, *refusal) {
 	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero is the default, not "no body"
+	// One allocation, not a doubling series, for a body up to preallocMax:
+	// past it the claimed length is not trusted (a client could claim 32
+	// MiB, send two bytes, and hold the buffer until BodyTimeout), and
+	// readAll grows the buffer as the bytes actually arrive.
 	if n := r.ContentLength; n > 0 && n <= maxBody && int64(cap(*in)) < n+1 {
-		*in = make([]byte, 0, n+1) // one allocation, not a doubling series
+		*in = make([]byte, 0, min(n+1, preallocMax))
 	}
 	// The body must arrive within BodyTimeout: a client trickling it in
 	// would hold a connection and a buffer before any admission (golem#5).
