@@ -40,6 +40,7 @@ func TestDecodeFailsClosed(t *testing.T) {
 		{"the name in another case", strings.Replace(cur, on, `"DeclaredWorstCaseCheck":true`, 1), "DeclaredWorstCaseCheck"},
 		{"the name twice, the last off", strings.Replace(cur, on, on+`,"declaredWorstCaseCheck":false`, 1), "duplicate"},
 		{"another schema", strings.Replace(cur, `"schema":1`, `"schema":9`, 1), "snapshot schema 9"},
+		{"another schema with members of its own", strings.Replace(cur, `"schema":1`, `"schema":9,"newPolicy":true`, 1), "upgrade the gateway"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !json.Valid([]byte(tc.body)) || tc.body == cur {

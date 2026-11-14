@@ -187,12 +187,20 @@ func (s *Snapshot) Encode() ([]byte, error) { return json.Marshal(s) }
 // case. A snapshot is policy: a member a reader skipped is policy it would
 // not apply (a renamed check read as off), so it fails closed instead.
 func Decode(b []byte) (*Snapshot, error) {
+	// The schema first: a newer schema's members are unknown here, and the
+	// refusal should say to upgrade the gateway, not name a member.
+	var head struct {
+		Schema int `json:"schema"`
+	}
+	if err := jsonv2.Unmarshal(b, &head); err != nil {
+		return nil, err
+	}
+	if head.Schema != Schema {
+		return nil, &SchemaError{Got: head.Schema}
+	}
 	var s Snapshot
 	if err := jsonv2.Unmarshal(b, &s, jsonv2.RejectUnknownMembers(true)); err != nil {
 		return nil, err
-	}
-	if s.Schema != Schema {
-		return nil, &SchemaError{Got: s.Schema}
 	}
 	return &s, nil
 }
