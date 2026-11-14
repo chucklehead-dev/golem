@@ -1,7 +1,9 @@
 # 0043: Ledger durability lives in the collector, not the gateway
 
-Status: Accepted. Amends ADR 0015 (where the persistent queue sits) and
-ADR 0042 (how a gap is resolved).
+Status: Accepted. Amends ADR 0015 (where the persistent queue sits). Its
+numbering record and gap reconstruction are superseded by
+[0048](0048-known-spend-by-time-boundary.md): rows carry no number, and a
+snapshot's boundary is a time.
 
 ## Context
 

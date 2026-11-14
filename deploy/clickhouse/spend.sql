@@ -43,8 +43,7 @@ CREATE TABLE IF NOT EXISTS golem.spend (
     error_origin          LowCardinality(String),
     error_code            LowCardinality(String),
     estimated_fraction    Float32,
-    waived                Bool,
-    counted               Bool
+    waived                Bool
 )
 ENGINE = MergeTree
 PARTITION BY period
@@ -52,25 +51,10 @@ ORDER BY (scope_id, principal_id, started_at, event_id);
 
 -- Balances and rollups read this view, never the table: at-least-once
 -- delivery writes some events twice, and background merges do not remove
--- them in time (ADR 0029). One row per event_id, whatever the merges.
+-- them in time (ADR 0029). One row per event_id, whatever the merges. A
+-- snapshot's known spend is this view's sum for a scope and period over
+-- the rows that ended before its boundary (ADR 0048).
 CREATE VIEW IF NOT EXISTS golem.spend_dedup AS
 SELECT * FROM golem.spend
 ORDER BY event_id, ended_at
 LIMIT 1 BY event_id;
-
--- Numbering records (ADR 0043): an event's number in its site's counter for
--- the scope and period, written when the limiter numbers it, apart from its
--- row (which never waits for it). golem-control's watermark joins them to
--- golem.spend by event_id. counter_seq 0: the event never reached the
--- counter. Deduplicate by (site, event_id) before use.
-CREATE TABLE IF NOT EXISTS golem.spend_seq (
-    schema_version        UInt16,
-    event_id              UUID,
-    site                  LowCardinality(String),
-    scope_id              String,
-    period                Date,
-    counter_seq           UInt64
-)
-ENGINE = ReplacingMergeTree
-PARTITION BY period
-ORDER BY (site, scope_id, period, counter_seq, event_id);

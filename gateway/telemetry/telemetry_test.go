@@ -56,7 +56,7 @@ var call = Call{RequestID: "01a2-req", Principal: "alice", PrincipalKind: "user"
 	Frontend: "anthropic.messages", Backend: "anthropic.messages", Alias: "claude", Model: "claude-sonnet-4-5",
 	Deployment: "anthropic/sonnet", Provider: "anthropic",
 	Started: time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC), Ended: time.Date(2026, 11, 13, 10, 0, 2, 0, time.UTC),
-	Usage: canon.Usage{Input: 100, Output: 50, CacheRead: 1000}, Cost: 1234, Currency: "USD", Status: 200, Outcome: "ok", Counted: true}
+	Usage: canon.Usage{Input: 100, Output: 50, CacheRead: 1000}, Cost: 1234, Currency: "USD", Status: 200, Outcome: "ok"}
 
 func TestEnded(t *testing.T) {
 	r := newRig(t)
@@ -94,51 +94,11 @@ func TestEnded(t *testing.T) {
 		t.Fatalf("metrics %v", names)
 	}
 
-	// The row is written at once, counted; its number follows apart.
+	// The row is written at once.
 	rows := r.ledgerRows(t)
-	if len(rows) != 1 || rows[0]["counted"] != true || rows[0]["cost_micros"] != 1234.0 || rows[0]["period"] != "2026-11-01" ||
+	if len(rows) != 1 || rows[0]["cost_micros"] != 1234.0 || rows[0]["period"] != "2026-11-01" ||
 		rows[0]["site"] != "us-east-2" || rows[0]["tokens_cache_read"] != 1000.0 || rows[0]["schema_version"] != 2.0 {
 		t.Fatalf("row %v", rows)
-	}
-	r.rows.Reset()
-	r.t.Numbered("team-a", "2026-11", call.RequestID, 42)
-	if rows := r.ledgerRows(t); len(rows) != 1 || rows[0]["counter_seq"] != 42.0 || rows[0]["event_id"] != call.RequestID ||
-		rows[0]["scope_id"] != "team-a" || rows[0]["period"] != "2026-11-01" || rows[0]["site"] != "us-east-2" {
-		t.Fatalf("numbering record %v", rows)
-	}
-}
-
-// TestRowMatchesSeqDDL: a numbering record's attributes are
-// golem.spend_seq's columns.
-func TestRowMatchesSeqDDL(t *testing.T) {
-	b, err := os.ReadFile("../../deploy/clickhouse/spend.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ddl := string(b)
-	start := strings.Index(ddl, "CREATE TABLE IF NOT EXISTS golem.spend_seq (")
-	end := strings.Index(ddl[start:], "\n)")
-	var want []string
-	for line := range strings.Lines(ddl[start : start+end]) {
-		if f := strings.Fields(line); len(f) >= 2 && !strings.HasPrefix(f[0], "--") && f[0] != "CREATE" {
-			want = append(want, f[0])
-		}
-	}
-	r := newRig(t)
-	r.t.Numbered("s", "2026-11", "e", 1)
-	var got []string
-	for line := range strings.Lines(r.rows.String()) {
-		dec := json.NewDecoder(strings.NewReader(line))
-		dec.Token()
-		for dec.More() {
-			k, _ := dec.Token()
-			got = append(got, k.(string))
-			var v any
-			dec.Decode(&v)
-		}
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("numbering record %v, spend_seq %v (in order)", got, want)
 	}
 }
 
@@ -194,7 +154,7 @@ func TestRowMatchesLedgerDDL(t *testing.T) {
 func TestRowPeriodIsTheCounters(t *testing.T) {
 	r := newRig(t)
 	c := call
-	c.Counted, c.Period = false, "2026-10" // e.g. counted in October's counter
+	c.Period = "2026-10" // e.g. counted in October's counter
 	r.t.Ended(t.Context(), c)
 	if rows := r.ledgerRows(t); len(rows) != 1 || rows[0]["period"] != "2026-10-01" {
 		t.Fatalf("rows %v", rows)

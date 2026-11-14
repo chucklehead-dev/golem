@@ -25,14 +25,15 @@ var (
 // Call is the call the limiter admits: admission's.
 type Call = admission.Call
 
-// Known is a snapshot's known spend for one scope on this site (ADR 0042),
-// for one budget period: the ledger's balance with this site's events
-// numbered above Watermark left out, and Watermark, the counter number up
-// to which every event of this site, scope and period is in the ledger.
+// Known is a snapshot's known spend for one scope (ADR 0048), for one
+// budget period: the ledger's spend of the calls that ended before Since,
+// a boundary golem-control places an ingestion allowance behind the
+// snapshot's time. The site counter's minutes from Since on are added to
+// it at admission.
 type Known struct {
-	Period    string
-	Spend     int64
-	Watermark int64
+	Period string
+	Spend  int64
+	Since  time.Time
 }
 
 // Limiter is one gateway's admission check over the site store. Its lock
@@ -40,11 +41,6 @@ type Known struct {
 // StoreTimeout.
 type Limiter struct {
 	store Store
-	// OnNumbered, if set, is told each event's counter number once it has
-	// one: at completion, or when an increment held during an outage is
-	// replayed (or 0, when it never will be). The ledger writes it as the
-	// event's numbering record (ADR 0043).
-	OnNumbered func(Numbered)
 	// Grace is how long after its own recovery a gateway records its
 	// admissions as waivers: peers that have not recovered yet hold calls
 	// Valkey lacks. Two renewal intervals by default (each peer renews, and
@@ -59,9 +55,14 @@ type Limiter struct {
 	// Now is the clock (tests set it).
 	Now func() time.Time
 	// MaxPending bounds the increments held during an outage (default
-	// 100,000); past it the oldest is given to OnNumbered with number 0, so
-	// its ledger row is written unnumbered (ADR 0042: never numbered).
+	// 100,000); past it the oldest is dropped (counted in Dropped). Its
+	// ledger row was written at the call's end, so the snapshots count it
+	// once their boundary passes its minute: the counter, this site's fast
+	// view, loses it until then.
 	MaxPending int
+	// Dropped counts the increments dropped: held past MaxPending, or
+	// abandoned at shutdown with the store unreachable.
+	Dropped atomic.Int64
 
 	// down is read on every request, so without the lock; it is written
 	// under mu with the state it goes with.
@@ -71,7 +72,6 @@ type Limiter struct {
 	mu          sync.Mutex
 	known       map[string]Known        // by scope, from the snapshot
 	last        map[keyOf]int64         // known spend as last computed: all an outage leaves
-	overLogged  map[keyOf]bool          // over-counting reported once per scope and period
 	running     map[string]*Ticket      // this gateway's calls the provider may still be working on
 	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer
 	byPrincipal map[string]int          // running calls, counted: an outage's local check is O(1)
@@ -84,6 +84,9 @@ type Limiter struct {
 	// flight are released after it.
 	reacquiring int
 	endedDuring []Slot
+	// beforeHold, if set, runs before an increment is held (tests: a
+	// recovery between a completion's look and its hold).
+	beforeHold func()
 }
 
 // keyOf is a scope in a budget period.
@@ -98,19 +101,9 @@ type periodName struct {
 
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
-	return &Limiter{store: store, known: map[string]Known{}, last: map[keyOf]int64{}, overLogged: map[keyOf]bool{},
+	return &Limiter{store: store, known: map[string]Known{}, last: map[keyOf]int64{},
 		running: map[string]*Ticket{}, tails: map[*Ticket]*time.Timer{}, byPrincipal: map[string]int{}, byScope: map[string]int{},
 		MaxPending: 100_000, Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
-}
-
-// Numbered is an event's number in its scope's counter for a period: the
-// ledger's numbering record (ADR 0043). Seq 0: the event never reached the
-// counter (an increment dropped during an outage), so its row counts as
-// it is.
-type Numbered struct {
-	Scope, Period string
-	Event
-	Seq int64
 }
 
 // Ticket is an admitted call. It ends once, by Complete or Cancel (a
@@ -185,13 +178,13 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	if !l.Down() {
 		k := l.snapshotFor(c.Scope, period)
 		sctx, cancel := l.storeContext(ctx)
-		o, known, over, err := l.store.Admit(sctx, Admission{Slot: Slot{c.ID, c.Principal, c.Scope}, Period: period,
-			Watermark: k.Watermark, Spend: k.Spend, Budget: c.Budget, DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
+		o, known, err := l.store.Admit(sctx, Admission{Slot: Slot{c.ID, c.Principal, c.Scope}, Period: period,
+			Since: k.Since, Spend: k.Spend, Now: l.now(), Budget: c.Budget, DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
 			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit})
 		cancel()
 		switch {
 		case err == nil:
-			return l.admitted(c, period, k.Watermark, o, known, over)
+			return l.admitted(c, period, o, known)
 		case ctx.Err() != nil:
 			return nil, ctx.Err() // the caller went away: no outage
 		}
@@ -203,18 +196,10 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 // admitted takes the store's answer to an admission: the known spend it
 // computed becomes the one an outage would fall back on, and an admitted
 // call is tracked.
-func (l *Limiter) admitted(c Call, period string, watermark int64, o Outcome, known int64, over bool) (*Ticket, error) {
-	key := keyOf{c.Scope, period}
+func (l *Limiter) admitted(c Call, period string, o Outcome, known int64) (*Ticket, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if over && !l.overLogged[key] {
-		// Once per scope and period: after a failover it holds for
-		// every admission until the next snapshot.
-		l.overLogged[key] = true
-		slog.Warn("limit: the counter no longer holds this snapshot's watermark; counting all of it (over-counting)",
-			"scope", c.Scope, "period", period, "watermark", watermark)
-	}
-	l.last[key] = known
+	l.last[keyOf{c.Scope, period}] = known
 	switch o {
 	case OverBudget:
 		return nil, ErrBudget
@@ -329,30 +314,38 @@ func (t *Ticket) cancel(ctx context.Context, seen int64) bool {
 	return true
 }
 
-// account records a ticket's event in its scope's counter, and with
-// release frees its slot in the same step (Store.Complete); otherwise
-// the slot stays (Store.Add). While the store is down, or if this call to
-// it fails (an outage: accounting runs detached from the caller), the
-// increment is held for Recover.
+// account adds a ticket's cost to its scope's counter, in the minute it
+// ends, and with release frees its slot in the same step (Store.Complete);
+// otherwise the slot stays (Store.Add). While the store is down, or if
+// this call to it fails (an outage: accounting runs detached from the
+// caller), the increment is held for Recover. An increment is held only
+// while the limiter is down (hold refuses one otherwise), so one that
+// races a recovery is sent again rather than held where no replay will
+// find it.
 func (l *Limiter) account(ctx context.Context, t *Ticket, cost int64, release bool) {
-	in := Increment{t.call.Scope, t.period, Event{t.call.ID, cost}}
-	if !l.Down() {
-		sctx, cancel := l.storeContext(ctx)
-		var seq int64
-		var err error
-		if release {
-			seq, err = l.store.Complete(sctx, in.Period, t.slot(), in.Event)
-		} else {
-			seq, err = l.store.Add(sctx, in.Scope, in.Period, in.Event)
+	in := Increment{Scope: t.call.Scope, Period: t.period, Call: t.call.ID, Cost: cost, At: l.now()}
+	for {
+		if !l.Down() {
+			sctx, cancel := l.storeContext(ctx)
+			var err error
+			if release {
+				err = l.store.Complete(sctx, in, t.slot())
+			} else {
+				err = l.store.Add(sctx, in)
+			}
+			cancel()
+			if err == nil {
+				return
+			}
+			l.markDown(err)
 		}
-		cancel()
-		if err == nil {
-			l.numbered(in, seq)
+		if l.beforeHold != nil {
+			l.beforeHold()
+		}
+		if l.hold(in) {
 			return
 		}
-		l.markDown(err)
 	}
-	l.hold(in)
 }
 
 // EndAt frees a cancelled call's slot at a time to come: the provider may
@@ -386,33 +379,26 @@ func (t *Ticket) Ended(ctx context.Context) {
 }
 
 // hold keeps an increment for Recover to replay, dropping the oldest past
-// MaxPending.
-func (l *Limiter) hold(in Increment) {
+// MaxPending. It refuses (false) once the limiter is up again: Recover
+// marks it up under the same lock and then drains what is held, so an
+// increment held after that would be held for ever.
+func (l *Limiter) hold(in Increment) bool {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.down.Load() {
+		return false
+	}
 	l.pending = append(l.pending, in)
-	var dropped Increment
-	over := len(l.pending) > cmp.Or(l.MaxPending, 100_000)
-	if over {
-		dropped, l.pending = l.pending[0], l.pending[1:]
+	if len(l.pending) > cmp.Or(l.MaxPending, 100_000) {
+		l.pending = l.pending[1:]
+		l.Dropped.Add(1)
 	}
-	l.mu.Unlock()
-	if over {
-		// The oldest goes to the ledger unnumbered: its row still counts
-		// once ingested; only the counter (this site's fast view) loses it.
-		l.numbered(dropped, 0)
-	}
-}
-
-// numbered tells OnNumbered an increment's number (0: never numbered).
-func (l *Limiter) numbered(in Increment, seq int64) {
-	if l.OnNumbered != nil {
-		l.OnNumbered(Numbered{in.Scope, in.Period, in.Event, seq})
-	}
+	return true
 }
 
 // ApplySnapshot takes a snapshot's known spend for a scope. The counter is
-// left as it is: a gateway still on an older snapshot needs its history
-// (ADR 0042), which retention trims.
+// left as it is: a gateway still on an older snapshot needs the minutes
+// from its own boundary (ADR 0048), which retention trims.
 func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -478,37 +464,49 @@ func (l *Limiter) renewable() []Slot {
 }
 
 // Recover is called when the store answers again: the held increments are
-// replayed in order, each numbered (harmless if repeated), and every call
-// still running re-registers its slot, so calls that streamed through the
-// outage still count. No lock is held across a store call: completions may
-// add to the held increments meanwhile, and Recover goes on until none is
-// left.
+// replayed in order, each into its own minute, and every call still
+// running re-registers its slot, so calls that streamed through the outage
+// still count. No lock is held across a store call.
+//
+// It converges under load: while it replays, completions are still held,
+// so it replays until little is left, re-registers the slots, marks the
+// limiter up (from then on hold refuses, and completions go to the store
+// themselves), and drains the rest, which can only shrink.
 func (l *Limiter) Recover(ctx context.Context) error {
-	for {
-		n, err := l.replayBatch(ctx)
-		if err != nil {
+	for l.held() > replayBatchSize {
+		if _, err := l.replayBatch(ctx); err != nil {
 			return err
-		}
-		if n == 0 {
-			break
 		}
 	}
 	if err := l.reacquire(ctx); err != nil {
 		return err
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.pending) > 0 {
-		return ErrUnavailable // more were held meanwhile: the next Recover replays them
-	}
 	l.down.Store(false)
 	l.graceUntil = l.now().Add(l.Grace)
-	return nil
+	l.mu.Unlock()
+	for {
+		n, err := l.replayBatch(ctx)
+		if err != nil {
+			l.markDown(err) // what is left stays held for the next Recover
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
+// held is how many increments are held.
+func (l *Limiter) held() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pending)
 }
 
 // replayBatch replays up to replayBatchSize of the oldest held increments
-// in one round trip: one at a time, a busy gateway's completions (held
-// while it replays) could outpace the replay.
+// in one round trip, all or none: one at a time, a busy gateway's
+// completions (held while it replays) could outpace the replay.
 func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
 	l.mu.Lock()
 	batch := slices.Clone(l.pending[:min(len(l.pending), replayBatchSize)])
@@ -517,21 +515,18 @@ func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	sctx, cancel := l.storeContext(ctx)
-	seqs, err := l.store.AddAll(sctx, batch)
+	err := l.store.AddAll(sctx, batch)
 	cancel()
 	if err != nil {
 		return 0, err
 	}
 	l.dropReplayed(batch)
-	for i, in := range batch {
-		l.numbered(in, seqs[i])
-	}
 	return len(batch), nil
 }
 
 // dropReplayed takes a replayed batch off the front of the held
 // increments, unless another replay took it meanwhile. Only Recover and
-// ReplayOne take from the front; completions append.
+// ReplayOne take from the front; holds append.
 func (l *Limiter) dropReplayed(batch []Increment) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -540,41 +535,41 @@ func (l *Limiter) dropReplayed(batch []Increment) {
 	}
 }
 
-const replayBatchSize = 256
+// replayBatchSize is the increments one replay sends: one add script
+// (addChunk), so a batch is added whole or not at all.
+const replayBatchSize = addChunk
 
 // ReplayOne replays the oldest increment held during an outage and reports
 // it; Recover replays them all. ok is false when none is held.
-func (l *Limiter) ReplayOne(ctx context.Context) (e Event, ok bool, err error) {
+func (l *Limiter) ReplayOne(ctx context.Context) (in Increment, ok bool, err error) {
 	l.mu.Lock()
 	if len(l.pending) == 0 {
 		l.mu.Unlock()
-		return Event{}, false, nil
+		return Increment{}, false, nil
 	}
-	in := l.pending[0]
+	in = l.pending[0]
 	l.mu.Unlock()
 	sctx, cancel := l.storeContext(ctx)
-	seq, err := l.store.Add(sctx, in.Scope, in.Period, in.Event)
+	err = l.store.Add(sctx, in)
 	cancel()
 	if err != nil {
-		return in.Event, false, err
+		return in, false, err
 	}
 	l.dropReplayed([]Increment{in})
-	l.numbered(in, seq)
-	return in.Event, true, nil
+	return in, true, nil
 }
 
 // Abandon gives up the increments still held (a gateway leaving with its
-// store unreachable): each is told to OnNumbered with number 0, so its row
-// counts as it is, the counter never having had it.
+// store unreachable). Their ledger rows were written at their calls' ends:
+// the snapshots count them once their boundary passes; the counter never
+// will.
 func (l *Limiter) Abandon() int {
 	l.mu.Lock()
-	held := l.pending
+	n := len(l.pending)
 	l.pending = nil
 	l.mu.Unlock()
-	for _, in := range held {
-		l.numbered(in, 0)
-	}
-	return len(held)
+	l.Dropped.Add(int64(n))
+	return n
 }
 
 // EndGrace ends the grace after a recovery at once: for an operator who
@@ -594,10 +589,10 @@ func (l *Limiter) Known(ctx context.Context, scope string) int64 {
 	if !l.Down() {
 		k := l.snapshotFor(scope, period)
 		sctx, cancel := l.storeContext(ctx)
-		after, _, err := l.store.After(sctx, scope, period, k.Watermark)
+		since, err := l.store.Since(sctx, scope, period, k.Since)
 		cancel()
 		if err == nil {
-			return k.Spend + after
+			return k.Spend + since
 		}
 	}
 	l.mu.Lock()
@@ -606,13 +601,13 @@ func (l *Limiter) Known(ctx context.Context, scope string) int64 {
 }
 
 // Pending lists the increments held for replay, for a scope.
-func (l *Limiter) Pending(scope string) []Event {
+func (l *Limiter) Pending(scope string) []Increment {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var out []Event
+	var out []Increment
 	for _, h := range l.pending {
 		if h.Scope == scope {
-			out = append(out, h.Event)
+			out = append(out, h)
 		}
 	}
 	return out
@@ -647,7 +642,8 @@ func (l *Limiter) Run(ctx context.Context) {
 
 // Finish is the last accounting, once every call has ended: increments
 // held through an outage replayed if the store answers within ctx, else
-// abandoned (numbered 0: their rows, already written, count as they are).
+// abandoned (their rows, already written, are counted by the snapshots
+// once their boundary passes).
 //
 // Tails still held are not released: their timers stop, and their slots
 // expire by their TTL, which is what a tail is for (the provider may still
@@ -661,11 +657,11 @@ func (l *Limiter) Finish(ctx context.Context) {
 	l.mu.Unlock()
 	if l.Down() {
 		if err := l.Recover(ctx); err != nil {
-			slog.Warn("limit: increments held through the outage were not replayed; their rows go unnumbered", "err", err)
+			slog.Warn("limit: increments held through the outage were not replayed", "err", err)
 		}
 	}
 	if n := l.Abandon(); n > 0 {
-		slog.Warn("limit: increments held through the outage abandoned; numbered 0", "increments", n)
+		slog.Warn("limit: increments held through the outage abandoned; the ledger has their rows", "increments", n)
 	}
 }
 

@@ -91,14 +91,15 @@ type Scope struct {
 	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
 	// Features: "restricted", "compatible", or "" (by the route's kind).
 	Features string `json:"features,omitempty"`
-	// KnownSpend is the ledger's balance for Period (a calendar month,
-	// "2026-11") with this site's events numbered above Watermark left out;
-	// Watermark is the site counter's number for the period up to which
-	// every event is in the ledger (ADR 0042). A gateway counts a snapshot
-	// of another period as none: a new month starts from nothing.
-	Period     string `json:"period,omitempty"`
-	KnownSpend int64  `json:"knownSpend,omitempty"`
-	Watermark  int64  `json:"watermark,omitempty"`
+	// KnownSpend is the ledger's spend for Period (a calendar month,
+	// "2026-11") of the calls that ended before Since, a minute
+	// golem-control places an ingestion allowance behind the snapshot's
+	// time; the site counter's minutes from Since on add the rest
+	// (ADR 0048). A gateway counts a snapshot of another period as none: a
+	// new month starts from nothing.
+	Period     string    `json:"period,omitempty"`
+	KnownSpend int64     `json:"knownSpend,omitempty"`
+	Since      time.Time `json:"since,omitzero"`
 }
 
 // Key is a key's entitlement: by hash, never the key itself.

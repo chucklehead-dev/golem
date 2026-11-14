@@ -68,7 +68,7 @@ func SDK(spans sdktrace.SpanExporter, metrics sdkmetric.Reader, logs sdklog.Expo
 	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(spans), sdktrace.WithResource(res))
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(metrics), sdkmetric.WithResource(res))
 	// The ledger's rows are billing data: their own queue, which counts
-	// what it cannot deliver. Their 40 keys are unique by construction (a
+	// what it cannot deliver. Their 39 keys are unique by construction (a
 	// test checks them against the DDL), so the SDK's per-record key
 	// deduplication, a quarter of a call's CPU, is turned off.
 	ledger := NewLedgerQueue(logs, ledgerQueueSize, 512, time.Second)

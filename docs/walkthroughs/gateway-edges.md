@@ -12,8 +12,8 @@ request path, §6 the snapshot lifecycle, §6a standalone mode),
 [control-plane.md §4](../control-plane.md#4-distribution) (distribution),
 [model/publication.md](../../model/publication.md) (the publication
 model the snapshot source is checked against),
-[ADR 0042](../adr/0042-known-spend-by-counter-watermark.md) (known spend by
-counter watermark), [ADR 0043](../adr/0043-ledger-durability.md) (ledger
+[ADR 0048](../adr/0048-known-spend-by-time-boundary.md) (known spend by a
+time boundary), [ADR 0043](../adr/0043-ledger-durability.md) (ledger
 durability lives in the collector), [ADR 0044](../adr/0044-budgets-are-controls-not-ceilings.md)
 (budgets are controls) and the acceptance record
 [m1-security-gates.md](../acceptance/m1-security-gates.md) (golem#4, golem#5).
@@ -30,7 +30,7 @@ durability lives in the collector), [ADR 0044](../adr/0044-budgets-are-controls-
 | `gateway/snapshot/secrets.go` | `Secrets`, `EnvSecrets` (standalone), `FileSecrets` (mounted Secrets) |
 | `gateway/snapshot/loop.go` | `repeat`, both sources' poll loop |
 | `gateway/telemetry/telemetry.go` | `Telemetry`: spans, GenAI metrics, the refusal counter |
-| `gateway/telemetry/ledger.go` | `Ledger`: golem.spend rows and golem.spend_seq numbering records |
+| `gateway/telemetry/ledger.go` | `Ledger`: golem.spend rows |
 | `gateway/telemetry/queue.go` | `LedgerQueue`: the ledger's own bounded, counted log processor |
 | `gateway/telemetry/setup.go` | `OTLP`, `SDK`, `Stdout`, the plaintext rule |
 | `cmd/golem-gateway/main.go` | flags, the release gate, wiring, the shutdown order |
@@ -174,7 +174,7 @@ snapshot object, the trusted checkpoint, then the signed pointer
    and the order under its mutex, refuses an expired lease, compiles
    (credentials, targets, routes, entitlements, prices), stores the new
    `Compiled`, sets the floor to 7 and calls `OnApply` (the limiter takes
-   each scope's known spend and watermark, ADR 0042).
+   each scope's known spend and boundary, ADR 0048).
 7. `saveCheckpoint` (`bucket.go:179`) writes "7" to a temporary file,
    syncs it and renames it over the checkpoint. A failure is logged, not
    returned: the snapshot is applied, and a restart's floor will be the
@@ -200,13 +200,10 @@ call allocates little and a 429 storm nothing for its counter. Every
 method is a no-op on a nil `*Telemetry`.
 
 The ledger (`ledger.go`) writes OTel log records whose attributes are
-the ClickHouse tables' columns: a `golem.spend` row per upstream attempt
-when the call ends (`Ledger.Ended`, `ledger.go:37`; 40 columns in the
-DDL's order, checked by `TestRowMatchesLedgerDDL`), and, for a call the
-limiter counted (`counted`), a separate `golem.spend_seq` numbering
-record with its counter number (`Ledger.Numbered`, `ledger.go:45`). A row
-is never held for its number (ADR 0043): a counter outage keeps no
-billing rows in memory. A row's period is the limiter's when given, else
+the ClickHouse table's columns: a `golem.spend` row per upstream attempt
+when the call ends (`Ledger.Ended`; 39 columns in the DDL's order, checked
+by `TestRowMatchesLedgerDDL`), whatever the site counter's state (ADR
+0043): a counter outage keeps no billing rows in memory. A row's period is the limiter's when given, else
 the call's start in the configured zone (`ledger.go:71`), so the counter
 and the ledger agree on the month.
 
@@ -275,7 +272,7 @@ through the drain because the limiter's renewals keep calls' slots), let
 the limiter finish (`main.go:125`), and shut telemetry down last
 (`main.go:127`), delivering the rows the cut calls wrote.
 `TestShutdownAccounts` checks this end to end: the cut stream leaves one
-row with outcome `cancelled` and its numbering record.
+row with outcome `cancelled`, its cost in the counter.
 
 ## Invariants: where each is enforced and tested
 

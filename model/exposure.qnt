@@ -8,22 +8,23 @@ module exposure {
   const BUDGET: int
   const LIMIT: int
   const SCOPE_LIMIT: int
+  const ALLOWANCE: int
 
   const SCOPE_LIMIT_ON: bool
   const HANDOFF: str
   const HOLD_ON_CANCEL: bool
   const REACQUIRE: bool
-  type Event = (str, int)
+  type Event = (str, int, int)
 
   var phase: str -> str
   var gatewayOf: str -> str
   var billed: str -> int
   var seenCost: str -> int
   type Row = (str, int, int)
-  type Snap = { w: int, spend: int, whole: int, mark: int }
+  type Snap = { b: int, spend: int, whole: int }
 
-  var counter: List[Event]
-  var trimmed: int
+  var now: int
+  var counter: int -> int
   var pending: str -> Set[Event]
   var gwDown: Set[str]
   var grace: Set[str]
@@ -44,14 +45,15 @@ module exposure {
     gatewayOf' = REQUESTS.mapBy(r => ""),
     billed' = REQUESTS.mapBy(r => 0),
     seenCost' = REQUESTS.mapBy(r => 0),
-    counter' = [], trimmed' = 0, pending' = GATEWAYS.mapBy(g => Set()), gwDown' = Set(), grace' = Set(),
+    now' = 0, counter' = Map(), pending' = GATEWAYS.mapBy(g => Set()), gwDown' = Set(), grace' = Set(),
     buffer' = Set(), ledger' = Set(),
     latest' = blankSnap, snaps' = GATEWAYS.mapBy(g => blankSnap),
     slots' = Set(), valkeyUp' = true, views' = GATEWAYS.mapBy(g => 0),
     observed' = Set(), uncounted' = 0, waived' = Set(), heldEver' = 0, overAdmit' = false,
   }
 
-  val blankSnap: Snap = { w: 0, spend: 0, whole: 0, mark: 0 }
+  // The first snapshot: nothing from the ledger, every minute counted.
+  val blankSnap: Snap = { b: 0, spend: 0, whole: 0 }
   def sum(events: Set[Event]): int = events.fold(0, (acc, e) => acc + e._2)
   def rowsSum(rows: Set[Row]): int = rows.fold(0, (acc, r) => acc + r._2)
   def running: Set[str] = REQUESTS.filter(r => phase.get(r) == "inflight" or phase.get(r) == "cancelled")
@@ -61,16 +63,17 @@ module exposure {
   def held: int = GATEWAYS.fold(0, (acc, g) => acc + sum(pending.get(g)))
   // A gateway uses the store if Valkey answers and it has recovered.
   def usesStore(g: str): bool = valkeyUp and not(gwDown.contains(g))
-  def counterTotal(from: int): int =
-    counter.indices().filter(i => i >= from and i >= trimmed).fold(0, (acc, i) => acc + counter[i]._2)
+  def counterFrom(b: int): int = counter.keys().filter(t => t >= b).fold(0, (acc, t) => acc + counter.get(t))
+  def counterAll: int = counter.keys().fold(0, (acc, t) => acc + counter.get(t))
+  def addAt(c: int -> int, t: int, cost: int): int -> int =
+    if (c.keys().contains(t)) c.set(t, c.get(t) + cost) else c.put(t, cost)
   def known(g: str): int =
     val sn = snaps.get(g)
-    if (HANDOFF == "reset") sn.whole + counterTotal(sn.mark)
-    else if (HANDOFF == "sum") sn.whole + counterTotal(0)
-    else sn.spend + counterTotal(sn.w)
+    if (HANDOFF == "sum") sn.whole + counterAll
+    else sn.spend + counterFrom(sn.b)
   action keepCalls = all { phase' = phase, gatewayOf' = gatewayOf, billed' = billed, seenCost' = seenCost }
   action keepSpend = all {
-    counter' = counter, trimmed' = trimmed, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
     latest' = latest, snaps' = snaps, views' = views,
   }
   action keepGhosts = all { observed' = observed, uncounted' = uncounted, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit }
@@ -100,28 +103,26 @@ module exposure {
     gatewayOf' = gatewayOf.put(request, gateway),
     billed' = billed, seenCost' = seenCost,
     valkeyUp' = valkeyUp, observed' = observed, uncounted' = uncounted, heldEver' = heldEver,
-    counter' = counter, trimmed' = trimmed, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
     latest' = latest, snaps' = snaps,
   }
-  def holds(c: List[Event], e: Event): bool = c.foldl(false, (b, x) => b or x._1 == e._1)
-
-  action emit(e: Event, g: str): bool = all {
-    observed' = observed.union(Set(e)),
-    val up = usesStore(g) and not(holds(counter, e))
+  action emit(id: str, cost: int, g: str): bool = all {
+    val e = (id, cost, now)
     all {
-      counter' = if (up) counter.append(e) else counter,
-      buffer' = if (up) buffer.union(Set((e._1, e._2, counter.length() + 1))) else buffer,
+      observed' = observed.union(Set(e)),
+      counter' = if (usesStore(g)) addAt(counter, now, cost) else counter,
+      buffer' = buffer.union(Set(e)),
+      pending' = if (usesStore(g)) pending else pending.put(g, pending.get(g).union(Set(e))),
+      heldEver' = if (usesStore(g)) heldEver else heldEver + cost,
     },
-    pending' = if (usesStore(g)) pending else pending.put(g, pending.get(g).union(Set(e))),
-    heldEver' = if (usesStore(g)) heldEver else heldEver + e._2,
-    gwDown' = gwDown, grace' = grace, trimmed' = trimmed, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
+    now' = now, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
   }
   action complete(request: str, cost: int): bool = all {
     phase.get(request) == "inflight",
     phase' = phase.put(request, "done"),
     billed' = billed.put(request, cost),
     seenCost' = seenCost.put(request, cost),
-    emit((request, cost), gatewayOf.get(request)),
+    emit(request, cost, gatewayOf.get(request)),
     slots' = slots.exclude(Set(request)),
     gatewayOf' = gatewayOf, valkeyUp' = valkeyUp,
     uncounted' = uncounted, waived' = waived, overAdmit' = overAdmit,
@@ -130,7 +131,7 @@ module exposure {
     phase.get(request) == "inflight",
     phase' = phase.put(request, "cancelled"),
     seenCost' = seenCost.put(request, seen),
-    emit((request, seen), gatewayOf.get(request)),
+    emit(request, seen, gatewayOf.get(request)),
     slots' = if (HOLD_ON_CANCEL) slots else slots.exclude(Set(request)),
     gatewayOf' = gatewayOf, billed' = billed, valkeyUp' = valkeyUp,
     uncounted' = uncounted, waived' = waived, overAdmit' = overAdmit,
@@ -146,26 +147,28 @@ module exposure {
     gatewayOf' = gatewayOf, seenCost' = seenCost, valkeyUp' = valkeyUp,
     keepSpend, observed' = observed, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit,
   }
+  action tick: bool = all {
+    buffer.forall(r => r._3 >= now + 1 - ALLOWANCE),
+    now' = now + 1,
+    counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    latest' = latest, snaps' = snaps, views' = views,
+    keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
+  }
+
   action deliver(r: Row): bool = all {
     buffer.contains(r),
     buffer' = buffer.exclude(Set(r)),
     ledger' = ledger.union(Set(r)),
-    counter' = counter, trimmed' = trimmed, pending' = pending, gwDown' = gwDown, grace' = grace, latest' = latest, snaps' = snaps, views' = views,
+    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, latest' = latest, snaps' = snaps, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
-  def ingested: Set[int] = ledger.map(r => r._3)
-  def contiguous: int =
-    0.to(ingested.fold(0, (m, n) => if (n > m) n else m))
-     .filter(w => 1.to(w).forall(n => ingested.contains(n)))
-     .fold(0, (m, n) => if (n > m) n else m)
-  def watermark: int =
-    if (HANDOFF == "maxIngested") ingested.fold(0, (m, n) => if (n > m) n else m) else contiguous
+  def boundary: int = if (HANDOFF == "noAllowance") now else now - ALLOWANCE
 
   action publishSnapshot: bool = all {
-    val w = watermark
-    latest' = { w: w, spend: rowsSum(ledger.filter(r => r._3 <= w)), whole: rowsSum(ledger), mark: counter.length() },
-    counter' = counter, trimmed' = trimmed, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    val b = boundary
+    latest' = { b: b, spend: rowsSum(ledger.filter(r => r._3 < b)), whole: rowsSum(ledger) },
+    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
     snaps' = snaps, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
@@ -173,10 +176,10 @@ module exposure {
   action applySnapshot(gateway: str): bool = all {
     snaps.get(gateway) != latest,
     snaps' = snaps.put(gateway, latest),
-    // The bug: trim the history the new snapshot no longer needs, which
-    // a gateway still on an older one does.
-    trimmed' = if (HANDOFF == "trimAtApply" and valkeyUp and latest.w > trimmed) latest.w else trimmed,
-    counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, views' = views,
+    // The bug: start the counter again at each snapshot, as if the
+    // snapshot held everything before it.
+    counter' = if (HANDOFF == "resetAtApply" and valkeyUp) Map() else counter,
+    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
   action valkeyDown: bool = all {
@@ -185,7 +188,7 @@ module exposure {
     gwDown' = GATEWAYS,
     grace' = grace,
     slots' = Set(),
-    counter' = counter, trimmed' = trimmed, pending' = pending, buffer' = buffer, ledger' = ledger,
+    now' = now, counter' = counter, pending' = pending, buffer' = buffer, ledger' = ledger,
     latest' = latest, snaps' = snaps, views' = views,
     keepCalls, keepGhosts,
   }
@@ -200,13 +203,9 @@ module exposure {
     valkeyUp,
     gwDown.contains(gateway),
     pending.get(gateway).contains(e),
-    val fresh = not(holds(counter, e))
-    all {
-      counter' = if (fresh) counter.append(e) else counter,
-      buffer' = if (fresh) buffer.union(Set((e._1, e._2, counter.length() + 1))) else buffer,
-    },
+    counter' = addAt(counter, e._3, e._2),
     pending' = pending.put(gateway, pending.get(gateway).exclude(Set(e))),
-    gwDown' = gwDown, grace' = grace, trimmed' = trimmed, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
+    now' = now, buffer' = buffer, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -217,7 +216,7 @@ module exposure {
     gwDown' = gwDown.exclude(Set(gateway)),
     grace' = grace.union(Set(gateway)),
     slots' = if (REACQUIRE) slots.union(running.filter(r => gatewayOf.get(r) == gateway)) else slots,
-    counter' = counter, trimmed' = trimmed, pending' = pending, buffer' = buffer, ledger' = ledger,
+    now' = now, counter' = counter, pending' = pending, buffer' = buffer, ledger' = ledger,
     latest' = latest, snaps' = snaps, views' = views,
     keepCalls, valkeyUp' = valkeyUp, keepGhosts,
   }
@@ -228,22 +227,17 @@ module exposure {
     grace.contains(gateway),
     gwDown == Set(),
     grace' = grace.exclude(Set(gateway)),
-    counter' = counter, trimmed' = trimmed, pending' = pending, gwDown' = gwDown, buffer' = buffer, ledger' = ledger,
+    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, buffer' = buffer, ledger' = ledger,
     latest' = latest, snaps' = snaps, views' = views,
     keepCalls, keepGhosts, slots' = slots, valkeyUp' = valkeyUp,
   }
 
-  action failover(keep: int): bool = all {
+  action failover(t: int): bool = all {
     valkeyUp,
-    keep >= 0,
-    keep < counter.length(),
-    val lost = counter.indices().filter(i => i >= keep).fold(0, (acc, i) => acc + counter[i]._2)
-    all {
-      counter' = counter.slice(0, keep),
-      trimmed' = if (trimmed > keep) keep else trimmed,
-      uncounted' = uncounted + lost + (counter.length() - keep) * WORST,
-    },
-    pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
+    counter.keys().contains(t),
+    counter' = counter.keys().exclude(Set(t)).mapBy(m => counter.get(m)),
+    uncounted' = uncounted + counter.get(t),
+    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp,
     observed' = observed, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit,
   }
@@ -252,9 +246,10 @@ module exposure {
     nondet gateway = GATEWAYS.oneOf()
     nondet cost = COSTS.oneOf()
     nondet r = buffer.union(Set(("none", 0, 0))).oneOf()
-    nondet e = pending.get(gateway).union(Set(("none", 0))).oneOf()
-    nondet keep = 0.to(counter.length()).oneOf()
+    nondet e = pending.get(gateway).union(Set(("none", 0, 0))).oneOf()
+    nondet t = counter.keys().union(Set(-1)).oneOf()
     any {
+      tick,
       admit(request, gateway),
       complete(request, cost),
       cancel(request, cost),
@@ -267,7 +262,7 @@ module exposure {
       replayOne(gateway, e),
       recover(gateway),
       graceEnds(gateway),
-      failover(keep),
+      failover(t),
     }
   }
   val limitsHonoured = not(overAdmit)
@@ -280,10 +275,11 @@ module exposure {
   val overshoots = totalBilled > BUDGET
   val waiverExceedsLimit = REQUESTS.exists(r => ownedBy(running, OWNER.get(r)).size() > LIMIT)
   val cancelledBilledMore = REQUESTS.exists(r => billed.get(r) > seenCost.get(r))
-  // A gateway's snapshot includes some events and the counter holds later ones.
-  val handoffInFlight = GATEWAYS.exists(g => snaps.get(g).w > 0 and counter.length() > snaps.get(g).w)
+  // A gateway's snapshot holds some spend, and the counter's minutes after
+  // its boundary hold more.
+  val handoffInFlight = GATEWAYS.exists(g => snaps.get(g).spend > 0 and counterFrom(snaps.get(g).b) > 0)
   // Two gateways on different snapshots, both exact.
-  val snapshotSkew = GATEWAYS.exists(g => GATEWAYS.exists(h => snaps.get(g).w != snaps.get(h).w))
+  val snapshotSkew = GATEWAYS.exists(g => GATEWAYS.exists(h => snaps.get(g).b != snaps.get(h).b))
   run scopeExposureTest =
     init
       .then(admit("a1", "g1"))
@@ -292,38 +288,29 @@ module exposure {
       .expect(not(limitsHonoured))
   run resetTest =
     init
-      .then(admit("a1", "g1")).then(complete("a1", 3)).then(publishSnapshot).then(applySnapshot("g1"))
-      .then(admit("a2", "g1")).then(complete("a2", 3)).then(publishSnapshot).then(applySnapshot("g1"))
-      .then(admit("b1", "g1")).then(complete("b1", 3)).then(publishSnapshot).then(applySnapshot("g1"))
-      .then(admit("b2", "g1")).then(complete("b2", 3))
-      .expect(not(withinBound))
+      .then(admit("a1", "g1")).then(complete("a1", 3))
+      .then(publishSnapshot).then(applySnapshot("g1"))
+      .expect(not(noLostIncrements))
   run sumTest =
     init
       .then(admit("a1", "g1"))
       .then(complete("a1", 2))
-      .then(deliver(("a1", 2, 1)))
+      .then(deliver(("a1", 2, 0)))
       .then(publishSnapshot)
       .then(applySnapshot("g1"))
       .expect(not(knownNeverOver))
-  run maxIngestedTest =
+  run noAllowanceTest =
     init
       .then(admit("a1", "g1")).then(complete("a1", 3))
-      .then(admit("b1", "g1")).then(complete("b1", 1))
-      .then(deliver(("b1", 1, 2)))
-      .then(publishSnapshot)
-      .then(applySnapshot("g1"))
-      .expect(not(noLostIncrements))
-  run trimTest =
-    init
-      .then(admit("a1", "g1")).then(complete("a1", 3))
-      .then(deliver(("a1", 3, 1)))
+      .then(tick)
       .then(publishSnapshot)
       .then(applySnapshot("g1"))
       .expect(not(noLostIncrements))
   run skewTest =
     init
       .then(admit("a1", "g1")).then(complete("a1", 3))
-      .then(deliver(("a1", 3, 1)))
+      .then(deliver(("a1", 3, 0)))
+      .then(tick).then(tick)
       .then(publishSnapshot)
       .then(applySnapshot("g1"))
       .expect(snapshotSkew and known("g1") == 3 and known("g2") == 3 and noLostIncrements and knownNeverOver)
@@ -354,61 +341,54 @@ module exposure {
 module exposureDesign {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
-    SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }
 
 module noScopeLimit {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
-    SCOPE_LIMIT_ON = false, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = false, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }
 
-module resetHandoff {
+module resetAtApply {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
-    SCOPE_LIMIT_ON = true, HANDOFF = "reset", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "resetAtApply", HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }
 
 module sumHandoff {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
     SCOPE_LIMIT_ON = true, HANDOFF = "sum", HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }
 
 module releaseOnCancel {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
-    SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = false, REACQUIRE = true).*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = false, REACQUIRE = true).*
 }
 
-module maxIngested {
+module noAllowance {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
-    SCOPE_LIMIT_ON = true, HANDOFF = "maxIngested", HOLD_ON_CANCEL = true, REACQUIRE = true).*
-}
-
-module trimAtApply {
-  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
-    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
-    SCOPE_LIMIT_ON = true, HANDOFF = "trimAtApply", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "noAllowance", HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }
 
 module noReacquire {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
-    SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = false).*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = false).*
 }
 
 module small {
   import exposure(REQUESTS = Set("a1", "a2", "b1"), OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1, SCOPE_LIMIT = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1, SCOPE_LIMIT = 1, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }

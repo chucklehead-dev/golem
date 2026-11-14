@@ -15,27 +15,30 @@ import (
 
 // The limiter against model/exposure.md's design: the model's traces drive
 // one Limiter per gateway over one shared store, and after every step the
-// counter (its events in number order), the slots, waivers, held
-// increments and each gateway's known spend (while it uses the store) must
-// be the model's. The ledger and golem-control (deliver, publishSnapshot)
-// are the environment; applySnapshot gives a gateway the model's snapshot.
+// counter (its minutes), the slots, waivers, held increments and each
+// gateway's known spend (while it uses the store) must be the model's. The
+// ledger and golem-control (deliver, publishSnapshot) are the environment;
+// applySnapshot gives a gateway the model's snapshot, its boundary a model
+// minute on the driver's clock.
 
 // The exposureDesign instance's constants.
 var owner = map[string]string{"a1": "p1", "a2": "p1", "b1": "p2", "b2": "p2", "c1": "p3"}
 
 const scope = "s"
 
-// The model has one budget period: the driver's clock stays in it.
+// The model has one budget period: the driver's clock, inPeriod plus the
+// model's minutes, stays in it.
 var (
 	inPeriod = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	period   = "2026-11"
 )
 
-func newLimiter(st Store) *Limiter {
-	l := New(st)
-	l.Now = func() time.Time { return inPeriod }
-	return l
-}
+// mbtRetain keeps every minute of a trace: inPeriod is long past by the
+// stores' own clocks, which trim by them.
+const mbtRetain = 1000 * 24 * time.Hour
+
+// modelMinute is a time's minute on the model's clock.
+func modelMinute(t time.Time) int64 { return minuteOf(t) - minuteOf(inPeriod) }
 
 func call(request string) Call {
 	return Call{ID: request, Principal: owner[request], Scope: scope, Budget: 4, PrincipalLimit: 1, ScopeLimit: 2}
@@ -44,14 +47,15 @@ func call(request string) Call {
 type event struct {
 	ID   string `itf:",tuple"`
 	Cost int64
+	At   int64
 }
 
 // faultyStore is a Store the test can fault as the model's environment does.
 type faultyStore interface {
 	Store
 	SetDown(bool)
-	Failover(scope, period string, keep int)
-	Counter(scope, period string) []Event
+	Failover(scope, period string, minute int64)
+	Buckets(scope, period string) map[int64]int64
 	Slots() []Slot
 }
 
@@ -59,13 +63,24 @@ type expDriver struct {
 	t       testing.TB
 	newSt   func(testing.TB) faultyStore
 	store   faultyStore
+	clock   int64 // the model's minute
 	gws     map[string]*Limiter
 	tickets map[string]*Ticket
 	waived  map[string]bool // the model's ghost: every call ever waived
 }
 
 type snapRec struct {
-	W, Spend int64
+	B, Spend int64
+}
+
+func (d *expDriver) now() time.Time { return inPeriod.Add(time.Duration(d.clock) * time.Minute) }
+
+func (d *expDriver) newLimiter() *Limiter {
+	l := New(d.store)
+	l.Now = d.now
+	// The model ends a grace by graceEnds, not by its clock's minutes.
+	l.Grace = mbtRetain
+	return l
 }
 
 func (d *expDriver) Step(s *connect.Step) error {
@@ -75,8 +90,8 @@ func (d *expDriver) Step(s *connect.Step) error {
 	cost := func() int64 { return connect.MustPick[int64](s, "cost") }
 	return connect.Switch{
 		"init": func(*connect.Step) error {
-			d.store = d.newSt(d.t)
-			d.gws = map[string]*Limiter{"g1": newLimiter(d.store), "g2": newLimiter(d.store)}
+			d.store, d.clock = d.newSt(d.t), 0
+			d.gws = map[string]*Limiter{"g1": d.newLimiter(), "g2": d.newLimiter()}
 			d.tickets, d.waived = map[string]*Ticket{}, map[string]bool{}
 			return nil
 		},
@@ -94,6 +109,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 		"complete":     func(*connect.Step) error { d.tickets[req()].Complete(ctx, cost()); return nil },
 		"cancel":       func(*connect.Step) error { d.tickets[req()].Cancel(ctx, cost()); return nil },
 		"providerEnds": func(*connect.Step) error { d.tickets[req()].Ended(ctx); return nil },
+		"tick":         func(*connect.Step) error { d.clock++; return nil },
 		// The ledger and golem-control: the environment.
 		"deliver": connect.Skip, "publishSnapshot": connect.Skip,
 		"applySnapshot": func(s *connect.Step) error {
@@ -102,7 +118,8 @@ func (d *expDriver) Step(s *connect.Step) error {
 				return err
 			}
 			sn := snaps[gw()]
-			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Period: period, Spend: sn.Spend, Watermark: sn.W})
+			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Period: period, Spend: sn.Spend,
+				Since: inPeriod.Add(time.Duration(sn.B) * time.Minute)})
 			return nil
 		},
 		"valkeyDown": func(*connect.Step) error {
@@ -119,7 +136,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 			// its own order, so bring the model's to the front.
 			e := connect.MustPick[event](s, "e")
 			l.mu.Lock()
-			i := slices.IndexFunc(l.pending, func(in Increment) bool { return in.ID == e.ID })
+			i := slices.IndexFunc(l.pending, func(in Increment) bool { return in.Call == e.ID })
 			if i >= 0 {
 				l.pending[0], l.pending[i] = l.pending[i], l.pending[0]
 			}
@@ -133,7 +150,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 		"recover":   func(*connect.Step) error { return d.gws[gw()].Recover(ctx) },
 		"graceEnds": func(*connect.Step) error { d.gws[gw()].EndGrace(); return nil },
 		"failover": func(s *connect.Step) error {
-			d.store.Failover(scope, period, connect.MustPick[int](s, "keep"))
+			d.store.Failover(scope, period, minuteOf(inPeriod)+connect.MustPick[int64](s, "t"))
 			return nil
 		},
 	}.Step(s)
@@ -141,27 +158,27 @@ func (d *expDriver) Step(s *connect.Step) error {
 
 // expState projects the model's variables the limiter has.
 type expState struct {
-	Counter []event
+	Counter map[int64]int64
 	Slots   []string
 	Waived  []string
 	Pending map[string][]event
 }
 
 func (d *expDriver) State() (any, error) {
-	st := expState{Counter: []event{}, Slots: []string{}, Waived: slices.Sorted(maps.Keys(d.waived)), Pending: map[string][]event{}}
+	st := expState{Counter: map[int64]int64{}, Slots: []string{}, Waived: slices.Sorted(maps.Keys(d.waived)), Pending: map[string][]event{}}
 	if st.Waived == nil {
 		st.Waived = []string{}
 	}
-	for _, e := range d.store.Counter(scope, period) {
-		st.Counter = append(st.Counter, event{e.ID, e.Cost})
+	for m, spend := range d.store.Buckets(scope, period) {
+		st.Counter[m-minuteOf(inPeriod)] = spend
 	}
 	for _, s := range d.store.Slots() {
 		st.Slots = append(st.Slots, s.Call)
 	}
 	for _, g := range slices.Sorted(maps.Keys(d.gws)) {
 		ps := []event{}
-		for _, e := range d.gws[g].Pending(scope) {
-			ps = append(ps, event{e.ID, e.Cost})
+		for _, in := range d.gws[g].Pending(scope) {
+			ps = append(ps, event{in.Call, in.Cost, modelMinute(in.At)})
 		}
 		slices.SortFunc(ps, func(a, b event) int { return strings.Compare(a.ID, b.ID) })
 		st.Pending[g] = ps
@@ -175,7 +192,7 @@ func (d *expDriver) CheckStep(s *connect.Step) error {
 	var up bool
 	var down []string
 	var snaps map[string]snapRec
-	var counter []event
+	var counter map[int64]int64
 	for _, c := range []struct {
 		path string
 		dst  any
@@ -189,9 +206,9 @@ func (d *expDriver) CheckStep(s *connect.Step) error {
 			continue // a gateway not using the store decides from its last view
 		}
 		want := snaps[g].Spend
-		for i, e := range counter {
-			if int64(i) >= snaps[g].W {
-				want += e.Cost
+		for m, spend := range counter {
+			if m >= snaps[g].B {
+				want += spend
 			}
 		}
 		if got := d.gws[g].Known(d.t.Context(), scope); got != want {
@@ -207,7 +224,7 @@ func TestExposureModel(t *testing.T) {
 	}
 	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 100, MaxSteps: 30},
 		func(tb testing.TB) connect.Driver {
-			return &expDriver{t: tb, newSt: func(testing.TB) faultyStore { return NewMem() }}
+			return &expDriver{t: tb, newSt: func(testing.TB) faultyStore { m := NewMem(); m.Retain = mbtRetain; return m }}
 		})
 }
 
@@ -221,7 +238,9 @@ func TestExposureModelValkey(t *testing.T) {
 	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 50, MaxSteps: 30},
 		func(tb testing.TB) connect.Driver {
 			return &expDriver{t: tb, newSt: func(tb testing.TB) faultyStore {
-				return &valkeyFaults{Valkey: newValkey(tb, addr)}
+				v := newValkey(tb, addr)
+				v.Retain = mbtRetain
+				return &valkeyFaults{Valkey: v}
 			}}
 		})
 }

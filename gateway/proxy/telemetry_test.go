@@ -10,7 +10,6 @@ import (
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/key"
 )
@@ -35,7 +34,6 @@ spec:
 		t.Fatal(err)
 	}
 	h.Telemetry = tel
-	lim.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
 
 	stream := `{"model":"claude","max_tokens":10,"stream":true,"messages":[]}`
 	for range 2 {
@@ -47,22 +45,25 @@ spec:
 	if w := send(h, "", stream); w.Code != 401 {
 		t.Fatalf("no key: %d", w.Code)
 	}
-	got, nums := splitRows(t, &rows)
-	if len(got) != 2 || len(nums) != 2 {
-		t.Fatalf("%d rows, %d numbering records; want one of each per call that reached the provider", len(got), len(nums))
+	got := splitRows(t, &rows)
+	if len(got) != 2 {
+		t.Fatalf("%d rows; want one per call that reached the provider", len(got))
 	}
 	for i, r := range got {
-		if nums[i]["counter_seq"] != float64(i+1) || nums[i]["event_id"] != r["event_id"] || r["counted"] != true ||
-			r["outcome"] != "completed" || r["principal_id"] != "alice" ||
+		if r["outcome"] != "completed" || r["principal_id"] != "alice" ||
 			r["scope_id"] != "team-a" || r["cost_micros"] != 6204000.0 || r["currency"] != "USD" || r["waived"] != false ||
 			r["model"] != "claude-sonnet" || r["tokens_input"] != 2048.0 {
 			t.Errorf("row %d: %v", i, r)
 		}
 	}
+	// The counter holds what the rows charge, once each.
+	if k := lim.Known(t.Context(), "team-a"); k != 2*6204000 {
+		t.Fatalf("known spend %d, want the two rows' 12408000", k)
+	}
 }
 
 // TestPeriodIsTheStart: the request path gives the limiter the call's
-// start, so the counter it is numbered in and its ledger row name the same
+// start, so the counter it is added to and its ledger row name the same
 // month however late the admission (here a limiter whose clock is a month
 // ahead of the request's arrival).
 func TestPeriodIsTheStart(t *testing.T) {
@@ -79,31 +80,33 @@ spec:
 	var rows bytes.Buffer
 	tel, _ := telemetry.New(telemetry.Stdout(&rows), "local", "standalone")
 	h.Telemetry = tel
-	lim.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
 	if w := send(h, alice, `{"model":"claude","max_tokens":10,"stream":true,"messages":[]}`); w.Code != 200 {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	got, nums := splitRows(t, &rows)
-	if want := time.Now().UTC().Format("2006-01") + "-01"; len(got) != 1 || len(nums) != 1 || got[0]["period"] != want ||
-		nums[0]["period"] != want || nums[0]["counter_seq"] != 1.0 {
-		t.Fatalf("rows %v, numbering %v: period %s, numbered in its counter", got, nums, want)
+	got := splitRows(t, &rows)
+	if want := time.Now().UTC().Format("2006-01") + "-01"; len(got) != 1 || got[0]["period"] != want {
+		t.Fatalf("rows %v: period %s", got, want)
+	}
+	// The counter of the start's month has the call: known spend this
+	// month (the limiter's clock back) is its cost.
+	lim.Now = time.Now
+	if k := lim.Known(t.Context(), "team-a"); k == 0 || float64(k) != got[0]["cost_micros"] {
+		t.Fatalf("known spend this month %d, the row's cost %v: the call is in its start's counter", k, got[0]["cost_micros"])
 	}
 }
 
-// splitRows reads standalone telemetry's lines: ledger rows, and numbering
-// records (golem.spend_seq).
-func splitRows(t *testing.T, b *bytes.Buffer) (rows, nums []map[string]any) {
+// splitRows reads standalone telemetry's lines: ledger rows.
+func splitRows(t *testing.T, b *bytes.Buffer) (rows []map[string]any) {
 	t.Helper()
 	for line := range strings.Lines(b.String()) {
 		var m map[string]any
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := m["row_kind"]; ok {
-			rows = append(rows, m)
-		} else {
-			nums = append(nums, m)
+		if _, ok := m["row_kind"]; !ok {
+			t.Fatalf("a line that is not a ledger row: %v", m)
 		}
+		rows = append(rows, m)
 	}
-	return rows, nums
+	return rows
 }

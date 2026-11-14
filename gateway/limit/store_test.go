@@ -18,10 +18,21 @@ import (
 
 const nov = "2026-11"
 
+// at is a minute of November, on the test's clock: the counter's minutes
+// are the increments' own, whatever the store's clock.
+func at(minute int) time.Time {
+	return time.Now().Truncate(time.Minute).Add(time.Duration(minute-10) * time.Minute)
+}
+
+// inc is an increment of scope s in November, in the given minute.
+func inc(call string, cost int64, minute int) Increment {
+	return Increment{Scope: "s", Period: nov, Call: call, Cost: cost, At: at(minute)}
+}
+
 // acquire admits a slot with no budget: the slot half of Admit.
 func acquire(t *testing.T, st Store, s Slot, principalLimit, scopeLimit int) bool {
 	t.Helper()
-	o, _, _, err := st.Admit(t.Context(), Admission{Slot: s, Period: nov, PrincipalLimit: principalLimit, ScopeLimit: scopeLimit})
+	o, _, err := st.Admit(t.Context(), Admission{Slot: s, Period: nov, PrincipalLimit: principalLimit, ScopeLimit: scopeLimit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +69,7 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatal("the re-registered slots count against the scope")
 		}
 		// Complete frees the slot it records.
-		if _, err := st.Complete(ctx, nov, Slot{"b", "p1", "s"}, Event{"b", 1}); err != nil {
+		if err := st.Complete(ctx, inc("b", 1, 0), Slot{"b", "p1", "s"}); err != nil {
 			t.Fatal(err)
 		}
 		if !acquire(t, st, Slot{"b2", "p1", "s"}, 3, 0) || acquire(t, st, Slot{"b3", "p1", "s"}, 3, 0) {
@@ -67,13 +78,13 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 	t.Run("budget", func(t *testing.T) {
 		ctx, st := t.Context(), newStore(t)
-		st.Add(ctx, "s", nov, Event{"e1", 3})
-		st.Add(ctx, "s", nov, Event{"e2", 5})
+		st.Add(ctx, inc("e1", 3, 1))
+		st.Add(ctx, inc("e2", 5, 2))
 		for _, tc := range []struct {
 			name string
 			a    Admission
 			want Outcome
-		}{ // known: the snapshot's 2 (as of number 1) plus the 5 after it
+		}{ // known: the snapshot's 2 (before minute 2) plus the 5 from it
 			{"soft, under", Admission{Budget: 8}, Admitted},
 			{"soft, at", Admission{Budget: 7}, OverBudget},
 			{"declared-worst-case check, fits", Admission{Budget: 9, DeclaredWorstCaseCheck: true, Worst: 2}, Admitted},
@@ -81,10 +92,10 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			{"none", Admission{}, Admitted},
 		} {
 			a := tc.a
-			a.Slot, a.Period, a.Watermark, a.Spend = Slot{tc.name, tc.name, "s"}, nov, 1, 2
-			o, known, over, err := st.Admit(ctx, a)
-			if err != nil || o != tc.want || known != 7 || over {
-				t.Errorf("%s: %v %d %v %v; want %v, known 7", tc.name, o, known, over, err, tc.want)
+			a.Slot, a.Period, a.Since, a.Spend = Slot{tc.name, tc.name, "s"}, nov, at(2), 2
+			o, known, err := st.Admit(ctx, a)
+			if err != nil || o != tc.want || known != 7 {
+				t.Errorf("%s: %v %d %v; want %v, known 7", tc.name, o, known, err, tc.want)
 			}
 		}
 		// Over budget takes no slot.
@@ -94,28 +105,23 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 	t.Run("counter", func(t *testing.T) {
 		ctx, st := t.Context(), newStore(t)
-		for _, tc := range []struct {
-			e    Event
-			want int64
-		}{{Event{"e1", 3}, 1}, {Event{"e2", 5}, 2}, {Event{"e1", 3}, 1}} { // twice is once
-			if seq, err := st.Add(ctx, "s", nov, tc.e); err != nil || seq != tc.want {
-				t.Fatalf("Add(%v) = %d, %v; want %d", tc.e, seq, err, tc.want)
+		st.Add(ctx, inc("e1", 3, 0))
+		st.Add(ctx, inc("e2", 5, 1))
+		st.Add(ctx, inc("e3", 2, 1)) // the same minute: summed
+		st.Add(ctx, inc("e2", 5, 1)) // an amount, not an event: twice is twice
+		st.Add(ctx, Increment{Scope: "other", Period: nov, Cost: 100, At: at(1)})
+		st.Add(ctx, Increment{Scope: "s", Period: "2026-12", Cost: 100, At: at(1)})
+		for since, want := range map[time.Time]int64{{}: 15, at(0): 15, at(1): 12, at(1).Add(30 * time.Second): 12, at(2): 0} {
+			if got, err := st.Since(ctx, "s", nov, since); err != nil || got != want {
+				t.Errorf("Since(%v) = %d, %v; want %d", since, got, err, want)
 			}
 		}
-		st.Add(ctx, "other", nov, Event{"e9", 100})
-		st.Add(ctx, "s", "2026-12", Event{"e10", 100})
-		for w, want := range map[int64]int64{0: 8, 1: 5, 2: 0, 7: 0} {
-			if got, over, err := st.After(ctx, "s", nov, w); err != nil || over || got != want {
-				t.Errorf("After(%d) = %d, %v, %v; want %d", w, got, over, err, want)
-			}
+		// A batch, whole.
+		if err := st.AddAll(ctx, []Increment{inc("e4", 1, 3), inc("e5", 1, 4), {Scope: "other", Period: nov, Cost: 1, At: at(3)}}); err != nil {
+			t.Fatal(err)
 		}
-		if seq, _ := st.Add(ctx, "s", "2026-12", Event{"e11", 1}); seq != 2 {
-			t.Errorf("December's second event numbered %d", seq)
-		}
-		// A batch, in order, a repeat keeping its number.
-		seqs, err := st.AddAll(ctx, []Increment{{"s", nov, Event{"e3", 1}}, {"s", nov, Event{"e1", 3}}, {"other", nov, Event{"e4", 1}}})
-		if err != nil || !slices.Equal(seqs, []int64{3, 1, 2}) {
-			t.Errorf("AddAll = %v, %v; want [3 1 2]", seqs, err)
+		if got, _ := st.Since(ctx, "s", nov, at(3)); got != 2 {
+			t.Errorf("after AddAll, Since(3) = %d, want 2", got)
 		}
 	})
 }
@@ -138,10 +144,6 @@ func slotsOf(t *testing.T, st Store) []string {
 	}
 	t.Fatalf("no slot listing for %T", st)
 	return nil
-}
-
-func sortEvents(es []Event) {
-	slices.SortFunc(es, func(a, b Event) int { return strings.Compare(a.ID, b.ID) })
 }
 
 func TestMemStore(t *testing.T) { testStore(t, func(*testing.T) Store { return NewMem() }) }
@@ -226,18 +228,28 @@ func TestValkeyStore(t *testing.T) {
 		}
 		t.Fatal("b's slot never expired")
 	})
-	t.Run("trimmed history over-counts, never under-counts", func(t *testing.T) {
+	t.Run("a counter keeps a retention's minutes and its whole total", func(t *testing.T) {
 		ctx, st := t.Context(), newValkey(t, addr)
-		st.Retain = 100 * time.Millisecond
-		st.Add(ctx, "s", nov, Event{"old", 1})
-		st.Add(ctx, "s", nov, Event{"mid", 2})
-		time.Sleep(250 * time.Millisecond)
-		st.Add(ctx, "s", nov, Event{"new", 4}) // trims numbers 1 and 2
-		if got, over, _ := st.After(ctx, "s", nov, 1); !over || got != 7 {
-			t.Fatalf("After(1) = %d, over %v; want the whole total (7), flagged", got, over)
+		st.Retain = 2 * time.Minute
+		now := time.Now()
+		var incs []Increment
+		for m := range 80 { // 80 minutes back to now, 1 each
+			incs = append(incs, Increment{Scope: "s", Period: nov, Cost: 1, At: now.Add(time.Duration(m-79) * time.Minute)})
 		}
-		if got, over, _ := st.After(ctx, "s", nov, 3); over || got != 0 {
-			t.Fatalf("After(3) = %d, %v", got, over)
+		if err := st.AddAll(ctx, incs); err != nil {
+			t.Fatal(err)
+		}
+		// A boundary an hour back reads only the retained minutes; none
+		// reads the whole total.
+		_, known, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov, Since: now.Add(-time.Hour), Now: now})
+		if err != nil || known != 3 {
+			t.Fatalf("known %d, %v: want the 3 minutes within retention", known, err)
+		}
+		if _, known, _ := st.Admit(ctx, Admission{Slot: Slot{"b", "p2", "s"}, Period: nov, Now: now}); known != 80 {
+			t.Fatalf("known %d with no boundary, want the total, 80", known)
+		}
+		if n, _ := st.c.Do(ctx, st.c.B().Hlen().Key(st.counterKey("s", nov)).Build()).AsInt64(); n > 2+60+1 {
+			t.Fatalf("%d fields kept: past a retention and its margin, the old minutes go", n)
 		}
 	})
 	t.Run("an unreachable server is ErrUnavailable", func(t *testing.T) {
@@ -249,7 +261,7 @@ func TestValkeyStore(t *testing.T) {
 		c.Close()
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		if _, _, _, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov}); err == nil || !strings.Contains(err.Error(), ErrUnavailable.Error()) {
+		if _, _, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov}); err == nil || !strings.Contains(err.Error(), ErrUnavailable.Error()) {
 			t.Fatalf("%v, want ErrUnavailable", err)
 		}
 	})
@@ -272,7 +284,7 @@ func TestReplicaAcks(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for { // the replica's first sync
 		st.Unreplicated.Store(0)
-		if _, err := st.Add(ctx, "s", nov, Event{fmt.Sprint("sync", time.Now().UnixNano()), 1}); err != nil {
+		if err := st.Add(ctx, inc(fmt.Sprint("sync", time.Now().UnixNano()), 1, 0)); err != nil {
 			t.Fatal(err)
 		}
 		if st.Unreplicated.Load() == 0 {
@@ -283,8 +295,8 @@ func TestReplicaAcks(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if seq, err := st.Complete(ctx, nov, Slot{"c1", "p", "s"}, Event{"c1", 2}); err != nil || seq < 2 || st.Unreplicated.Load() != 0 {
-		t.Fatalf("Complete = %d, %v, unreplicated %d", seq, err, st.Unreplicated.Load())
+	if err := st.Complete(ctx, inc("c1", 2, 0), Slot{"c1", "p", "s"}); err != nil || st.Unreplicated.Load() != 0 {
+		t.Fatalf("Complete = %v, unreplicated %d", err, st.Unreplicated.Load())
 	}
 	// A stalled replica cannot acknowledge the add: WAIT on the add's own
 	// connection times out and the add is counted. A WAIT on another
@@ -296,7 +308,7 @@ func TestReplicaAcks(t *testing.T) {
 	// once a second), then the stall and the add.
 	fresh := newValkey(t, primary)
 	fresh.ReplicaAcks = 1
-	if _, err := fresh.Add(ctx, "s", nov, Event{"warm", 1}); err != nil {
+	if err := fresh.Add(ctx, inc("warm", 1, 0)); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(1500 * time.Millisecond)
@@ -311,7 +323,7 @@ func TestReplicaAcks(t *testing.T) {
 		stalled <- rc.Do(context.Background(), rc.B().Arbitrary("DEBUG", "SLEEP").Args("0.5").Build()).Error()
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if _, err := fresh.Add(ctx, "s", nov, Event{"stalled", 1}); err != nil || fresh.Unreplicated.Load() != 1 {
+	if err := fresh.Add(ctx, inc("stalled", 1, 0)); err != nil || fresh.Unreplicated.Load() != 1 {
 		t.Fatalf("err %v, unreplicated %d: an add the stalled replica never saw must be counted", err, fresh.Unreplicated.Load())
 	}
 	if err := <-stalled; err != nil {
@@ -319,7 +331,7 @@ func TestReplicaAcks(t *testing.T) {
 	}
 	st.Unreplicated.Store(0)
 	st.ReplicaAcks = 2 // more than there are
-	if _, err := st.Add(ctx, "s", nov, Event{"x", 1}); err != nil || st.Unreplicated.Load() != 1 {
+	if err := st.Add(ctx, inc("x", 1, 0)); err != nil || st.Unreplicated.Load() != 1 {
 		t.Fatalf("err %v, unreplicated %d: one replica short must be counted", err, st.Unreplicated.Load())
 	}
 }

@@ -136,8 +136,7 @@ func (q *LedgerQueue) drain(ctx context.Context, buf []sdklog.Record) []sdklog.R
 // export delivers a batch, retrying a failure with backoff: a collector
 // restarting is a few seconds, and its rows must not be dropped for it
 // (golem#4). A batch the collector may have partly taken is sent whole
-// again; the ledger deduplicates by event (golem.spend_dedup,
-// golem.spend_seq's ReplacingMergeTree). After the last attempt, or at the
+// again; the ledger deduplicates by event (golem.spend_dedup). After the last attempt, or at the
 // shutdown's deadline, its rows are counted as failed.
 func (q *LedgerQueue) export(ctx context.Context, buf []sdklog.Record) []sdklog.Record {
 	if len(buf) == 0 {

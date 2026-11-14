@@ -55,7 +55,9 @@ guaranteed to cover every provider feature or failure mode.
   (ADR 0041);
 - call lifetime: first-byte, idle and maximum durations;
 - refusal once known spend reaches a budget, on every site within the
-  refresh lag (ADR 0031, 0042).
+  refresh lag (ADR 0031, 0048); known spend undercounts a row the ledger
+  ingests later than its allowance, or minutes a Valkey failover lost,
+  until a later snapshot's boundary passes them (ADR 0048).
 
 **Estimates are conservative, not guaranteed.** A call whose usage is
 missing or ambiguous is charged by rules chosen to err high (every byte
