@@ -12,20 +12,21 @@ if ! command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
 fi
 STATES=${STATES:-3000000} # set before graph.sh, whose default is smaller
 . ./graph.sh
-D=${DEPTH:-10}
-echo "== exhaustive: leadership.small.yaml, every run up to depth $D"
+D=${DEPTH:-10}  # the breaking runs
+H=${HOLD_DEPTH:-9} # the designs holding: depth 10 needs over 4 GiB of stored graph
+echo "== exhaustive: leadership.small.yaml, the designs to depth $H, the broken ones to $D"
 echo "-- the architect's design (lease object + fence and records in the document)"
-for rb in none doc lead; do graph_holds leadership $D "ROLLBACK=\"$rb\"" takeDoc bump readLease rollbackDoc rollbackLead; done
+for rb in none doc lead; do graph_holds leadership $H "ROLLBACK=\"$rb\"" takeDoc bump readLease rollbackDoc rollbackLead; done
 graph_breaks leadership $D 'JOBS="none"' noStaleSync
 graph_breaks leadership $D 'JOBS="readLease"' noStaleSync
 graph_breaks leadership $D 'GUARD=false,ROLLBACK="doc"' floorNeverDrops
 echo "-- the specialist's design (lease and records in a lead object + epoch copy in the document)"
-for rb in none doc; do graph_holds leadership $D "DESIGN=\"object\",ROLLBACK=\"$rb\"" takeDoc claim readLease rollbackDoc rollbackLead; done
+for rb in none doc; do graph_holds leadership $H "DESIGN=\"object\",ROLLBACK=\"$rb\"" takeDoc claim readLease rollbackDoc rollbackLead; done
 graph_breaks leadership $D 'DESIGN="object",ROLLBACK="lead"' epochsUnique
 graph_breaks leadership $D 'DESIGN="object",JOBS_AFTER_CLAIM=false' noStaleSync
 graph_breaks leadership $D 'DESIGN="object",GUARD=false,ROLLBACK="lead"' floorNeverDrops
 echo "-- today (lease and records in the document)"
-graph_holds leadership $D 'DESIGN="doc"' acquire claim bump readLease rollbackDoc rollbackLead
+graph_holds leadership $H 'DESIGN="doc"' acquire claim bump readLease rollbackDoc rollbackLead
 graph_breaks leadership $D 'DESIGN="doc",JOBS="none"' noStaleSync
 graph_breaks leadership $D 'DESIGN="doc",GUARD=false,ROLLBACK="doc"' floorNeverDrops
 graph_breaks leadership $D 'DESIGN="doc",ROLLBACK="doc"' epochsUnique
