@@ -255,7 +255,12 @@ control plane.
   an `emergency-denylist` ConfigMap (key prefixes or hashes, principals)
   mounted into its gateways and read as a file, applied over the snapshot.
   A site admin edits it with `kubectl`; it is cleared once the control
-  plane has the revocation.
+  plane has the revocation. **Built:** `gateway/auth.DenyFile`
+  (`golem-gateway -denylist <file>`): one entry a line, `key <hash>`,
+  `key-prefix <display prefix>`, `principal <id>` or `entra <oid or app
+  ID>`; read before the gateway serves and re-read as it changes; a line it
+  cannot read keeps the previous list in force; a match is refused with
+  `auth.denied` (403) whatever the snapshot says.
 - **Bootstrap**: a `GolemInstallation` claim on the platform's Crossplane
   (ADR 0040) composes the bucket (versioning, lifecycle, policy,
   replication to the backup account), the KMS keys (encryption, signing),

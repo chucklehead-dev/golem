@@ -3,8 +3,12 @@ package auth
 import (
 	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
 
 	"github.com/chucklehead-dev/golem/lib/contract"
 	"github.com/chucklehead-dev/golem/lib/key"
@@ -111,5 +115,71 @@ func TestImplicit(t *testing.T) {
 	live.RequireLocalKey(local)
 	if _, r := live.Authenticate(http.Header{"X-Api-Key": {local}}); r == nil {
 		t.Fatal("a live installation has no implicit principal")
+	}
+}
+
+// TestDenylist: an entry refuses its credential or caller whatever the
+// snapshot allows; a bad edit keeps the list in force; clearing it lets
+// them in again.
+func TestDenylist(t *testing.T) {
+	e := &Entra{Tenant: tenant, Audiences: []string{apiID}, Now: func() time.Time { return now }}
+	e.SetKeys(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &signingKey.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
+	plain := key.New(key.Live)
+	hash := key.Hash(plain)
+	ents := snapshot.Entitlements{
+		Scopes:    []snapshot.Scope{{ID: "team-a", Models: []string{"claude"}}},
+		Users:     []snapshot.Member{{ID: "alice", Entra: alice, Scopes: []string{"team-a"}, Default: "team-a"}},
+		KeyOwners: []snapshot.Owner{{ID: "alice", Kind: "user", Scopes: []string{"team-a"}}},
+		Keys:      []snapshot.Key{{Hash: hex.EncodeToString(hash[:]), Display: key.Display(plain), Principal: "alice", PrincipalKind: "user", Scope: "team-a"}},
+	}
+	k := Compile(ents, key.Live, func() time.Time { return now }, e)
+	path := filepath.Join(t.TempDir(), "denylist")
+	f := &DenyFile{Path: path}
+	k.Deny(f)
+	write := func(body string) error {
+		os.WriteFile(path, []byte(body), 0o600)
+		return f.Load()
+	}
+	refusal := func(h http.Header) string {
+		if _, r := k.Authenticate(h); r != nil {
+			return r.Code.Name
+		}
+		return ""
+	}
+	byKey := http.Header{"X-Api-Key": {plain}}
+	byToken := bearer(sign(t, signingKey, "k1", userClaims()), "")
+	if got := refusal(byKey) + refusal(byToken); got != "" {
+		t.Fatalf("no denylist: %s", got)
+	}
+	for name, tc := range map[string]struct {
+		body             string
+		keyDenied, token bool
+	}{
+		"by hash":      {"key " + hex.EncodeToString(hash[:]) + "  # leaked in a gist\n", true, false},
+		"by prefix":    {"key-prefix " + plain[:20] + "\n", true, false},
+		"by principal": {"# incident 42\nprincipal alice\n", true, true},
+		"by Entra ID":  {"entra " + alice + "\n", false, true},
+	} {
+		if err := write(tc.body); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := refusal(byKey) == "auth.denied"; got != tc.keyDenied {
+			t.Errorf("%s: the key denied %v, want %v", name, got, tc.keyDenied)
+		}
+		if got := refusal(byToken) == "auth.denied"; got != tc.token {
+			t.Errorf("%s: the token denied %v, want %v", name, got, tc.token)
+		}
+	}
+	if err := write("principal alice\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := write("prinicpal typo\n"); err == nil || refusal(byToken) != "auth.denied" {
+		t.Fatalf("a bad edit: %v, %q; want an error and the previous list kept", err, refusal(byToken))
+	}
+	if err := write("key-prefix glm_\n"); err == nil {
+		t.Fatal("a prefix that would deny every key was accepted")
+	}
+	if err := write(""); err != nil || refusal(byKey)+refusal(byToken) != "" {
+		t.Fatalf("cleared: %v", err)
 	}
 }

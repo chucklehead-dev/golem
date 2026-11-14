@@ -45,6 +45,7 @@ var (
 	AuthKeyWrongInstallation = Code{"auth.key_wrong_installation", 401, OriginClient}
 	AuthTokenInvalid         = Code{"auth.token_invalid", 401, OriginClient}
 	AuthTokenExpired         = Code{"auth.token_expired", 401, OriginClient}
+	AuthDenied               = Code{"auth.denied", 403, OriginPolicy}
 
 	AuthzModelNotAllowed          = Code{"authz.model_not_allowed", 403, OriginPolicy}
 	AuthzScopeNotMember           = Code{"authz.scope_not_member", 403, OriginPolicy}
@@ -74,7 +75,7 @@ var (
 var Codes = []Code{
 	LimitRate, LimitConcurrency, LimitProviderQuota,
 	BudgetPoolExhausted, BudgetMemberCap, BudgetKeyCap,
-	AuthMissing, AuthKeyUnknown, AuthKeyExpired, AuthKeyRevoked, AuthKeyWrongInstallation, AuthTokenInvalid, AuthTokenExpired,
+	AuthMissing, AuthKeyUnknown, AuthKeyExpired, AuthKeyRevoked, AuthKeyWrongInstallation, AuthTokenInvalid, AuthTokenExpired, AuthDenied,
 	AuthzModelNotAllowed, AuthzScopeNotMember, AuthzProviderStorageForbidden, AuthzOriginForbidden, AuthzFeatureForbidden,
 	RequestInvalid, RequestTooLarge, RequestUnreadable, RequestOverCeiling,
 	RouteUnknownModel, RouteNoCapableDeployment, RouteWrongFrontend, TranslateUnsupportedField,

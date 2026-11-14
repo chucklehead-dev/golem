@@ -47,6 +47,7 @@ func main() {
 	localKeyFile := flag.String("local-key", "", "the file holding standalone's local key (generated on first use); default <user config dir>/golem/standalone-key")
 	zoneName := flag.String("period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
 	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
+	denylist := flag.String("denylist", "", "the site's emergency denylist file (a mounted ConfigMap), re-read as it changes; empty: none")
 	flag.Parse()
 	if err := releaseGate(*standalone, *listen); err != nil {
 		fail("%v", err)
@@ -76,6 +77,16 @@ func main() {
 			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Watermark: s.Watermark})
 		}
 	}}
+	var deny *auth.DenyFile
+	if *denylist != "" {
+		// Read before serving: a gateway started during an incident must
+		// not admit what the list refuses, even once.
+		deny = &auth.DenyFile{Path: *denylist, Log: slog.Default()}
+		if err := deny.Load(); err != nil {
+			fail("-denylist: %v", err)
+		}
+		holder.Deny = deny
+	}
 	dir := &snapshot.Dir{Path: *standalone, Holder: holder, Secrets: snapshot.EnvSecrets{Getenv: os.Getenv}}
 	if err := dir.Load(); err != nil {
 		fail("%v", err)
@@ -98,6 +109,9 @@ func main() {
 	bg, stopBg := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Go(func() { dir.Run(bg) })
+	if deny != nil {
+		wg.Go(func() { deny.Run(bg) })
+	}
 	wg.Go(func() { limiter.Run(bg) })
 	if entra != nil {
 		wg.Go(func() { entra.Run(bg) })

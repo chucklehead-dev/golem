@@ -63,6 +63,9 @@ type Holder struct {
 	// OnApply, if set, is called with each snapshot applied (the limiter
 	// takes its known spend).
 	OnApply func(*Compiled)
+	// Deny, if set, is the site's emergency denylist, applied over every
+	// snapshot's entitlements (control-plane.md §5).
+	Deny *auth.DenyFile
 
 	mu    sync.Mutex
 	floor uint64
@@ -244,6 +247,7 @@ func compileRoute(r snapshot.Route, targets map[targetKey]*route.Target) (*route
 // gateway's local key for an implicit principal.
 func (h *Holder) compileAuth(e snapshot.Entitlements) *auth.Keys {
 	k := auth.Compile(e, cmp.Or(h.Env, key.Live), h.now, h.Entra)
+	k.Deny(h.Deny)
 	if h.LocalKey != "" {
 		k.RequireLocalKey(h.LocalKey)
 	}

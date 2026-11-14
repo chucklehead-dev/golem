@@ -25,8 +25,9 @@ type Principal struct {
 	Key      string // the key's display prefix, if a key was used
 	// models is the scope's aliases narrowed by the key's; nil allows every
 	// route (standalone's implicit principal only).
-	models map[string]bool
-	Limits Limits
+	models  map[string]bool
+	entraID string // the Entra ID a token named, for the denylist
+	Limits  Limits
 }
 
 // Limits are the scope's, for the limiter.
@@ -57,6 +58,7 @@ type Keys struct {
 	local    [32]byte // the implicit principal's key, hashed (RequireLocalKey)
 	now      func() time.Time
 	entra    *Entra
+	deny     *DenyFile // the site's emergency denylist, applied over the snapshot
 	// byEntra: a user's oid or a service's app ID, then a scope, to the
 	// principal acting there; the empty scope is the default's.
 	byEntra map[string]map[string]*Principal
@@ -139,7 +141,7 @@ func (k *Keys) addMembers(kind string, ms []snapshot.Member, scopes map[string]*
 		byScope := map[string]*Principal{}
 		for _, id := range m.Scopes {
 			if r := scopes[id]; r != nil {
-				byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: r.models, Limits: r.limits}
+				byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: r.models, entraID: m.Entra, Limits: r.limits}
 			}
 		}
 		if p := byScope[m.Default]; p != nil {
@@ -192,10 +194,34 @@ type Refusal struct {
 	Msg  string
 }
 
+// Deny applies a site's emergency denylist to every request these keys
+// authenticate, over what the snapshot allows.
+func (k *Keys) Deny(f *DenyFile) { k.deny = f }
+
 // Authenticate finds the request's principal. The credential, a golem key
 // or an Entra token, is in Authorization: Bearer (OpenAI's SDKs) or
-// x-api-key (Anthropic's).
+// x-api-key (Anthropic's). A caller the site's emergency denylist names is
+// refused, whatever the snapshot says.
 func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
+	p, r := k.authenticateKey(h)
+	if r == nil {
+		if cred, _ := credential(h); k.deny.Current().denies(p, keyCred(cred), p.entraID) {
+			return nil, denied
+		}
+	}
+	return p, r
+}
+
+// keyCred is cred if it is a golem key, else "" (a token is matched by its
+// Entra ID).
+func keyCred(cred string) string {
+	if looksLikeJWS(cred) {
+		return ""
+	}
+	return cred
+}
+
+func (k *Keys) authenticateKey(h http.Header) (*Principal, *Refusal) {
 	cred, conflict := credential(h)
 	if conflict {
 		return nil, &Refusal{contract.AuthMissing, "two different credentials (Authorization and x-api-key): send one"}
