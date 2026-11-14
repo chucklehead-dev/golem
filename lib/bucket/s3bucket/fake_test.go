@@ -15,8 +15,9 @@ import (
 // documents them. Conditions are checked and applied under one lock, as
 // S3 applies a conditional write atomically.
 type fakeS3 struct {
-	mu      sync.Mutex
-	objects map[string][]byte
+	mu       sync.Mutex
+	objects  map[string][]byte
+	noBucket bool // every request answered 404 NoSuchBucket
 }
 
 func etagOf(b []byte) string { h := md5.Sum(b); return `"` + hex.EncodeToString(h[:]) + `"` }
@@ -33,6 +34,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/")
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.noBucket {
+		s3Error(w, http.StatusNotFound, "NoSuchBucket")
+		return
+	}
 	cur, exists := f.objects[key]
 	switch r.Method {
 	case http.MethodGet:

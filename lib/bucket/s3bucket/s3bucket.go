@@ -14,6 +14,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	"github.com/chucklehead-dev/golem/lib/bucket"
@@ -86,6 +87,12 @@ func (b *Bucket) Put(ctx context.Context, key string, body []byte, ifMatch strin
 // conditional write racing another: S3's ConditionalRequestConflict, which
 // is the same outcome for a compare-and-swap).
 func mapErr(key string, err error) error {
+	// A missing bucket is a 404 too, and must not read as a missing object:
+	// the state store would take it for no state yet, and a gateway for a
+	// pool never published.
+	if ae, ok := errors.AsType[smithy.APIError](err); ok && ae.ErrorCode() == "NoSuchBucket" {
+		return fmt.Errorf("bucket: %s: the bucket does not exist (check -bucket and the region): %w", key, err)
+	}
 	if re, ok := errors.AsType[*smithyhttp.ResponseError](err); ok {
 		switch re.HTTPStatusCode() {
 		case http.StatusNotFound:

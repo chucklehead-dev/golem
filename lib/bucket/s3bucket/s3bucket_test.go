@@ -2,6 +2,8 @@ package s3bucket
 
 import (
 	"crypto/ed25519"
+	"errors"
+	"strings"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/state"
+	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/bucket/buckettest"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
@@ -84,4 +87,14 @@ func keys(m map[string][]byte) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+// TestNoSuchBucket: a missing bucket is an error, not a missing object
+// (which the state store would read as no state yet).
+func TestNoSuchBucket(t *testing.T) {
+	b := against(t, &fakeS3{objects: map[string][]byte{}, noBucket: true})
+	_, _, err := b.Get(t.Context(), "state/document.json", "")
+	if err == nil || errors.Is(err, bucket.ErrNotFound) || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("%v: want an error naming the missing bucket", err)
+	}
 }
