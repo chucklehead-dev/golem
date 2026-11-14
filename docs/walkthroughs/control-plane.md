@@ -381,19 +381,31 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    published to renew either, nothing is published. Before this, the last
    good config lived only in memory, and a restarted leader over a broken
    directory published nothing until every gateway's lease lapsed.
-4. **Due?** (`due`, `controller.go:379`) A publication is due when the good
-   config's hash, the entitlements' hash or the epoch differs from the last
-   publication's, or the renewal interval (`Renew`, default a minute) has
-   passed. Renewal extends the snapshots' authorization lease (`Lease`,
-   default four hours; ADRs 0030, 0032).
+4. **Due?** (`due`, `controller.go:379`) Each pool is due on its own
+   (`poolState`): when the good config's hash, the entitlements' hash or
+   the epoch differs from its last publication's, or the renewal interval
+   (`Renew`, default a minute) has passed. Renewal extends the snapshots'
+   authorization lease (`Lease`, default four hours; ADRs 0030, 0032). A
+   pool whose last attempt failed is due once its backoff has passed
+   (`backoff`: `Retry`, two seconds, doubling at each failure in a row up
+   to the renewal interval, less up to a quarter of jitter, so it is still
+   tried at least once a renewal interval), or at once if what is to be
+   published changed since that attempt (a revocation is not held back by
+   a retry's wait). Nothing due: nothing is published, and the step's
+   error still names each failing pool's last failure.
 5. **Known spend**: if a known-spend job is set, run it (§4.1).
 6. **Publish** every pool (`publish`, `controller.go:388`), in sorted order,
    through one `PublishAll` with the same snapshot built by
    `compile.Compile` from the good config (or `compile.Renew`, step 3) and
    `entitlements` (`controller.go:404`): the state's `Document.Entitlements` (scopes'
    models limited to routes that exist) with known spend laid over it.
-   Only if every pool succeeded is the publication remembered; otherwise
-   the next step tries them all again.
+   Only the due pools are published. Each that succeeded records its
+   publication and clears its failures; each that failed counts one more
+   failure and waits its backoff. Before this, a publication was
+   remembered only if every pool succeeded, so one pool failing for good
+   (a tampered checkpoint) made every step due: the healthy pools were
+   published, and the document written, every second rather than every
+   minute. `TestFailingPoolBacksOff`.
 
 **A problem of the state's degrades one scope, not the publication.** A
 scope with a budget is charged by price, so a scope that reaches a model
@@ -456,7 +468,9 @@ instruments, read when the meter collects:
   it fails; an attempted publication (a due step) also counts
   `config_renewing` while the directory is not what is published and
   `unpriced` while scopes are published without aliases (`degraded`,
-  `controller.go:174`). Steps with nothing due count nothing.
+  `controller.go:174`), against the pools it attempted. Steps with nothing
+  due count nothing, so a pool that keeps failing counts once per retry
+  of its backoff: at least once a renewal interval.
 - **The config's state**: `ConfigRenewing` (the last step found the
   directory not compiling, or an edit refused) and `Unpriced`.
 - **The jobs**: the last audit step and group sync that succeeded
@@ -695,10 +709,6 @@ path with a real gateway source over one bucket.
   pools' checkpoints and pointers. A deletion of the document together
   with all of those (or a deployment whose `-pools` names none that were
   published) is taken for a first start.
-- **One failing pool republishes the rest every second**: `Step` records a
-  publication only when every pool succeeded, so while one pool fails (a
-  tampered checkpoint, say) the others are published, and the document
-  written, at every step rather than every renewal interval.
 - **An unpriced scope's status is a log line and a count**: a budgeted
   scope published without its unpriced aliases is reported in the step's
   error (logged at error level once until it changes), by
@@ -708,9 +718,10 @@ path with a real gateway source over one bucket.
   (a scope update), it needs the same check.
 - **Metrics need `-telemetry`**: without a collector the loop's record is
   kept but not exported. The failure counter counts attempts, not
-  incidents: a pool that keeps failing counts every second (one failing
-  pool makes every step due, above), so alerts read its increase, not its
-  value.
+  incidents: a pool that keeps failing counts at each retry of its
+  backoff (every two seconds at first, then once a renewal interval), so
+  alerts read its increase over a window longer than a renewal interval,
+  not its value.
 - **A replica that will not start reports nothing**: `ErrMissing` at
   `Load`, or a bad flag, stops golem-control before its metrics exist;
   the alert is their absence.

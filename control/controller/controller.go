@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math/rand/v2"
 	"os"
 	"slices"
 	"strings"
@@ -45,8 +46,13 @@ type Controller struct {
 	// hours for internal pools); Renew how often they are republished to
 	// extend it (default a minute).
 	Lease, Renew time.Duration
-	Now          func() time.Time
-	Log          *slog.Logger
+	// Retry is how soon a pool whose publication failed is tried again
+	// (default two seconds), doubling at each further failure up to Renew,
+	// jittered; a change to publish (the config, the entitlements, the
+	// epoch) tries it at once.
+	Retry time.Duration
+	Now   func() time.Time
+	Log   *slog.Logger
 	// Audit, if set, ships the state's audit outbox while this replica
 	// leads (control/audit).
 	Audit *audit.Shipper
@@ -70,16 +76,33 @@ type Controller struct {
 	// renewing is each pool's publication as found in the bucket, renewed
 	// (compile.Renew) while no config has compiled since this replica
 	// started; nil once one has.
-	renewing  map[string]*snapshot.Snapshot
-	published struct { // the last publication that reached every pool
-		sum   [32]byte // its config's
-		ents  [32]byte // the state's entitlements published
-		epoch uint64
-		at    time.Time
-	}
+	renewing map[string]*snapshot.Snapshot
+	// pools is each pool's publishing state: what it last published and
+	// when, and its failed attempts since, so each pool is due on its own
+	// and a failing one is retried with backoff while the others publish at
+	// their own cadence. Only the loop touches it.
+	pools map[string]*poolState
 	// status is what the loop has done, for its metrics (control/metrics),
 	// under mu: written by the loop, read at a collection.
 	status status
+}
+
+// content is what a publication carries, as far as its being due goes:
+// the good config, the state's entitlements and the epoch it is made under.
+type content struct {
+	sum   [32]byte // the good config's
+	ents  [32]byte // the state's entitlements
+	epoch uint64
+}
+
+// poolState is one pool's publishing state.
+type poolState struct {
+	published content   // its last successful publication's
+	at        time.Time // when that was, by the controller's clock
+	attempted content   // what its last failed attempt tried to publish
+	failures  int       // failed attempts in a row since it last published
+	retryAt   time.Time // not tried again before this unless the content changes
+	err       error     // the last failed attempt's error
 }
 
 // status is the controller's record of its own work, for its metrics.
@@ -168,15 +191,15 @@ func (c *Controller) count(reason string, pools ...string) {
 	}
 }
 
-// degraded counts what made a publication attempt less than the
-// directory's config with every scope whole: a config not applied
-// (cfgErr), and aliases left out of scopes.
-func (c *Controller) degraded(cfgErr error) {
+// degraded counts, against the pools attempted, what made a publication
+// attempt less than the directory's config with every scope whole: a
+// config not applied (cfgErr), and aliases left out of scopes.
+func (c *Controller) degraded(cfgErr error, pools ...string) {
 	if cfgErr != nil {
-		c.count(ReasonConfigRenewing)
+		c.count(ReasonConfigRenewing, pools...)
 	}
 	if len(c.Unpriced()) > 0 {
-		c.count(ReasonUnpriced)
+		c.count(ReasonUnpriced, pools...)
 	}
 }
 
@@ -261,8 +284,13 @@ func (c *Controller) log() *slog.Logger {
 // edit cannot let every gateway's authorization lapse. A scope of the
 // state's whose budget reaches an unpriced model is published without
 // that model's alias and reported (ErrUnpriced), every step until it is
-// fixed; the other scopes and pools are published as usual. It reports
-// whether it published.
+// fixed; the other scopes and pools are published as usual.
+//
+// Each pool is due on its own: a pool that fails (a tampered checkpoint, a
+// regressed record) is retried with backoff (Retry, doubling up to Renew)
+// while the others publish at their own cadence, and its last failure is
+// in the error of every step until it publishes. It reports whether it
+// published to any pool.
 func (c *Controller) Step(ctx context.Context) (bool, error) {
 	fence, leads := c.Elector.Fence()
 	if !leads {
@@ -296,20 +324,73 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		c.count(FailureReason(err))
 		return false, err
 	}
-	if !c.due(ents, fence.Epoch) {
-		return false, errors.Join(cfgErr, c.unpricedErr())
+	cur, now := content{c.goodSum, ents, fence.Epoch}, c.now()
+	var due []string
+	var waiting []error // pools backing off, not tried this step: their last failure
+	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
+		switch ps := c.pool(pool); {
+		case c.due(ps, cur, now):
+			due = append(due, pool)
+		case ps.failures > 0:
+			waiting = append(waiting, fmt.Errorf("pool %s: %w", pool, ps.err))
+		}
+	}
+	if len(due) == 0 {
+		return false, errors.Join(append(waiting, cfgErr, c.unpricedErr())...)
 	}
 	var spendErr error
 	if c.Spend != nil {
 		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
 	}
-	errs := c.publish(ctx, fence, doc) // counts each pool's failure
-	c.degraded(cfgErr)
-	if len(errs) > 0 {
-		return false, errors.Join(append(errs, cfgErr, spendErr, c.unpricedErr())...)
+	perrs := c.publish(ctx, fence, doc, due) // counts each pool's failure
+	c.degraded(cfgErr, due...)
+	var errs []error
+	published := false
+	for _, pool := range due {
+		ps := c.pool(pool)
+		err := perrs[pool]
+		if err == nil {
+			*ps = poolState{published: cur, at: now}
+			published = true
+			continue
+		}
+		ps.failures++
+		ps.attempted, ps.err = cur, err
+		ps.retryAt = now.Add(c.backoff(ps.failures))
+		errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
 	}
-	c.published.sum, c.published.ents, c.published.epoch, c.published.at = c.goodSum, ents, fence.Epoch, c.now()
-	return true, errors.Join(cfgErr, spendErr, c.unpricedErr())
+	return published, errors.Join(append(append(errs, waiting...), cfgErr, spendErr, c.unpricedErr())...)
+}
+
+// pool is pool's publishing state, created on first use.
+func (c *Controller) pool(pool string) *poolState {
+	if c.pools == nil {
+		c.pools = map[string]*poolState{}
+	}
+	ps, ok := c.pools[pool]
+	if !ok {
+		ps = &poolState{}
+		c.pools[pool] = ps
+	}
+	return ps
+}
+
+// renew is the renewal interval: a minute unless set.
+func (c *Controller) renew() time.Duration { return cmp.Or(c.Renew, time.Minute) }
+
+// backoff is how long a pool waits after its nth failed attempt in a row:
+// Retry (two seconds unless set), doubled at each failure after the first,
+// at most the renewal interval, less up to a quarter of jitter. The jitter
+// keeps replicas' retries out of step; taking it off, never adding it,
+// keeps a failing pool tried at least once a renewal interval, which the
+// failure alerts rely on (they count attempts).
+func (c *Controller) backoff(n int) time.Duration {
+	d, renew := cmp.Or(c.Retry, 2*time.Second), c.renew()
+	for i := 1; i < n && d < renew; i++ {
+		d *= 2
+	}
+	d = min(d, renew)
+	return d - time.Duration(rand.Int64N(int64(d)/4+1))
 }
 
 // ErrUnpriced: a scope of the state's with a budget can reach a model no
@@ -373,20 +454,23 @@ func (c *Controller) CheckScope(d *state.Document, id string) error {
 	return nil
 }
 
-// due reports whether a publication is due: the good config, the
-// entitlements (their hash, ents) or the epoch differ from the last
-// publication's, or its renewal interval has passed.
-func (c *Controller) due(ents [32]byte, epoch uint64) bool {
-	renew := cmp.Or(c.Renew, time.Minute)
-	return c.goodSum != c.published.sum || ents != c.published.ents || epoch != c.published.epoch ||
-		!c.now().Before(c.published.at.Add(renew))
+// due reports whether a pool's publication is due at now with content
+// cur. A pool whose last attempt failed is due once its backoff has
+// passed, or at once if cur differs from what that attempt tried to
+// publish: a revocation is not held back by a retry's wait. Otherwise it
+// is due when cur differs from its last publication's (the config, the
+// entitlements, the epoch), or its renewal interval has passed.
+func (c *Controller) due(ps *poolState, cur content, now time.Time) bool {
+	if ps.failures > 0 {
+		return cur != ps.attempted || !now.Before(ps.retryAt)
+	}
+	return cur != ps.published || !now.Before(ps.at.Add(c.renew()))
 }
 
-// publish publishes the good config with doc's entitlements to every pool,
-// all their records in one state write (ADR 0049), under fence and from
-// doc's version. It returns each pool's failure, in pool order.
-func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.Document) []error {
-	pools := slices.Sorted(maps.Keys(c.Publishers))
+// publish publishes the good config with doc's entitlements to pools (in
+// sorted order), all their records in one state write (ADR 0049), under
+// fence and from doc's version. It returns each failed pool's error.
+func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.Document, pools []string) map[string]error {
 	var pubs []*publish.Publisher
 	for _, pool := range pools {
 		pubs = append(pubs, c.Publishers[pool])
@@ -422,11 +506,9 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 		c.unpriced = ps
 		c.mu.Unlock()
 	}
-	var errs []error
 	for _, pool := range pools {
 		if err := perrs[pool]; err != nil {
 			c.count(FailureReason(err), pool)
-			errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
 			continue
 		}
 		ptr := ptrs[pool]
@@ -438,7 +520,7 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 		c.mu.Unlock()
 		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", fence.Epoch, "hash", ptr.Hash[:12])
 	}
-	return errs
+	return perrs
 }
 
 // entitlements is the snapshot's entitlements for the routes that exist

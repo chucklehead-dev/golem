@@ -227,7 +227,11 @@ control plane.
     and reported, never stopping the publication; the control API refuses
     to create one. Every pool gets the same snapshot, its
     entitlements the state document's, republished at the next step when
-    they change; pool selectors and the CRD watch come later. Its
+    they change; pool selectors and the CRD watch come later. Each pool
+    is due on its own: one that fails (a tampered checkpoint, a regressed
+    record) is retried with backoff, from two seconds doubling to the
+    renewal interval, jittered, and at once on a change to publish, while
+    the others publish at their own cadence. Its
     end-to-end test runs two replicas and a gateway source over one
     bucket: a change reaches the gateway, a renewal extends its lease, a
     broken edit renews the last good config, a new leader publishes and a
