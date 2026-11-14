@@ -534,3 +534,19 @@ module noReconcile {
     BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = false).*
 }
 ```
+
+## The small instance
+
+The instance the exhaustive search explores (accounting.small.yaml, run by
+check-accounting.sh where it has one): the design at sizes small enough to
+search every run to a depth. The binding names this module rather than
+repeating its constants, and the check scripts vary one switch at a time
+with `-const`.
+
+```quint accounting.qnt +=
+
+module small {
+  import accounting(REQUESTS = Set("r1", "r2", "r3"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1,
+    LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
+}
+```

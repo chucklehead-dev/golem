@@ -678,3 +678,19 @@ module naiveRestore {
   this protocol's.
 - **Object identity**: rights stand for (UID, generation)-identified
   objects; a deleted-and-recreated object is a removal and a new grant.
+
+## The small instance
+
+The instance the exhaustive search explores (freshness.small.yaml, run by
+check-freshness.sh where it has one): the design at sizes small enough to
+search every run to a depth. The binding names this module rather than
+repeating its constants, and the check scripts vary one switch at a time
+with `-const`.
+
+```quint freshness.qnt +=
+
+module small {
+  import freshness(REPLICAS = Set("r1", "r2"), GATEWAYS = Set("g1"), RIGHTS = Set("a"), LEASE = 2, MAX_TIME = 4,
+    CONFIG_FRESH = true, ANCHOR_EARLIEST = true, FENCE_BOTH = true, PRESERVE_ON_RESTORE = true).*
+}
+```

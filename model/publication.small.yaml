@@ -1,17 +1,6 @@
 # publication.md's small instance, explored exhaustively to a depth
 # (check.sh): two replicas, one gateway, one key, a lease of 2.
 spec: publication.qnt
-module: publication
-constants:
-  REPLICAS: 'Set("r1", "r2")'
-  GATEWAYS: 'Set("g1")'
-  KEYS: 'Set("k1")'
-  LEASE: '2'
-  MAX_TIME: '4'
-  FENCE: 'true'
-  LEASE_FROM_SOURCE: 'true'
-  TRUSTED_FLOOR: 'true'
-  PRESERVE_ON_RESTORE: 'true'
-  CHECK_EXPIRY: 'true'
+module: small
 actions: {}
 invariants: [safe, revocationBounded, noExpiredServe, noRollback, noRollbackBelowCheckpoint, publicationsOrdered, revocationsSurviveRestore]

@@ -4,7 +4,9 @@ QUINT ?= quint
 LMT ?= lmt
 MODELS = publication accounting freshness exposure
 
-.PHONY: all check tangle verify-tangled
+GOTOGETHER ?= gotogether
+
+.PHONY: all check tangle verify-tangled lint
 all: check
 
 %.qnt: %.md
@@ -12,7 +14,14 @@ all: check
 
 tangle: $(MODELS:=.qnt)
 
-check: tangle
+# Model-level mistakes before any run (precedence, reserved names,
+# quint's typecheck): gotogether lint -model.
+lint: tangle
+	$(GOTOGETHER) lint -model $(subst $(eval) ,$(comma),$(MODELS:=.qnt))
+
+comma := ,
+
+check: tangle lint
 	QUINT=$(QUINT) ./check.sh
 	QUINT=$(QUINT) ./check-accounting.sh
 	QUINT=$(QUINT) ./check-freshness.sh

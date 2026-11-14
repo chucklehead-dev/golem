@@ -406,3 +406,9 @@ module noReacquire {
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
     SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = false).*
 }
+
+module small {
+  import exposure(REQUESTS = Set("a1", "a2", "b1"), OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2"),
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1, SCOPE_LIMIT = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+}

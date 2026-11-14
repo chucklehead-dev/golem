@@ -801,3 +801,20 @@ module noReacquire {
     SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = false).*
 }
 ```
+
+## The small instance
+
+The instance the exhaustive search explores (exposure.small.yaml, run by
+check-exposure.sh where it has one): the design at sizes small enough to
+search every run to a depth. The binding names this module rather than
+repeating its constants, and the check scripts vary one switch at a time
+with `-const`.
+
+```quint exposure.qnt +=
+
+module small {
+  import exposure(REQUESTS = Set("a1", "a2", "b1"), OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2"),
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1, SCOPE_LIMIT = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "watermark", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+}
+```

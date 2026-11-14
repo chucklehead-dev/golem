@@ -355,3 +355,8 @@ module naiveRestore {
     LEASE = 3, MAX_TIME = 7,
     CONFIG_FRESH = true, ANCHOR_EARLIEST = true, FENCE_BOTH = true, PRESERVE_ON_RESTORE = false).*
 }
+
+module small {
+  import freshness(REPLICAS = Set("r1", "r2"), GATEWAYS = Set("g1"), RIGHTS = Set("a"), LEASE = 2, MAX_TIME = 4,
+    CONFIG_FRESH = true, ANCHOR_EARLIEST = true, FENCE_BOTH = true, PRESERVE_ON_RESTORE = true).*
+}

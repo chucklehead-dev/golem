@@ -847,3 +847,19 @@ the real code with the model's traces, run it in simulation with the same
 faults (paused leaders, partitions, empty disks, replayed objects), and
 validate recorded runs against `safe`. The broken designs become planted
 mutants of the code, which the checks must catch.
+
+## The small instance
+
+The instance the exhaustive search explores (publication.small.yaml, run by
+check-publication.sh where it has one): the design at sizes small enough to
+search every run to a depth. The binding names this module rather than
+repeating its constants, and the check scripts vary one switch at a time
+with `-const`.
+
+```quint publication.qnt +=
+
+module small {
+  import publication(REPLICAS = Set("r1", "r2"), GATEWAYS = Set("g1"), KEYS = Set("k1"), LEASE = 2, MAX_TIME = 4,
+    FENCE = true, LEASE_FROM_SOURCE = true, TRUSTED_FLOOR = true, PRESERVE_ON_RESTORE = true, CHECK_EXPIRY = true).*
+}
+```

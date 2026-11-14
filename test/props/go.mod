@@ -4,8 +4,8 @@ go 1.27.3
 
 require (
 	github.com/chucklehead-dev/golem v0.0.0
-	github.com/chucklehead-dev/gotogether v0.0.0-20261112171447-7707ddf5f585
-	github.com/chucklehead-dev/gotogether/qhegel v0.0.0-20261112171447-7707ddf5f585
+	github.com/chucklehead-dev/gotogether v0.0.0-20261114062401-6dee29cf278c
+	github.com/chucklehead-dev/gotogether/qhegel v0.0.0-20261114062401-6dee29cf278c
 	hegel.dev/go/hegel v0.9.30
 )
 

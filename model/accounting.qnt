@@ -237,3 +237,8 @@ module noReconcile {
   import accounting(REQUESTS = Set("r1", "r2", "r3", "r4", "r5"), COSTS = Set(1, 2, 3), WORST = 3,
     BUDGET = 6, LIMIT = 2, LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = false).*
 }
+
+module small {
+  import accounting(REQUESTS = Set("r1", "r2", "r3"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1,
+    LIMIT_ON = true, RENEW_SLOTS = true, WORST_CHECK = false, DEDUP = true, RECONCILE = true).*
+}
