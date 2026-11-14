@@ -6,6 +6,7 @@
 //	golem-control -config ./config -bucket s3://golem-state/golem/ -signing-key kms:arn:aws:kms:... -pools internal,edge
 //	golem-control keygen ./keys   (a development Ed25519 key pair)
 //	golem-control pubkey kms:arn:aws:kms:...   (the publishing key's public half, for gateways' -keys)
+//	golem-control restore -bucket s3://golem-state/golem/ -from old.json -actor alice [-apply]   (an older document's entitlements, never widening)
 package main
 
 import (
@@ -68,9 +69,67 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "restore" {
+		if err := restore(context.Background(), os.Stdout, os.Args[2:]); err != nil {
+			fail("%v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fail("%v", err)
 	}
+}
+
+// restore brings an older state document's entitlements back without
+// widening anyone's rights (state.Restore): a dry run by default, which
+// prints what would be withheld and rolled back; written with -apply. The
+// backup is a document file, an old version taken from the bucket's
+// history or its Object Lock replica (control-plane.md §3).
+func restore(ctx context.Context, w io.Writer, args []string) error {
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	where := fs.String("bucket", "", "the state bucket: a directory, or s3://bucket/prefix/")
+	from := fs.String("from", "", "the backup: a state document file")
+	actor := fs.String("actor", "", "who restores, for the audit event (required)")
+	apply := fs.Bool("apply", false, "write the restore; without it, only show what it would do")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *where == "" || *from == "" || *actor == "" || fs.NArg() > 0 {
+		return errors.New("usage: golem-control restore -bucket <dir|s3://...> -from <document.json> -actor <who> [-apply]")
+	}
+	raw, err := os.ReadFile(*from)
+	if err != nil {
+		return err
+	}
+	backup, err := state.Decode(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *from, err)
+	}
+	b, err := openBucket(ctx, *where)
+	if err != nil {
+		return err
+	}
+	st := &state.Store{Bucket: b}
+	report, err := st.Restore(ctx, backup, *actor, !*apply)
+	if err != nil {
+		return fmt.Errorf("restore refused (nothing written): %w", err)
+	}
+	verb := "would be"
+	if *apply {
+		verb = "were"
+	}
+	fmt.Fprintf(w, "restoring state version %d: %d right(s) in the backup %s withheld, %d change(s) since it %s rolled back\n",
+		backup.StateVersion, len(report.Withheld), verb, len(report.Removed), verb)
+	for _, l := range report.Withheld {
+		fmt.Fprintln(w, "  withheld:", l, "(re-grant it as its own change if it is wanted)")
+	}
+	for _, l := range report.Removed {
+		fmt.Fprintln(w, "  rolled back:", l)
+	}
+	if !*apply {
+		fmt.Fprintln(w, "nothing written: run again with -apply")
+	}
+	return nil
 }
 
 // run is golem-control: set up, then run until SIGTERM or a component

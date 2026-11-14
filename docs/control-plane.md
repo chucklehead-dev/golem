@@ -102,9 +102,15 @@ validate` (the snapshot compiler as a library), not by a live API call
   writing the old; release N+1 writes the new. Mixed replicas during a
   rolling upgrade therefore always read what the others write.
 - **History**: bucket versioning in place, replication to a backup
-  account under Object Lock (ADR 0007). `golemctl state restore` writes an
-  old content as a new version after preserving all subsequent restrictive
-  security changes; missing history requires quarantined recovery and review.
+  account under Object Lock (ADR 0007). A restore writes an old content as
+  a new version after preserving all subsequent restrictive security
+  changes; missing history requires quarantined recovery and review.
+  Built: `state.Restore` and `golem-control restore` (a dry run unless
+  `-apply`): every right the narrower of the backup's and the current
+  document's (what only the backup has is withheld and reported, what was
+  added since is rolled back, keys minted since revoked), the fence,
+  records, revocations and outbox the current document's, the write an
+  audited `Update`. `golemctl state restore` over the admin API is next.
 - **Write access**: golem-control's role only, by bucket policy; a
   break-glass role exists, audited, MFA, two-person (ADR 0007).
 - **Not in the document**: shipped audit (ClickHouse), counters and
@@ -120,7 +126,7 @@ validate` (the snapshot compiler as a library), not by a live API call
   `If-Match`, a re-read and retry on 412), holding each pool's
   publication record (`publications`), which no write may remove or move
   back. JSON, decoded strictly, for now; the rest of §3.1, protobuf with
-  zstd, the audit outbox and restore come as they are built.
+  zstd come as they are built (the audit outbox and restore are, below).
   Entitlements (slice 2): `principals` (kind, Entra ID, memberships,
   default scope), `scopes` (policy), `keys` (by hash: owner, scope, model
   narrowing, expiry, revocation) and the append-only `revocations`. Every

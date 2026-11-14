@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chucklehead-dev/golem/control/state"
+	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/sign"
 )
 
@@ -81,5 +83,60 @@ func TestPubkey(t *testing.T) {
 	sig, _ := s.Sign(t.Context(), []byte("m"))
 	if err := k.Verify(s.KeyID(), []byte("m"), sig); err != nil {
 		t.Fatalf("the printed key does not verify the signer's signature under its ID: %v", err)
+	}
+}
+
+// TestRestoreCommand: a dry run shows what a restore would do and writes
+// nothing; -apply writes it, and a scope's model added since the backup
+// is gone.
+func TestRestoreCommand(t *testing.T) {
+	dir := t.TempDir()
+	b, err := bucket.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &state.Store{Bucket: b}
+	ctx := t.Context()
+	if _, err := st.Update(ctx, func(d *state.Document) error {
+		d.Scopes = map[string]state.Scope{"a": {Models: []string{"claude"}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := st.Current().Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.json")
+	os.WriteFile(backup, raw, 0o600)
+	if _, err := st.Update(ctx, func(d *state.Document) error {
+		d.Scopes["a"] = state.Scope{Models: []string{"claude", "gpt"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read := func() *state.Document {
+		s := &state.Store{Bucket: b}
+		if err := s.Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return s.Current()
+	}
+	var out strings.Builder
+	if err := restore(ctx, &out, []string{"-bucket", dir, "-from", backup, "-actor", "ops"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "scope a's model gpt") || !strings.Contains(out.String(), "nothing written") || len(read().Scopes["a"].Models) != 2 {
+		t.Fatalf("dry run:\n%s", out.String())
+	}
+	out.Reset()
+	if err := restore(ctx, &out, []string{"-bucket", dir, "-from", backup, "-actor", "ops", "-apply"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read().Scopes["a"].Models; len(got) != 1 {
+		t.Fatalf("after -apply, scope a's models %v:\n%s", got, out.String())
+	}
+	if err := restore(ctx, &out, []string{"-bucket", dir, "-from", backup}); err == nil {
+		t.Fatal("a restore with no actor")
 	}
 }
