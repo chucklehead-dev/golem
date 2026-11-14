@@ -174,6 +174,8 @@ TTL renewal scheduling is not proof that renewal succeeded.
 
 When slot renewal cannot be confirmed, stop admitting dependent work and
 attempt cancellation before lease expiry, reporting uncertain provider work.
+
+> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md):** no scope cancels calls in flight when renewal cannot be confirmed. New admissions stop; calls already running continue, and the interval's exposure is recorded as a waiver.
 Cancellation cannot guarantee that provider billing stops. Any fail-open mode
 explicitly waives the concurrency/spend bound and records its exposure.
 Strict mode accepts only modalities and billing categories with a verified
@@ -240,7 +242,7 @@ slot renewal (Valkey unreachable):
   for that interval;
 - in **strict** scopes, it attempts cancellation as §6 requires.
 
-  > **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** "Strict" scopes are those with `declaredWorstCaseCheck`, an admission check only. Cancelling calls in flight on a failed renewal is not part of that check and is not implemented for any scope; whether a scope option should ask for it is an open decision.
+  > **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** Decided: no scope cancels calls in flight on a failed renewal, `declaredWorstCaseCheck` included (an admission check only). Every scope behaves as the soft bullet above: new calls stop, calls already running continue, and the exposure is recorded as a waiver for the interval.
 
 **7.4 A golem-owned capture collector (adapts §2).** The isolated capture
 pipeline is a separate OpenTelemetry collector Deployment owned by golem,
