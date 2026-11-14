@@ -180,6 +180,8 @@ Strict mode accepts only modalities and billing categories with a verified
 conservative bound; body bytes alone do not bound URL-referenced images,
 documents, framing or tool/cache charges.
 
+> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** No mode claims a verified bound on cost. The declared-worst-case check (formerly strict) refuses what it can name: a declared worst case over the budget, no `max_tokens`, server-side tools or MCP servers, an unpriceable cost. It does not claim to bound URL-referenced inputs, framing or units billed outside tokens; provider-account limits contain them.
+
 Until those gates pass, describe budgets as eventually enforced, with
 unquantified additional exposure under failures. Use global concurrency,
 rate/output limits and provider-account controls as separate safeguards;
@@ -237,6 +239,8 @@ slot renewal (Valkey unreachable):
   worse outcome), and the exposure is recorded as a waiver of the bound
   for that interval;
 - in **strict** scopes, it attempts cancellation as §6 requires.
+
+  > **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** "Strict" scopes are those with `declaredWorstCaseCheck`, an admission check only. Cancelling calls in flight on a failed renewal is not part of that check and is not implemented for any scope; whether a scope option should ask for it is an open decision.
 
 **7.4 A golem-owned capture collector (adapts §2).** The isolated capture
 pipeline is a separate OpenTelemetry collector Deployment owned by golem,

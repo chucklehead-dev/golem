@@ -104,7 +104,15 @@ provider's bill, reconciled monthly, is the record".
 ## Consequences
 
 - `ScopePolicy.strict` is `declaredWorstCaseCheck` (v1alpha1, unreleased: no
-  conversion). The snapshot, the limiter and its Valkey script follow.
+  conversion). The limiter and its Valkey script follow. "No conversion"
+  means incompatible artifacts are refused, never read with weaker
+  policy: the CRD decoder refuses `strict` as an unknown field, and the
+  snapshot's schema is 2, so a gateway of either schema refuses the
+  other's snapshots (a schema-1 reader would take the check as off). A
+  snapshot also refuses unknown members, duplicate names and names in
+  another case, so a future rename fails closed even if the bump is
+  forgotten. Snapshots or checkpoints of schema 1 are discarded on
+  upgrade (none is persisted yet).
   Refusal messages name the check and what it closes on.
 - The accounting model's `STRICT` switch is `WORST_CHECK`, its instances
   `worstCheckDesign` and `worstCheckSingle`, and `hardCeiling` is

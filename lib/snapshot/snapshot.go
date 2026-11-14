@@ -13,11 +13,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"time"
 )
 
-// Schema is this format's version; a reader refuses a newer one.
-const Schema = 1
+// Schema is this format's version; a reader refuses any other. 2: the
+// scope option strict became declaredWorstCaseCheck (ADR 0044). A reader
+// of 1 that took a 2 would ignore the new name and admit unchecked; a
+// reader of 2 that took a 1 would ignore strict. Neither may: the bump
+// makes each refuse the other, and a stored snapshot or checkpoint of
+// another schema is discarded on upgrade, never reinterpreted.
+const Schema = 2
 
 // Snapshot is one pool's complete configuration at one moment.
 type Snapshot struct {
@@ -178,14 +184,27 @@ type Target struct {
 // and encoding/json orders struct fields, so equal snapshots encode equally.
 func (s *Snapshot) Encode() ([]byte, error) { return json.Marshal(s) }
 
-// Decode reads a snapshot, refusing a schema this reader does not know.
+// Decode reads a snapshot, refusing a schema this reader does not know,
+// and any member it does not know, a duplicate name, or a name in another
+// case. A snapshot is policy: a member a reader skipped is policy it would
+// not apply (a renamed check read as off), so a reader fails closed on
+// anything it cannot interpret, and any change to a member's name or
+// meaning bumps Schema.
 func Decode(b []byte) (*Snapshot, error) {
-	var s Snapshot
-	if err := json.Unmarshal(b, &s); err != nil {
+	// The schema first, alone: another schema's members are not this one's
+	// to judge, and its error says which side to upgrade.
+	var v struct {
+		Schema int `json:"schema"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
 		return nil, err
 	}
-	if s.Schema != Schema {
-		return nil, &SchemaError{Got: s.Schema}
+	if v.Schema != Schema {
+		return nil, &SchemaError{Got: v.Schema}
+	}
+	var s Snapshot
+	if err := jsonv2.Unmarshal(b, &s, jsonv2.RejectUnknownMembers(true)); err != nil {
+		return nil, err
 	}
 	return &s, nil
 }
