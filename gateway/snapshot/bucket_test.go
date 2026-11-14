@@ -3,8 +3,8 @@ package snapshot
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
