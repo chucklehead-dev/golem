@@ -108,6 +108,11 @@ var (
 	ErrInvariant = errors.New("state: the change breaks an invariant")
 	// ErrContended: other writers won every attempt.
 	ErrContended = errors.New("state: the document changed under every attempt; retry")
+	// ErrRegressed: the bucket holds an older version than this store has
+	// seen, or none: an out-of-band restore or a deletion. The store adopts
+	// neither (adopting would drop every later revocation, the naive
+	// restore model/publication.md shows unsafe) nor writes over it.
+	ErrRegressed = errors.New("state: the document in the bucket went back")
 )
 
 // Store is the document in a bucket. The zero Store is not ready: Load it.
@@ -140,6 +145,9 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 	case errors.Is(err, bucket.ErrNotModified):
 		return nil
 	case errors.Is(err, bucket.ErrNotFound):
+		if cur := s.Current(); s.seen() && cur.StateVersion > 0 {
+			return regressed(cur.StateVersion, "none (deleted)")
+		}
 		s.set(&Document{Schema: Schema}, bucket.Absent)
 		return nil
 	case err != nil:
@@ -149,8 +157,23 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 	if err != nil {
 		return err
 	}
+	if cur := s.Current(); s.seen() && d.StateVersion < cur.StateVersion {
+		return regressed(cur.StateVersion, fmt.Sprintf("version %d", d.StateVersion))
+	}
 	s.set(d, newTag)
 	return nil
+}
+
+// regressed is ErrRegressed, saying what to do.
+func regressed(had uint64, now string) error {
+	return fmt.Errorf("%w: from version %d to %s. A restore goes through golemctl state restore, which keeps every later revocation and writes above the current version; restore that way, or put the newer version back (bucket versioning). Until then golem-control serves what it last read and writes nothing", ErrRegressed, had, now)
+}
+
+// seen reports whether the store has read or written a document.
+func (s *Store) seen() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cur != nil
 }
 
 func (s *Store) set(d *Document, tag string) {

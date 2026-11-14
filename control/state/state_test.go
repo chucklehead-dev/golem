@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -138,4 +139,69 @@ func TestDecode(t *testing.T) {
 			t.Errorf("%s: %v, want %s", in, err, want)
 		}
 	}
+}
+
+// TestRegressed: a document put back to an older version, or deleted,
+// behind the store's back is not adopted, nor written over: reads and
+// writes say so, instead of spinning on conflicts for ever.
+func TestRegressed(t *testing.T) {
+	for name, regress := range map[string]func(t *testing.T, b bucket.Bucket, old []byte){
+		"an older version put back": func(t *testing.T, b bucket.Bucket, old []byte) {
+			if _, err := b.Put(t.Context(), DocumentKey, old, ""); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"deleted": func(t *testing.T, b bucket.Bucket, _ []byte) {
+			b.(*deletable).gone = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, err := bucket.OpenDir(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dir.Close()
+			b := &deletable{Dir: dir}
+			s := &Store{Bucket: b}
+			if _, err := s.Update(t.Context(), func(d *Document) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			old, _, _ := b.Get(t.Context(), DocumentKey, "")
+			for range 2 {
+				if _, err := s.Update(t.Context(), func(d *Document) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			regress(t, b, old)
+			if err := s.Refresh(t.Context()); !errors.Is(err, ErrRegressed) {
+				t.Fatalf("refresh: %v, want ErrRegressed", err)
+			}
+			if _, err := s.Update(t.Context(), func(d *Document) error { return nil }); !errors.Is(err, ErrRegressed) {
+				t.Fatalf("update: %v, want ErrRegressed", err)
+			}
+			if s.Current().StateVersion != 3 {
+				t.Fatalf("version %d: the regressed document was adopted", s.Current().StateVersion)
+			}
+		})
+	}
+}
+
+// deletable is a bucket whose document can vanish.
+type deletable struct {
+	*bucket.Dir
+	gone bool
+}
+
+func (d *deletable) Get(ctx context.Context, key, inm string) ([]byte, string, error) {
+	if d.gone && key == DocumentKey {
+		return nil, "", bucket.ErrNotFound
+	}
+	return d.Dir.Get(ctx, key, inm)
+}
+
+func (d *deletable) Put(ctx context.Context, key string, body []byte, ifMatch string) (string, error) {
+	if d.gone && key == DocumentKey && ifMatch != "" && ifMatch != bucket.Absent {
+		return "", bucket.ErrPrecondition
+	}
+	return d.Dir.Put(ctx, key, body, ifMatch)
 }
