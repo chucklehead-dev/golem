@@ -89,7 +89,7 @@ func main() {
 	lc := &lifecycle{unready: *unready, drain: *drainFor, cut: 10 * time.Second}
 	mux := http.NewServeMux()
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
-		mux.Handle(pattern, lc.track(localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter, MaxBody: *maxBody, Telemetry: tel})))
+		mux.Handle(pattern, lc.track(localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: proxy.Limits(limiter), MaxBody: *maxBody, Telemetry: tel})))
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))
@@ -124,7 +124,7 @@ func main() {
 	bg, stopBg := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Go(func() { dir.Run(bg) })
-	wg.Go(func() { renew(bg, limiter) })
+	wg.Go(func() { limiter.Run(bg) })
 	if entra != nil {
 		wg.Go(func() { entra.Run(bg) })
 	}
@@ -147,48 +147,11 @@ func main() {
 	<-drained
 	stopBg()
 	wg.Wait()
-	finish(limiter)
+	fctx, fcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	limiter.Finish(fctx)
+	fcancel()
 	shutdownTelemetry() // last: it delivers the rows the calls wrote
 	os.Exit(code)
-}
-
-// finish is the last accounting, once every call has ended: increments
-// held through an outage replayed if the store answers, else abandoned
-// (numbered 0: their rows, already written, count as they are).
-func finish(l *limit.Limiter) {
-	if l.Down() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		if err := l.Recover(ctx); err != nil {
-			slog.Warn("golem-gateway: increments held through the outage were not replayed; their rows go unnumbered", "err", err)
-		}
-		cancel()
-	}
-	if n := l.Abandon(); n > 0 { // their rows count as they are, never numbered
-		slog.Warn("golem-gateway: increments held through the outage abandoned; numbered 0", "increments", n)
-	}
-}
-
-// renew keeps running calls' slots alive (ADR 0038: every 30 seconds) and,
-// after an outage, replays held increments and re-acquires slots.
-func renew(ctx context.Context, l *limit.Limiter) {
-	t := time.NewTicker(30 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		if l.Down() {
-			if err := l.Recover(ctx); err != nil {
-				slog.Warn("limiter store still unreachable; admitting on local counts, recorded as waivers", "err", err)
-			}
-			continue
-		}
-		if err := l.Renew(ctx); err != nil {
-			slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
-		}
-	}
 }
 
 // setupTelemetry starts the gateway's telemetry: ledger rows on stdout, none,

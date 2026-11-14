@@ -98,7 +98,15 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    input tokens by byte count: ADR 0038); a concurrency slot for the
    principal, renewed every 30 seconds while the call is in flight; rate limits and the
    deployment's provider quota share. Refusals are 402 (budgets) or 429
-   (limits).
+   (limits). The proxy sees the limiter only as `proxy.Admitter` (admit,
+   then a `Ticket` completed or cancelled, its slot held to the provider's
+   tail); `gateway/limit` is golem's implementation, with its own renewal
+   and recovery loop (`Run`) and last accounting (`Finish`). It is a fixed
+   stage after routing, not a hook: admission needs the route's price,
+   its slot lives across the whole call, and its completion must not be
+   dropped, none of which ADR 0014's stateless, per-phase hooks (whose
+   Complete phase may drop work) provide. Limits that only refuse fit a
+   Request hook.
 7. **Attempt loop.** For each attempt: build the upstream request (fast
    path: same bytes, spliced model name; else the frontend's decoder and the
    backend's encoder through `canon`), wrap it in the deployment's envelope

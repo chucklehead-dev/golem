@@ -46,7 +46,7 @@ func TestShutdownAccounts(t *testing.T) {
 	lc := &lifecycle{drain: 200 * time.Millisecond, cut: 5 * time.Second}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/chat/completions", lc.track(&proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, ProviderTail: 50 * time.Millisecond,
-		Limiter: lim, MaxBody: 1 << 20, Telemetry: tel}))
+		Limiter: proxy.Limits(lim), MaxBody: 1 << 20, Telemetry: tel}))
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { return nil }))
 	ts := httptest.NewUnstartedServer(mux)
 	lc.srv = ts.Config
@@ -74,7 +74,7 @@ func TestShutdownAccounts(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("shutdown did not finish")
 	}
-	finish(lim)
+	lim.Finish(t.Context())
 
 	lines := strings.Split(strings.TrimSpace(rows.String()), "\n")
 	if len(lines) != 2 {

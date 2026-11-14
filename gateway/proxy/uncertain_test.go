@@ -64,7 +64,7 @@ spec:
 			}
 			h.ProviderTail = 100 * time.Millisecond
 			st := limit.NewMem()
-			h.Limiter = limit.New(st)
+			h.Limiter = Limits(limit.New(st))
 			var rows bytes.Buffer
 			tel, _ := telemetry.New(telemetry.Stdout(&rows), "local", "standalone")
 			h.Telemetry = tel

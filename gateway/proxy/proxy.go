@@ -52,9 +52,9 @@ type Result struct {
 type Handler struct {
 	Dialect   Dialect
 	Snapshots Snapshots
-	// Limiter admits calls against budgets and in-flight limits; nil admits
-	// everything.
-	Limiter *limit.Limiter
+	// Limiter admits calls against budgets and in-flight limits
+	// (Limits(l) for golem's); nil admits everything.
+	Limiter Admitter
 	MaxBody int64 // request body cap in bytes
 	// Telemetry records each request's span, metrics and ledger row; nil
 	// records nothing.
@@ -450,7 +450,7 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 
 // admit checks the call against the scope's budget and in-flight limits
 // (ADR 0031) and takes its slots. A nil ticket with no refusal: no limiter.
-func (h *Handler) admit(ctx context.Context, reqID string, started, deadline time.Time, p *auth.Principal, req scanned, worst int64) (*limit.Ticket, *refusal) {
+func (h *Handler) admit(ctx context.Context, reqID string, started, deadline time.Time, p *auth.Principal, req scanned, worst int64) (Ticket, *refusal) {
 	if h.Limiter == nil {
 		return nil, nil
 	}

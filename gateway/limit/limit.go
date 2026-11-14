@@ -597,3 +597,41 @@ func (l *Limiter) Pending(scope string) []Event {
 
 // Down reports whether this gateway believes the store unreachable.
 func (l *Limiter) Down() bool { return l.isDown() }
+
+// Run keeps running calls' slots alive (ADR 0038: every 30 seconds) and,
+// after an outage, replays held increments and re-acquires slots, until
+// ctx ends.
+func (l *Limiter) Run(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if l.Down() {
+			if err := l.Recover(ctx); err != nil {
+				slog.Warn("limiter store still unreachable; admitting on local counts, recorded as waivers", "err", err)
+			}
+			continue
+		}
+		if err := l.Renew(ctx); err != nil {
+			slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
+		}
+	}
+}
+
+// Finish is the last accounting, once every call has ended: increments
+// held through an outage replayed if the store answers within ctx, else
+// abandoned (numbered 0: their rows, already written, count as they are).
+func (l *Limiter) Finish(ctx context.Context) {
+	if l.Down() {
+		if err := l.Recover(ctx); err != nil {
+			slog.Warn("limit: increments held through the outage were not replayed; their rows go unnumbered", "err", err)
+		}
+	}
+	if n := l.Abandon(); n > 0 {
+		slog.Warn("limit: increments held through the outage abandoned; numbered 0", "increments", n)
+	}
+}
