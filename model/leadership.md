@@ -53,6 +53,10 @@ module leadership {
   const CROSS_CHECK: bool
   const JOBS_AFTER_CLAIM: bool
   const ROLLBACK: str
+  const VERIFY: bool
+  const CP_ATTACK: bool
+  const RESTORE: str
+  const LOST_REPLY: bool
 ```
 
 ## 2. State
@@ -71,7 +75,9 @@ rollback.
   var lead: Lead
   var docHist: Set[Doc]
   var leadHist: Set[Lead]
-  var rolled: bool
+  var rolledDoc: bool
+  var rolledLead: bool
+  var restored: bool
 
   var believes: str -> int   // the epoch a replica acts at; 0: none
   var pending: str -> int    // "fence": acquired, not yet claimed
@@ -80,7 +86,9 @@ rollback.
   var readAt: str -> int     // the epoch it read it at: a sync writes what it read as that leader
   var dir: int               // the directory (Entra), which only grows
 
-  var checkpoint: int        // the trusted floor
+  var checkpoint: int        // the stored checkpoint's sequence
+  var cpSigned: bool         // whether it is golem-control's signed one
+  var cpHist: Set[int]       // every signed checkpoint written: what a replay copies back
   var pointer: int           // the last published sequence
 ```
 
@@ -91,6 +99,8 @@ availability, not safety), and which replica claimed each epoch.
 
 ```quint leadership.qnt +=
   var cpBack: bool
+  var cpMax: int             // the highest checkpoint golem-control signed
+  var cpInflated: bool       // a publication numbered above an unsigned checkpoint
   var syncBack: bool
   var seqBack: bool
   var maxSynced: int
@@ -108,7 +118,11 @@ from.
   action keepDoc = all { doc' = doc, docHist' = docHist }
   action keepLead = all { lead' = lead, leadHist' = leadHist }
   action keepJobs = all { readAt' = readAt, seen' = seen, dir' = dir, leaseOk' = leaseOk, maxSynced' = maxSynced, syncBack' = syncBack }
-  action keepPub = all { checkpoint' = checkpoint, pointer' = pointer, cpBack' = cpBack, seqBack' = seqBack }
+  action keepPub = all { checkpoint' = checkpoint, cpSigned' = cpSigned, cpHist' = cpHist, pointer' = pointer,
+    cpBack' = cpBack, cpMax' = cpMax, cpInflated' = cpInflated, seqBack' = seqBack }
+  action keepRolled = all { rolledDoc' = rolledDoc, rolledLead' = rolledLead, restored' = restored }
+  val recordsInDoc = DESIGN == "doc" or DESIGN == "fence"
+  val twoStep = DESIGN == "fence" or DESIGN == "hybrid"
   action keepLeaders = all { believes' = believes, pending' = pending, claims' = claims }
 
   val nextEpoch = if (CROSS_CHECK) maxOf(lead.epoch, doc.epoch) + 1 else lead.epoch + 1
@@ -129,7 +143,7 @@ separately.
       writeDoc(doc.with("holder", r).with("epoch", e)),
       believes' = believes.put(r, e), pending' = pending, claims' = claims.union(Set((e, r))),
     },
-    keepLead, keepJobs, keepPub, rolled' = rolled,
+    keepLead, keepJobs, keepPub, keepRolled,
   }
 
   action acquire(r: str): bool = all {
@@ -137,28 +151,48 @@ separately.
     val e = nextEpoch
     all {
       writeLead(lead.with("holder", r).with("epoch", e)),
-      if (DESIGN == "fence") all { pending' = pending.put(r, e), believes' = believes, claims' = claims }
+      if (twoStep) all { pending' = pending.put(r, e), believes' = believes, claims' = claims }
       else all { pending' = pending, believes' = believes.put(r, e), claims' = claims.union(Set((e, r))) },
     },
-    keepDoc, keepJobs, keepPub, rolled' = rolled,
+    keepDoc, keepJobs, keepPub, keepRolled,
   }
 
   action claim(r: str): bool = all {
-    DESIGN == "fence",
+    twoStep,
     pending.get(r) > doc.epoch,
     val e = pending.get(r)
     all {
       writeDoc(doc.with("holder", r).with("epoch", e)),
       believes' = believes.put(r, e), pending' = pending.put(r, 0), claims' = claims.union(Set((e, r))),
     },
-    keepLead, keepJobs, keepPub, rolled' = rolled,
+    keepLead, keepJobs, keepPub, keepRolled,
+  }
+
+  // A claim that lands but whose reply is lost: the replica does not know
+  // it leads until it reads the document again (adopt).
+  action claimLost(r: str): bool = all {
+    twoStep, LOST_REPLY,
+    pending.get(r) > doc.epoch,
+    val e = pending.get(r)
+    all {
+      writeDoc(doc.with("holder", r).with("epoch", e)),
+      believes' = believes, pending' = pending, claims' = claims.union(Set((e, r))),
+    },
+    keepLead, keepJobs, keepPub, keepRolled,
+  }
+
+  action adopt(r: str): bool = all {
+    twoStep, LOST_REPLY,
+    pending.get(r) > 0, doc.holder == r, doc.epoch == pending.get(r),
+    believes' = believes.put(r, pending.get(r)), pending' = pending.put(r, 0), claims' = claims,
+    keepDoc, keepLead, keepJobs, keepPub, keepRolled,
   }
 
   action bump(r: str): bool = all {
     DESIGN == "object",
     believes.get(r) > doc.epoch,
     writeDoc(doc.with("holder", r).with("epoch", believes.get(r))),
-    keepLead, keepLeaders, keepJobs, keepPub, rolled' = rolled,
+    keepLead, keepLeaders, keepJobs, keepPub, keepRolled,
   }
 ```
 
@@ -170,22 +204,35 @@ too. Without `GUARD`, a checkpoint above the record is replaced, as
 today's `advance` replaces one it takes for not golem-control's.
 
 ```quint leadership.qnt +=
-  action publish(r: str): bool = all {
+  // A publication: the record won under the fence, then the checkpoint and
+  // pointer. With lost, the record's write landed but its reply was lost,
+  // and the publisher, seeing a conflict, wrote neither.
+  action publishAs(r: str, lost: bool): bool = all {
     val e = believes.get(r)
-    val inDoc = DESIGN != "object"
-    val fenced = if (inDoc) doc.holder == r and doc.epoch == e else lead.holder == r and lead.epoch == e
-    val base = if (inDoc) doc.seq else lead.seq
-    val s = if (GUARD) maxOf(base, checkpoint) + 1 else base + 1
+    val fenced = if (recordsInDoc) doc.holder == r and doc.epoch == e else lead.holder == r and lead.epoch == e
+    val base = if (recordsInDoc) doc.seq else lead.seq
+    // GUARD: number above the stored checkpoint too, counting it only if
+    // it verifies (VERIFY); an unverified one is not golem-control's.
+    val counted = if (GUARD and (cpSigned or not(VERIFY))) checkpoint else 0
+    val s = maxOf(base, counted) + 1
     all {
-      e > 0, fenced,
-      if (inDoc) all { writeDoc(doc.with("seq", s)), keepLead }
+      e > 0, fenced, not(lost) or LOST_REPLY,
+      if (recordsInDoc) all { writeDoc(doc.with("seq", s)), keepLead }
       else all { writeLead(lead.with("seq", s)), keepDoc },
-      checkpoint' = s, pointer' = s,
-      cpBack' = (cpBack or s < checkpoint),
-      seqBack' = (seqBack or s <= pointer),
+      if (lost) all { checkpoint' = checkpoint, cpSigned' = cpSigned, cpHist' = cpHist, pointer' = pointer,
+                      cpBack' = cpBack, cpMax' = cpMax, seqBack' = seqBack }
+      else all {
+        checkpoint' = s, cpSigned' = true, cpHist' = cpHist.union(Set(s)), pointer' = s,
+        cpBack' = (cpBack or s < cpMax), cpMax' = maxOf(cpMax, s),
+        seqBack' = (seqBack or s <= pointer),
+      },
+      cpInflated' = (cpInflated or (not(cpSigned) and counted > base)),
     },
-    keepLeaders, keepJobs, rolled' = rolled,
+    keepLeaders, keepJobs, keepRolled,
   }
+
+  action publish(r: str): bool = publishAs(r, false)
+  action publishLost(r: str): bool = publishAs(r, true)
 ```
 
 **The group sync.** A replica reads the directory, and later writes what
@@ -197,21 +244,21 @@ it read. The directory only grows (a removal is a newer value). Fenced
   action dirChange: bool = all {
     dir < MAX_DIR, dir' = dir + 1,
     readAt' = readAt, seen' = seen, leaseOk' = leaseOk, maxSynced' = maxSynced, syncBack' = syncBack,
-    keepDoc, keepLead, keepLeaders, keepPub, rolled' = rolled,
+    keepDoc, keepLead, keepLeaders, keepPub, keepRolled,
   }
 
   action readDir(r: str): bool = all {
     believes.get(r) > 0, not(JOBS_AFTER_CLAIM) or doc.epoch == believes.get(r),
     seen' = seen.put(r, dir), readAt' = readAt.put(r, believes.get(r)),
     dir' = dir, leaseOk' = leaseOk, maxSynced' = maxSynced, syncBack' = syncBack,
-    keepDoc, keepLead, keepLeaders, keepPub, rolled' = rolled,
+    keepDoc, keepLead, keepLeaders, keepPub, keepRolled,
   }
 
   action readLease(r: str): bool = all {
     JOBS == "readLease",
     leaseOk' = leaseOk.put(r, (lead.holder == r and lead.epoch == believes.get(r))),
     readAt' = readAt, seen' = seen, dir' = dir, maxSynced' = maxSynced, syncBack' = syncBack,
-    keepDoc, keepLead, keepLeaders, keepPub, rolled' = rolled,
+    keepDoc, keepLead, keepLeaders, keepPub, keepRolled,
   }
 
   action syncWrite(r: str): bool = all {
@@ -226,7 +273,7 @@ it read. The directory only grows (a removal is a newer value). Fenced
       maxSynced' = maxOf(maxSynced, seen.get(r)),
       readAt' = readAt, seen' = seen, dir' = dir, leaseOk' = leaseOk,
     },
-    keepLead, keepLeaders, keepPub, rolled' = rolled,
+    keepLead, keepLeaders, keepPub, keepRolled,
   }
 ```
 
@@ -237,17 +284,52 @@ current: the model takes the worst.
 
 ```quint leadership.qnt +=
   action rollbackDoc: bool = all {
-    ROLLBACK == "doc", not(rolled),
+    ROLLBACK == "doc" or ROLLBACK == "both", not(rolledDoc),
     nondet d = docHist.oneOf()
     all { doc' = d, docHist' = docHist },
-    rolled' = true, keepLead, keepLeaders, keepJobs, keepPub,
+    rolledDoc' = true, rolledLead' = rolledLead, restored' = restored, keepLead, keepLeaders, keepJobs, keepPub,
   }
 
   action rollbackLead: bool = all {
-    ROLLBACK == "lead", not(rolled), DESIGN != "doc",
+    ROLLBACK == "lead" or ROLLBACK == "both", not(rolledLead), DESIGN != "doc",
     nondet l = leadHist.oneOf()
     all { lead' = l, leadHist' = leadHist },
-    rolled' = true, keepDoc, keepLeaders, keepJobs, keepPub,
+    rolledLead' = true, rolledDoc' = rolledDoc, restored' = restored, keepDoc, keepLeaders, keepJobs, keepPub,
+  }
+
+  // The restore procedure (golemctl state restore): an older document's
+  // contents written above the current version, keeping what may not go
+  // back (here the fence and the records). "naive" puts the old document
+  // back whole, as a rollback does.
+  action restore: bool = all {
+    RESTORE != "none", not(restored),
+    nondet d = docHist.oneOf()
+    val back = if (RESTORE == "preserve") d.with("holder", doc.holder).with("epoch", doc.epoch).with("seq", doc.seq) else d
+    writeDoc(back),
+    restored' = true, rolledDoc' = rolledDoc, rolledLead' = rolledLead, keepLead, keepLeaders, keepJobs, keepPub,
+  }
+
+  // The attacker on the checkpoint (an identity that can write the
+  // bucket but not sign): an unsigned forgery above the record, an older
+  // signed one copied back, or none.
+  action forgeCheckpoint: bool = all {
+    CP_ATTACK, checkpoint' = pointer + 2, cpSigned' = false,
+    cpHist' = cpHist, pointer' = pointer, cpBack' = cpBack, cpMax' = cpMax, cpInflated' = cpInflated, seqBack' = seqBack,
+    keepDoc, keepLead, keepLeaders, keepJobs, keepRolled,
+  }
+
+  action replayCheckpoint: bool = all {
+    CP_ATTACK, cpHist.size() > 0,
+    nondet v = cpHist.oneOf()
+    all { checkpoint' = v, cpSigned' = true },
+    cpHist' = cpHist, pointer' = pointer, cpBack' = cpBack, cpMax' = cpMax, cpInflated' = cpInflated, seqBack' = seqBack,
+    keepDoc, keepLead, keepLeaders, keepJobs, keepRolled,
+  }
+
+  action deleteCheckpoint: bool = all {
+    CP_ATTACK, checkpoint' = 0, cpSigned' = false,
+    cpHist' = cpHist, pointer' = pointer, cpBack' = cpBack, cpMax' = cpMax, cpInflated' = cpInflated, seqBack' = seqBack,
+    keepDoc, keepLead, keepLeaders, keepJobs, keepRolled,
   }
 ```
 
@@ -260,20 +342,22 @@ r1 leads at epoch 1; nothing is published yet.
     val d = { holder: "r1", epoch: 1, seq: 0, sync: 0 }
     val l = { holder: "r1", epoch: 1, seq: 0 }
     all {
-      doc' = d, lead' = l, docHist' = Set(d), leadHist' = Set(l), rolled' = false,
+      doc' = d, lead' = l, docHist' = Set(d), leadHist' = Set(l),
+      rolledDoc' = false, rolledLead' = false, restored' = false,
       believes' = REPLICAS.mapBy(r => if (r == "r1") 1 else 0),
       pending' = REPLICAS.mapBy(_ => 0), leaseOk' = REPLICAS.mapBy(_ => false),
       seen' = REPLICAS.mapBy(_ => 0), readAt' = REPLICAS.mapBy(_ => 0), dir' = 0,
-      checkpoint' = 0, pointer' = 0,
-      cpBack' = false, syncBack' = false, seqBack' = false, maxSynced' = 0,
+      checkpoint' = 0, cpSigned' = false, cpHist' = Set(), pointer' = 0,
+      cpMax' = 0, cpInflated' = false, cpBack' = false, syncBack' = false, seqBack' = false, maxSynced' = 0,
       claims' = Set((1, "r1")),
     }
   }
 
   action step = any {
     nondet r = REPLICAS.oneOf()
-    any { takeDoc(r), acquire(r), claim(r), bump(r), publish(r), readDir(r), readLease(r), syncWrite(r) },
-    dirChange, rollbackDoc, rollbackLead,
+    any { takeDoc(r), acquire(r), claim(r), claimLost(r), adopt(r), bump(r), publish(r), publishLost(r),
+          readDir(r), readLease(r), syncWrite(r) },
+    dirChange, rollbackDoc, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint,
   }
 ```
 
@@ -295,9 +379,10 @@ r1 leads at epoch 1; nothing is published yet.
 
 ```quint leadership.qnt +=
   val floorNeverDrops = not(cpBack)
-  val noStaleSync = not(syncBack) or (ROLLBACK == "doc" and rolled)
+  val noStaleSync = not(syncBack) or rolledDoc or (restored and RESTORE == "naive")
   val epochsUnique = claims.forall(a => claims.forall(b => a._1 == b._1 implies a._2 == b._2))
-  val safe = floorNeverDrops and noStaleSync and epochsUnique
+  val noInflation = not(cpInflated)
+  val safe = floorNeverDrops and noStaleSync and epochsUnique and noInflation
   val forward = not(seqBack)
 ```
 
@@ -337,6 +422,6 @@ at a time with `-const`.
 module small {
   import leadership(REPLICAS = Set("r1", "r2"), MAX_DIR = 2,
     DESIGN = "fence", JOBS = "doc", GUARD = true, CROSS_CHECK = true, JOBS_AFTER_CLAIM = true,
-    ROLLBACK = "none").*
+    ROLLBACK = "none", VERIFY = true, CP_ATTACK = false, RESTORE = "none", LOST_REPLY = false).*
 }
 ```

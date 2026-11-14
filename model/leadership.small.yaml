@@ -3,4 +3,4 @@
 spec: leadership.qnt
 module: small
 actions: {}
-invariants: [safe, floorNeverDrops, noStaleSync, epochsUnique, forward]
+invariants: [safe, floorNeverDrops, noStaleSync, epochsUnique, noInflation, forward]
