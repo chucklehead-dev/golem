@@ -323,12 +323,25 @@ func (s *Service) UnbindGroup(ctx context.Context, c Caller, o Options, scope, g
 	})
 }
 
-// BindManager makes principal a manager of scope: admins only.
+// BindManager makes principal a manager of scope: admins only. The scope
+// and the principal must exist (not found otherwise). The principal need
+// not be a member: managing is its own right (org-model.md §2: a parent
+// team's managers manage its sub-teams), and a manager reads the scope
+// without being one.
 func (s *Service) BindManager(ctx context.Context, c Caller, o Options, scope, principal string) error {
 	if !c.Admin {
 		return denied("only admins assign managers")
 	}
+	if principal == "" {
+		return invalid("principal", "required: the principal to make a manager")
+	}
 	return s.apply(ctx, c, o, "role.bind", principal, map[string]string{"role": manager, "scope": scope}, func(d *state.Document) error {
+		if _, err := visibleScope(d, c, scope); err != nil {
+			return err
+		}
+		if _, ok := d.Principals[principal]; !ok {
+			return notFound("principal %s: add them to a scope first (golemctl members add), or bind their Entra group and let the sync create them", principal)
+		}
 		if d.Has(principal, manager, scope) {
 			return nil
 		}

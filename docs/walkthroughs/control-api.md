@@ -92,7 +92,7 @@ Admin is never stored: it comes from the token on every call.
 ## 3. Authorization, per method
 
 The rules are in `control/service/service.go`, one method each. Four
-shared helpers sit together near the top (service.go:117-149):
+shared helpers sit together near the top (service.go:123-156):
 
 - `manages(d, c, scope)`: an admin, or a manager binding on the scope;
 - `sees(d, c, scope)`: that, or a member (granted or synced);
@@ -110,7 +110,7 @@ shared helpers sit together near the top (service.go:117-149):
 | `AddMember` | the scope's managers, admins (`requireManager`) | who the member is comes from `principalToAdd`: an existing principal, unchanged (a different kind or Entra ID given is `invalid`); else a new one with a kind. A manager may create only a keys-only service: never a user, never an Entra ID (ADR 0047: users come from bound groups, and an Entra ID is bound by the sync or an admin). IDs beginning `entra:` are refused |
 | `RemoveMember` | the scope's managers, admins (`requireManager`); a fellow manager only by admins | removes a membership granted in golem; a synced one is the group's (`invalid`: remove them in Entra or unbind the group). When the principal is no longer a member at all, its keys in the scope are revoked, its default scope cleared and its manager role there dropped; a principal still a member through a bound group keeps its keys and role |
 | `BindGroup`, `UnbindGroup` | admins | an Entra group's members become the scope's at the next sync (control/entrasync); unbinding ends them at the next sync |
-| `BindManager` | admins | `manager` is the only role bound so far |
+| `BindManager` | admins | `manager` is the only role bound so far; a scope or principal that does not exist is `not found` (`TestBindManager`). The principal need not be a member: managing is its own right (org-model.md §2: a parent team's managers manage its sub-teams), and a manager reads the scope without being one (`TestManagerReadsScope`) |
 | `MintKey` | a member, its own keys; the scope's managers, its services' keys; admins, any (`mayMint`) | owner must be a member; models within the scope's; expiry in the future; a personal (user's) key within 90 days, by default at 90 (`keyExpiry`, `MaxPersonalKeyLife`); a service's key needs no expiry |
 | `RevokeKey` | the key's owner, admins; a service's key, its scope's managers | a manager cannot revoke a member's personal key (they remove the member instead); revoking a revoked key is no change; an outsider gets `not found` |
 | `Whoami` | anyone signed in | |
@@ -129,6 +129,7 @@ shared helpers sit together near the top (service.go:117-149):
 | Each method's callers are exactly those of §3 | the methods, through `manages`, `sees`, `visibleScope`, `requireManager`, `mayMint` | `TestAuthorization` (service_test.go:47), `TestRevokeKey` (:98), `TestBindGroup` (:373) |
 | An outsider learns nothing of a scope or key: `not found`, not `permission denied` | `visibleScope`, `RevokeKey` | `TestAuthorization`, `TestRevokeKey`, `TestReads` (:231) |
 | A manager cannot remove a fellow manager | `RemoveMember` | `TestManagerRules` (:127) |
+| A manager is bound on a scope and of a principal that exist (`not found` otherwise, before the store's invariant); it need not be a member | `BindManager`; `checkRoles` in control/state | `TestBindManager`, `TestManagerReadsScope` |
 | A manager cannot create a user or bind an Entra ID; no principal ID begins `entra:` | `principalToAdd`, `AddMember`; `checkPrincipals` in control/state | `TestIdentityBinding` (:319), `TestEntitlementInvariants` |
 | A synced membership is removed only in Entra or by unbinding | `RemoveMember` | `TestIdentityBinding` |
 | A removed member's keys in the scope are revoked, and its role there dropped | `RemoveMember`, `Document.RevokeOutside` | `TestRemoveMember` (:207) |
@@ -143,12 +144,12 @@ shared helpers sit together near the top (service.go:117-149):
 
 ## 5. One change: apply, validate-only, audit
 
-Every mutating method ends in `Service.apply` (service.go:93). It wraps
+Every mutating method ends in `Service.apply` (service.go:99). It wraps
 the method's change in a function that runs the change and appends one
 `state.AuditEvent` (time, actor, action such as `key.mint`, target, and a
-small detail map; service.go:99), then hands it to the store:
+small detail map; service.go:105), then hands it to the store:
 
-- normally to `state.Store.Update` (service.go:105), which applies it to
+- normally to `state.Store.Update` (service.go:111), which applies it to
   a copy of the document, numbers the new audit events, checks the
   invariants (`state.check`), and writes with `If-Match`. When another
   writer won, it re-reads and runs the change again, so a change must
@@ -156,7 +157,7 @@ small detail map; service.go:99), then hands it to the store:
   inside it: every check that needs the document runs in the closure,
   and none of them writes to the variables it captured;
 - with `validate_only` (`Options.ValidateOnly`), to `state.Store.Validate`
-  (service.go:103), which does the same up to the check and writes
+  (service.go:109), which does the same up to the check and writes
   nothing. So a dry run reports the same authorization, validation and
   invariant errors a real run would.
 
@@ -277,24 +278,24 @@ usage.
    `alice`. Connect then decodes the body, refusing one over 1 MiB.
 6. `keys.MintKey` (control/api/keys.go:16) converts the request to a
    `service.KeyRequest` and calls `Service.MintKey` (keys.go:22;
-   control/service/service.go:348).
-7. `MintKey` defaults the owner to the caller (service.go:349), mints the
-   plaintext with `lib/key` and hashes it (service.go:352), then calls
-   `apply` (service.go:355) with the action `key.mint` and a change that,
+   control/service/service.go:372).
+7. `MintKey` defaults the owner to the caller (service.go:373), mints the
+   plaintext with `lib/key` and hashes it (service.go:377), then calls
+   `apply` (service.go:379) with the action `key.mint` and a change that,
    on the document:
-   - finds the scope with `visibleScope` (service.go:356), or `not found`;
-   - finds the owner (service.go:360), or `not found`, and checks it is a
-     member (service.go:364), or `invalid key.owner`;
+   - finds the scope with `visibleScope` (service.go:380), or `not found`;
+   - finds the owner (service.go:384), or `not found`, and checks it is a
+     member (service.go:388), or `invalid key.owner`;
    - checks the caller may mint for that owner with `mayMint`
-     (service.go:367, defined at :394), or `permission denied`;
-   - checks each model is in the scope's (service.go:370), or `invalid
+     (service.go:391, defined at :418), or `permission denied`;
+   - checks each model is in the scope's (service.go:394), or `invalid
      key.models[i]`;
-   - works out the expiry with `keyExpiry` (service.go:375, defined at
-     :402): not in the past, and, because alice is a user, at most 90
+   - works out the expiry with `keyExpiry` (service.go:399, defined at
+     :426): not in the past, and, because alice is a user, at most 90
      days away (with no `--expires`, exactly 90);
-   - stores the key's record by its hash (service.go:382), never the
+   - stores the key's record by its hash (service.go:406), never the
      plaintext.
-8. `apply` (service.go:93) appends the audit event (actor `alice`, target
+8. `apply` (service.go:99) appends the audit event (actor `alice`, target
    the key's display prefix, detail owner and scope) and calls
    `state.Store.Update`, which checks the invariants (a live key's owner
    is a member of its scope, among others) and writes the document.
@@ -347,9 +348,6 @@ end against a fake Entra and a real `api.Server`.
   moves out of the state document into a ScopePolicy CRD, checked by
   lib/compile's `scopePolicy` as a LocalScope's is; until then, give
   policies through golemctl with care.
-- `BindManager` checks neither that the scope nor the principal exists:
-  the store's invariants refuse the write, so the caller gets
-  `failed_precondition` rather than `not found`.
 - Responses carry no etag (control-plane.md §2 step 5) and there are no
   conditional updates by the client.
 - `golemctl` loads its settings before it looks up the command, so an

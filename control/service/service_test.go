@@ -419,3 +419,30 @@ func TestCreateScopePriced(t *testing.T) {
 		t.Fatalf("a scope with no budget: %v, checked %v", err, checked)
 	}
 }
+
+// TestBindManager: binding a manager on a scope or of a principal that
+// does not exist is not found, dry run or not, and writes nothing (the
+// store's invariant would refuse it, as failed_precondition, too late to
+// say which). A principal need not be a member to manage
+// (TestManagerReadsScope).
+func TestBindManager(t *testing.T) {
+	s := setup(t)
+	for _, o := range []Options{{ValidateOnly: true}, {}} {
+		for _, tc := range []struct{ scope, principal, want string }{
+			{"team-z", "alice", "scope team-z"},
+			{"team-a", "zed", "principal zed: add them to a scope first"},
+		} {
+			before := s.State.Current().StateVersion
+			err := s.BindManager(t.Context(), admin, o, tc.scope, tc.principal)
+			if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s on %s (dry run %v): %v, want not found: %s", tc.principal, tc.scope, o.ValidateOnly, err, tc.want)
+			}
+			if s.State.Current().StateVersion != before {
+				t.Errorf("%s on %s: written", tc.principal, tc.scope)
+			}
+		}
+	}
+	if err := s.BindManager(t.Context(), admin, Options{}, "team-a", ""); !errors.Is(err, ErrInvalid) {
+		t.Errorf("no principal: %v, want invalid", err)
+	}
+}
