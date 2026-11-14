@@ -121,7 +121,8 @@ control/
 console/                   web UI (Go html/template + htmx), a client of the control API (planned)
 plugins/backstage/         TypeScript, generated client (M3)
 lib/                       shared libraries with no control-plane or Kubernetes-client deps:
-                           bucket (+ S3), sign (+ KMS), the snapshot format and signed pointer,
+                           bucket (+ S3), sign (+ KMS), entra (token verification), otlp (the
+                           telemetry transport), the snapshot format and signed pointer,
                            the CRD types (lib/api/v1alpha1) and the snapshot compiler
                            (lib/compile), key, period, contract
 internal/archtest/         the rules below, as tests

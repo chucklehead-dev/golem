@@ -1,4 +1,4 @@
-package telemetry
+package otlp
 
 import (
 	"context"
@@ -18,27 +18,30 @@ import (
 	"testing"
 	"time"
 
+	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestPlaintextOK(t *testing.T) {
 	for host, want := range map[string]bool{"127.0.0.1": true, "127.1.2.3": true, "::1": true,
 		"localhost":         false, // a name is resolved when dialed: not held to this machine
 		"collector.example": false, "10.0.0.5": false, "localhost.example": false} {
-		if plaintextOK(host) != want {
-			t.Errorf("plaintextOK(%q) = %v, want %v", host, !want, want)
+		if PlaintextOK(host) != want {
+			t.Errorf("PlaintextOK(%q) = %v, want %v", host, !want, want)
 		}
 	}
 }
 
 // TestOTLPIgnoresInsecureEnv: the SDK's environment variables cannot turn
 // TLS off, nor send telemetry elsewhere (golem#5). With every insecure and
-// endpoint variable set against it, a span still reaches the TLS
+// endpoint variable set against it, a span (the gateway's exporters) and a
+// log record (golem-control's audit provider) still reach the TLS
 // collector named, over TLS.
 func TestOTLPIgnoresInsecureEnv(t *testing.T) {
 	var got atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS != nil && r.URL.Path == "/v1/traces" {
+		if r.TLS != nil && (r.URL.Path == "/v1/traces" || r.URL.Path == "/v1/logs") {
 			got.Add(1)
 		}
 	}))
@@ -53,24 +56,38 @@ func TestOTLPIgnoresInsecureEnv(t *testing.T) {
 	defer elsewhere.Close()
 	for k, v := range map[string]string{
 		"OTEL_EXPORTER_OTLP_INSECURE": "true", "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true",
-		"OTEL_EXPORTER_OTLP_ENDPOINT": elsewhere.URL, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": elsewhere.URL + "/v1/traces",
-		"OTEL_EXPORTER_OTLP_CERTIFICATE": ca,
+		"OTEL_EXPORTER_OTLP_LOGS_INSECURE": "true",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":      elsewhere.URL, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": elsewhere.URL + "/v1/traces",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": elsewhere.URL + "/v1/logs",
+		"OTEL_EXPORTER_OTLP_CERTIFICATE":   ca,
 	} {
 		t.Setenv(k, v)
 	}
-	// localhost: a name, so held to TLS (plaintextOK), and in the test
+	// localhost: a name, so held to TLS (PlaintextOK), and in the test
 	// server's certificate.
-	p, shutdown, err := OTLP(t.Context(), "localhost:"+port, resource.Empty())
+	endpoint := "localhost:" + port
+	ex, err := New(t.Context(), endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, span := p.Tracer.Tracer("t").Start(context.Background(), "s")
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(ex.Spans))
+	_, span := tp.Tracer("t").Start(context.Background(), "s")
 	span.End()
-	if err := shutdown(t.Context()); err != nil {
-		t.Fatalf("shutdown: %v", err)
+	if err := tp.Shutdown(t.Context()); err != nil {
+		t.Fatalf("spans: %v", err)
 	}
-	if got.Load() == 0 {
-		t.Fatal("no span reached the collector over TLS")
+	lp, stop, err := LoggerProvider(t.Context(), endpoint, resource.Empty())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r otellog.Record
+	r.SetEventName("golem.audit")
+	lp.Logger("t").Emit(context.Background(), r)
+	if err := stop(t.Context()); err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	if got.Load() != 2 {
+		t.Fatalf("%d of a span and a log record reached the collector over TLS", got.Load())
 	}
 }
 

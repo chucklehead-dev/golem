@@ -32,7 +32,8 @@ durability lives in the collector), [ADR 0044](../adr/0044-budgets-are-controls-
 | `gateway/telemetry/telemetry.go` | `Telemetry`: spans, GenAI metrics, the refusal counter |
 | `gateway/telemetry/ledger.go` | `Ledger`: golem.spend rows |
 | `gateway/telemetry/queue.go` | `LedgerQueue`: the ledger's own bounded, counted log processor |
-| `gateway/telemetry/setup.go` | `OTLP`, `SDK`, `Stdout`, the plaintext rule |
+| `gateway/telemetry/setup.go` | `OTLP`, `SDK`, `Stdout` |
+| `lib/otlp/otlp.go` | the OTLP/HTTP exporters and the transport rule, shared with golem-control's audit |
 | `cmd/golem-gateway/main.go` | flags, the release gate, wiring, the shutdown order |
 | `cmd/golem-gateway/guard.go` | `localOnly`, standalone's browser guard |
 | `cmd/golem-gateway/lifecycle.go` | readiness, drain and cut |
@@ -225,14 +226,15 @@ Its guarantees:
 - `ForceFlush` never waits on a stopped worker.
 
 Durability through a collector outage is the collector's (ADR 0043): the
-queue (65,536 rows, `setup.go:88`) bridges a node-local agent's restart.
+queue (65,536 rows, `ledgerQueueSize`) bridges a node-local agent's restart.
 
-`OTLP` (`setup.go:36`) exports everything over OTLP/HTTP, with TLS unless
-the endpoint is a literal loopback address (`plaintextOK`,
-`setup.go:156`): `localhost` is a name and gets TLS. `SDK` puts the
+`OTLP` exports everything over OTLP/HTTP through `lib/otlp`, with TLS
+unless the endpoint is a literal loopback address (`otlp.PlaintextOK`):
+`localhost` is a name and gets TLS; each exporter gets its whole URL, so
+the `OTEL_EXPORTER_OTLP_*` variables cannot turn TLS off. `SDK` puts the
 ledger's queue under the logger provider and shuts down logs first,
 traces next and metrics last, so the final drop and failure counts are
-exported after the rows they count (`setup.go:81`). `Stdout` is
+exported after the rows they count. `Stdout` is
 standalone's: no spans or metrics, ledger rows as JSON lines.
 
 ## 4. The binary's lifecycle (`cmd/golem-gateway`)
@@ -289,7 +291,7 @@ row with outcome `cancelled`, its cost in the counter.
 | The implicit principal exists only for dev, and takes only the local key | `Compile`, `Authenticate` | `TestImplicit`, `TestLocalKey` |
 | Entra tokens are refused once the key set is too old | `entra.Verifier.Verify` | `TestStaleKeys` |
 | Every ledger row is delivered, dropped or failed, and counted | `LedgerQueue` | `TestLedgerQueue*` (shutdown races, emission during shutdown, flush during shutdown, retries, partial delivery) |
-| OTLP uses TLS unless the collector is a literal loopback address | `plaintextOK` | `TestPlaintextOK` |
+| OTLP uses TLS unless the collector is a literal loopback address, whatever the environment says | `otlp.PlaintextOK`, `otlp.New` | `TestPlaintextOK`, `TestOTLPIgnoresInsecureEnv` (lib/otlp) |
 | A stream cut at shutdown still leaves its row and counter add | `lifecycle.shutdown`, the order in `main` | `TestShutdownAccounts` |
 | Standalone answers only loopback, same-origin JSON requests | `localOnly` | `TestLocalOnly` |
 | Production publication stays disabled | `releaseGate` | `TestReleaseGate` |

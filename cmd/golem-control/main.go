@@ -39,10 +39,10 @@ import (
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
-	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
 	"github.com/chucklehead-dev/golem/lib/entra"
+	"github.com/chucklehead-dev/golem/lib/otlp"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/sign/kmssign"
 )
@@ -222,11 +222,11 @@ func openAudit(ctx context.Context, st *state.Store, archive, telem string) (_ *
 	if telem == "off" {
 		return s, func() {}, nil
 	}
-	p, stop, err := telemetry.OTLP(ctx, telem, resource.NewSchemaless(attribute.String("service.name", "golem-control")))
+	lp, stop, err := otlp.LoggerProvider(ctx, telem, resource.NewSchemaless(attribute.String("service.name", "golem-control")))
 	if err != nil {
 		return nil, nil, fmt.Errorf("-telemetry: %w", err)
 	}
-	s.Logger = p.Logger.Logger("golem-control")
+	s.Logger = lp.Logger("golem-control")
 	return s, func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

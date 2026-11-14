@@ -5,18 +5,12 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"errors"
-	"fmt"
 	"io"
-	"net"
-	"net/netip"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/embedded"
 	"go.opentelemetry.io/otel/log/global"
@@ -25,38 +19,20 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
+	"github.com/chucklehead-dev/golem/lib/otlp"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // OTLP sets up OTLP/HTTP exporters for traces, metrics and logs to the
-// collector at endpoint (host:port), installs them globally, and returns
-// the providers and their shutdown. Telemetry carries the ledger: it goes
-// over TLS unless the collector is on this machine (a node-local agent at
-// a literal loopback address, 127.0.0.1 or [::1]; ADR 0043, golem#5).
-//
-// Each exporter is given its whole URL, scheme included: the OTEL_EXPORTER_OTLP_*
-// variables (INSECURE, ENDPOINT, the per-signal ones) are applied before
-// options, and an explicit URL overrides every one of them, so none can
-// turn TLS off or send the ledger elsewhere. The CERTIFICATE variables
-// still apply: they add trust, they cannot remove verification.
+// collector at endpoint (host:port; lib/otlp's transport rule), installs
+// them globally, and returns the providers and their shutdown.
 func OTLP(ctx context.Context, endpoint string, res *resource.Resource) (Providers, func(context.Context) error, error) {
-	base, err := otlpBase(endpoint)
+	ex, err := otlp.New(ctx, endpoint)
 	if err != nil {
 		return Providers{}, nil, err
 	}
-	te, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(base+"/v1/traces"))
-	if err != nil {
-		return Providers{}, nil, err
-	}
-	me, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpointURL(base+"/v1/metrics"))
-	if err != nil {
-		return Providers{}, nil, err
-	}
-	le, err := otlploghttp.New(ctx, otlploghttp.WithEndpointURL(base+"/v1/logs"))
-	if err != nil {
-		return Providers{}, nil, err
-	}
-	p, shutdown := SDK(te, sdkmetric.NewPeriodicReader(me), le, res)
+	p, shutdown := SDK(ex.Spans, sdkmetric.NewPeriodicReader(ex.Metrics), ex.Logs, res)
 	otel.SetTracerProvider(p.Tracer)
 	otel.SetMeterProvider(p.Meter)
 	global.SetLoggerProvider(p.Logger)
@@ -151,19 +127,3 @@ func writeValue(enc *jsontext.Encoder, v attribute.Value) {
 // included, is resolved when dialed, by whatever resolver and hosts file
 // the node has, so it would not hold telemetry to this machine: a name
 // gets TLS.
-// otlpBase is the collector's base URL: https unless plaintext is allowed.
-func otlpBase(endpoint string) (string, error) {
-	host, _, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		return "", fmt.Errorf("telemetry endpoint %q: want host:port", endpoint)
-	}
-	if plaintextOK(host) {
-		return "http://" + endpoint, nil
-	}
-	return "https://" + endpoint, nil
-}
-
-func plaintextOK(host string) bool {
-	ip, err := netip.ParseAddr(host)
-	return err == nil && ip.IsLoopback()
-}
