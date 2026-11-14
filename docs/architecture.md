@@ -95,43 +95,48 @@ checks the caller's role on the resource (org-model §2).
 One Go module, one repository; binaries share generated API code and a few
 libraries, and nothing else.
 
+As built (planned parts marked so):
+
 ```
 proto/golem/...            API definitions (buf); the contract between components
-gen/                       generated Go (protobuf, connect) and TypeScript clients
+gen/                       generated Go (protobuf, connect)
 cmd/golem-gateway/         each main only wires its component
 cmd/golem-control/
-cmd/golemctl/
-gateway/...                data plane (gateway.md §4)
+cmd/golemctl/              the CLI: lib/ and the generated clients only
+gateway/                   data plane (gateway.md §4): proxy, dialect, sse, canon, route,
+                           auth, limit, admission, price, snapshot (the gateway's sources), telemetry
 control/
-  api/                     Connect handlers: decode, call service, encode; no logic
-  service/                 domain logic and authorization: org, keys, budget, config, spend
-  store/                   repository interfaces
-  store/doc/               the state document over a blob CAS interface (ADR 0006)
-  store/blob/              adapters: S3 and in-memory (others when a site needs them)
-  config/                  the CRD watch, validation, status, overrides layering
-  distribution/            snapshot building, signing and publication
-  spend/                   ClickHouse queries
-  jobs/                    the leader's jobs; call control/service, never the store directly
-console/                   web UI (Go html/template + htmx), a client of the control API
-cli/                       golemctl commands, a client of the control API
+  api/                     Connect handlers: authenticate, decode, call service, encode; no rules
+  service/                 rules and authorization: org, keys, groups
+  state/                   the state document over a bucket's compare-and-swap (ADR 0006)
+  lead/                    leadership: the lease in the state document (ADR 0045)
+  publish/                 a pool's publication: record, checkpoint, signed pointer
+  controller/              the leader's loop: compile, publish, renew; runs the jobs
+  audit/                   audit shipping: archive, emit, trim
+  entrasync/               Entra group sync (ADR 0047)
+  watermark/               known spend's ledger watermark (ADR 0042; being replaced)
+  config/, spend/          the CRD watch and ClickHouse queries (planned)
+console/                   web UI (Go html/template + htmx), a client of the control API (planned)
 plugins/backstage/         TypeScript, generated client (M3)
 lib/                       shared libraries with no control-plane or Kubernetes-client deps:
-                           telemetry setup, Entra token validation, uuid/v7 ids, retry, the
-                           snapshot format, the CRD types (lib/api/v1alpha1) and the snapshot
-                           compiler (lib/compile), used by golem-control, golemctl and the
-                           standalone gateway
-deploy/                    Helm charts (CRDs, golem-control, gateway pools), the Crossplane composition and XRDs, Argo CD ApplicationSet, ClickHouse DDL, Grafana
+                           bucket (+ S3), sign (+ KMS), the snapshot format and signed pointer,
+                           the CRD types (lib/api/v1alpha1) and the snapshot compiler
+                           (lib/compile), key, period, contract
+internal/archtest/         the rules below, as tests
+model/                     the Quint models, literate (model/*.md)
+test/props/                Hegel property tests over the models' machines
+deploy/                    Helm charts, Crossplane composition, ClickHouse DDL (planned in part)
 docs/
 ```
 
 ### 4.1 Layers
 
 ```
- transport (api/, console handlers, CLI commands)
+ transport (control/api, golemctl, the console)
      ↓
- service (control/service) — the only place rules live: authz, invariants, transactions
+ service (control/service) — the only place rules live: authz, validation
      ↓
- store (control/store interfaces) → store/doc (state document, blob CAS)
+ store (control/state) — the document, its invariants, compare-and-swap
 ```
 
 Jobs and the console sit beside the transport layer: jobs call services,
@@ -142,16 +147,15 @@ layer below it.
 
 `internal/archtest` runs `go list -deps` per binary and fails when:
 
-- `cmd/golem-gateway` depends on `control/...`, `pgx`, `clickhouse-go`,
+- `cmd/golem-gateway` links `control/...`, `pgx`, `clickhouse-go`,
   `client-go` or `controller-runtime`;
-- anything outside `control/store/...` writes the state document;
-- `control/api` imports `control/store`;
-- `cli` or `console` import anything of `control` but the
-  generated clients and `lib/api/v1alpha1`;
-- `lib/` imports client-go, controller-runtime or anything of the control
-  plane (the standalone gateway imports `lib/compile`);
-- `control/api` imports `control/jobs` or the reverse;
-- `gen/` or `lib/` import any component.
+- `cmd/golemctl` links `gateway/...` or `control/...` (the CLI uses
+  `lib/` and the generated clients);
+- a `lib/` package imports anything but `lib/` and `gen/`;
+- a `gateway/` package imports `control/`.
+
+Planned as rules too: only `control/state` writes the state document, and
+`control/api` never imports `control/state`'s writers.
 
 Each binary also gets its own image and its own dependency list in
 `deploy/`, so the gateway's image carries the gateway's code only.
