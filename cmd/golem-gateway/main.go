@@ -89,7 +89,7 @@ func main() {
 	lc := &lifecycle{unready: *unready, drain: *drainFor, cut: 10 * time.Second}
 	mux := http.NewServeMux()
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
-		mux.Handle(pattern, lc.track(localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: proxy.Limits(limiter), MaxBody: *maxBody, Telemetry: tel})))
+		mux.Handle(pattern, lc.track(localOnly(d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: *maxBody, Telemetry: tel})))
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))

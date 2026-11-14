@@ -53,7 +53,7 @@ request:   ztunnel (mesh mTLS) → listener → frontend (dialect, scan) → aut
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
 inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
            or, standalone (ADR 0023), CRD YAML in a local directory compiled in-process
-state:     the site's Valkey (spend since the snapshot, rate windows, concurrency slots, provider quota shares) (ADR 0031)
+state:     the site's Valkey (spend since the snapshot, concurrency slots; rate windows and provider quota shares planned) (ADR 0031)
 outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
            status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
@@ -92,21 +92,34 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    selection by strategy (affinity key first, then the strategy among
    healthy deployments).
 6. **Check** (ADR 0031), in one Valkey round trip: known spend (the
-   snapshot's, plus the site's counter since) against the key cap, member
-   cap and scope pool, with the request's declared worst case added in
-   scopes with the declared-worst-case check (bounded by the scope's `max_tokens` and input-size ceilings,
-   input tokens by byte count: ADR 0038); a concurrency slot for the
-   principal, renewed every 30 seconds while the call is in flight; rate limits and the
-   deployment's provider quota share. Refusals are 402 (budgets) or 429
-   (limits). The proxy sees the limiter only as `proxy.Admitter` (admit,
-   then a `Ticket` completed or cancelled, its slot held to the provider's
-   tail); `gateway/limit` is golem's implementation, with its own renewal
-   and recovery loop (`Run`) and last accounting (`Finish`). It is a fixed
-   stage after routing, not a hook: admission needs the route's price,
-   its slot lives across the whole call, and its completion must not be
-   dropped, none of which ADR 0014's stateless, per-phase hooks (whose
-   Complete phase may drop work) provide. Limits that only refuse fit a
-   Request hook.
+   snapshot's, plus the site's counter since) against the scope's budget,
+   with the request's declared worst case added in scopes with the
+   declared-worst-case check (bounded by the scope's `max_tokens` and
+   input-size ceilings, input tokens by byte count: ADR 0038); and
+   concurrency slots for the principal and the scope, renewed every 30
+   seconds while the call is in flight. Refusals are 402 (budgets) or 429
+   (limits). *Planned, not built:* key and member caps, rate limits and the
+   deployment's provider quota share, in the same round trip (the call
+   carries the alias, deployment and model they key on).
+
+   The proxy sees admission only as `gateway/admission`: `Admitter.Admit`
+   returns a `Ticket`, ended exactly once by `Complete` (the cost) or
+   `Cancel` (the cost seen, and when to free the slot: the provider's
+   tail), or a `*Refusal` rendered with its code and Retry-After; a caller
+   gone during admission is told nothing. `gateway/limit` is golem's
+   implementation (`Limiter.Admitter`), with its renewal and recovery loop
+   (`Run`) and last accounting (`Finish`), and owes the ledger one
+   numbering record per counted event (ADR 0042, 0043). Admission is a
+   fixed stage after routing, not a hook: ADR 0014 has no phase after
+   routing, its hooks are stateless per phase, and its Complete phase may
+   drop work, while an admitted call holds a slot across its life and is
+   counted exactly once. Nor does the limiter's outage behaviour fit a
+   hook's fail-open or fail-closed: it admits on its own in-flight counts,
+   each admission a waiver, then replays and re-acquires in a grace after
+   recovery (ADR 0041 §7.3). Stateless refusals (deny lists, size rules)
+   fit a Request hook; rate limits do not, since a hook that took a token
+   before a budget refusal would spend it on a refused call: they belong
+   in the admitter's round trip.
 7. **Attempt loop.** For each attempt: build the upstream request (fast
    path: same bytes, spliced model name; else the frontend's decoder and the
    backend's encoder through `canon`), wrap it in the deployment's envelope
@@ -118,7 +131,8 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    extractor; flush per event. Translated: decode upstream events, encode
    frontend events.
 9. **Record**: price the actual usage from the catalog; add it to the
-   site's spend counters; release the concurrency slot; record metrics and
+   site's spend counters; release the concurrency slot (a cancelled or cut
+   call holds it through the provider's tail, `ProviderTail`); record metrics and
    the access log record (which is also the
    ledger's input, ADR 0015); queue `Complete` hooks (bounded queue,
    dropped work counted).
@@ -147,7 +161,8 @@ gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT)
 gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object-storage poller,
                        the file source, the on-disk last-good copy, status writes
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
-gateway/limit/         Limiter: known-spend checks, worst-case cost, concurrency slots, GCRA rate windows; Valkey and in-memory implementations
+gateway/admission/     the request path's contract with admission: Call, Admitter, Ticket, Refusal (a leaf)
+gateway/limit/         Limiter (admission's implementation): known-spend checks, concurrency slots; Valkey and in-memory stores
                        (built: known spend as snapshot spend plus the counter after the ledger watermark, O(1) (ADR 0042);
                        soft and declared-worst-case checks; principal and scope slots; holding on cancel; outages with waivers, replay and a
                        recovery grace; over an in-memory store and Valkey (Lua scripts; slot TTLs on the server's clock);

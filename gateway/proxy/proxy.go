@@ -14,13 +14,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"uuid"
 
+	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/canon"
-	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/price"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
@@ -52,9 +53,9 @@ type Result struct {
 type Handler struct {
 	Dialect   Dialect
 	Snapshots Snapshots
-	// Limiter admits calls against budgets and in-flight limits
-	// (Limits(l) for golem's); nil admits everything.
-	Limiter Admitter
+	// Limiter admits calls against budgets and in-flight limits (golem's:
+	// limit.Limiter.Admitter); nil admits everything uncounted.
+	Limiter admission.Admitter
 	MaxBody int64 // request body cap in bytes
 	// Telemetry records each request's span, metrics and ledger row; nil
 	// records nothing.
@@ -122,8 +123,10 @@ func reachedProvider(err error) bool {
 // refusal is a request the path will not serve: a contract code and a
 // message that says what to do next.
 type refusal struct {
-	code contract.Code
-	msg  string
+	code       contract.Code
+	msg        string
+	retryAfter time.Duration // the admitter's, if it said when to retry
+	callerGone bool          // nothing to tell: the caller left first
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +162,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Scan and route. (Hooks go here.)
 	req, err := ex.scan(h.Dialect, body)
 	if err != nil {
-		h.fail(ctx, w, &refusal{contract.RequestInvalid, err.Error()})
+		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: err.Error()})
 		return
 	}
 	rt, no := h.route(snap, principal, req.alias)
@@ -183,14 +186,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	worst, ok := price.Worst(int64(len(body)), req.maxTokens, req.n, pr)
 	if !ok {
-		h.fail(ctx, w, &refusal{contract.RequestInvalid, "the request's token count is too large to price safely: lower max_tokens or n"})
+		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: "the request's token count is too large to price safely: lower max_tokens or n"})
 		return
 	}
-	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, req, worst)
+	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, rt.Alias, *target, req, worst)
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
 	}
+	// Every admitted call's ticket ends exactly once. Should anything below
+	// panic before it does (a bug; the abort of a cut response comes after
+	// its end), the call is cancelled at its declared worst case and its
+	// slot held for the tail, rather than held for ever. Its row is not
+	// written: the panic's report is the record.
+	ended := false
+	defer func() {
+		if ticket != nil && !ended {
+			ticket.Cancel(context.WithoutCancel(ctx), worst, h.tailEnd(deadline))
+		}
+	}()
 
 	out := getBody()
 	if n := len(body) + len(target.Model) + 64; cap(*out) < n {
@@ -251,9 +265,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if cost == 0 {
 				ticket.Complete(acct, 0) // the provider never had it
 			} else {
-				ticket.Cancel(acct, cost)
-				ticket.EndAt(h.tailEnd(deadline))
+				ticket.Cancel(acct, cost, h.tailEnd(deadline))
 			}
+			ended = true
 		}
 		Refuse(w, h.Dialect, c, msg)
 		return
@@ -293,8 +307,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call.Ended, call.Status, call.Usage, call.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
 	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
 	call.Outcome, call.ErrorOrigin, call.ErrorCode = outcome(res, cut)
-	// The row is prepared before the ticket numbers its event: the
-	// limiter's OnNumbered writes it with the number.
+	// The row is written before the ticket numbers its event: the
+	// limiter's OnNumbered then emits the event's numbering record
+	// (golem.spend_seq, ADR 0043), joined to the row by event.
 	h.Telemetry.Ended(ctx, call)
 	if ticket != nil {
 		if res.CallerGone || cut {
@@ -302,12 +317,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// (estimated where unreported), and the slot is held for the
 			// provider's tail, which may go on working after the connection
 			// closes (ADR 0041 §7.6; golem#4).
-			ticket.Cancel(acct, res.Cost)
 			resp.Body.Close()
-			ticket.EndAt(h.tailEnd(deadline))
+			ticket.Cancel(acct, res.Cost, h.tailEnd(deadline))
 		} else {
 			ticket.Complete(acct, res.Cost)
 		}
+		ended = true
 	}
 	if h.Record != nil {
 		h.Record(r, res)
@@ -330,16 +345,15 @@ func (h *Handler) authenticate(r *http.Request) (*snapshot.Compiled, *auth.Princ
 	snap, err := h.Snapshots.Current()
 	switch {
 	case errors.Is(err, snapshot.ErrExpired):
-		return nil, nil, &refusal{contract.GatewayAuthorizationExpired,
-			"this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted"}
+		return nil, nil, &refusal{code: contract.GatewayAuthorizationExpired, msg: "this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted"}
 	case err != nil:
-		return nil, nil, &refusal{contract.GatewayNotReady, "this gateway has no configuration yet; retry shortly"}
+		return nil, nil, &refusal{code: contract.GatewayNotReady, msg: "this gateway has no configuration yet; retry shortly"}
 	case snap.Auth == nil:
 		return snap, auth.Anyone, nil
 	}
 	p, no := snap.Auth.Authenticate(r.Header)
 	if no != nil {
-		return nil, nil, &refusal{no.Code, no.Msg}
+		return nil, nil, &refusal{code: no.Code, msg: no.Msg}
 	}
 	return snap, p, nil
 }
@@ -359,9 +373,9 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) (
 	rc.SetReadDeadline(time.Time{})
 	switch _, tooBig := errors.AsType[*http.MaxBytesError](err); {
 	case tooBig:
-		return nil, &refusal{contract.RequestTooLarge, "the request body is larger than this gateway accepts"}
+		return nil, &refusal{code: contract.RequestTooLarge, msg: "the request body is larger than this gateway accepts"}
 	case err != nil:
-		return nil, &refusal{contract.RequestUnreadable, "the request body could not be read"}
+		return nil, &refusal{code: contract.RequestUnreadable, msg: "the request body could not be read"}
 	}
 	return *in, nil
 }
@@ -371,12 +385,11 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 	rt := snap.Routes.Lookup(alias)
 	switch {
 	case rt == nil:
-		return nil, &refusal{contract.RouteUnknownModel, "no route for this model; ask the scope's managers which aliases it may use"}
+		return nil, &refusal{code: contract.RouteUnknownModel, msg: "no route for this model; ask the scope's managers which aliases it may use"}
 	case rt.Dialect != h.Dialect.Name():
-		return nil, &refusal{contract.RouteWrongFrontend,
-			"this model speaks " + rt.Dialect + ", not " + h.Dialect.Name() + ": call it at that API's endpoint (golem converts only where a route says so)"}
+		return nil, &refusal{code: contract.RouteWrongFrontend, msg: "this model speaks " + rt.Dialect + ", not " + h.Dialect.Name() + ": call it at that API's endpoint (golem converts only where a route says so)"}
 	case !p.Allows(alias):
-		return nil, &refusal{contract.AuthzModelNotAllowed, "this key's scope may not use this model; its managers can allow it, or use an alias it allows"}
+		return nil, &refusal{code: contract.AuthzModelNotAllowed, msg: "this key's scope may not use this model; its managers can allow it, or use an alias it allows"}
 	}
 	return rt, nil
 }
@@ -401,17 +414,17 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 		return nil
 	}
 	if req.unknown > 0 {
-		return &refusal{contract.AuthzFeatureForbidden, fmt.Sprintf("%d request member(s) golem does not know: this route forwards approved features only (restricted mode); its managers can approve them", req.unknown)}
+		return &refusal{code: contract.AuthzFeatureForbidden, msg: fmt.Sprintf("%d request member(s) golem does not know: this route forwards approved features only (restricted mode); its managers can approve them", req.unknown)}
 	}
 	for _, v := range hdr.Values("Anthropic-Beta") {
 		for b := range strings.SplitSeq(v, ",") {
 			if b = strings.TrimSpace(b); b != "" && !rt.Betas[b] {
-				return &refusal{contract.AuthzFeatureForbidden, "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
+				return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
 			}
 		}
 	}
 	if v := hdr.Get("Anthropic-Version"); v != "" && !approvedVersions[v] {
-		return &refusal{contract.AuthzFeatureForbidden, "anthropic-version " + v + " is not approved (restricted mode)"}
+		return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-version " + v + " is not approved (restricted mode)"}
 	}
 	return nil
 }
@@ -424,50 +437,52 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
 	lim := p.Limits
 	if c := lim.MaxInputBytes; c > 0 && requestBytes > c {
-		return &refusal{contract.RequestOverCeiling, fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}
+		return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}
 	}
 	if c := lim.MaxOutputTokens; c > 0 {
 		switch {
 		case !req.hasMax:
-			return &refusal{contract.RequestOverCeiling, fmt.Sprintf("this scope caps output at %d tokens a request: set max_tokens, at most that", c)}
+			return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("this scope caps output at %d tokens a request: set max_tokens, at most that", c)}
 		case req.maxTokens > c/req.n:
-			return &refusal{contract.RequestOverCeiling, fmt.Sprintf("max_tokens %d for %d completions is over this scope's ceiling of %d tokens a request", req.maxTokens, req.n, c)}
+			return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("max_tokens %d for %d completions is over this scope's ceiling of %d tokens a request", req.maxTokens, req.n, c)}
 		}
 	}
 	if !lim.StorageAllowed {
 		if req.state {
-			return &refusal{contract.AuthzProviderStorageForbidden, "this scope forbids provider-side storage, which a container keeps; its managers can allow it (ADR 0027)"}
+			return &refusal{code: contract.AuthzProviderStorageForbidden, msg: "this scope forbids provider-side storage, which a container keeps; its managers can allow it (ADR 0027)"}
 		}
 		if req.store {
 			ex.forbidStorage(h.Dialect)
 		}
 	}
 	if lim.DeclaredWorstCaseCheck && req.serverTools {
-		return &refusal{contract.AuthzFeatureForbidden, "this scope checks each call's declared worst case, and server-side tools (web search or fetch, code execution, MCP servers) declare none: use client-side tools, or a scope without declaredWorstCaseCheck"}
+		return &refusal{code: contract.AuthzFeatureForbidden, msg: "this scope checks each call's declared worst case, and server-side tools (web search or fetch, code execution, MCP servers) declare none: use client-side tools, or a scope without declaredWorstCaseCheck"}
 	}
 	return nil
 }
 
 // admit checks the call against the scope's budget and in-flight limits
 // (ADR 0031) and takes its slots. A nil ticket with no refusal: no limiter.
-func (h *Handler) admit(ctx context.Context, reqID string, started, deadline time.Time, p *auth.Principal, req scanned, worst int64) (Ticket, *refusal) {
+func (h *Handler) admit(ctx context.Context, reqID string, started, deadline time.Time, p *auth.Principal, alias string, target route.Target, req scanned, worst int64) (admission.Ticket, *refusal) {
 	if h.Limiter == nil {
 		return nil, nil
 	}
 	lim := p.Limits
 	if lim.DeclaredWorstCaseCheck && !req.hasMax {
-		return nil, &refusal{contract.RequestInvalid, "this scope checks each call's declared worst case: set max_tokens, so it can be checked against the budget"}
+		return nil, &refusal{code: contract.RequestInvalid, msg: "this scope checks each call's declared worst case: set max_tokens, so it can be checked against the budget"}
 	}
-	t, err := h.Limiter.Admit(ctx, limit.Call{ID: reqID, Principal: p.ID, Scope: p.Scope,
+	t, err := h.Limiter.Admit(ctx, admission.Call{ID: reqID, Principal: p.ID, Scope: p.Scope,
+		Alias: alias, Deployment: target.Backend + "/" + target.Deployment, Model: target.Model,
 		Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
 		DeclaredWorstCaseCheck: lim.DeclaredWorstCaseCheck, Worst: worst, Started: started, Deadline: deadline})
+	if no, ok := errors.AsType[*admission.Refusal](err); ok {
+		return nil, &refusal{code: no.Code, msg: no.Msg, retryAfter: no.RetryAfter}
+	}
 	switch {
-	case errors.Is(err, limit.ErrBudget):
-		return nil, &refusal{contract.BudgetPoolExhausted, "the scope's budget for this period is spent; its managers or a budget manager can add to it"}
-	case errors.Is(err, limit.ErrConcurrency):
-		return nil, &refusal{contract.LimitConcurrency, "too many calls in flight for this key's principal or scope; retry when one finishes"}
+	case err != nil && ctx.Err() != nil:
+		return nil, &refusal{callerGone: true}
 	case err != nil:
-		return nil, &refusal{contract.GatewayInternal, "the limiter failed"}
+		return nil, &refusal{code: contract.GatewayInternal, msg: "the limiter failed"}
 	}
 	return t, nil
 }
@@ -603,16 +618,25 @@ func (e errUpstreamCut) Unwrap() error { return e.err }
 // fail refuses a request: the refusal recorded, and written in the
 // caller's dialect.
 func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, no *refusal) {
+	if no.callerGone {
+		return // no one to tell, nothing refused
+	}
 	h.Telemetry.Refused(ctx, no.code)
-	Refuse(w, h.Dialect, no.code, no.msg)
+	refuse(w, h.Dialect, no.code, no.msg, no.retryAfter)
 }
 
 // Refuse writes a refusal in a dialect's error shape, with golem's code, a
 // message that says what to do next, and the request ID if the response has
 // one (contracts.md §1). Only contract codes can be sent.
-func Refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string) {
+func Refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string) { refuse(w, d, c, msg, 0) }
+
+// refuse is Refuse with the refuser's own Retry-After, when it gave one.
+func refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string, after time.Duration) {
 	w.Header()["Content-Type"] = jsonType
-	if c.RetryAfter() {
+	switch {
+	case after > 0:
+		w.Header()["Retry-After"] = []string{strconv.FormatInt(int64((after+time.Second-1)/time.Second), 10)}
+	case c.RetryAfter():
 		w.Header()["Retry-After"] = retryAfter
 	}
 	w.WriteHeader(c.Status)

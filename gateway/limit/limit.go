@@ -3,42 +3,27 @@ package limit
 import (
 	"cmp"
 	"context"
-	"errors"
 	"log/slog"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/chucklehead-dev/golem/gateway/admission"
+	"github.com/chucklehead-dev/golem/lib/contract"
 	budget "github.com/chucklehead-dev/golem/lib/period"
 )
 
-// Refusals, mapped to contract codes by the proxy (contracts.md §1).
+// Refusals (contracts.md §1), matched with errors.Is.
 var (
-	ErrBudget      = errors.New("limit: the budget is spent")      // budget.pool_exhausted, 402
-	ErrConcurrency = errors.New("limit: too many calls in flight") // limit.concurrency, 429
+	ErrBudget = &admission.Refusal{Code: contract.BudgetPoolExhausted,
+		Msg: "the scope's budget for this period is spent; its managers or a budget manager can add to it"}
+	ErrConcurrency = &admission.Refusal{Code: contract.LimitConcurrency,
+		Msg: "too many calls in flight for this key's principal or scope; retry when one finishes"}
 )
 
-// Call is one request's admission: who, where, and its limits as the
-// snapshot gives them.
-type Call struct {
-	ID, Principal, Scope string
-	Budget               int64 // the scope's budget in micro-units; 0: none
-	PrincipalLimit       int   // in-flight calls per principal; 0: none
-	ScopeLimit           int   // in-flight calls per scope (ADR 0041 §7.6); 0: none
-	// DeclaredWorstCaseCheck (a scope option): admit only if known spend plus Worst,
-	// the call's declared worst case, fits (ADR 0031, 0044); else the soft
-	// check, known spend below the budget.
-	DeclaredWorstCaseCheck bool
-	Worst                  int64
-	// Started is when the call began (the request's arrival): it fixes the
-	// budget period the call belongs to, the one its ledger row names. Zero
-	// means now.
-	Started time.Time
-	// Deadline is the call's end at the latest (its route's maximum
-	// duration); renewals stop holding its slot past it. Zero: none.
-	Deadline time.Time
-}
+// Call is the call the limiter admits: admission's.
+type Call = admission.Call
 
 // Known is a snapshot's known spend for one scope on this site (ADR 0042),
 // for one budget period: the ledger's balance with this site's events
@@ -80,11 +65,12 @@ type Limiter struct {
 	periods atomic.Pointer[periodName]
 
 	mu          sync.Mutex
-	known       map[string]Known   // by scope, from the snapshot
-	last        map[keyOf]int64    // known spend as last computed: all an outage leaves
-	overLogged  map[keyOf]bool     // over-counting reported once per scope and period
-	running     map[string]*Ticket // this gateway's calls the provider may still be working on
-	byPrincipal map[string]int     // running calls, counted: an outage's local check is O(1)
+	known       map[string]Known        // by scope, from the snapshot
+	last        map[keyOf]int64         // known spend as last computed: all an outage leaves
+	overLogged  map[keyOf]bool          // over-counting reported once per scope and period
+	running     map[string]*Ticket      // this gateway's calls the provider may still be working on
+	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer
+	byPrincipal map[string]int          // running calls, counted: an outage's local check is O(1)
 	byScope     map[string]int
 	pending     []held // increments held while the store is down, in order
 	graceUntil  time.Time
@@ -132,14 +118,27 @@ type Numbered struct {
 	Seq int64
 }
 
-// Ticket is an admitted call. Exactly one of Complete or Cancel is called;
-// after Cancel, Ended when the upstream has ended.
+// Ticket is an admitted call. It ends once, by Complete or Cancel (a
+// later end is ignored); after Cancel, its slot is held until Ended, or
+// the time EndAt names.
 type Ticket struct {
-	l      *Limiter
-	call   Call
-	period string
-	waived bool
-	done   bool
+	l       *Limiter
+	call    Call
+	period  string
+	waived  bool
+	charged bool // Complete or Cancel has run (under l.mu)
+	done    bool // its slot is freed (under l.mu)
+}
+
+// charge claims the ticket's one end.
+func (l *Limiter) charge(t *Ticket) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t.charged {
+		return false
+	}
+	t.charged = true
+	return true
 }
 
 // Waived reports whether the call was admitted outside the bound: while the
@@ -305,7 +304,7 @@ func (t *Ticket) slot() Slot { return Slot{t.call.ID, t.call.Principal, t.call.S
 // Complete records the call's cost and frees its slot: one round trip.
 func (t *Ticket) Complete(ctx context.Context, cost int64) {
 	l, e := t.l, Event{t.call.ID, cost}
-	if !l.finish(t) {
+	if !l.charge(t) || !l.finish(t) {
 		return
 	}
 	if !l.isDown() {
@@ -325,32 +324,50 @@ func (t *Ticket) Complete(ctx context.Context, cost int64) {
 // slot is kept until Ended: the provider may still be working (and billing)
 // on it, and freeing the slot would let cancel-and-resend escape the
 // in-flight limit (ADR 0041 §7.6).
-func (t *Ticket) Cancel(ctx context.Context, seen int64) {
+func (t *Ticket) Cancel(ctx context.Context, seen int64) { t.cancel(ctx, seen) }
+
+func (t *Ticket) cancel(ctx context.Context, seen int64) bool {
 	l, e := t.l, Event{t.call.ID, seen}
+	if !l.charge(t) {
+		return false
+	}
 	if !l.isDown() {
 		sctx, cancel := l.storeContext(ctx)
 		seq, err := l.store.Add(sctx, t.call.Scope, t.period, e)
 		cancel()
 		if err == nil {
 			l.numbered(t.call.Scope, t.period, e, seq)
-			return
+			return true
 		}
 		l.markDown(err)
 	}
 	l.hold(t.call.Scope, t.period, e)
+	return true
 }
 
 // EndAt frees a cancelled call's slot at a time to come: the provider may
 // go on working (and billing) after its response was cut or abandoned, so
 // the slot is held a while longer (ADR 0041 §7.6; golem#4).
 func (t *Ticket) EndAt(at time.Time) {
-	time.AfterFunc(time.Until(at), func() { t.Ended(context.Background()) })
+	l := t.l
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t.done || l.tails[t] != nil {
+		return
+	}
+	if l.tails == nil {
+		l.tails = map[*Ticket]*time.Timer{}
+	}
+	l.tails[t] = time.AfterFunc(time.Until(at), func() { t.Ended(context.Background()) })
 }
 
 // Ended frees a cancelled call's slot once its upstream has ended (the
 // connection closed, or the deployment's maximum duration passed).
 func (t *Ticket) Ended(ctx context.Context) {
 	l := t.l
+	l.mu.Lock()
+	delete(l.tails, t)
+	l.mu.Unlock()
 	if !l.finish(t) || l.isDown() {
 		return // when down, the slot's TTL frees it
 	}
@@ -625,7 +642,17 @@ func (l *Limiter) Run(ctx context.Context) {
 // Finish is the last accounting, once every call has ended: increments
 // held through an outage replayed if the store answers within ctx, else
 // abandoned (numbered 0: their rows, already written, count as they are).
+//
+// Tails still held are not released: their timers stop, and their slots
+// expire by their TTL, which is what a tail is for (the provider may still
+// be working), and no release races the abandonment below.
 func (l *Limiter) Finish(ctx context.Context) {
+	l.mu.Lock()
+	for t, timer := range l.tails {
+		timer.Stop()
+		delete(l.tails, t)
+	}
+	l.mu.Unlock()
 	if l.Down() {
 		if err := l.Recover(ctx); err != nil {
 			slog.Warn("limit: increments held through the outage were not replayed; their rows go unnumbered", "err", err)
@@ -633,5 +660,33 @@ func (l *Limiter) Finish(ctx context.Context) {
 	}
 	if n := l.Abandon(); n > 0 {
 		slog.Warn("limit: increments held through the outage abandoned; numbered 0", "increments", n)
+	}
+}
+
+// Admitter is the limiter as the request path's admission.Admitter; nil
+// for a nil limiter (no limits: every call admitted uncounted).
+func (l *Limiter) Admitter() admission.Admitter {
+	if l == nil {
+		return nil
+	}
+	return admitter{l}
+}
+
+type admitter struct{ l *Limiter }
+
+func (a admitter) Admit(ctx context.Context, c admission.Call) (admission.Ticket, error) {
+	t, err := a.l.Admit(ctx, c)
+	if t == nil { // a nil *Ticket is not a nil admission.Ticket
+		return nil, err
+	}
+	return tailed{t}, err
+}
+
+// tailed is a Ticket whose Cancel holds its slot to a time given.
+type tailed struct{ *Ticket }
+
+func (h tailed) Cancel(ctx context.Context, seen int64, until time.Time) {
+	if h.cancel(ctx, seen) {
+		h.EndAt(until)
 	}
 }

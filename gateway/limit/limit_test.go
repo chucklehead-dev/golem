@@ -351,3 +351,62 @@ func TestRenewalStopsAtDeadline(t *testing.T) {
 		t.Fatalf("renewed %v: before its deadline, then not", st.got)
 	}
 }
+
+// TestTicketEndsOnce: a ticket's second end, in either order, charges
+// nothing more and frees nothing twice.
+func TestTicketEndsOnce(t *testing.T) {
+	ctx := t.Context()
+	var seen []int64
+	l := New(NewMem())
+	l.OnNumbered = func(n Numbered) { seen = append(seen, n.Cost) }
+	a, _ := l.Admit(ctx, scopeCall("a", "p1"))
+	a.Cancel(ctx, 3)
+	a.Complete(ctx, 5) // after Cancel: ignored
+	a.Cancel(ctx, 7)   // twice: ignored
+	b, _ := l.Admit(ctx, scopeCall("b", "p2"))
+	b.Complete(ctx, 2)
+	b.Complete(ctx, 2)
+	b.Cancel(ctx, 4)
+	if len(seen) != 2 || seen[0] != 3 || seen[1] != 2 || l.Known(ctx, "s") != 5 {
+		t.Fatalf("numbered %v, known %d: each ticket charged once (3 and 2)", seen, l.Known(ctx, "s"))
+	}
+}
+
+// TestAdmitter: the request path's view. A nil limiter is no admitter at
+// all; Cancel holds the slot until the time given, then frees it, and
+// Finish stops the tails still held (their slots expire by TTL).
+func TestAdmitter(t *testing.T) {
+	var none *Limiter
+	if none.Admitter() != nil {
+		t.Fatal("a nil limiter's Admitter must be a nil interface (admit everything uncounted)")
+	}
+	ctx := t.Context()
+	l := New(NewMem())
+	a := l.Admitter()
+	tk, err := a.Admit(ctx, scopeCall("a", "p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk.Cancel(ctx, 1, time.Now().Add(50*time.Millisecond))
+	if _, err := a.Admit(ctx, scopeCall("b", "p1")); !errors.Is(err, ErrConcurrency) {
+		t.Fatalf("during the tail: %v, want the slot still held", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := a.Admit(ctx, scopeCall("b", "p1")); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("after the tail: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	held, _ := a.Admit(ctx, scopeCall("c", "p2"))
+	held.Cancel(ctx, 1, time.Now().Add(time.Hour))
+	l.Finish(ctx)
+	l.mu.Lock()
+	n := len(l.tails)
+	l.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d tails still timed after Finish", n)
+	}
+}

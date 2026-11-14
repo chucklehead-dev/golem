@@ -146,8 +146,8 @@ spec:
 	}
 	mux := http.NewServeMux()
 	lim := limit.New(limit.NewMem())
-	mux.Handle("POST /v1/messages", &proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: h, Limiter: proxy.Limits(lim), MaxBody: 1 << 20})
-	mux.Handle("POST /v1/chat/completions", &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: h, Limiter: proxy.Limits(lim), MaxBody: 1 << 20})
+	mux.Handle("POST /v1/messages", &proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: h, Limiter: lim.Admitter(), MaxBody: 1 << 20})
+	mux.Handle("POST /v1/chat/completions", &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: h, Limiter: lim.Admitter(), MaxBody: 1 << 20})
 	return httptest.NewServer(mux)
 }
 

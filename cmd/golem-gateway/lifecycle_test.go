@@ -46,7 +46,7 @@ func TestShutdownAccounts(t *testing.T) {
 	lc := &lifecycle{drain: 200 * time.Millisecond, cut: 5 * time.Second}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/chat/completions", lc.track(&proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, ProviderTail: 50 * time.Millisecond,
-		Limiter: proxy.Limits(lim), MaxBody: 1 << 20, Telemetry: tel}))
+		Limiter: lim.Admitter(), MaxBody: 1 << 20, Telemetry: tel}))
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { return nil }))
 	ts := httptest.NewUnstartedServer(mux)
 	lc.srv = ts.Config
@@ -74,6 +74,11 @@ func TestShutdownAccounts(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("shutdown did not finish")
 	}
+	month := time.Now().UTC().Format("2006-01")
+	time.Sleep(100 * time.Millisecond) // the cut call's slot is held for the provider's tail (golem#4)
+	if len(st.Counter("any", month)) != 1 || len(st.Slots()) != 0 {
+		t.Fatalf("counter %v, slots %v: the call is counted and its slot freed after its tail", st.Counter("any", month), st.Slots())
+	}
 	lim.Finish(t.Context())
 
 	lines := strings.Split(strings.TrimSpace(rows.String()), "\n")
@@ -85,10 +90,5 @@ func TestShutdownAccounts(t *testing.T) {
 	json.Unmarshal([]byte(lines[1]), &num)
 	if row["outcome"] != "cancelled" || num["counter_seq"] != 1.0 || num["event_id"] != row["event_id"] {
 		t.Fatalf("row %v, numbering %v: the cut call is a cancellation, numbered", row, num)
-	}
-	month := time.Now().UTC().Format("2006-01")
-	time.Sleep(100 * time.Millisecond) // the cut call's slot is held for the provider's tail (golem#4)
-	if len(st.Counter("any", month)) != 1 || len(st.Slots()) != 0 {
-		t.Fatalf("counter %v, slots %v: the call is counted and its slot freed", st.Counter("any", month), st.Slots())
 	}
 }

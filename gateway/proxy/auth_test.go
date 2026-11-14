@@ -61,7 +61,7 @@ spec:
 	c, _ := h.Current()
 	c.Routes.Lookup([]byte("claude")).Pick().Transport = s
 	c.Routes.Lookup([]byte("haiku")).Pick().Transport = s
-	return &Handler{Dialect: AnthropicMessages, Snapshots: h, Limiter: Limits(lim), MaxBody: 1 << 20}, lim
+	return &Handler{Dialect: AnthropicMessages, Snapshots: h, Limiter: lim.Admitter(), MaxBody: 1 << 20}, lim
 }
 
 func errorCode(t *testing.T, w *httptest.ResponseRecorder) string {

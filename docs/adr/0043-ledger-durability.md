@@ -43,12 +43,12 @@ considered.
   over TLS (operations.md, "Telemetry transport"; golem#7). The gateway's queue then only bridges the local agent's
   restart, and counts what it cannot deliver (`golem.ledger.dropped`,
   `golem.ledger.failed`, alerted on).
-- **A row does not wait for its number (to build).** The row is written
+- **A row does not wait for its number.** The row is written
   when its call ends. When the limiter numbers the event, it emits a small
   `(event_id, site, scope, period, counter_seq)` record, joined to the row
   in ClickHouse. A Valkey outage then holds no billing rows in gateway
   memory; today up to 100,000 wait there and a crash loses them.
-- **A gap is reconstructed before it is declared lost (to build).** The
+- **A gap is reconstructed before it is declared lost.** The
   site counter keeps each event's ID and cost for five hours (ADR 0042),
   far longer than the 15-minute gap timeout.
   - Before declaring a gap lost, a site-local job (golem-control still
