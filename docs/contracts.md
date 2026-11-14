@@ -212,7 +212,9 @@ wherever they appear, and the list grows with the nightly review. The
 mode is the scope's `features` (unset: restricted, but compatible on routes
 marked `agent`); restricted refuses unknown request members, unapproved
 `anthropic-beta` values (the route's `approvedBetas`) and unapproved
-`anthropic-version`s (`authz.feature_forbidden`):
+`anthropic-version`s (`authz.feature_forbidden`; approved: `2023-06-01` and
+`2026-10-21`, the SDKs' 2026-10 majors' default, reviewed against this table
+and golem's usage and stream parsing):
 
 | Field or family | Policy |
 |---|---|

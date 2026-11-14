@@ -421,8 +421,13 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 }
 
 // approvedVersions are the anthropic-version values restricted mode
-// forwards.
-var approvedVersions = map[string]bool{"2023-06-01": true} // read-only
+// forwards. 2026-10-21 (the default of the SDKs' 2026-10 majors) was
+// reviewed against what golem reads and enforces: it changes no usage,
+// stop or stream field, and no policy field of contracts.md §8; its
+// removals (temperature, top_p, top_k; documents in assistant turns;
+// citations in user turns) are the provider's refusals, forwarded as such.
+// Its SDKs send the key as Authorization: Bearer, which auth accepts.
+var approvedVersions = map[string]bool{"2023-06-01": true, "2026-10-21": true} // read-only
 
 // features applies the request-feature mode (ADR 0037, 0041 §3, §7.1):
 // in restricted mode (the default, but for agent routes) only approved

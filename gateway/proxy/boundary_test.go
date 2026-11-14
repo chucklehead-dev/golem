@@ -33,6 +33,8 @@ func TestFeatureModes(t *testing.T) {
 		{"restricted: an approved beta", known, "approved-2025", "", false, "", 200},
 		{"restricted: another beta", known, "approved-2025, novel-2026", "", false, "", 403},
 		{"restricted: an unapproved version", known, "", "2099-01-01", false, "", 403},
+		{"restricted: the first version", known, "", "2023-06-01", false, "", 200},
+		{"restricted: the 2026-10 version", known, "", "2026-10-21", false, "", 200},
 		{"an agent route: compatible", unknown, "novel-2026", "", true, "", 200},
 		{"a compatible scope", unknown, "novel-2026", "", false, "compatible", 200},
 		{"a restricted scope on an agent route", unknown, "", "", true, "restricted", 403},
