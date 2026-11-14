@@ -195,7 +195,7 @@ func (s *Service) BindManager(ctx context.Context, c Caller, o Options, scope, p
 
 // KeyRequest is a key to mint.
 type KeyRequest struct {
-	Owner   string // the principal the key acts as
+	Owner   string // the principal the key acts as; empty: the caller
 	Scope   string
 	Models  []string // narrows the scope's; empty: all of them
 	Expires time.Time
@@ -211,6 +211,9 @@ type Minted struct {
 // a scope's managers mint its services' keys; admins mint any. The owner
 // must be a member of the scope, and the models within the scope's.
 func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest) (Minted, error) {
+	if r.Owner == "" {
+		r.Owner = c.Principal // the caller's own key
+	}
 	plain := key.New(key.Live)
 	h := key.Hash(plain)
 	m := Minted{Key: plain, Hash: hex.EncodeToString(h[:]), Display: key.Display(plain)}

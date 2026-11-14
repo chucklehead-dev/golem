@@ -26,7 +26,7 @@ const (
 
 type MintKeyRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The principal the key acts as.
+	// The principal the key acts as; empty: the caller.
 	Owner string `protobuf:"bytes,1,opt,name=owner,proto3" json:"owner,omitempty"`
 	Scope string `protobuf:"bytes,2,opt,name=scope,proto3" json:"scope,omitempty"`
 	// Narrows the scope's models; empty: all of them.

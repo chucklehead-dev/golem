@@ -5,6 +5,15 @@ Status: draft, third pass. Every tool here is a client of the control API
 
 ## 1. golemctl
 
+**Built so far:** `config validate`, `keys mint --dev`, `login` (Entra's
+device code flow; tenant, client ID and API remembered), `token`, and over
+the control API `scopes create`, `members add|remove`, `managers add`,
+`keys create` (owner defaults to the caller; `--expires 30d`) and
+`keys revoke`, each mutating one with `--dry-run`. Tokens are cached in a
+file only their owner reads (`GOLEMCTL_HOME`, else the user's config
+directory) and refreshed from the refresh token; the OS keychain, browser
+sign-in with PKCE, `-o json` and the rest of the table below come later.
+
 One binary for every persona; commands are hidden from `--help` only when
 the caller lacks every role they need. Sign-in is Entra (device code, or
 browser with PKCE), tokens cached in the OS keychain. Output: table by

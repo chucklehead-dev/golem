@@ -16,7 +16,7 @@ service KeyService {
 }
 
 message MintKeyRequest {
-  // The principal the key acts as.
+  // The principal the key acts as; empty: the caller.
   string owner = 1;
   string scope = 2;
   // Narrows the scope's models; empty: all of them.

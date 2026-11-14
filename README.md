@@ -19,7 +19,8 @@ and `golemctl config validate`. golem-control publishes signed snapshots of a
 config directory to a bucket while it leads (`golem-control keygen ./keys`, then
 `golem-control -config ./config -bucket ./bucket -signing-key file:keys/publishing.key`;
 `-bucket s3://…` and `-signing-key kms:…` in AWS; `-listen` with
-`-entra-tenant` serves the org and key APIs over Connect); the gateway's bucket source
+`-entra-tenant` serves the org and key APIs over Connect, which `golemctl login`,
+`scopes`, `members`, `managers` and `keys create|revoke` call); the gateway's bucket source
 reads them, not yet wired into its binary (golem#7).
 
 - [docs/prd.md](docs/prd.md): what it does and for whom, the feature set,
