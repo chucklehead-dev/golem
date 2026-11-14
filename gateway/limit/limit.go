@@ -68,7 +68,7 @@ type Limiter struct {
 	// down is read on every request, so without the lock; it is written
 	// under mu with the state it goes with.
 	down    atomic.Bool
-	periods atomic.Pointer[periodName]
+	periods atomic.Pointer[periodName] // the latest month's, for period
 
 	mu          sync.Mutex
 	known       map[string]Known        // by scope, from the snapshot
@@ -100,11 +100,18 @@ type periodName struct {
 	name  string
 }
 
+// renewInterval is how often Run renews the running calls' slots (ADR
+// 0038), well inside their TTL.
+const renewInterval = 30 * time.Second
+
+// defaultMaxPending is MaxPending's default.
+const defaultMaxPending = 100_000
+
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{}, last: map[keyOf]int64{},
 		running: map[string]*Ticket{}, tails: map[*Ticket]*time.Timer{}, byPrincipal: map[string]int{}, byScope: map[string]int{},
-		MaxPending: 100_000, Grace: 60 * time.Second, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
+		MaxPending: defaultMaxPending, Grace: 2 * renewInterval, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
 }
 
 // Ticket is an admitted call. It ends once, by Complete or Cancel (a
@@ -178,10 +185,11 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	period := l.period(cmp.Or(c.Started, l.now()))
 	if !l.Down() {
 		k := l.snapshotFor(c.Scope, period)
+		a := Admission{Slot: slotOf(c), Period: period, Since: k.Since, Spend: k.Spend, Now: l.now(),
+			Budget: c.Budget, DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
+			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit}
 		sctx, cancel := l.storeContext(ctx)
-		o, known, err := l.store.Admit(sctx, Admission{Slot: Slot{c.ID, c.Principal, c.Scope}, Period: period,
-			Since: k.Since, Spend: k.Spend, Now: l.now(), Budget: c.Budget, DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
-			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit})
+		o, known, err := l.store.Admit(sctx, a)
 		cancel()
 		switch {
 		case err == nil:
@@ -288,7 +296,10 @@ func decr(m map[string]int, k string) {
 	m[k]--
 }
 
-func (t *Ticket) slot() Slot { return Slot{t.call.ID, t.call.Principal, t.call.Scope} }
+// slotOf is the slot a call holds while it runs.
+func slotOf(c Call) Slot { return Slot{c.ID, c.Principal, c.Scope} }
+
+func (t *Ticket) slot() Slot { return slotOf(t.call) }
 
 // Complete records the call's cost and frees its slot: one round trip.
 // If the store does not take it, the increment is held and the slot's TTL
@@ -330,14 +341,7 @@ func (l *Limiter) account(ctx context.Context, t *Ticket, cost int64, release bo
 	in := Increment{Scope: t.call.Scope, Period: t.period, Call: t.call.ID, Cost: min(max(cost, 0), snapshot.MaxMicros), At: l.now()}
 	for {
 		if !l.Down() {
-			sctx, cancel := l.storeContext(ctx)
-			var err error
-			if release {
-				err = l.store.Complete(sctx, in, t.slot())
-			} else {
-				err = l.store.Add(sctx, in)
-			}
-			cancel()
+			err := l.send(ctx, in, t, release)
 			if err == nil {
 				return
 			}
@@ -350,6 +354,17 @@ func (l *Limiter) account(ctx context.Context, t *Ticket, cost int64, release bo
 			return
 		}
 	}
+}
+
+// send gives the store a ticket's increment: with release, freeing its slot
+// in the same step (Store.Complete); without, keeping it (Store.Add).
+func (l *Limiter) send(ctx context.Context, in Increment, t *Ticket, release bool) error {
+	sctx, cancel := l.storeContext(ctx)
+	defer cancel()
+	if release {
+		return l.store.Complete(sctx, in, t.slot())
+	}
+	return l.store.Add(sctx, in)
 }
 
 // EndAt frees a cancelled call's slot at a time to come: the provider may
@@ -393,7 +408,7 @@ func (l *Limiter) hold(in Increment) bool {
 		return false
 	}
 	l.pending = append(l.pending, in)
-	if len(l.pending) > cmp.Or(l.MaxPending, 100_000) {
+	if len(l.pending) > cmp.Or(l.MaxPending, defaultMaxPending) {
 		l.pending = l.pending[1:]
 		l.Dropped.Add(1)
 	}
@@ -434,19 +449,26 @@ func (l *Limiter) reacquire(ctx context.Context) error {
 	sctx, cancel := l.storeContext(ctx)
 	err := l.store.Reacquire(sctx, slots)
 	cancel()
-	l.mu.Lock()
-	l.reacquiring--
-	var ended []Slot
-	if l.reacquiring == 0 {
-		ended, l.endedDuring = l.endedDuring, nil
-	}
-	l.mu.Unlock()
-	for _, s := range ended {
+	for _, s := range l.reacquired() {
 		sctx, cancel := l.storeContext(ctx)
 		l.store.Release(sctx, s) // if it fails, the slot's TTL frees it
 		cancel()
 	}
 	return err
+}
+
+// reacquired ends a renewal: the last of those in flight takes the slots
+// of the calls that ended meanwhile, for release.
+func (l *Limiter) reacquired() []Slot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.reacquiring--
+	if l.reacquiring > 0 {
+		return nil
+	}
+	ended := l.endedDuring
+	l.endedDuring = nil
+	return ended
 }
 
 // renewalGrace is how long past its deadline a call's slot is still
@@ -624,7 +646,7 @@ func (l *Limiter) Down() bool { return l.down.Load() }
 // after an outage, replays held increments and re-acquires slots, until
 // ctx ends.
 func (l *Limiter) Run(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(renewInterval)
 	defer t.Stop()
 	for {
 		select {

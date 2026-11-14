@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// TestClickHouse: the query reads the deduplicated view with its values
+// TestClickHouse: the query reads golem.spend_by_event FINAL with its values
 // bound as parameters, and the rows become each scope's spend.
 func TestClickHouse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -173,17 +173,8 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, int64, error) {
 	return Admitted, known, nil
 }
 
-func (m *Mem) Complete(_ context.Context, in Increment, s Slot) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.down {
-		return ErrUnavailable
-	}
-	m.add(in)
-	delete(m.slots, s.Call)
-	return nil
-}
-
+// acquire takes a slot if the principal's and the scope's limits allow;
+// mu is held.
 func (m *Mem) acquire(s Slot, principalLimit, scopeLimit int) bool {
 	byPrincipal, byScope := 0, 0
 	for _, o := range m.slots {
@@ -199,6 +190,17 @@ func (m *Mem) acquire(s Slot, principalLimit, scopeLimit int) bool {
 	}
 	m.slots[s.Call] = s
 	return true
+}
+
+func (m *Mem) Complete(_ context.Context, in Increment, s Slot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down {
+		return ErrUnavailable
+	}
+	m.add(in)
+	delete(m.slots, s.Call)
+	return nil
 }
 
 func (m *Mem) Release(_ context.Context, s Slot) error {
@@ -223,6 +225,7 @@ func (m *Mem) Reacquire(_ context.Context, slots []Slot) error {
 	return nil
 }
 
+// inProcess: Mem has no I/O, so the limiter sets it no deadline.
 func (*Mem) inProcess() {}
 
 func (m *Mem) Add(_ context.Context, in Increment) error {
@@ -247,6 +250,7 @@ func (m *Mem) AddAll(_ context.Context, incs []Increment) error {
 	return nil
 }
 
+// add counts an increment in its minute and the total; mu is held.
 func (m *Mem) add(in Increment) {
 	k := keyOf{in.Scope, in.Period}
 	c := m.counter[k]
@@ -270,26 +274,28 @@ func (m *Mem) Since(_ context.Context, scope, period string, since time.Time) (i
 	return m.since(scope, period, since), nil
 }
 
+// since is the counter's spend from since's minute on, in the window the
+// Valkey script's since reads: no further back than the retention (a
+// minute past it may not be trimmed yet) and no further ahead than a
+// peer's clock skew. No boundary reads the whole total.
 func (m *Mem) since(scope, period string, since time.Time) int64 {
 	c := m.counter[keyOf{scope, period}]
-	if c == nil {
+	switch from := fromMinute(since); {
+	case c == nil:
 		return 0
-	}
-	from, total := fromMinute(since), int64(0)
-	if from == 0 {
+	case from == 0:
 		return c.total
-	}
-	// Valkey's window (its since): no further back than the retention,
-	// though a minute past it may not be trimmed yet, and no further ahead
-	// than a peer's clock skew.
-	now := minuteOf(m.Now())
-	lo, hi := max(from, now-int64(m.Retain/time.Minute)), now+1
-	for minute, spend := range c.minutes {
-		if minute >= lo && minute <= hi {
-			total += spend
+	default:
+		now := minuteOf(m.Now())
+		lo, hi := max(from, now-int64(m.Retain/time.Minute)), now+clockSkewMinutes
+		total := int64(0)
+		for minute, spend := range c.minutes {
+			if minute >= lo && minute <= hi {
+				total += spend
+			}
 		}
+		return total
 	}
-	return total
 }
 
 // SetDown makes the store unreachable (true) or reachable again. Going down

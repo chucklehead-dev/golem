@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -47,8 +46,7 @@ type Job struct {
 	Allowance time.Duration
 	// Location is the budget periods' time zone: the gateways' -period-zone.
 	Location *time.Location
-	Now      func() time.Time
-	Log      *slog.Logger
+	Now      func() time.Time // the clock (tests set it)
 
 	mu   sync.Mutex
 	last *Known
@@ -58,10 +56,7 @@ type Job struct {
 // result is kept for its own period (a new period's spend is not the old
 // one's), and the error returned; Current says what to publish.
 func (j *Job) Step(ctx context.Context) error {
-	now := time.Now()
-	if j.Now != nil {
-		now = j.Now()
-	}
+	now := j.now()
 	loc := cmp.Or(j.Location, time.UTC)
 	since := now.Add(-cmp.Or(j.Allowance, 5*time.Minute)).Truncate(time.Minute)
 	period := budget.Of(now, loc)
@@ -73,21 +68,35 @@ func (j *Job) Step(ctx context.Context) error {
 	}
 	s, err := j.Ledger.Spend(ctx, period, since)
 	if err != nil {
-		j.mu.Lock()
-		if j.last != nil && j.last.Period != period {
-			j.last = nil
-		}
-		j.mu.Unlock()
+		j.forgetOtherThan(period)
 		return fmt.Errorf("known spend for %s: %w (the last result is kept)", period, err)
 	}
 	j.set(&Known{Period: period, Since: since, Spend: s})
 	return nil
 }
 
+func (j *Job) now() time.Time {
+	if j.Now != nil {
+		return j.Now()
+	}
+	return time.Now()
+}
+
 func (j *Job) set(k *Known) {
 	j.mu.Lock()
 	j.last = k
 	j.mu.Unlock()
+}
+
+// forgetOtherThan drops the last result unless it is of period: an older
+// result stays exact for its own period (its boundary is earlier, and the
+// gateways add the minutes from it), but not for another.
+func (j *Job) forgetOtherThan(period string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.last != nil && j.last.Period != period {
+		j.last = nil
+	}
 }
 
 // Current is the latest result, or false if there is none yet: a snapshot
@@ -149,8 +158,13 @@ func (c ClickHouse) Spend(ctx context.Context, period string, before time.Time) 
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("ClickHouse: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
+	return readSpend(io.LimitReader(resp.Body, 64<<20))
+}
+
+// readSpend reads the query's JSONEachRow rows: scope to spend.
+func readSpend(r io.Reader) (map[string]int64, error) {
 	out := map[string]int64{}
-	sc := bufio.NewScanner(io.LimitReader(resp.Body, 64<<20))
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		if len(strings.TrimSpace(sc.Text())) == 0 {
 			continue
