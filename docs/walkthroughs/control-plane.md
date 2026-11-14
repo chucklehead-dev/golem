@@ -303,16 +303,20 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
 `Controller.Step` (`controller.go:94`):
 
 1. **Not leading** (`Elector.Fence` reports none): do nothing.
-2. **Config compile** (`load`, `controller.go:183`): hash the config
-   directory; if it changed, decode it and trial-compile it. A config that
+2. **Entitlements**: refresh the state (`controller.go:110`) and hash its
+   principals, scopes, keys and revocations (`entitlementsSum`,
+   `controller.go:389`). The state version is not hashed: the publisher's
+   own record write moves it at every publication.
+3. **Config compile** (`load`, `controller.go:271`): hash the config
+   directory; if it changed, decode it and trial-compile it (`trial`) with
+   the state's entitlements, as it will be published. A config that
    compiles becomes the **last good config**; one that does not is
    reported (`cfgErr`) and the last good one stays in use, so a broken edit
-   cannot let every gateway's authorization lapse. Until some config has
-   compiled, nothing is published.
-3. **Entitlements**: refresh the state (`controller.go:105`) and hash its
-   principals, scopes, keys and revocations (`entitlementsSum`,
-   `controller.go:266`). The state version is not hashed: the publisher's
-   own record write moves it at every publication.
+   cannot let every gateway's authorization lapse. That includes an edit
+   that, against the state's scopes, leaves a budgeted scope reaching a
+   model no PriceList prices where the last good config priced it (a price
+   removed, a route moved): the edit is the config's mistake. Until some
+   config has compiled, nothing is published.
 4. **Due?** (`due`, `controller.go:130`) A publication is due when the good
    config's hash, the entitlements' hash or the epoch differs from the last
    publication's, or the renewal interval (`Renew`, default a minute) has
@@ -326,6 +330,27 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    models limited to routes that exist) with known spend laid over it.
    Only if every pool succeeded is the publication remembered; otherwise
    the next step tries them all again.
+
+**A problem of the state's degrades one scope, not the publication.** A
+scope with a budget is charged by price, so a scope that reaches a model
+no PriceList prices could not be charged (`checkPriced`,
+`lib/compile/compile.go`). A config that causes it is refused at step 3.
+When the state causes it (a budgeted scope created, or given a model,
+over an unpriced alias), the compile is told by `Options.Unpriced`: the
+scope is published **without that alias** (`withoutUnpriced`), so it
+fails closed (its members cannot call what it could not be charged for;
+a key narrowed to that alias calls nothing, since the gateway intersects
+a key's models with its scope's), and every other scope and pool is
+published as usual. Each such alias is the operator's status
+(`Controller.Unpriced`) and is reported with every step's error
+(`ErrUnpriced`, naming the scope, alias and model, and the fix: price the
+model, or take the alias out of the scope) until it is fixed. Before
+this, one such scope failed every pool's compile on every step, and every
+gateway's authorization lapsed within its lease. The control API refuses
+the mistake where it is made: `Service.CreateScope` checks a budgeted
+scope with `Service.Priced`, which golem-control sets to
+`Controller.CheckScope` (the last good config, or on a replica where none
+has compiled, the directory's). `TestUnpricedScope`, `TestCreateScopePriced`.
 
 ### 4.1 Known spend
 
@@ -491,7 +516,9 @@ path with a real gateway source over one bucket.
   (`TestPublishes`: a change arrives, a renewal extends the lease, a
   broken edit renews the last good config, a paused leader is fenced), the
   revocation path (`TestEntitlements`), the group sync reaching the
-  gateway (`TestGroupSync`) and known spend reaching it (`TestKnownSpend`).
+  gateway (`TestGroupSync`), known spend reaching it (`TestKnownSpend`),
+  and an unpriced budgeted scope failing closed alone while every pool is
+  published, an edit leaving one unpriced refused (`TestUnpricedScope`).
 - `control/audit`: archive, emit, trim; a retry after a crash; a mismatch;
   batches.
 - `cmd/golem-control`: `TestKeygen`, `TestOpenSigner`, `TestAPINeedsTenant`,
@@ -524,6 +551,12 @@ path with a real gateway source over one bucket.
   publication only when every pool succeeded, so while one pool fails (a
   tampered checkpoint, say) the others are published, and the document
   written, at every step rather than every renewal interval.
+- **An unpriced scope's status is a log line**: a budgeted scope published
+  without its unpriced aliases is reported in the step's error (logged at
+  error level once until it changes) and by `Controller.Unpriced`; no CRD
+  status or API field shows it yet. `CreateScope` refuses the mistake, but
+  nothing else writes a scope's models or budget yet; when something does
+  (a scope update), it needs the same check.
 - **The audit trim is not fenced**: `Shipper.Step` trims with `Update`, not
   `FencedUpdate`. It only removes events already archived, which
   `outboxFollows` checks, so a deposed leader's trim loses nothing.

@@ -202,8 +202,12 @@ control plane.
   - golem-control: `control/controller` and `cmd/golem-control`. While it
     leads, it compiles the config directory and publishes every pool when
     the config changes, when it becomes leader, and every minute to renew
-    the authorization lease; a config that does not compile is reported
-    and the last good one renewed. Every pool gets the same snapshot, its
+    the authorization lease; a config that does not compile, trial-compiled
+    with the state's entitlements, is reported and the last good one
+    renewed. A budgeted scope of the state's that reaches a model no
+    PriceList prices is published without that alias (it fails closed)
+    and reported, never stopping the publication; the control API refuses
+    to create one. Every pool gets the same snapshot, its
     entitlements the state document's, republished at the next step when
     they change; pool selectors and the CRD watch come later. Its
     end-to-end test runs two replicas and a gateway source over one

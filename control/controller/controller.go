@@ -21,6 +21,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,9 +59,14 @@ type Controller struct {
 	Sync      *entrasync.Sync
 	SyncEvery time.Duration
 
-	synced    time.Time  // when the group sync last ran
-	good      v1.Objects // the last config that compiled
-	goodSum   [32]byte
+	synced  time.Time // when the group sync last ran
+	mu      sync.Mutex
+	good    v1.Objects // the last config that compiled; written under mu (CheckScope reads it from the API's goroutines)
+	goodSum [32]byte
+	// unpriced is what the last publication left out of scopes, by
+	// Options.Unpriced (under mu): each scope's aliases that reach a model
+	// no PriceList prices.
+	unpriced  []compile.Problem
 	published struct { // the last publication that reached every pool
 		sum   [32]byte // its config's
 		ents  [32]byte // the state's entitlements published
@@ -89,39 +95,104 @@ func (c *Controller) log() *slog.Logger {
 // Step publishes if this replica leads and a publication is due: a config
 // change, a new epoch, or the renewal interval. A config that does not
 // compile is reported, and the last one that did is renewed, so a broken
-// edit cannot let every gateway's authorization lapse. It reports whether
-// it published.
+// edit cannot let every gateway's authorization lapse. A scope of the
+// state's whose budget reaches an unpriced model is published without
+// that model's alias and reported (ErrUnpriced), every step until it is
+// fixed; the other scopes and pools are published as usual. It reports
+// whether it published.
 func (c *Controller) Step(ctx context.Context) (bool, error) {
 	fence, leads := c.Elector.Fence()
 	if !leads {
 		return false, nil
 	}
-	cfgErr := c.load()
+	// The state as of now: a revocation is published within a step of its
+	// write (the store's own loop refreshes it too). The config is
+	// trial-compiled against it.
+	if err := c.Elector.State.Refresh(ctx); err != nil {
+		return false, err
+	}
+	doc := c.Elector.State.Current()
+	cfgErr := c.load(doc)
 	if c.goodSum == ([32]byte{}) {
 		return false, fmt.Errorf("no config has compiled yet: %w", cfgErr)
 	}
-	// The state as of now: a revocation is published within a step of its
-	// write (the store's own loop refreshes it too).
-	if err := c.Elector.State.Refresh(ctx); err != nil {
-		return false, errors.Join(err, cfgErr)
-	}
-	doc := c.Elector.State.Current()
 	ents, err := entitlementsSum(doc)
 	if err != nil {
 		return false, err
 	}
 	if !c.due(ents, fence.Epoch) {
-		return false, cfgErr
+		return false, errors.Join(cfgErr, c.unpricedErr())
 	}
 	var spendErr error
 	if c.Spend != nil {
 		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
 	}
 	if errs := c.publish(ctx, fence, doc); len(errs) > 0 {
-		return false, errors.Join(append(errs, cfgErr, spendErr)...)
+		return false, errors.Join(append(errs, cfgErr, spendErr, c.unpricedErr())...)
 	}
 	c.published.sum, c.published.ents, c.published.epoch, c.published.at = c.goodSum, ents, fence.Epoch, c.now()
-	return true, errors.Join(cfgErr, spendErr)
+	return true, errors.Join(cfgErr, spendErr, c.unpricedErr())
+}
+
+// ErrUnpriced: a scope of the state's with a budget can reach a model no
+// PriceList prices, so it is published without that alias (it fails
+// closed) while every other scope and pool is published as usual.
+var ErrUnpriced = errors.New("scopes published without the aliases their budgets could not be charged for")
+
+// unpricedErr is ErrUnpriced naming each alias the last publication left
+// out, and what to do; nil if it left none out.
+func (c *Controller) unpricedErr() error {
+	ps := c.Unpriced()
+	if len(ps) == 0 {
+		return nil
+	}
+	lines := make([]string, len(ps))
+	for i, p := range ps {
+		lines[i] = p.String()
+	}
+	return fmt.Errorf("%w; their members cannot call them until a PriceList prices the model or the alias is removed from the scope:\n  %s",
+		ErrUnpriced, strings.Join(lines, "\n  "))
+}
+
+// Unpriced is what the last publication left out of scopes because their
+// budgets could not be charged for it: each scope and alias, and the
+// unpriced model it reaches. The operator's status; Step reports it too.
+func (c *Controller) Unpriced() []compile.Problem {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.unpriced)
+}
+
+// CheckScope refuses scope id of d if its budget can reach a model the
+// config prices not: the control API's check when a scope is created
+// (service.Service.Priced), so the mistake is refused where it is made
+// rather than published as a scope that fails closed. It checks against
+// the last good config, or, on a replica where none has compiled (one
+// that does not lead), the directory's. With neither, or a config that
+// does not compile, it checks nothing: the publisher's rule still applies.
+func (c *Controller) CheckScope(d *state.Document, id string) error {
+	c.mu.Lock()
+	objs, ok := c.good, c.goodSum != ([32]byte{})
+	c.mu.Unlock()
+	if !ok {
+		var err error
+		if objs, err = c.decodeDir(); err != nil {
+			return nil
+		}
+	}
+	var bad []string
+	if _, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease(),
+		Entitlements: d.Entitlements, Unpriced: func(p compile.Problem) {
+			if p.Object == "scope "+id {
+				bad = append(bad, p.Msg)
+			}
+		}}); err != nil {
+		return nil
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("%s; price those models in a PriceList first, or leave the aliases out of the scope", strings.Join(bad, "; "))
+	}
+	return nil
 }
 
 // due reports whether a publication is due: the good config, the
@@ -142,11 +213,23 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	for _, pool := range pools {
 		pubs = append(pubs, c.Publishers[pool])
 	}
+	built, unpriced := false, map[string]compile.Problem{} // every pool's build leaves out the same
 	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, fence, doc.StateVersion, pubs,
 		func(_ *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
-			return compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
-				Entitlements: c.entitlements(doc)})
+			s, err := compile.Compile(c.good, compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
+				Entitlements: c.entitlements(doc), Unpriced: func(p compile.Problem) { unpriced[p.String()] = p }})
+			built = built || err == nil
+			return s, err
 		})
+	if built {
+		var ps []compile.Problem
+		for _, k := range slices.Sorted(maps.Keys(unpriced)) {
+			ps = append(ps, unpriced[k])
+		}
+		c.mu.Lock()
+		c.unpriced = ps
+		c.mu.Unlock()
+	}
 	var errs []error
 	for _, pool := range pools {
 		if err := perrs[pool]; err != nil {
@@ -178,9 +261,14 @@ func (c *Controller) entitlements(doc *state.Document) func(aliases []string) sn
 }
 
 // load reads the directory, keeping it as the good config if it compiles
-// (a trial compile with no entitlements). An unchanged directory costs a
-// content hash.
-func (c *Controller) load() error {
+// with doc's entitlements, as it will be published. A config that leaves a
+// budgeted scope of doc's unpriced where the last good one did not (a
+// price removed, a route moved to an unpriced model) is refused as a
+// config: the edit is what broke it, and the last good config is renewed.
+// What the state alone breaks (a budgeted scope created over an unpriced
+// alias) is not the config's: that scope fails closed when published
+// (compile.Options.Unpriced). An unchanged directory costs a content hash.
+func (c *Controller) load(doc *state.Document) error {
 	root, err := os.OpenRoot(c.Dir)
 	if err != nil {
 		return fmt.Errorf("config directory: %w", err)
@@ -198,11 +286,46 @@ func (c *Controller) load() error {
 	if err != nil {
 		return fmt.Errorf("config not applied, the last good one is published: %w", err)
 	}
-	if _, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease()}); err != nil {
+	unpriced, err := c.trial(objs, doc)
+	if err != nil {
 		return fmt.Errorf("config not applied, the last good one is published: %w", err)
 	}
+	if c.goodSum != ([32]byte{}) {
+		before, _ := c.trial(c.good, doc)
+		var added []string
+		for _, p := range unpriced {
+			if !slices.ContainsFunc(before, func(q compile.Problem) bool { return q.String() == p.String() }) {
+				added = append(added, p.String())
+			}
+		}
+		if len(added) > 0 {
+			return fmt.Errorf("config not applied, the last good one is published: with the state's scopes it leaves %d alias(es) unpriced that the last good config prices; price the models in a PriceList, or remove the aliases from those scopes first:\n  %s",
+				len(added), strings.Join(added, "\n  "))
+		}
+	}
+	c.mu.Lock()
 	c.good, c.goodSum = objs, sum
+	c.mu.Unlock()
 	return nil
+}
+
+// trial compiles objs with doc's entitlements, returning what it would
+// leave out of scopes for want of a price.
+func (c *Controller) trial(objs v1.Objects, doc *state.Document) ([]compile.Problem, error) {
+	var unpriced []compile.Problem
+	_, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease(),
+		Entitlements: c.entitlements(doc), Unpriced: func(p compile.Problem) { unpriced = append(unpriced, p) }})
+	return unpriced, err
+}
+
+// decodeDir decodes the config directory.
+func (c *Controller) decodeDir() (v1.Objects, error) {
+	root, err := os.OpenRoot(c.Dir)
+	if err != nil {
+		return v1.Objects{}, fmt.Errorf("config directory: %w", err)
+	}
+	defer root.Close()
+	return v1.DecodeFS(root.FS())
 }
 
 // Run tries for the lease and publishes when due, every second, until

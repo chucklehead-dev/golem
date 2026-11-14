@@ -222,7 +222,7 @@ func run() error {
 	var failed error // a component's failure, which stops the rest
 	wg.Go(func() { st.Run(ctx) })
 	if o.listen != "" {
-		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, st)
+		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, &service.Service{State: st, Priced: c.CheckScope})
 		if err != nil {
 			return fmt.Errorf("-listen: %w", err)
 		}
@@ -305,7 +305,7 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 // apiServer serves the control API, authenticated by Entra tokens: no
 // API without a tenant, since an unauthenticated one would let anyone
 // mint keys.
-func apiServer(ctx context.Context, listen, tenant, audience string, st *state.Store) (*http.Server, error) {
+func apiServer(ctx context.Context, listen, tenant, audience string, svc *service.Service) (*http.Server, error) {
 	if tenant == "" {
 		return nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
 	}
@@ -314,7 +314,7 @@ func apiServer(ctx context.Context, listen, tenant, audience string, st *state.S
 		return nil, fmt.Errorf("Entra's signing keys: %w", err)
 	}
 	go e.Run(ctx) //qenv:ok the key refresh loop, ended by ctx
-	h := (&api.Server{Service: &service.Service{State: st}, Auth: api.EntraAuth{Entra: e, State: st}}).Handler()
+	h := (&api.Server{Service: svc, Auth: api.EntraAuth{Entra: e, State: svc.State}}).Handler()
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true) // gRPC behind the mesh, which ends TLS
