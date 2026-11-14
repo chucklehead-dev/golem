@@ -77,11 +77,11 @@ jobs:
         run: make -C model check
         env:
           QUINT_BACKEND: typescript
-      - name: the gateway against its models (connect: the model drives)
-        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/... ./control/...   # TestExposureModelValkey too; the watermark job
+      - name: "the gateway against its models (connect: the model drives)"
+        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/... ./control/...   # TestExposureModelValkey too
         env:
           QUINT_BACKEND: typescript
-      - name: the gateway against its models (qhegel: Hegel drives, the model judges; planted bugs caught)
+      - name: "the gateway against its models (qhegel: Hegel drives, the model judges; planted bugs caught)"
         working-directory: test/props
         run: go test -count=1 -timeout 20m ./...
         env:
