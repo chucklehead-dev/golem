@@ -31,14 +31,21 @@ type Verifier interface {
 // verifier does not trust.
 var ErrBadSignature = errors.New("sign: the signature does not verify")
 
+// untrusted is every Verifier's refusal of a key ID it holds no key for.
+func untrusted(keyID string) error {
+	return fmt.Errorf("%w: key %q is not trusted by this gateway", ErrBadSignature, keyID)
+}
+
 // Ed25519 is a Signer over an Ed25519 private key.
 type Ed25519 struct {
 	ID  string
 	Key ed25519.PrivateKey
 }
 
+// KeyID implements Signer.
 func (e Ed25519) KeyID() string { return e.ID }
 
+// Sign implements Signer.
 func (e Ed25519) Sign(_ context.Context, msg []byte) ([]byte, error) {
 	if len(e.Key) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("sign: key %q is not an Ed25519 private key", e.ID)
@@ -54,10 +61,11 @@ func (e Ed25519) Verifier() Verifier {
 // Ed25519Keys is a Verifier: the public keys it trusts, by ID.
 type Ed25519Keys map[string]ed25519.PublicKey
 
+// Verify implements Verifier.
 func (k Ed25519Keys) Verify(keyID string, msg, sig []byte) error {
 	pub, ok := k[keyID]
 	if !ok {
-		return fmt.Errorf("%w: key %q is not trusted by this gateway", ErrBadSignature, keyID)
+		return untrusted(keyID)
 	}
 	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, msg, sig) {
 		return fmt.Errorf("%w (key %q)", ErrBadSignature, keyID)

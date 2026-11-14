@@ -14,10 +14,11 @@ import (
 // Gateways verify with the public key alone, so a poll never calls KMS.
 type ECDSAKeys map[string]*ecdsa.PublicKey
 
+// Verify implements Verifier.
 func (k ECDSAKeys) Verify(keyID string, msg, sig []byte) error {
 	pub, ok := k[keyID]
 	if !ok {
-		return fmt.Errorf("%w: key %q is not trusted by this gateway", ErrBadSignature, keyID)
+		return untrusted(keyID)
 	}
 	d := sha256.Sum256(msg)
 	if !ecdsa.VerifyASN1(pub, d[:], sig) {
@@ -40,8 +41,12 @@ func ParseECDSAPublicKey(b []byte) (*ecdsa.PublicKey, error) {
 		return nil, fmt.Errorf("sign: %w", err)
 	}
 	pub, ok := k.(*ecdsa.PublicKey)
-	if !ok || pub.Curve.Params().Name != "P-256" {
+	if !ok || !isP256(pub) {
 		return nil, errors.New("sign: not an ECDSA P-256 public key (the KMS key spec must be ECC_NIST_P256)")
 	}
 	return pub, nil
 }
+
+// isP256 reports whether pub is on the one curve golem verifies ECDSA on
+// (KMS's ECC_NIST_P256).
+func isP256(pub *ecdsa.PublicKey) bool { return pub.Curve.Params().Name == "P-256" }

@@ -41,6 +41,7 @@ const defaultMaxObject = 256 << 20
 
 var _ bucket.Bucket = (*Bucket)(nil)
 
+// Get implements bucket.Bucket.Get, reading at most MaxObject bytes.
 func (b *Bucket) Get(ctx context.Context, key, ifNoneMatch string) ([]byte, string, error) {
 	in := &s3.GetObjectInput{Bucket: aws.String(b.Name), Key: aws.String(b.Prefix + key)}
 	if ifNoneMatch != "" {
@@ -55,6 +56,7 @@ func (b *Bucket) Get(ctx context.Context, key, ifNoneMatch string) ([]byte, stri
 	if limit <= 0 {
 		limit = defaultMaxObject
 	}
+	// One byte past the limit tells an object over it from one exactly at it.
 	body, err := io.ReadAll(io.LimitReader(out.Body, limit+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("bucket: reading s3://%s/%s%s: %w", b.Name, b.Prefix, key, err)
@@ -65,6 +67,7 @@ func (b *Bucket) Get(ctx context.Context, key, ifNoneMatch string) ([]byte, stri
 	return body, aws.ToString(out.ETag), nil
 }
 
+// Put implements bucket.Bucket.Put with S3's conditional writes.
 func (b *Bucket) Put(ctx context.Context, key string, body []byte, ifMatch string) (string, error) {
 	in := &s3.PutObjectInput{Bucket: aws.String(b.Name), Key: aws.String(b.Prefix + key),
 		Body: bytes.NewReader(body), ContentLength: aws.Int64(int64(len(body)))}

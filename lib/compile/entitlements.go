@@ -31,18 +31,18 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 		return e
 	case !o.Standalone:
 		for _, src := range objs.Identities {
-			add(objectName("LocalIdentity", src.Object.Metadata.Name, src.Where()), "kind",
+			add(identityName(src), "kind",
 				"a LocalIdentity is for standalone mode only; entitlements come from the state document (ADR 0023)")
 		}
 		return e
 	case len(objs.Identities) > 1:
 		extra := objs.Identities[1]
-		add(objectName("LocalIdentity", extra.Object.Metadata.Name, extra.Where()), "kind",
+		add(identityName(extra), "kind",
 			"one LocalIdentity per config; merge the scopes and keys")
 		return e
 	}
 	src := objs.Identities[0]
-	obj := objectName("LocalIdentity", src.Object.Metadata.Name, src.Where())
+	obj := identityName(src)
 	spec := src.Object.Spec
 	scopes := localScopes(obj, spec.Scopes, aliases, add)
 	e.Keys, e.KeyOwners = localKeys(obj, spec.Keys, scopes, add)
@@ -56,6 +56,11 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 	}
 	slices.SortFunc(e.Scopes, func(a, b snapshot.Scope) int { return cmp.Compare(a.ID, b.ID) })
 	return e
+}
+
+// identityName names a LocalIdentity in a problem.
+func identityName(src v1.Source[v1.LocalIdentity]) string {
+	return objectName("LocalIdentity", src.Object.Metadata.Name, src.Where())
 }
 
 // localScopes validates a LocalIdentity's scopes, by name. Each reports at

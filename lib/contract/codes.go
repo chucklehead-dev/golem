@@ -8,6 +8,7 @@ package contract
 // Origin is who caused a failure (contracts.md §2).
 type Origin string
 
+// The origins, as contracts.md §2 lists them.
 const (
 	OriginClient   Origin = "client"
 	OriginPolicy   Origin = "policy"
