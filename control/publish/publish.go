@@ -48,9 +48,13 @@ type Publisher struct {
 	State  *state.Store  // the publication record's home
 	Bucket bucket.Bucket // snapshots, checkpoints and pointers
 	Signer sign.Signer
-	// Keys verifies the pool's checkpoint and pointer before their
-	// sequences are trusted: the publishing key's public half. Default: the
-	// Signer's own (Verifier), which every signer here provides.
+	// Keys are further publishing keys whose checkpoints and pointers are
+	// trusted, beside the Signer's own public half (its Verifier, which
+	// every signer here provides): during a rotation, the retiring key's
+	// (golem-control -trusted-keys). What a retiring key signed counts as
+	// golem-control's; the next publication re-signs the checkpoint and
+	// pointer with the Signer, so once a lease has passed nothing in the
+	// bucket needs the old key.
 	Keys sign.Verifier
 	Pool string
 	Now  func() time.Time
@@ -279,7 +283,7 @@ func (p *Publisher) floor(ctx context.Context, rec state.Record) (uint64, error)
 	}
 	cp, err := snapshot.OpenCheckpoint(raw, keys)
 	if err != nil || cp.Pool != p.Pool {
-		return 0, fmt.Errorf("%w: %s does not verify as this pool's (%v); restore golem-control's from the bucket's versions, and find who wrote it", ErrTampered, key, err)
+		return 0, fmt.Errorf("%w: %s does not verify as this pool's (%v). If the publishing key was rotated, give golem-control the previous key's public half in -trusted-keys (docs/operations.md, key rotation); otherwise restore golem-control's from the bucket's versions, and find who wrote it", ErrTampered, key, err)
 	}
 	return max(cp.PublishSeq, ptrSeq), nil
 }
@@ -305,7 +309,7 @@ func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []
 			case ok && stored >= seq && !bytes.Equal(cur, body):
 				return fmt.Errorf("%w: %s holds publication %d, this publisher wrote %d", ErrFenced, key, stored, seq)
 			case !ok && isCheckpoint:
-				return fmt.Errorf("%w: %s does not verify; nothing was written over it", ErrTampered, key)
+				return fmt.Errorf("%w: %s does not verify; nothing was written over it. If the publishing key was rotated, give golem-control the previous key's public half in -trusted-keys", ErrTampered, key)
 			}
 		}
 		_, err = p.Bucket.Put(ctx, key, body, tag)
@@ -327,17 +331,39 @@ func (p *Publisher) verifiedSeq(isCheckpoint bool, b []byte) (uint64, bool) {
 	return ptr.PublishSeq, err == nil && ptr.Pool == p.Pool
 }
 
-// keys is what verifies the pool's checkpoint and pointer: Keys, or the
-// Signer's own public half; nil if neither is there (floor refuses then,
+// keys is what verifies the pool's checkpoint and pointer: the Signer's
+// own public half, and Keys; nil if neither is there (floor refuses then,
 // before anything is written).
 func (p *Publisher) keys() sign.Verifier {
-	if p.Keys != nil {
-		return p.Keys
-	}
+	var vs anyOf
 	if v, ok := p.Signer.(interface{ Verifier() sign.Verifier }); ok {
-		return v.Verifier()
+		vs = append(vs, v.Verifier())
 	}
-	return nil
+	if p.Keys != nil {
+		vs = append(vs, p.Keys)
+	}
+	switch len(vs) {
+	case 0:
+		return nil
+	case 1:
+		return vs[0]
+	}
+	return vs
+}
+
+// anyOf verifies a signature that any of its verifiers does.
+type anyOf []sign.Verifier
+
+// Verify implements sign.Verifier: the last verifier's refusal if none
+// verifies.
+func (a anyOf) Verify(keyID string, msg, sig []byte) error {
+	var err error
+	for _, v := range a {
+		if err = v.Verify(keyID, msg, sig); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func (p *Publisher) now() time.Time {

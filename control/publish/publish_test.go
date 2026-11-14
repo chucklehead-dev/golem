@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -318,6 +319,52 @@ func TestGuard(t *testing.T) {
 		}
 	})
 }
+
+// TestKeyRotation: publications under key A, then the signer rotated to B
+// with A trusted: publication goes on, and the checkpoint and pointer are
+// re-signed under B, so the publication after (and a publisher trusting B
+// alone) verifies them. Without A trusted, the rotation is ErrTampered.
+func TestKeyRotation(t *testing.T) {
+	ctx := t.Context()
+	a, aKeys, d := setup(t)
+	l := leads(t, a.State, "r1", 1)
+	for range 2 {
+		if _, err := a.Publish(ctx, l, 1, build); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bPub, bPriv, _ := ed25519.GenerateKey(nil)
+	rotated := func(trusted sign.Verifier) *Publisher {
+		p := *a
+		p.State = &state.Store{Bucket: d}
+		p.Signer, p.Keys = sign.Ed25519{ID: "b", Key: bPriv}, trusted
+		return &p
+	}
+	if _, err := rotated(nil).Publish(ctx, l, 1, build); !errors.Is(err, ErrTampered) || !contains(err, "-trusted-keys") {
+		t.Fatalf("rotated without the old key trusted: %v, want ErrTampered naming -trusted-keys", err)
+	}
+	b := rotated(aKeys)
+	for want := uint64(3); want <= 4; want++ {
+		if ptr, err := b.Publish(ctx, l, 1, build); err != nil || ptr.PublishSeq != want {
+			t.Fatalf("rotated with the old key trusted: %+v %v, want publication %d", ptr, err, want)
+		}
+	}
+	bKeys := sign.Ed25519Keys{"b": bPub}
+	raw, _, _ := d.Get(ctx, snapshot.CheckpointKey("internal"), "")
+	if cp, err := snapshot.OpenCheckpoint(raw, bKeys); err != nil || cp.PublishSeq != 4 {
+		t.Fatalf("checkpoint %+v %v: want publication 4 signed by the new key", cp, err)
+	}
+	raw, _, _ = d.Get(ctx, snapshot.PointerKey("internal"), "")
+	if ptr, err := snapshot.OpenPointer(raw, bKeys); err != nil || ptr.PublishSeq != 4 {
+		t.Fatalf("pointer %+v %v: want publication 4 signed by the new key", ptr, err)
+	}
+	// The old key retired: what is in the bucket needs only the new one.
+	if ptr, err := rotated(nil).Publish(ctx, l, 1, build); err != nil || ptr.PublishSeq != 5 {
+		t.Fatalf("the old key retired: %+v %v", ptr, err)
+	}
+}
+
+func contains(err error, s string) bool { return err != nil && strings.Contains(err.Error(), s) }
 
 // failAt is a bucket whose puts of key fail.
 type failAt struct {

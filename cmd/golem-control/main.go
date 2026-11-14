@@ -135,6 +135,7 @@ func restore(ctx context.Context, w io.Writer, args []string) error {
 // options are golem-control's flags.
 type options struct {
 	config, bucket, signingKey, pools, id string
+	trustedKeys                           string
 	authLease                             time.Duration
 	listen                                string
 	archive, telemetry                    string
@@ -154,6 +155,7 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.config, "config", "", "the config CRDs' directory")
 	flag.StringVar(&o.bucket, "bucket", "", "the bucket: a directory, or s3://<bucket>/<prefix>")
 	flag.StringVar(&o.signingKey, "signing-key", "", "the publishing key: file:<an Ed25519 PKCS#8 PEM> or kms:<a KMS key ARN, ECC_NIST_P256>")
+	flag.StringVar(&o.trustedKeys, "trusted-keys", "", "a directory of retiring publishing keys' public halves (*.pub, as a gateway's -keys): checkpoints and pointers they signed are trusted while the signer is rotated, and re-signed with -signing-key at the next publication; empty: the signing key's own only")
 	flag.StringVar(&o.pools, "pools", "internal", "the gateway pools to publish to, comma-separated")
 	flag.StringVar(&o.id, "id", "", "this replica's name (default: the host name)")
 	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
@@ -266,11 +268,21 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 			closeAudit()
 		}
 	}()
+	// The publishing key's own public half is always trusted; -trusted-keys
+	// adds the retiring ones during a rotation (docs/operations.md).
+	var trusted sign.Verifier
+	if o.trustedKeys != "" {
+		k, err := sign.LoadKeys(o.trustedKeys)
+		if err != nil {
+			return nil, closeAudit, fmt.Errorf("-trusted-keys: %w", err)
+		}
+		trusted = k
+	}
 	c = &controller.Controller{Dir: o.config, Lease: o.authLease,
 		Elector: &lead.Elector{State: st, ID: replica}, Publishers: map[string]*publish.Publisher{}}
 	for _, p := range strings.Split(o.pools, ",") {
 		if p = strings.TrimSpace(p); p != "" {
-			c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Pool: p}
+			c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Keys: trusted, Pool: p}
 		}
 	}
 	if o.archive != "" {

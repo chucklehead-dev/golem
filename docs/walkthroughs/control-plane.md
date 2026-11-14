@@ -253,8 +253,13 @@ order:
    made (the record above 1, or a signed pointer present), is
    `ErrTampered`: that pool is not published until a person looks. Record
    1 without a checkpoint is a publisher that died between the first two
-   writes, not tampering. The checkpoint and pointer are verified with
-   `Keys`, or the signer's own public half (`keys`, `publish.go:333`).
+   writes, not tampering. The checkpoint and pointer are verified with the
+   signer's own public half or any of `Keys` (`keys`, `publish.go:350`):
+   golem-control's `-trusted-keys`, the retiring keys during a rotation.
+   What a retiring key signed counts, and step 5 re-signs it with the
+   current signer, so the publication after needs only the new key
+   (operations.md §2.1). Before `-trusted-keys`, a rotated signer met the
+   old key's checkpoint as `ErrTampered`, and every pool stopped.
 3. **Build** each snapshot and write it, content-addressed (`prepare`,
    `publish.go:181`). A pool that fails here is left out; the others go on.
 4. **Win every pool's record in one `FencedUpdate`** (`publish.go:141`):
@@ -287,9 +292,11 @@ The tests (`control/publish/publish_test.go`): `TestPublish`, `TestFenced`
 `TestLeaseLostBeforeRecord`, `TestPausedAfterRecord`, `TestGuard`
 (model/leadership.md's counterexamples, each refused: a rolled-back record
 met by an older checkpoint, a forged or deleted checkpoint, and the first
-publication's crash window not mistaken for tampering) and
+publication's crash window not mistaken for tampering),
 `TestPublishAll` (one state write for several pools; a failing pool left
-out without stopping the others).
+out without stopping the others) and `TestKeyRotation` (a signer rotated
+with the old key trusted goes on and re-signs; without it, `ErrTampered`;
+`cmd/golem-control`'s `TestTrustedKeys` runs the same through the flag).
 
 ## 4. The controller loop
 
@@ -434,6 +441,7 @@ are flushed.
 | `-config` | the config CRDs' directory (required) |
 | `-bucket` | the state and snapshot bucket: a directory, or `s3://<bucket>/<prefix>` with the default AWS credential chain (required) |
 | `-signing-key` | `file:<Ed25519 PKCS#8 PEM>` (key ID: the file's name) or `kms:<ARN>` (ECC_NIST_P256, checked at start) (required) |
+| `-trusted-keys` | a directory of retiring publishing keys' public halves (`*.pub`, read by `sign.LoadKeys` as a gateway's `-keys`): their checkpoints and pointers are trusted, and re-signed with `-signing-key` at the next publication (a key rotation, operations.md §2.1) |
 | `-pools` | the pools to publish, comma-separated (default `internal`) |
 | `-id` | this replica's name (default the host name): the lease holder |
 | `-lease` | the snapshots' authorization lease (default 4h) |
@@ -522,7 +530,7 @@ path with a real gateway source over one bucket.
 - `control/audit`: archive, emit, trim; a retry after a crash; a mismatch;
   batches.
 - `cmd/golem-control`: `TestKeygen`, `TestOpenSigner`, `TestAPINeedsTenant`,
-  `TestPubkey`, `TestRestoreCommand`.
+  `TestPubkey`, `TestRestoreCommand`, `TestTrustedKeys`.
 - `model/check-leadership.sh`: the lease and fence placements compared by
   exhaustive search, each mechanism shown necessary.
 - `gateway/snapshot/publication_mbt_test.go`: model/publication.qnt's

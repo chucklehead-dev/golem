@@ -190,7 +190,11 @@ control plane.
     gateway that sees nothing newer reports it overdue and goes on serving
     to its snapshot's lease end; a published pool's missing checkpoint is
     not floor zero; the snapshot itself is not signed: it is checked
-    against the pointer's hash and must carry the pointer's sequence;
+    against the pointer's hash and must carry the pointer's sequence; the
+    publishing key is rotated without stopping publication: gateways trust
+    the new key first, then golem-control signs with it and trusts the
+    retiring one (`-trusted-keys`) until its next publication has re-signed
+    every checkpoint and pointer (operations.md §2.1);
   - the gateway persists the last sequence applied to a local checkpoint
     file, and at start raises its floor to the higher of it and the
     trusted checkpoint; with neither (an empty disk and an unreadable

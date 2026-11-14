@@ -30,6 +30,7 @@ Crossplane for cloud resources, and a few golem-control jobs.
 | **Incident freeze** | A freeze override stops publication to a pool; gateways keep their snapshot until the lease runs out (ADR 0032). |
 | **Leadership and tampering** (ADR 0049) | The bucket policy lets only golem-control's role write `state/`, `lead/`, `control/` and `snapshots/`: it is the only defence against a rollback of both the lease object and the document, or of a record with an older checkpoint and pointer. `lead/lease.json` needs a noncurrent-version expiry and is left out of the backup replication (it holds no authority). Alarm on the publisher's `ErrTampered` (a pool's checkpoint does not verify or is missing: that pool stops publishing until restored from the bucket's versions), and, from the document's Object Lock history, on a fence epoch or a publication sequence that repeats or goes down. |
 | **Config and prices** | golem-control trial-compiles each edit of the config directory with the state's scopes. An edit that does not compile, or that leaves a budgeted scope reaching a model no PriceList prices where the last good config priced it, is refused (`config not applied, the last good one is published`) and the last good config keeps being renewed: fix the edit. A budgeted scope written to the state over an unpriced model (the API refuses to create one) is published without that alias and logged (`scopes published without the aliases their budgets could not be charged for`, naming scope, alias and model): price the model in a PriceList, or remove the alias from the scope. Its members cannot call that alias meanwhile; every other scope and pool is unaffected. |
+| **Publishing key rotation** | See [§2.1](#21-rotating-the-publishing-key). |
 | **State restore** | Fetch the wanted older version of `state/document.json` from the bucket's history (or its Object Lock replica), then `golem-control restore -bucket <url> -from old.json -actor <who>`: a dry run listing what the backup holds that would be **withheld** (rights removed since: re-grant each as its own change) and what would be **rolled back** (rights added since; keys minted since are revoked). Add `-apply` to write it, audited as `state.restore`. The fence, the publication records, the revocations and the audit outbox are always the current document's; a restore never widens a right. |
 | **Snapshot objects** | Every publication writes a new content-addressed snapshot object (`snapshots/<pool>/<hash>.json`; a renewal's differs in its lease), about 1,440 a pool a day, and none is deleted by golem. The bucket's lifecycle rule expires objects under `snapshots/<pool>/` other than `current` two days after creation: longer than any authorization lease (four hours), so no object a gateway could still apply is removed, and a publisher down for days has let its lease lapse long before. The Crossplane composition sets the rule; a hand-built bucket needs it. |
 | **Emergency revocation** | Site responders edit a separately bootstrapped denylist (`golem-gateway -denylist`; format in control-plane.md §5) outside Argo ownership/pruning; confirm projected-volume propagation (gateways re-read it every five seconds and log each list applied, or why an edit was not). It refuses new requests; calls already in flight finish (no cancellation in flight, ADR 0041). No seconds guarantee until measured; local Kubernetes delivery must work. Keep denials until fresh durable revocation is confirmed (ADR 0041 §1). |
@@ -37,6 +38,46 @@ Crossplane for cloud resources, and a few golem-control jobs.
 | **Langfuse projects** | A golem-control job creates a project when a scope first needs its own and adds its credentials to the capture collector's Secret (ADRs 0035, 0041). |
 | **Second site** | The bucket replicated to the standby region; its gateways read the replica; a golem-control there scaled to zero; the failover runbook promotes the replica and scales up (ADR 0008). |
 | **Support** | `golemctl support-bundle`: CRD statuses, gateway status objects, recent errors, a flight-recorder trace from a chosen gateway. |
+
+### 2.1 Rotating the publishing key
+
+golem-control signs each pool's pointer and trusted checkpoint with
+`-signing-key`; gateways verify them with the public keys in their
+`-keys` directory, by key ID; golem-control verifies the checkpoint and
+pointer already in the bucket before it numbers past them, with the
+signing key's own public half and any in `-trusted-keys`. A checkpoint it
+cannot verify stops that pool's publication (`ErrTampered`), so the
+signer is never switched alone. In order:
+
+1. **Make the new key under a new key ID**: a new KMS key (its ARN is its
+   ID), or for a file key a new file name (`publishing-2.key`: a file
+   key's ID is its name). Two keys under one ID cannot be told apart by
+   any verifier. Print its public half: `golem-control pubkey <new key>
+   > new.pub`.
+2. **Gateways trust the new key first**: add `new.pub` beside the old key
+   in every pool's `-keys` directory and roll the pools out. Until a
+   gateway trusts the new key it refuses every pointer signed with it
+   (and keeps serving its snapshot until its lease ends), so every pool
+   must be done before step 3.
+3. **Switch golem-control's signer, the old key still trusted**: put the
+   old key's public half (`golem-control pubkey <old key>`) in a
+   directory given as `-trusted-keys`, set `-signing-key` to the new key,
+   and roll golem-control out. Its first publication (within a minute)
+   verifies the old-key checkpoint and pointer under `-trusted-keys`, and
+   writes each pool's checkpoint and pointer signed with the new key.
+   Check every pool logs `published` and none `ErrTampered`.
+4. **After a full authorization lease** (four hours for internal pools;
+   the longest lease of any pool), retire the old key: remove it from
+   every gateway's `-keys` and from golem-control's `-trusted-keys`
+   (drop the flag), then disable the old key (KMS: schedule its
+   deletion). By then nothing a gateway holds or the bucket keeps as
+   current was signed with it.
+
+If golem-control was switched without `-trusted-keys` and stopped with
+`ErrTampered` naming a checkpoint that does not verify, step 3 is the
+fix: add the old key's public half there and restart it. Restoring the
+checkpoint from the bucket's versions does not help: those were signed
+with the old key too.
 
 ## 3. Sites
 
