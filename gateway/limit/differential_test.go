@@ -45,16 +45,18 @@ func (d *expDriver) Observe() (any, error) {
 	return o, nil
 }
 
-// unjudged is a driver with no model checks of its own (CheckStep, the
-// model's known spend): a varied run is compared across the stores only.
-type unjudged struct{ d *expDriver }
+// byReads is a driver whose stores are compared through what reads return,
+// not their raw minutes (a varied run's: its short retention trims each
+// store on its own schedule). Under IgnoreModel the Differential runs no
+// driver's model checks, so nothing else needs hiding.
+type byReads struct{ d *expDriver }
 
-func (u unjudged) Step(s *connect.Step) error { return u.d.Step(s) }
+func (u byReads) Step(s *connect.Step) error { return u.d.Step(s) }
 
 // Observe is what reads see: a store keeps minutes past retention until it
 // trims them, and each trims on its own schedule, so the counter is
 // compared as every read from each of the trace's minutes returns it.
-func (u unjudged) Observe() (any, error) {
+func (u byReads) Observe() (any, error) {
 	o, err := u.d.Observe()
 	if err != nil {
 		return nil, err
@@ -82,7 +84,7 @@ func (u unjudged) Observe() (any, error) {
 
 // stores makes a driver per store over the same trace; retain is both
 // stores' retention, and both trim by the model's clock.
-func stores(tb testing.TB, addr string, retain time.Duration, judged bool) map[string]connect.Driver {
+func stores(tb testing.TB, addr string, retain time.Duration, byRead bool) map[string]connect.Driver {
 	var drivers []*expDriver
 	clock := func() time.Time { // the trace's clock: the drivers step together
 		return drivers[0].now()
@@ -98,8 +100,8 @@ func stores(tb testing.TB, addr string, retain time.Duration, judged bool) map[s
 		return &valkeyFaults{Valkey: v}
 	}}
 	drivers = []*expDriver{mem, vk}
-	if !judged {
-		return map[string]connect.Driver{"mem": unjudged{mem}, "valkey": unjudged{vk}}
+	if byRead {
+		return map[string]connect.Driver{"mem": byReads{mem}, "valkey": byReads{vk}}
 	}
 	return map[string]connect.Driver{"mem": mem, "valkey": vk}
 }
@@ -113,7 +115,7 @@ func TestStoresAgree(t *testing.T) {
 	addr := valkeyAddr(t)
 	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 50, MaxSteps: 30},
 		func(tb testing.TB) connect.Driver {
-			return &connect.Differential{Impls: stores(tb, addr, mbtRetain, true)}
+			return &connect.Differential{Impls: stores(tb, addr, mbtRetain, false)}
 		})
 }
 
@@ -132,7 +134,7 @@ func TestStoresAgreeVaried(t *testing.T) {
 	budgets := []int64{-1, 0, 1, 4, 1 << 40, 1<<53 + 1}
 	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 100, MaxSteps: 30},
 		func(tb testing.TB) connect.Driver {
-			return &connect.Differential{Impls: stores(tb, addr, 5*time.Minute, false), IgnoreModel: true,
+			return &connect.Differential{Impls: stores(tb, addr, 5*time.Minute, true), IgnoreModel: true,
 				Vary: func(s *connect.Step) error {
 					r := rand.New(rand.NewPCG(uint64(s.Trace), uint64(s.Index)))
 					set := func(name string, from []int64) error {

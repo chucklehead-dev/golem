@@ -350,6 +350,9 @@ func TestPublicationModel(t *testing.T) {
 			t.Skip("quint not installed (or set QUINT_BIN)")
 		}
 	}
-	connect.Run(t, connect.Config{Spec: "../../model/publication.qnt", Main: "design", MaxSamples: 50, MaxSteps: 30},
+	// Require: check.sh's scenarios, each reached (or steered to) by the
+	// traces that drive the gateway.
+	connect.Run(t, connect.Config{Spec: "../../model/publication.qnt", Main: "design", MaxSamples: 50, MaxSteps: 30,
+		Require: []string{"revocationReachesGateway", "partitionedAndExpired", "restoredWithRevocations"}},
 		func(t testing.TB) connect.Driver { return &pubDriver{t: t} })
 }

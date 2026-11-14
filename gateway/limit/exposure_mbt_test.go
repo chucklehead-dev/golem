@@ -240,7 +240,11 @@ func TestExposureModel(t *testing.T) {
 	if _, err := exec.LookPath("quint"); err != nil {
 		t.Skip("quint not installed")
 	}
-	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 100, MaxSteps: 30},
+	// Require: every scenario check-exposure.sh shows the design can reach
+	// is reached by the traces that drive the limiter (or steered to), so
+	// the limiter is tested in each, not only where sampling happens to go.
+	connect.Run(t, connect.Config{Spec: "../../model/exposure.qnt", Main: "exposureDesign", MaxSamples: 100, MaxSteps: 30,
+		Require: []string{"overshoots", "waiverExceedsLimit", "cancelledBilledMore", "handoffInFlight", "snapshotSkew"}},
 		func(tb testing.TB) connect.Driver {
 			return &expDriver{t: tb, newSt: func(testing.TB) faultyStore { m := NewMem(); m.Retain = mbtRetain; return m }}
 		})
