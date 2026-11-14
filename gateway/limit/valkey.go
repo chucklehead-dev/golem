@@ -65,18 +65,21 @@ type Valkey struct {
 }
 
 // durArgs are the scripts' duration arguments, formatted once for the
-// durations they were formatted from.
+// durations they were formatted from: an admission or a completion builds
+// no strings for them.
 type durArgs struct {
-	ttl, retain time.Duration
-	ttlMs       string
-	lifeMs      string // past the longest month, plus retention
+	ttl, retain   time.Duration
+	ttlMs         string // a slot's life
+	lifeMs        string // a counter's: past the longest month, plus retention
+	retainMinutes string
 }
 
 func (v *Valkey) durations() *durArgs {
 	if d := v.args.Load(); d != nil && d.ttl == v.TTL && d.retain == v.Retain {
 		return d
 	}
-	d := &durArgs{ttl: v.TTL, retain: v.Retain, ttlMs: ms(v.TTL), lifeMs: ms(31*24*time.Hour + v.Retain)}
+	d := &durArgs{ttl: v.TTL, retain: v.Retain, ttlMs: ms(v.TTL), lifeMs: ms(31*24*time.Hour + v.Retain),
+		retainMinutes: i64(int64(v.Retain / time.Minute))}
 	v.args.Store(d)
 	return d
 }
@@ -123,37 +126,45 @@ func newScript(src string) *script {
 	return &script{valkey.NewLuaScript(src), src, hex.EncodeToString(sum[:])}
 }
 
-const nowMillis = `local t = redis.call('TIME'); local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+// The scripts are built from the Lua fragments below, each a local
+// function (or, nowMillis, a local) a script's body calls. Each script's
+// comment lists its KEYS and ARGV; numbers travel as decimal strings,
+// minutes are Unix minutes (minuteOf), and a counter's fields are its
+// minutes and "total".
+
+// nowMillis is the server's clock (TIME) in milliseconds: slots expire on
+// it, so no gateway's clock can extend one.
+const nowMillis = `local t = redis.call('TIME'); local nowMs = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 `
 
 // slotsTake is the Lua function take: it trims expired slots from a
-// principal's and a scope's slot sets and, if the limits allow, takes one
-// in each for the call, for the TTL. The admit script calls it.
+// principal's and a scope's slot sets and, if the limits allow (0: none),
+// takes one in each for the call, for the TTL.
 const slotsTake = `
-local function take(pk, sk, call, plimit, slimit, ttl)
-  redis.call('ZREMRANGEBYSCORE', pk, '-inf', now)
-  redis.call('ZREMRANGEBYSCORE', sk, '-inf', now)
-  if plimit > 0 and redis.call('ZCARD', pk) >= plimit then return false end
-  if slimit > 0 and redis.call('ZCARD', sk) >= slimit then return false end
-  redis.call('ZADD', pk, now + ttl, call)
-  redis.call('ZADD', sk, now + ttl, call)
-  redis.call('PEXPIRE', pk, ttl)
-  redis.call('PEXPIRE', sk, ttl)
+local function take(principalSlots, scopeSlots, call, principalLimit, scopeLimit, ttl)
+  redis.call('ZREMRANGEBYSCORE', principalSlots, '-inf', nowMs)
+  redis.call('ZREMRANGEBYSCORE', scopeSlots, '-inf', nowMs)
+  if principalLimit > 0 and redis.call('ZCARD', principalSlots) >= principalLimit then return false end
+  if scopeLimit > 0 and redis.call('ZCARD', scopeSlots) >= scopeLimit then return false end
+  redis.call('ZADD', principalSlots, nowMs + ttl, call)
+  redis.call('ZADD', scopeSlots, nowMs + ttl, call)
+  redis.call('PEXPIRE', principalSlots, ttl)
+  redis.call('PEXPIRE', scopeSlots, ttl)
   return true
 end
 `
 
 // sinceOf is the Lua function since: the counter's spend in the minutes
-// from from to now (the caller's minute) plus clockSkew, and no further
-// back than the retention. It reads only those minutes: the cost is the
-// boundary's age, not the counter's size.
-const sinceOf = `
-local function since(k, from, now, retain)
-  if from == 0 then return tonumber(redis.call('HGET', k, 'total') or '0') end
-  local lo = math.max(from, now - retain)
+// from from to the caller's minute plus clockSkewMinutes, and no further
+// back than the retention (Mem.since reads the same window). It reads
+// only those minutes, one HGET each: the cost is the boundary's age, not
+// the counter's size. A from of 0 (no boundary) reads the total alone.
+var sinceOf = `
+local function since(counter, from, minute, retain)
+  if from == 0 then return tonumber(redis.call('HGET', counter, 'total') or '0') end
   local total = 0
-  for m = lo, now + ` + clockSkewMinutes + ` do
-    local v = redis.call('HGET', k, m)
+  for m = math.max(from, minute - retain), minute + ` + strconv.Itoa(clockSkewMinutes) + ` do
+    local v = redis.call('HGET', counter, m)
     if v then total = total + tonumber(v) end
   end
   return total
@@ -162,78 +173,102 @@ end
 
 // clockSkewMinutes is how far past the caller's minute a read looks: a
 // minute stamped by a peer gateway whose clock is a little ahead.
-const clockSkewMinutes = "1"
+const clockSkewMinutes = 1
 
-// trimOf is the Lua function trim: once a counter holds more than a
-// retention's minutes (and a margin), delete those older than it, by the
-// increment's minute. Amortised: it runs about once a margin's minutes.
-const trimOf = `
-local function trim(k, now, retain)
-  if redis.call('HLEN', k) <= retain + 60 then return end
-  for _, f in ipairs(redis.call('HKEYS', k)) do
-    local m = tonumber(f) -- nil for "total"
-    if m and m < now - retain then redis.call('HDEL', k, f) end
+// addTo is the Lua functions trim and add. add adds a cost to a minute of
+// the counter and to its total, and extends the counter's life (a period's
+// counter outlives its period by the retention, then goes); minute is the
+// field as sent. trim, once the counter holds more than a retention's
+// minutes and a margin, deletes those older than the retention, by the
+// increment's minute: amortised, it runs about once a margin's minutes.
+const addTo = `
+local function trim(counter, minute, retain)
+  if redis.call('HLEN', counter) <= retain + 60 then return end
+  for _, field in ipairs(redis.call('HKEYS', counter)) do
+    local m = tonumber(field) -- nil for 'total'
+    if m and m < minute - retain then redis.call('HDEL', counter, field) end
   end
+end
+
+local function add(counter, minute, cost, life, retain)
+  redis.call('HINCRBY', counter, minute, cost)
+  redis.call('HINCRBY', counter, 'total', cost)
+  redis.call('PEXPIRE', counter, life)
+  trim(counter, tonumber(minute), retain)
 end
 `
 
-// admit: KEYS principal slots, scope slots, counter; ARGV call, principal
-// limit, scope limit, TTL, from minute, spend, budget, worst-case check (0
-// or 1), worst, retention in minutes, the gateway's minute. Returns
-// {outcome, known}: the check and the slot in one atomic step, so two
-// gateways cannot both pass the check and then both take the last slot or
-// the last of the budget.
+// admitScript is one admission: the budget check and the slots in one
+// atomic step, so two gateways cannot both pass the check and then both
+// take the last slot or the last of the budget. The check is overBudget's.
+//
+//	KEYS: principal slots, scope slots, counter
+//	ARGV: call, principal limit, scope limit, TTL (ms), from minute,
+//	      the snapshot's spend, budget, worst-case check ("1" or "0"),
+//	      worst, retention (minutes), the gateway's minute
+//
+// It returns {outcome, known}, outcome an Outcome.
 var admitScript = valkey.NewLuaScript(nowMillis + slotsTake + sinceOf + `
-local known = tonumber(ARGV[6]) + since(KEYS[3], tonumber(ARGV[5]), tonumber(ARGV[11]), tonumber(ARGV[10]))
-local budget, worst = tonumber(ARGV[7]), tonumber(ARGV[9])
+local principalSlots, scopeSlots, counter = KEYS[1], KEYS[2], KEYS[3]
+local call, principalLimit, scopeLimit, ttl = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+local from, spend, budget = tonumber(ARGV[5]), tonumber(ARGV[6]), tonumber(ARGV[7])
+local worstCaseCheck, worst = ARGV[8] == '1', tonumber(ARGV[9])
+local retain, minute = tonumber(ARGV[10]), tonumber(ARGV[11])
+
+local known = spend + since(counter, from, minute, retain)
 if budget ~= 0 then -- 0 is none; a negative one refuses, as overBudget does
-  if ARGV[8] == '1' and known + worst > budget then return {1, known} end
-  if ARGV[8] ~= '1' and known >= budget then return {1, known} end
+  local over
+  if worstCaseCheck then over = known + worst > budget else over = known >= budget end
+  if over then return {1, known} end
 end
-if not take(KEYS[1], KEYS[2], ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])) then
-  return {2, known}
-end
+if not take(principalSlots, scopeSlots, call, principalLimit, scopeLimit, ttl) then return {2, known} end
 return {0, known}`)
 
-// register adds slots without checking limits: KEYS pairs (principal,
-// scope), ARGV[1] the TTL, then the calls.
+// registerScript registers (or renews) slots without checking limits.
+//
+//	KEYS: principal slots, scope slots, per call
+//	ARGV: TTL (ms), then the calls
 var registerScript = valkey.NewLuaScript(nowMillis + `
-local exp = now + tonumber(ARGV[1])
-for i = 2, #ARGV do
-  redis.call('ZADD', KEYS[2*i-3], exp, ARGV[i])
-  redis.call('ZADD', KEYS[2*i-2], exp, ARGV[i])
-  redis.call('PEXPIRE', KEYS[2*i-3], ARGV[1])
-  redis.call('PEXPIRE', KEYS[2*i-2], ARGV[1])
+local ttl = ARGV[1]
+local expiry = nowMs + tonumber(ttl)
+for i = 1, #ARGV - 1 do
+  local call, principalSlots, scopeSlots = ARGV[i+1], KEYS[2*i-1], KEYS[2*i]
+  redis.call('ZADD', principalSlots, expiry, call)
+  redis.call('ZADD', scopeSlots, expiry, call)
+  redis.call('PEXPIRE', principalSlots, ttl)
+  redis.call('PEXPIRE', scopeSlots, ttl)
 end
 return 1`)
 
-// addScript: KEYS counters, one per increment; ARGV the keys' life, the
-// retention in minutes, then (minute, cost) per increment. A period's
-// counter outlives its period by the retention, then goes. One script, so
-// a batch is added whole or not at all.
-var addScript = newScript(trimOf + `
-local retain = tonumber(ARGV[2])
+// addScript adds increments in one script, so a batch is added whole or
+// not at all.
+//
+//	KEYS: the counter, per increment
+//	ARGV: the counters' life (ms), retention (minutes), then minute and
+//	      cost per increment
+var addScript = newScript(addTo + `
+local life, retain = ARGV[1], tonumber(ARGV[2])
 for i = 1, #KEYS do
-  redis.call('HINCRBY', KEYS[i], ARGV[2*i+1], ARGV[2*i+2])
-  redis.call('HINCRBY', KEYS[i], 'total', ARGV[2*i+2])
-  redis.call('PEXPIRE', KEYS[i], ARGV[1])
-  trim(KEYS[i], tonumber(ARGV[2*i+1]), retain)
+  add(KEYS[i], ARGV[2*i+1], ARGV[2*i+2], life, retain)
 end
 return 1`)
 
-// completeScript: the add, then free the slot: KEYS counter, principal and
-// scope slots; ARGV life, minute, cost, call, retention in minutes.
-var completeScript = newScript(trimOf + `
-redis.call('HINCRBY', KEYS[1], ARGV[2], ARGV[3])
-redis.call('HINCRBY', KEYS[1], 'total', ARGV[3])
-redis.call('PEXPIRE', KEYS[1], ARGV[1])
-trim(KEYS[1], tonumber(ARGV[2]), tonumber(ARGV[5]))
-redis.call('ZREM', KEYS[2], ARGV[4])
-redis.call('ZREM', KEYS[3], ARGV[4])
+// completeScript is a completion: the add, then the slot freed.
+//
+//	KEYS: counter, principal slots, scope slots
+//	ARGV: the counter's life (ms), minute, cost, call, retention (minutes)
+var completeScript = newScript(addTo + `
+local counter, principalSlots, scopeSlots = KEYS[1], KEYS[2], KEYS[3]
+local life, minute, cost, call, retain = ARGV[1], ARGV[2], ARGV[3], ARGV[4], tonumber(ARGV[5])
+add(counter, minute, cost, life, retain)
+redis.call('ZREM', principalSlots, call)
+redis.call('ZREM', scopeSlots, call)
 return 1`)
 
-// sinceScript: KEYS counter; ARGV from minute, now minute, retention in
-// minutes.
+// sinceScript reads the counter's spend from a minute on (Store.Since).
+//
+//	KEYS: counter
+//	ARGV: from minute, the gateway's minute, retention (minutes)
 var sinceScript = valkey.NewLuaScript(sinceOf + `
 return since(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]))`)
 
@@ -248,20 +283,20 @@ func (v *Valkey) now() time.Time {
 	return time.Now()
 }
 
-// retainMinutes is the retention in whole minutes, for the scripts.
-func (v *Valkey) retainMinutes() string { return strconv.FormatInt(int64(v.Retain/time.Minute), 10) }
-
 func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
+
+func i64(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, error) {
 	check := "0"
 	if a.DeclaredWorstCaseCheck {
 		check = "1"
 	}
-	ks := v.keysOf(a.Scope, a.Period)
+	d, ks := v.durations(), v.keysOf(a.Scope, a.Period)
 	keys := []string{v.principalKey(a.Principal), ks.slots, ks.counter}
-	r, err := admitScript.Exec(ctx, v.c, keys, []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.durations().ttlMs,
-		i64(fromMinute(a.Since)), i64(a.Spend), i64(a.Budget), check, i64(a.Worst), v.retainMinutes(), i64(minuteOf(cmp.Or(a.Now, v.now())))}).AsIntSlice()
+	args := []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), d.ttlMs,
+		i64(fromMinute(a.Since)), i64(a.Spend), i64(a.Budget), check, i64(a.Worst), d.retainMinutes, i64(minuteOf(cmp.Or(a.Now, v.now())))}
+	r, err := admitScript.Exec(ctx, v.c, keys, args).AsIntSlice()
 	if err != nil {
 		return 0, 0, wrap(err)
 	}
@@ -272,22 +307,32 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, error)
 }
 
 func (v *Valkey) Complete(ctx context.Context, in Increment, s Slot) error {
-	ks := v.keysOf(in.Scope, in.Period)
+	d, ks := v.durations(), v.keysOf(in.Scope, in.Period)
 	keys := []string{ks.counter, v.principalKey(s.Principal), v.scopeKey(s.Scope)}
-	return v.write(ctx, completeScript, keys, []string{v.durations().lifeMs, i64(minuteOf(in.At)), i64(in.Cost), s.Call, v.retainMinutes()}, 1)
+	return v.write(ctx, completeScript, keys, []string{d.lifeMs, i64(minuteOf(in.At)), i64(in.Cost), s.Call, d.retainMinutes}, 1)
 }
 
-// write runs an add script. With ReplicaAcks it sends the script and WAIT
-// together, on one connection: WAIT counts only its own connection's
-// writes, and valkey-go sends a blocking command such as WAIT alone on a
-// dedicated connection, where it would acknowledge nothing. A replica's
-// acknowledgement only narrows what a failover can lose, so a short one
-// is counted (Unreplicated: n increments), not an error.
+// write runs an add script (n increments). With ReplicaAcks it sends the
+// script and WAIT together, on one connection: WAIT counts only its own
+// connection's writes, and valkey-go sends a blocking command such as WAIT
+// alone on a dedicated connection, where it would acknowledge nothing. A
+// replica's acknowledgement only narrows what a failover can lose, so a
+// short one is counted (Unreplicated), not an error.
 func (v *Valkey) write(ctx context.Context, s *script, keys, args []string, n int64) error {
 	if v.ReplicaAcks <= 0 {
 		return wrap(s.Exec(ctx, v.c, keys, args).Error())
 	}
-	rs := v.pipeline(ctx, func(eval bool) valkey.Commands { return valkey.Commands{v.run(s, eval, keys, args)} })
+	send := func(eval bool) []valkey.ValkeyResult {
+		// Built for each send: a built command is spent once sent.
+		wait := v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build()
+		return v.c.DoMulti(ctx, v.run(s, eval, keys, args), wait)
+	}
+	// Lua.Exec falls back from EVALSHA to EVAL itself, one command at a
+	// time; a pipeline has to do it by hand.
+	rs := send(false)
+	if err, ok := valkey.IsValkeyErr(rs[0].Error()); ok && err.IsNoScript() {
+		rs = send(true)
+	}
 	if err := rs[0].Error(); err != nil {
 		return wrap(err)
 	}
@@ -297,28 +342,8 @@ func (v *Valkey) write(ctx context.Context, s *script, keys, args []string, n in
 	return nil
 }
 
-// pipeline sends the script commands build makes, and WAIT after them
-// when ReplicaAcks is set, in one round trip on one connection. If the
-// server lacks the script (NOSCRIPT, in the first reply) it sends them
-// again with the scripts' source: build is called for each send, since a
-// built command is spent once sent.
-func (v *Valkey) pipeline(ctx context.Context, build func(eval bool) valkey.Commands) []valkey.ValkeyResult {
-	send := func(eval bool) []valkey.ValkeyResult {
-		cmds := build(eval)
-		if v.ReplicaAcks > 0 {
-			cmds = append(cmds, v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build())
-		}
-		return v.c.DoMulti(ctx, cmds...)
-	}
-	rs := send(false)
-	if err, ok := valkey.IsValkeyErr(rs[0].Error()); ok && err.IsNoScript() {
-		rs = send(true)
-	}
-	return rs
-}
-
 // run is the command that runs a script: EVALSHA, or with eval EVAL of its
-// source.
+// source (the server lacked it: NOSCRIPT).
 func (v *Valkey) run(s *script, eval bool, keys, args []string) valkey.Completed {
 	if eval {
 		return v.c.B().Eval().Script(s.src).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build()
@@ -331,8 +356,6 @@ func (v *Valkey) replicated(wait valkey.ValkeyResult) bool {
 	n, err := wait.AsInt64()
 	return err == nil && n >= int64(v.ReplicaAcks)
 }
-
-func i64(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (v *Valkey) Release(ctx context.Context, s Slot) error {
 	cmds := valkey.Commands{
@@ -379,10 +402,10 @@ func (v *Valkey) Add(ctx context.Context, in Increment) error { return v.AddAll(
 // all. A failed chunk ends the batch; the caller keeps the increments not
 // reported added and replays them.
 func (v *Valkey) AddAll(ctx context.Context, incs []Increment) error {
-	life := v.durations().lifeMs
+	d := v.durations()
 	for chunk := range slices.Chunk(incs, addChunk) {
 		keys := make([]string, 0, len(chunk))
-		args := append(make([]string, 0, 2+2*len(chunk)), life, v.retainMinutes())
+		args := append(make([]string, 0, 2+2*len(chunk)), d.lifeMs, d.retainMinutes)
 		for _, in := range chunk {
 			keys = append(keys, v.counterKey(in.Scope, in.Period))
 			args = append(args, i64(minuteOf(in.At)), i64(in.Cost))
@@ -400,7 +423,7 @@ const addChunk = 256
 
 func (v *Valkey) Since(ctx context.Context, scope, period string, since time.Time) (int64, error) {
 	n, err := sinceScript.Exec(ctx, v.c, []string{v.counterKey(scope, period)},
-		[]string{i64(fromMinute(since)), i64(minuteOf(v.now())), v.retainMinutes()}).AsInt64()
+		[]string{i64(fromMinute(since)), i64(minuteOf(v.now())), v.durations().retainMinutes}).AsInt64()
 	return n, wrap(err)
 }
 
