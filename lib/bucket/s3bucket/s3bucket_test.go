@@ -3,8 +3,8 @@ package s3bucket
 import (
 	"crypto/ed25519"
 	"errors"
-	"strings"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 

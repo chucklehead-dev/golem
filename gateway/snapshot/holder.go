@@ -27,8 +27,8 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/route"
-	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/entra"
+	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
