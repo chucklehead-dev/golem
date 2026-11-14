@@ -41,7 +41,7 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
 | A response past MaxResponse is cut | `TestRequestBoundary` (past the ceiling) | — | 8165990 |
 | Upstream connections to metadata, link-local, unspecified or multicast addresses are refused always; to loopback or private ones unless granted | `gateway/snapshot` `TestCheckDestination` (IPv4-mapped and CGNAT included), `TestDialRefused` (on a real dial) | — | 79e0d0a |
 | OTLP export uses TLS unless the collector is a literal loopback address (a name, localhost included, gets TLS) | `gateway/telemetry` `TestPlaintextOK` (the decision; no live collector) | — | 79e0d0a; names 2c0d42e |
-| A snapshot this reader cannot interpret is refused, never read with weaker policy: schema 2 for the rename of strict (ADR 0044), refused by and refusing schema 1; unknown members, duplicate names and names in another case refused | `lib/snapshot` `TestRenameFailsClosed` (an old publisher's snapshot; strict under schema 2; both names; another case; a duplicate, the last off; a schema-1 gateway reading schema 2) | yes (the bump alone, the strict decode alone, neither) | this commit |
+| A snapshot the reader cannot interpret is refused, never read with weaker policy: unknown members (`strict` included), duplicate names, names in another case | `lib/snapshot` `TestDecodeFailsClosed` | yes | this commit |
 | Production publication stays disabled: the gateway runs standalone only, on loopback | `cmd/golem-gateway` `TestReleaseGate` | — | 434c819 |
 
 ## Not yet shown
