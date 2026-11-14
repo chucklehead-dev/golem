@@ -146,6 +146,17 @@ control plane.
   - the checkpoint is trusted by where it is: the bucket policy must let
     only golem-control's role write `state/` and `control/` (and
     `snapshots/`), and a pool's credentials write only its `status/`.
+  - golem-control: `control/controller` and `cmd/golem-control`. While it
+    leads, it compiles the config directory and publishes every pool when
+    the config changes, when it becomes leader, and every minute to renew
+    the authorization lease; a config that does not compile is reported
+    and the last good one renewed. Every pool gets the same snapshot, with
+    empty entitlements until the state document carries them (it
+    authorizes no one); pool selectors and the CRD watch come later. Its
+    end-to-end test runs two replicas and a gateway source over one
+    bucket: a change reaches the gateway, a renewal extends its lease, a
+    broken edit renews the last good config, a new leader publishes and a
+    paused one is fenced;
   - leadership: `control/lead`, the lease in the state document (ADR
     0045): taken when lapsed at the next epoch, renewed by its holder,
     given up by its holder's own clock before another may take it; the

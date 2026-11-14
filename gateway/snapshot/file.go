@@ -2,12 +2,9 @@ package snapshot
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
-	"path"
 	"strings"
 	"time"
 
@@ -40,7 +37,7 @@ func (d *Dir) Load() error {
 	}
 	defer root.Close()
 	fsys := root.FS()
-	sum, err := contentHash(fsys)
+	sum, err := v1.ContentHash(fsys)
 	if err != nil {
 		return err
 	}
@@ -99,30 +96,6 @@ func (d *Dir) log() *slog.Logger {
 		return d.Log
 	}
 	return slog.Default()
-}
-
-// contentHash hashes every YAML file's name and contents: a cheap test of
-// whether anything changed.
-func contentHash(fsys fs.FS) ([32]byte, error) {
-	h := sha256.New()
-	err := fs.WalkDir(fsys, ".", func(p string, e fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ext := path.Ext(p); e.IsDir() || (ext != ".yaml" && ext != ".yml") {
-			return nil
-		}
-		b, err := fs.ReadFile(fsys, p)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(h, "%s\x00%d\x00", p, len(b))
-		h.Write(b)
-		return nil
-	})
-	var sum [32]byte
-	copy(sum[:], h.Sum(nil))
-	return sum, err
 }
 
 // FileSecrets resolves secretRef "name/key" to the file key in the

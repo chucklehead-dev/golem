@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"path"
@@ -122,4 +123,28 @@ func documents(b []byte) [][]byte {
 		cur.Write(line)
 	}
 	return append(docs, cur.Bytes())
+}
+
+// ContentHash hashes every YAML file's name and contents, as DecodeFS reads
+// them: a cheap test of whether a config directory changed.
+func ContentHash(fsys fs.FS) ([32]byte, error) {
+	h := sha256.New()
+	err := fs.WalkDir(fsys, ".", func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ext := path.Ext(p); e.IsDir() || (ext != ".yaml" && ext != ".yml") {
+			return nil
+		}
+		b, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", p, len(b))
+		h.Write(b)
+		return nil
+	})
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, err
 }
