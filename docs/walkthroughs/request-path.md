@@ -71,7 +71,7 @@ path reads only what those decisions need and forwards bytes unchanged:
 | `gateway/canon` | `Usage`, the one canonical type the path needs so far |
 
 `proxy` is imported only by the binary (`internal/archtest` checks it).
-The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:189`),
+The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:198`),
 each wrapped by the lifecycle's drain tracking and, in standalone mode
 only, by `localOnly` (`cmd/golem-gateway/guard.go:24`), which refuses
 non-loopback hosts, cross-origin browser requests and non-JSON bodies.
@@ -122,7 +122,7 @@ forbidden).
 token, the output cap times `n`); a product that would overflow is refused.
 `admit` (`proxy.go:490`) fills an `admission.Call` with the scope's limits
 and calls the `Admitter`: golem's is `Limiter.Admitter`
-(`gateway/limit/limit.go:731`). A `*admission.Refusal` is rendered with its
+(`gateway/limit/limit.go:744`). A `*admission.Refusal` is rendered with its
 code and Retry-After; an error with the caller gone is a silent end. The
 admitted ticket goes into a `settlement` (`proxy.go:169`, type at
 `proxy.go:293`) with a context that is never cancelled, and a deferred

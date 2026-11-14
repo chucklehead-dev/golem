@@ -117,6 +117,7 @@ control/
   audit/                   audit shipping: archive, emit, trim
   entrasync/               Entra group sync (ADR 0047)
   spend/                   known spend from the ledger in ClickHouse (ADR 0048)
+  metrics/                 golem-control's metrics: observable instruments over the controller
   config/                  the CRD watch (planned)
 console/                   web UI (Go html/template + htmx), a client of the control API (planned)
 plugins/backstage/         TypeScript, generated client (M3)

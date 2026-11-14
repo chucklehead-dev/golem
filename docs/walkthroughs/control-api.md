@@ -33,13 +33,13 @@ store is `EntraAuth`, which looks up a token's principal in the current
 document; it never writes.
 
 `cmd/golem-control` wires it up (`apiServer`,
-cmd/golem-control/main.go:265): an `api.Server` over a `service.Service`
+cmd/golem-control/main.go:263): an `api.Server` over a `service.Service`
 over the shared `state.Store`, with `api.EntraAuth` as the
 authenticator. The API is served only with `-listen`, and refuses to
 start without `-entra-tenant` (`TestAPINeedsTenant`); `-entra-audience`
-(default `api://golem-control`, main.go:152) is the control API
+(default `api://golem-control`, main.go:153) is the control API
 registration's, never the gateway's. The `http.Server` cuts off a slow
-peer (main.go:280): headers within 10 seconds, the whole request within
+peer (main.go:279): headers within 10 seconds, the whole request within
 30, the response within a minute, idle connections after two, headers
 at most 64 KiB.
 
@@ -125,7 +125,7 @@ shared helpers sit together near the top (service.go:117-149):
 | Every call is authenticated before its body is read | `Server.Handler` (api.go:52) | `TestLimits`, `TestAPI` |
 | A request message is at most 1 MiB | `connect.WithReadMaxBytes` in `Handler` (api.go:53) | `TestLimits` (with a 1 KiB limit) |
 | An internal error's text (bucket, S3) never reaches the caller | `connectError` (api.go:89): logged with an id, answered "internal error <id>" | `TestLimits` |
-| Only control API tokens (`golem.manage`, `api://golem-control`) are accepted; a gateway token is not | `entra.Verifier` with `Scope: entra.ScopeManage` (main.go:269) | `TestEntraAuth` |
+| Only control API tokens (`golem.manage`, `api://golem-control`) are accepted; a gateway token is not | `entra.Verifier` with `Scope: entra.ScopeManage` (main.go:267) | `TestEntraAuth` |
 | Each method's callers are exactly those of §3 | the methods, through `manages`, `sees`, `visibleScope`, `requireManager`, `mayMint` | `TestAuthorization` (service_test.go:47), `TestRevokeKey` (:98), `TestBindGroup` (:373) |
 | An outsider learns nothing of a scope or key: `not found`, not `permission denied` | `visibleScope`, `RevokeKey` | `TestAuthorization`, `TestRevokeKey`, `TestReads` (:231) |
 | A manager cannot remove a fellow manager | `RemoveMember` | `TestManagerRules` (:127) |

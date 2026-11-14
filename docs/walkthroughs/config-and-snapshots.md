@@ -34,7 +34,7 @@ function too, since those move more often.
 | `lib/period` | budget period names ("2026-11") | gateway counters, ledger, control |
 | `lib/contract` | refusal codes, origins and header names, checked against contracts.md | the gateway's every refusal |
 | `lib/entra` | Entra ID v2 access-token verification with a cached key set | gateway/auth, the control API (control/api) |
-| `lib/otlp` | OTLP/HTTP exporters, TLS unless the collector is a literal loopback address | gateway/telemetry, golem-control's audit |
+| `lib/otlp` | OTLP/HTTP exporters, TLS unless the collector is a literal loopback address | gateway/telemetry, golem-control's metrics and audit |
 
 ## 1. Config CRDs (`lib/api/v1alpha1`)
 
@@ -79,7 +79,7 @@ carries.
 
 `ContentHash` (`decode.go:137`) hashes the YAML files' names and contents
 in walk order: golem-control (`Controller.load`,
-`control/controller/controller.go:172`) and the standalone gateway
+`control/controller/controller.go:338`) and the standalone gateway
 (`Dir.Load`, `gateway/snapshot/file.go:40`) use it to skip decoding and
 compiling a directory that has not changed.
 
@@ -87,8 +87,8 @@ compiling a directory that has not changed.
 
 One validation path (ADR 0005): `golemctl config validate` (`validate`,
 `cmd/golemctl/main.go:136`) runs it offline, golem-control on the live
-config (`Controller.Step`'s publication, `control/controller/controller.go:143`,
-and `load`'s trial compile at `:183`), the standalone gateway on its
+config (`Controller.Step`'s publication, `control/controller/controller.go:309`,
+and `load`'s trial compile at `:349`), the standalone gateway on its
 directory (`Dir.Load`, `gateway/snapshot/file.go:51`).
 
 `Compile` (`compile.go:72`) reports **every** problem, not the first, as
@@ -158,7 +158,7 @@ A **published** snapshot's entitlements come from the state document
 (`control/state`): golem-control passes `Options.Entitlements`, a function
 told the sorted route aliases that exist (`compile.go:86`); golem-control's
 fills in each scope's known spend (`Controller.Step`,
-`control/controller/controller.go:124`). Without one, the snapshot
+`control/controller/controller.go:284`). Without one, the snapshot
 authorizes no one. Compile still runs `entitlements` first, so that a
 LocalIdentity in a published config is reported.
 
@@ -186,7 +186,7 @@ Valkey scripts sum in Lua numbers, doubles exact only below 2^53; under
 this bound a period's sums stay exact there as they are in memory. The
 compiler refuses a larger budget (`at most 1125899906842624 (2^50)`,
 `entitlements_test.go:85`), and the gateway clamps the cost one call adds
-to the same bound (`gateway/limit/limit.go:351`).
+to the same bound (`gateway/limit/limit.go:357`).
 
 ## 3. The snapshot format (`lib/snapshot/snapshot.go`)
 
@@ -250,10 +250,10 @@ copy one back) is refused. It is signed and also under a prefix only
 golem-control's role may write (control-plane.md §3): a bucket policy
 mistake alone does not let anyone lower it. golem-control writes it after
 the publication record and before the pointer. At start
-(`Bucket.Start`, `gateway/snapshot/bucket.go:69`) a gateway takes the
+(`Bucket.Start`, `gateway/snapshot/bucket.go:75`) a gateway takes the
 higher of its local checkpoint and the pool's trusted one; a missing
 checkpoint is floor zero only while the pool has no pointer either
-(`trustedCheckpoint`, `:142`), and a published pool's missing or
+(`trustedCheckpoint`, `:149`), and a published pool's missing or
 unverifiable checkpoint stops a gateway with an empty disk from starting.
 
 A pointer's `Expires` (`pointer.go:27`; the publisher sets it ten minutes
@@ -261,7 +261,7 @@ after issue unless `Publisher.PointerTTL` says otherwise, ten renewals at
 the default one-minute renew) is TUF's timestamp role as a signal, not a
 refusal: a gateway that sees nothing newer than an expired pointer reports
 it overdue (`Bucket.Overdue`, logged once by `checkOverdue`,
-`gateway/snapshot/bucket.go:202`) and goes on serving until its snapshot's
+`gateway/snapshot/bucket.go:209`) and goes on serving until its snapshot's
 `ValidUntil`, which is what bounds a frozen or replayed bucket (ADR 0030).
 
 ## 5. The bucket (`lib/bucket`)
@@ -317,7 +317,7 @@ verifier refuses an ID it holds no key for with the same error
   KMS's ECDSA_SHA_256 produces; `ParseECDSAPublicKey` (`ecdsa.go:32`)
   reads KMS's DER or PEM public key and refuses other curves.
 - `Keys` and `LoadKeys` (`keys.go:17`, `:38`): what a pool gateway trusts
-  (`-keys`, `cmd/golem-gateway/main.go:239`). Every `*.pub` file of the
+  (`-keys`, `cmd/golem-gateway/main.go:248`). Every `*.pub` file of the
   directory is a PEM `PUBLIC KEY`, Ed25519 or ECDSA P-256; its key ID is
   the PEM's `Key-ID` header if it has one (a KMS key's ARN), else the
   file's name without `.pub`. A directory with no keys is an error: a
@@ -375,9 +375,9 @@ revoked is not trusted for ever. Its tests are its callers':
 `gateway/auth/entra_test.go` and `control/api/entra_test.go`.
 
 **`lib/otlp`** is the OTLP/HTTP transport: `New` (`otlp.go:40`) the
-gateway's three exporters, `LoggerProvider` (`otlp.go:72`) golem-control's
+gateway's three exporters, `LoggerProvider` (`otlp.go:93`) golem-control's
 audit logs. Telemetry carries billing and audit data, so `Base`
-(`otlp.go:82`) gives https unless `PlaintextOK` (`otlp.go:95`): the host is
+(`otlp.go:103`) gives https unless `PlaintextOK` (`otlp.go:116`): the host is
 a literal loopback address (a name is resolved when dialed, so is not held
 to this machine; ADR 0043). Each exporter is given its whole URL, which
 overrides the SDK's `OTEL_EXPORTER_OTLP_*` endpoint and insecure
@@ -392,15 +392,15 @@ fixture of `compile_test.go:14`, a Backend `anthropic` with one deployment
 deployment under one alias, and a ConfigMap.
 
 1. **Read.** golem-control's `Controller.Step` calls `load`
-   (`control/controller/controller.go:165`), which hashes the directory
+   (`control/controller/controller.go:331`), which hashes the directory
    with `ContentHash`; it changed, so `DecodeFS` reads it (`decode.go:38`).
    Document 1 decodes into `objs.Backends`, document 2 into
    `objs.Routes`; the ConfigMap in document 3 is skipped (`decode.go:83`).
-   A trial compile with a lease and no entitlements (`controller.go:183`)
+   A trial compile with a lease and no entitlements (`controller.go:349`)
    passes, and the objects become the good config.
 2. **Compile.** `PublishAll`'s build function calls `Compile`
    (`compile.go:72`) with the publication's sequence, a lease and the
-   state's entitlements (`controller.go:143`). `compileBackends`
+   state's entitlements (`controller.go:309`). `compileBackends`
    (`compile.go:122`) accepts `anthropic`; `backendAuth` compiles its auth
    to `secretRef: "anthropic/api-key"`; `deployments` checks the one
    deployment's https URL; `catalog.add` records the backend's dialect and
@@ -420,9 +420,9 @@ deployment under one alias, and a ConfigMap.
    ADR 0049); then `finish` (`publish.go:208`) signs and writes the
    checkpoint (`SignCheckpoint`, `pointer.go:85`), then signs the pointer
    with its `Expires` (`SignPointer`, `pointer.go:73`) and writes it.
-5. **Verify.** A gateway's `Poll` (`gateway/snapshot/bucket.go:172`) does
-   a conditional GET of the pointer; it changed, so `read` (`:272`) calls
-   `openPointer` (`:229`), which calls `OpenPointer` with its `sign.Keys`
+5. **Verify.** A gateway's `Poll` (`gateway/snapshot/bucket.go:179`) does
+   a conditional GET of the pointer; it changed, so `read` (`:284`) calls
+   `openPointer` (`:241`), which calls `OpenPointer` with its `sign.Keys`
    (`pointer.go:79`) and refuses another pool's pointer or one below its
    floor. It notes the pointer's `Expires`, fetches the object, and
    `openSnapshot` (`:246`) checks `snapshot.Hash(body) == ptr.Hash`,
@@ -452,7 +452,7 @@ publishing the last good config.
 | An S3 object over `MaxObject` is refused, not buffered | `Bucket.Get`, `s3bucket.go:45` | `TestMaxObject`, `s3bucket_test.go:76` |
 | A mistyped or truncated key is refused | `Parse`, `lib/key/key.go:57` | `TestRefused`, `lib/key/key_test.go:23` |
 | Codes and headers match contracts.md | `lib/contract/codes.go` | `lib/contract/contract_test.go:37`, `:73` |
-| Telemetry goes over TLS unless to a literal loopback address, whatever the environment says | `Base`, `lib/otlp/otlp.go:82` | `TestPlaintextOK`, `otlp_test.go:26`; `TestOTLPIgnoresInsecureEnv`, `:41` |
+| Telemetry goes over TLS unless to a literal loopback address, whatever the environment says | `Base`, `lib/otlp/otlp.go:103` | `TestPlaintextOK`, `otlp_test.go:26`; `TestOTLPIgnoresInsecureEnv`, `:41` |
 | An Entra token is accepted only RS256, for its API's audience and scope, with keys not too old | `Verifier.Verify`, `lib/entra/entra.go:108` | `gateway/auth/entra_test.go` (`TestEntra`, `TestStaleKeys`), `control/api/entra_test.go` |
 
 ## Known gaps
