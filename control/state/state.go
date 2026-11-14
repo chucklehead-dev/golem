@@ -239,6 +239,35 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 	return nil, ErrContended
 }
 
+// Fence is the leadership a leader-only write is made under: the replica
+// that believes it leads, and at which epoch (control/lead).
+type Fence struct {
+	Holder string
+	Epoch  uint64
+}
+
+// ErrFenced: the document's leadership is not the writer's (it has lost
+// the lease, or never held it at that epoch). Nothing was written.
+var ErrFenced = errors.New("state: fenced: this replica does not lead at that epoch")
+
+// FencedUpdate is Update for a leader-only write (publication, the group
+// sync, the period and expiry jobs): change is applied only if the
+// document's leadership is still f, checked in the same compare-and-swap,
+// so a leader deposed while it worked writes nothing (model/leadership.md,
+// JOBS "doc").
+func (s *Store) FencedUpdate(ctx context.Context, f Fence, change func(*Document) error) (*Document, error) {
+	return s.Update(ctx, func(d *Document) error {
+		if l := d.Leader; l == nil || l.Holder != f.Holder || l.Epoch != f.Epoch {
+			have := "no leader"
+			if l != nil {
+				have = fmt.Sprintf("%s leads at epoch %d", l.Holder, l.Epoch)
+			}
+			return fmt.Errorf("%w: %s; this writer is %s at epoch %d", ErrFenced, have, f.Holder, f.Epoch)
+		}
+		return change(d)
+	})
+}
+
 // Validate applies change to a copy of the current document and checks the
 // invariants, writing nothing: validate_only (control-plane.md §2).
 func (s *Store) Validate(ctx context.Context, change func(*Document) error) error {

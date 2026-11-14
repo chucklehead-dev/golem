@@ -197,11 +197,12 @@ func (c *Controller) Run(ctx context.Context) {
 // syncStep runs the group sync if this replica leads and it is due. A
 // failed step is retried at the next interval, not every second.
 func (c *Controller) syncStep(ctx context.Context) error {
-	if c.Sync == nil || c.Elector.Epoch() == 0 || c.now().Before(c.synced.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
+	epoch := c.Elector.Epoch()
+	if c.Sync == nil || epoch == 0 || c.now().Before(c.synced.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
 		return nil
 	}
 	c.synced = c.now()
-	res, err := c.Sync.Step(ctx)
+	res, err := c.Sync.Step(ctx, state.Fence{Holder: c.Elector.ID, Epoch: epoch})
 	if err == nil && res != (entrasync.Result{}) {
 		c.log().Info("entra sync", "created", res.Created, "added", res.Added, "removed", res.Removed, "keysRevoked", res.Revoked)
 	}

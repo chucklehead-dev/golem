@@ -35,6 +35,9 @@ func (d *dir) Members(_ context.Context, g string) ([]User, error) {
 
 var at = time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
 
+// lead1 is the leadership the tests' syncs run under.
+var lead1 = state.Fence{Holder: "r1", Epoch: 1}
+
 func setup(t *testing.T, d *dir) *Sync {
 	t.Helper()
 	b, err := bucket.OpenDir(t.TempDir())
@@ -51,6 +54,7 @@ func setup(t *testing.T, d *dir) *Sync {
 			"ci":    {Kind: "service", Scopes: []string{"team-c"}},
 		}
 		doc.Keys = map[string]state.Key{"kc": {Owner: "carol", Scope: "team-a"}, "kc2": {Owner: "carol", Scope: "team-c"}}
+		doc.Leader = &state.Lease{Holder: "r1", Epoch: 1}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -70,7 +74,7 @@ func TestSync(t *testing.T) {
 		"g-nested": {{ID: "oid-x", UPN: "x@example.com", Enabled: false}},
 	}}
 	s := setup(t, d)
-	res, err := s.Step(t.Context())
+	res, err := s.Step(t.Context(), lead1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +87,7 @@ func TestSync(t *testing.T) {
 		t.Fatalf("a disabled account was created (%+v)", res)
 	}
 	if v := doc.StateVersion; func() bool {
-		r, _ := s.Step(t.Context())
+		r, _ := s.Step(t.Context(), lead1)
 		return s.State.Current().StateVersion != v || r != (Result{})
 	}() {
 		t.Fatal("a step with nothing to change wrote")
@@ -92,7 +96,7 @@ func TestSync(t *testing.T) {
 	// carol leaves g-a: her synced team-a ends, with its key; team-c,
 	// granted in golem, stays, with its key.
 	d.groups["g-a"] = d.groups["g-a"][:1]
-	if _, err := s.Step(t.Context()); err != nil {
+	if _, err := s.Step(t.Context(), lead1); err != nil {
 		t.Fatal(err)
 	}
 	doc = s.State.Current()
@@ -114,7 +118,7 @@ func TestSync(t *testing.T) {
 			}
 		}
 	}
-	if _, err := s.Step(t.Context()); err != nil {
+	if _, err := s.Step(t.Context(), lead1); err != nil {
 		t.Fatal(err)
 	}
 	doc = s.State.Current()
@@ -137,19 +141,19 @@ func TestSync(t *testing.T) {
 func TestSyncSafety(t *testing.T) {
 	d := &dir{groups: map[string][]User{"g-a": {{ID: "oid-c", UPN: "carol@example.com", Enabled: true}}, "g-b": {}, "g-nested": {}}}
 	s := setup(t, d)
-	if _, err := s.Step(t.Context()); err != nil {
+	if _, err := s.Step(t.Context(), lead1); err != nil {
 		t.Fatal(err)
 	}
 	before := s.State.Current().StateVersion
 	d.fail = errors.New("Graph: 503")
-	if _, err := s.Step(t.Context()); err == nil || s.State.Current().StateVersion != before {
+	if _, err := s.Step(t.Context(), lead1); err == nil || s.State.Current().StateVersion != before {
 		t.Fatalf("a directory error: %v, written %v", err, s.State.Current().StateVersion != before)
 	}
 	d.fail = nil
 
 	s.MaxRemovals = 0       // the default, 50
 	delete(d.groups, "g-a") // deleted in Entra
-	if _, err := s.Step(t.Context()); err != nil {
+	if _, err := s.Step(t.Context(), lead1); err != nil {
 		t.Fatal(err)
 	}
 	if c := s.State.Current().Principals["carol"]; len(c.Synced) != 0 {
@@ -161,16 +165,16 @@ func TestSyncSafety(t *testing.T) {
 		many = append(many, User{ID: "oid-" + string(rune('A'+i%26)) + string(rune('a'+i/26)), UPN: "u" + string(rune('A'+i%26)) + string(rune('a'+i/26)) + "@example.com", Enabled: true})
 	}
 	d.groups["g-b"] = many
-	if _, err := s.Step(t.Context()); err != nil {
+	if _, err := s.Step(t.Context(), lead1); err != nil {
 		t.Fatal(err)
 	}
 	d.groups["g-b"] = nil // emptied by mistake
 	before = s.State.Current().StateVersion
-	if _, err := s.Step(t.Context()); !errors.Is(err, ErrTooManyRemovals) || s.State.Current().StateVersion != before {
+	if _, err := s.Step(t.Context(), lead1); !errors.Is(err, ErrTooManyRemovals) || s.State.Current().StateVersion != before {
 		t.Fatalf("60 removals at once: %v", err)
 	}
 	s.MaxRemovals = 100
-	if r, err := s.Step(t.Context()); err != nil || r.Removed != 60 {
+	if r, err := s.Step(t.Context(), lead1); err != nil || r.Removed != 60 {
 		t.Fatalf("with the limit raised: %+v %v", r, err)
 	}
 }
@@ -184,7 +188,7 @@ func TestSyncNames(t *testing.T) {
 		"g-nested": {},
 	}}
 	s := setup(t, d)
-	if _, err := s.Step(t.Context()); err != nil {
+	if _, err := s.Step(t.Context(), lead1); err != nil {
 		t.Fatal(err)
 	}
 	doc := s.State.Current()
@@ -271,5 +275,44 @@ func TestFederatedToken(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("%d token requests, want 1 (cached)", calls)
+	}
+}
+
+// deposing is a directory during whose read another replica takes the lease.
+type deposing struct {
+	*dir
+	st *state.Store
+}
+
+func (d deposing) Members(ctx context.Context, g string) ([]User, error) {
+	d.st.Update(ctx, func(doc *state.Document) error {
+		doc.Leader = &state.Lease{Holder: "r2", Epoch: 2}
+		return nil
+	})
+	return d.dir.Members(ctx, g)
+}
+
+// TestSyncFenced: a sync whose replica was deposed while it read the
+// directory writes nothing (model/leadership.md's noStaleSync), and one run
+// at a stale epoch is refused outright.
+func TestSyncFenced(t *testing.T) {
+	d := &dir{groups: map[string][]User{"g-a": {{ID: "oid-z", UPN: "zed@example.com", Enabled: true}}, "g-b": {}, "g-nested": {}}}
+	s := setup(t, d)
+	other := &state.Store{Bucket: s.State.Bucket}
+	s.Directory = deposing{d, other}
+	before := s.State.Current().Principals
+	if _, err := s.Step(t.Context(), lead1); !errors.Is(err, state.ErrFenced) {
+		t.Fatalf("a sync deposed mid-read: %v, want state.ErrFenced", err)
+	}
+	s.State.Refresh(t.Context())
+	if _, ok := s.State.Current().Principals["zed@example.com"]; ok || len(s.State.Current().Principals) != len(before) {
+		t.Fatal("the deposed leader's sync wrote")
+	}
+	s.Directory = d
+	if _, err := s.Step(t.Context(), lead1); !errors.Is(err, state.ErrFenced) {
+		t.Fatalf("a sync at a stale epoch: %v", err)
+	}
+	if _, err := s.Step(t.Context(), state.Fence{Holder: "r2", Epoch: 2}); err != nil {
+		t.Fatalf("the new leader's sync: %v", err)
 	}
 }

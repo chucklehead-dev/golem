@@ -71,8 +71,12 @@ type Result struct {
 // nothing for it.
 var errNoChange = errors.New("no change")
 
-// Step reads every bound group and reconciles the state with it.
-func (s *Sync) Step(ctx context.Context) (Result, error) {
+// Step reads every bound group and reconciles the state with it, as the
+// leader at fence: the write is refused (state.ErrFenced) if this replica
+// was deposed while it read the directory, so a paused old leader's stale
+// read never undoes a newer leader's sync (model/leadership.md's
+// noStaleSync: the group sync was unfenced before).
+func (s *Sync) Step(ctx context.Context, fence state.Fence) (Result, error) {
 	if err := s.State.Refresh(ctx); err != nil {
 		return Result{}, err
 	}
@@ -90,7 +94,7 @@ func (s *Sync) Step(ctx context.Context) (Result, error) {
 		members[g] = us
 	}
 	var res Result
-	_, err := s.State.Update(ctx, func(d *state.Document) error {
+	_, err := s.State.FencedUpdate(ctx, fence, func(d *state.Document) error {
 		// Built afresh from the document this attempt is given: the update
 		// may retry against a newer one.
 		res = reconcile(d, members, s.now())

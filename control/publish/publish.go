@@ -67,12 +67,8 @@ func (p *Publisher) Record(ctx context.Context) (state.Record, error) {
 	return p.State.Current().Publications[p.Pool], nil
 }
 
-// Lease is the leadership a publication is made under: the replica that
-// believes it holds the lease, and at which epoch (control/lead).
-type Lease struct {
-	Holder string
-	Epoch  uint64
-}
+// Lease is the leadership a publication is made under (state.Fence).
+type Lease = state.Fence
 
 // Publish builds the next publication with build, given its sequence
 // number, and publishes it under lease from the state version source. The
