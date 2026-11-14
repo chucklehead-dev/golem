@@ -63,6 +63,26 @@ const (
 	OverConcurrency
 )
 
+// overBudget is admission's budget check, as Mem and an outage's local
+// check make it (the admit script makes the same in Lua). Under the
+// declared-worst-case check known spend plus the call's declared worst
+// case must fit the budget; under the soft check known spend must be below
+// it, whatever the call then costs (ADR 0031, 0044). A budget of 0 is none.
+func overBudget(known, budget int64, worstCaseCheck bool, worst int64) bool {
+	switch {
+	case budget == 0:
+		return false
+	case worstCaseCheck:
+		return known+worst > budget
+	default:
+		return known >= budget
+	}
+}
+
+// atLimit reports whether n calls in flight fill an in-flight limit (0:
+// none).
+func atLimit(n, limit int) bool { return limit > 0 && n >= limit }
+
 // Store is the site's shared state: concurrency slots and the spend
 // counter, per scope and budget period. Each method is one atomic operation
 // and one round trip (one Valkey script).
@@ -135,9 +155,7 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, int64, bool, error
 	}
 	after, over := m.after(a.Scope, a.Period, a.Watermark)
 	known := a.Spend + after
-	switch {
-	case a.Budget == 0:
-	case a.DeclaredWorstCaseCheck && known+a.Worst > a.Budget, !a.DeclaredWorstCaseCheck && known >= a.Budget:
+	if overBudget(known, a.Budget, a.DeclaredWorstCaseCheck, a.Worst) {
 		return OverBudget, known, over, nil
 	}
 	if !m.acquire(a.Slot, a.PrincipalLimit, a.ScopeLimit) {
@@ -167,7 +185,7 @@ func (m *Mem) acquire(s Slot, principalLimit, scopeLimit int) bool {
 			byScope++
 		}
 	}
-	if (principalLimit > 0 && byPrincipal >= principalLimit) || (scopeLimit > 0 && byScope >= scopeLimit) {
+	if atLimit(byPrincipal, principalLimit) || atLimit(byScope, scopeLimit) {
 		return false
 	}
 	m.slots[s.Call] = s

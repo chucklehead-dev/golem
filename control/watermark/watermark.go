@@ -87,105 +87,128 @@ func (j *Job) Run(ctx context.Context, rows []Row, nums []Numbering) (results []
 	}
 	timeout := cmp.Or(j.GapTimeout, 15*time.Minute)
 
-	byEvent := make(map[string]Row, len(rows))
-	for _, r := range rows {
-		byEvent[r.Event] = r
-	}
-	// An event's number at its site; the lowest wins if a record repeats.
-	numOf := map[string]int64{}
-	for _, n := range nums {
-		if old, ok := numOf[n.Event]; !ok || n.Seq < old {
-			numOf[n.Event] = n.Seq
-		}
-	}
-	// The numbers whose rows the ledger holds, per counter.
-	have := map[Key]map[int64]bool{}
-	highest := map[Key]int64{}
-	for ev, seq := range numOf {
-		r, ok := byEvent[ev]
-		if !ok || seq == 0 {
-			continue
-		}
-		if have[r.Key] == nil {
-			have[r.Key] = map[int64]bool{}
-		}
-		have[r.Key][seq] = true
-		highest[r.Key] = max(highest[r.Key], seq)
-	}
-	// Numbers given but whose rows have not arrived also stall the mark:
-	// the counter has them, the ledger not.
-	for _, n := range nums {
-		if n.Seq > 0 {
-			highest[n.Key] = max(highest[n.Key], n.Seq)
-		}
-	}
-
+	l := index(rows, nums)
 	marks := map[Key]int64{}
-	for k, top := range highest {
-		w := int64(0)
-		for w < top {
-			next := gap{k, w + 1}
-			if have[k][next.seq] || j.lost[next] {
-				w++
-				continue
-			}
-			first, seen := j.gaps[next]
-			if !seen {
-				j.gaps[next] = now
-				break
-			}
-			if now.Sub(first) < timeout {
-				break
-			}
-			// Past the timeout: rebuild the row from the counter, else declare
-			// the number lost and move the mark past it (its cost leaves known
-			// spend; reconciliation books it, ADR 0031).
-			if r, ok, err := j.reconstruct(ctx, k, next.seq, now); err != nil {
-				return nil, nil, err
-			} else if ok {
-				if _, real := byEvent[r.Event]; !real {
-					byEvent[r.Event] = r
-					reconstructed = append(reconstructed, r)
-				}
-				numOf[r.Event] = next.seq
-				if have[k] == nil {
-					have[k] = map[int64]bool{}
-				}
-				have[k][next.seq] = true
-			} else {
-				j.lost[next] = true
-			}
-			delete(j.gaps, next)
+	for k, top := range l.highest {
+		w, rebuilt, err := j.advance(ctx, l, k, top, now, timeout)
+		if err != nil {
+			return nil, nil, err
 		}
 		marks[k] = w
+		reconstructed = append(reconstructed, rebuilt...)
 	}
+	results = l.known(marks, now, timeout)
+	j.forget(marks)
+	return results, reconstructed, nil
+}
 
-	// Known spend for each site's counter: every row of the scope and
-	// period, less this site's counted rows the counter covers (numbered
-	// above W, or not yet numbered and not yet past the timeout).
-	balance := map[[2]string]int64{}
-	sites := map[[2]string]map[string]bool{}
-	for _, r := range byEvent {
-		sp := [2]string{r.Scope, r.Period}
-		balance[sp] += r.Cost
-		if sites[sp] == nil {
-			sites[sp] = map[string]bool{}
-		}
-		sites[sp][r.Site] = true
+// ledger is the ledger as one run reads it.
+type ledger struct {
+	byEvent map[string]Row   // the rows, by event
+	numOf   map[string]int64 // an event's number at its site
+	have    map[Key]map[int64]bool
+	// highest is each counter's highest number given: a number whose row
+	// has not arrived stalls the mark too, since the counter has it and
+	// the ledger not.
+	highest map[Key]int64
+}
+
+// index reads the rows and numbering records: the numbers whose rows the
+// ledger holds, per counter, and each counter's highest number.
+func index(rows []Row, nums []Numbering) *ledger {
+	l := &ledger{byEvent: make(map[string]Row, len(rows)), numOf: map[string]int64{}, have: map[Key]map[int64]bool{}, highest: map[Key]int64{}}
+	for _, r := range rows {
+		l.byEvent[r.Event] = r
 	}
-	for k := range marks {
-		sp := [2]string{k.Scope, k.Period}
-		if sites[sp] == nil {
-			sites[sp] = map[string]bool{}
+	// The lowest number wins if an event's record repeats.
+	for _, n := range nums {
+		if old, ok := l.numOf[n.Event]; !ok || n.Seq < old {
+			l.numOf[n.Event] = n.Seq
 		}
-		sites[sp][k.Site] = true
 	}
+	for ev, seq := range l.numOf {
+		if r, ok := l.byEvent[ev]; ok && seq != 0 {
+			l.holds(r.Key, seq)
+			l.highest[r.Key] = max(l.highest[r.Key], seq)
+		}
+	}
+	for _, n := range nums {
+		if n.Seq > 0 {
+			l.highest[n.Key] = max(l.highest[n.Key], n.Seq)
+		}
+	}
+	return l
+}
+
+// holds records that the ledger has the row numbered seq in k's counter.
+func (l *ledger) holds(k Key, seq int64) {
+	if l.have[k] == nil {
+		l.have[k] = map[int64]bool{}
+	}
+	l.have[k][seq] = true
+}
+
+// advance moves k's mark up the contiguous prefix of numbers the ledger
+// holds (or that were declared lost), toward top. A missing number stalls
+// it until the gap timeout; then its row is rebuilt from the counter
+// (added to l, and returned for the ledger), or the number is declared lost
+// and the mark moves past it (its cost leaves known spend; reconciliation
+// books it, ADR 0031).
+func (j *Job) advance(ctx context.Context, l *ledger, k Key, top int64, now time.Time, timeout time.Duration) (w int64, rebuilt []Row, err error) {
+	for w < top {
+		next := gap{k, w + 1}
+		if l.have[k][next.seq] || j.lost[next] {
+			w++
+			continue
+		}
+		first, seen := j.gaps[next]
+		if !seen {
+			j.gaps[next] = now
+			break
+		}
+		if now.Sub(first) < timeout {
+			break
+		}
+		r, ok, err := j.reconstruct(ctx, k, next.seq, now)
+		switch {
+		case err != nil:
+			return 0, nil, err
+		case ok:
+			if _, real := l.byEvent[r.Event]; !real {
+				l.byEvent[r.Event] = r
+				rebuilt = append(rebuilt, r)
+			}
+			l.numOf[r.Event] = next.seq
+			l.holds(k, next.seq)
+		default:
+			j.lost[next] = true
+		}
+		delete(j.gaps, next)
+	}
+	return w, rebuilt, nil
+}
+
+// known is each site's result: the mark, and the known spend its snapshot
+// carries. That is every row of the scope and period, less this site's
+// counted rows its counter covers: numbered above the mark, or not yet
+// numbered and not yet past the timeout. A site has a result for each
+// scope and period it has rows or numbers in, sorted by scope, period and
+// site.
+func (l *ledger) known(marks map[Key]int64, now time.Time, timeout time.Duration) []Result {
+	type scopePeriod struct{ scope, period string }
+	balance := map[scopePeriod]int64{}
 	covered := map[Key]int64{}
-	for _, r := range byEvent {
+	keys := map[Key]bool{}
+	for k := range marks {
+		keys[k] = true
+	}
+	for _, r := range l.byEvent {
+		keys[r.Key] = true
+		balance[scopePeriod{r.Scope, r.Period}] += r.Cost
 		if !r.Counted {
 			continue
 		}
-		seq, numbered := numOf[r.Event]
+		seq, numbered := l.numOf[r.Event]
 		switch {
 		case numbered && seq == 0: // never reached the counter
 		case numbered && seq > marks[r.Key]:
@@ -194,17 +217,14 @@ func (j *Job) Run(ctx context.Context, rows []Row, nums []Numbering) (results []
 			covered[r.Key] += r.Cost
 		}
 	}
-	for sp, ss := range sites {
-		for site := range ss {
-			k := Key{site, sp[0], sp[1]}
-			results = append(results, Result{Key: k, Watermark: marks[k], Spend: balance[sp] - covered[k]})
-		}
+	var results []Result
+	for k := range keys {
+		results = append(results, Result{Key: k, Watermark: marks[k], Spend: balance[scopePeriod{k.Scope, k.Period}] - covered[k]})
 	}
 	slices.SortFunc(results, func(a, b Result) int {
 		return cmp.Or(cmp.Compare(a.Scope, b.Scope), cmp.Compare(a.Period, b.Period), cmp.Compare(a.Site, b.Site))
 	})
-	j.forget(marks)
-	return results, reconstructed, nil
+	return results
 }
 
 func (j *Job) reconstruct(ctx context.Context, k Key, seq int64, now time.Time) (Row, bool, error) {

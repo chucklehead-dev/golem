@@ -119,7 +119,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 			// its own order, so bring the model's to the front.
 			e := connect.MustPick[event](s, "e")
 			l.mu.Lock()
-			i := slices.IndexFunc(l.pending, func(h held) bool { return h.e.ID == e.ID })
+			i := slices.IndexFunc(l.pending, func(in Increment) bool { return in.ID == e.ID })
 			if i >= 0 {
 				l.pending[0], l.pending[i] = l.pending[i], l.pending[0]
 			}
