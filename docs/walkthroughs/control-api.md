@@ -35,12 +35,16 @@ with `api.EntraAuth` as the authenticator. The API is served only with
 
 ## 2. Authentication
 
-Every call goes through one unary interceptor, built in `Server.Handler`
-(control/api/api.go:38). It asks the `Authenticator` for a
-`service.Caller`, answers `unauthenticated` if it fails, and stores the
-caller in the context, where each handler reads it with `caller(ctx)`.
-Every method is unary today; a streaming method would need a streaming
-interceptor too, or it would run with a zero caller.
+Every call is authenticated by the HTTP handler `Server.Handler` wraps
+around the Connect routes, from its headers alone, before Connect reads
+its body: an unauthenticated caller costs a header check, never a decode.
+It asks the `Authenticator` for a `service.Caller`, answers
+`unauthenticated` (written by Connect's error writer in the caller's
+protocol) if it fails, and stores the caller in the request's context,
+where each handler reads it with `caller(ctx)`. A message over
+`MaxRequest` (1 MiB) is refused (`resource_exhausted`), and the server
+cuts off a request not read in 30 seconds or a response not written in a
+minute.
 
 `EntraAuth.Authenticate` (control/api/entra.go:28):
 
@@ -121,7 +125,7 @@ is never in an event; `TestKeyRules` checks it.
 ## 5. Errors
 
 The service returns errors that wrap one of three sentinels;
-`connectError` (control/api/api.go:72) maps them, with the store's:
+`connectError` maps them, with the store's:
 
 | Error | Connect code | HTTP (JSON) |
 |---|---|---|
@@ -131,11 +135,15 @@ The service returns errors that wrap one of three sentinels;
 | `service.ErrInvalid` (an `*Invalid` with a field path, such as `key.models[0]`) | `invalid_argument` | 400 |
 | `state.ErrInvariant` | `failed_precondition` | 400 |
 | `state.ErrContended` | `aborted` | 409 |
-| context cancelled or past its deadline | `canceled` | 499 |
+| context past its deadline | `deadline_exceeded` | 504 |
+| context cancelled | `canceled` | 499 |
 | anything else | `internal` | 500 |
 
 The message is the service's, which names the field and what to do; tests
-assert on the codes and on field paths (`TestAPI`).
+assert on the codes and on field paths (`TestAPI`). An internal error (the
+bucket's or S3's, whose text names buckets and keys) is logged with an id,
+and the caller is told only "internal error <id>: see golem-control's
+log" (`TestLimits`).
 
 ## 6. The protos and code generation
 

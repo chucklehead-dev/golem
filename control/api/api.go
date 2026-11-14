@@ -7,8 +7,12 @@
 package api
 
 import (
+	"cmp"
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 
 	"connectrpc.com/connect"
@@ -28,27 +32,31 @@ type Authenticator interface {
 type Server struct {
 	Service *service.Service
 	Auth    Authenticator
+	// MaxRequest bounds a request's message (default 1 MiB): the API's
+	// messages are small, and an oversized one is refused unread.
+	MaxRequest int
+	Log        *slog.Logger
 }
 
 type callerKey struct{}
 
-// Handler is the APIs' routes, every call authenticated first. Every
-// method is unary, so a unary interceptor covers them all; a streaming
-// method would need a streaming one too.
+// Handler is the APIs' routes. Every call is authenticated from its
+// headers before its body is read, so an unauthenticated caller costs a
+// header check, never a decode; a message over MaxRequest is refused.
 func (s *Server) Handler() http.Handler {
-	authn := connect.WithInterceptors(connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			c, err := s.Auth.Authenticate(ctx, req.Header())
-			if err != nil {
-				return nil, connect.NewError(connect.CodeUnauthenticated, err)
-			}
-			return next(context.WithValue(ctx, callerKey{}, c), req)
-		}
-	}))
+	limit := connect.WithReadMaxBytes(cmp.Or(s.MaxRequest, 1<<20))
 	mux := http.NewServeMux()
-	mux.Handle(orgv1connect.NewOrgServiceHandler(org{s.Service}, authn))
-	mux.Handle(keysv1connect.NewKeyServiceHandler(keys{s.Service}, authn))
-	return mux
+	mux.Handle(orgv1connect.NewOrgServiceHandler(org{s}, limit))
+	mux.Handle(keysv1connect.NewKeyServiceHandler(keys{s}, limit))
+	errs := connect.NewErrorWriter()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := s.Auth.Authenticate(r.Context(), r.Header)
+		if err != nil {
+			errs.Write(w, r, connect.NewError(connect.CodeUnauthenticated, err))
+			return
+		}
+		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, c)))
+	})
 }
 
 // caller is the request's caller, as the interceptor authenticated them.
@@ -60,17 +68,19 @@ func caller(ctx context.Context) service.Caller {
 func options(validateOnly bool) service.Options { return service.Options{ValidateOnly: validateOnly} }
 
 // reply is a method's response: msg, or err as its Connect error.
-func reply[T any](msg *T, err error) (*connect.Response[T], error) {
+func reply[T any](s *Server, msg *T, err error) (*connect.Response[T], error) {
 	if err != nil {
-		return nil, connectError(err)
+		return nil, s.connectError(err)
 	}
 	return connect.NewResponse(msg), nil
 }
 
 // connectError maps the service's and store's errors to Connect codes; its
-// message keeps the field path and what to do.
-func connectError(err error) error {
-	code := connect.CodeInternal
+// message keeps the field path and what to do. Any other error (the
+// bucket's, S3's) is logged and answered with a generic message: its text
+// names buckets, keys and endpoints a caller has no need of.
+func (s *Server) connectError(err error) error {
+	var code connect.Code
 	switch {
 	case errors.Is(err, service.ErrPermission):
 		code = connect.CodePermissionDenied
@@ -82,8 +92,14 @@ func connectError(err error) error {
 		code = connect.CodeFailedPrecondition
 	case errors.Is(err, state.ErrContended):
 		code = connect.CodeAborted
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded):
+		code = connect.CodeDeadlineExceeded
+	case errors.Is(err, context.Canceled):
 		code = connect.CodeCanceled
+	default:
+		id := rand.Text()[:12]
+		cmp.Or(s.Log, slog.Default()).Error("control API: internal error", "id", id, "err", err)
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("internal error %s: see golem-control's log", id))
 	}
 	return connect.NewError(code, err)
 }

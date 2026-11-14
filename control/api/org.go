@@ -11,47 +11,47 @@ import (
 )
 
 // org is golem.org.v1.OrgService.
-type org struct{ s *service.Service }
+type org struct{ *Server }
 
 func (o org) CreateScope(ctx context.Context, r *connect.Request[orgv1.CreateScopeRequest]) (*connect.Response[orgv1.CreateScopeResponse], error) {
 	m := r.Msg
-	err := o.s.CreateScope(ctx, caller(ctx), options(m.ValidateOnly), m.Id, policyToState(m.Policy))
-	return reply(&orgv1.CreateScopeResponse{}, err)
+	err := o.Service.CreateScope(ctx, caller(ctx), options(m.ValidateOnly), m.Id, policyToState(m.Policy))
+	return reply(o.Server, &orgv1.CreateScopeResponse{}, err)
 }
 
 func (o org) AddMember(ctx context.Context, r *connect.Request[orgv1.AddMemberRequest]) (*connect.Response[orgv1.AddMemberResponse], error) {
 	m, mem := r.Msg, r.Msg.GetMember()
-	err := o.s.AddMember(ctx, caller(ctx), options(m.ValidateOnly), m.Scope,
+	err := o.Service.AddMember(ctx, caller(ctx), options(m.ValidateOnly), m.Scope,
 		service.Member{ID: mem.GetId(), Kind: mem.GetKind(), Entra: mem.GetEntra()})
-	return reply(&orgv1.AddMemberResponse{}, err)
+	return reply(o.Server, &orgv1.AddMemberResponse{}, err)
 }
 
 func (o org) RemoveMember(ctx context.Context, r *connect.Request[orgv1.RemoveMemberRequest]) (*connect.Response[orgv1.RemoveMemberResponse], error) {
 	m := r.Msg
-	err := o.s.RemoveMember(ctx, caller(ctx), options(m.ValidateOnly), m.Scope, m.Principal)
-	return reply(&orgv1.RemoveMemberResponse{}, err)
+	err := o.Service.RemoveMember(ctx, caller(ctx), options(m.ValidateOnly), m.Scope, m.Principal)
+	return reply(o.Server, &orgv1.RemoveMemberResponse{}, err)
 }
 
 func (o org) BindManager(ctx context.Context, r *connect.Request[orgv1.BindManagerRequest]) (*connect.Response[orgv1.BindManagerResponse], error) {
 	m := r.Msg
-	err := o.s.BindManager(ctx, caller(ctx), options(m.ValidateOnly), m.Scope, m.Principal)
-	return reply(&orgv1.BindManagerResponse{}, err)
+	err := o.Service.BindManager(ctx, caller(ctx), options(m.ValidateOnly), m.Scope, m.Principal)
+	return reply(o.Server, &orgv1.BindManagerResponse{}, err)
 }
 
 func (o org) Whoami(ctx context.Context, _ *connect.Request[orgv1.WhoamiRequest]) (*connect.Response[orgv1.WhoamiResponse], error) {
-	me, err := o.s.Whoami(ctx, caller(ctx))
-	return reply(&orgv1.WhoamiResponse{Principal: me.Principal, Admin: me.Admin, Kind: me.Kind,
+	me, err := o.Service.Whoami(ctx, caller(ctx))
+	return reply(o.Server, &orgv1.WhoamiResponse{Principal: me.Principal, Admin: me.Admin, Kind: me.Kind,
 		Scopes: me.Scopes, Manages: me.Manages}, err)
 }
 
 func (o org) ListScopes(ctx context.Context, _ *connect.Request[orgv1.ListScopesRequest]) (*connect.Response[orgv1.ListScopesResponse], error) {
-	ids, err := o.s.ListScopes(ctx, caller(ctx))
-	return reply(&orgv1.ListScopesResponse{Ids: ids}, err)
+	ids, err := o.Service.ListScopes(ctx, caller(ctx))
+	return reply(o.Server, &orgv1.ListScopesResponse{Ids: ids}, err)
 }
 
 func (o org) GetScope(ctx context.Context, r *connect.Request[orgv1.GetScopeRequest]) (*connect.Response[orgv1.GetScopeResponse], error) {
-	v, err := o.s.GetScope(ctx, caller(ctx), r.Msg.Id)
-	return reply(&orgv1.GetScopeResponse{Id: v.ID, Policy: policyFromState(v.Policy),
+	v, err := o.Service.GetScope(ctx, caller(ctx), r.Msg.Id)
+	return reply(o.Server, &orgv1.GetScopeResponse{Id: v.ID, Policy: policyFromState(v.Policy),
 		Members: v.Members, Managers: v.Managers}, err)
 }
 

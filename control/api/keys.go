@@ -11,7 +11,7 @@ import (
 )
 
 // keys is golem.keys.v1.KeyService.
-type keys struct{ s *service.Service }
+type keys struct{ *Server }
 
 func (k keys) MintKey(ctx context.Context, r *connect.Request[keysv1.MintKeyRequest]) (*connect.Response[keysv1.MintKeyResponse], error) {
 	m := r.Msg
@@ -19,8 +19,8 @@ func (k keys) MintKey(ctx context.Context, r *connect.Request[keysv1.MintKeyRequ
 	if m.Expires != nil {
 		req.Expires = m.Expires.AsTime()
 	}
-	minted, err := k.s.MintKey(ctx, caller(ctx), options(m.ValidateOnly), req)
-	res, err := reply(&keysv1.MintKeyResponse{Key: minted.Key, Hash: minted.Hash, Display: minted.Display}, err)
+	minted, err := k.Service.MintKey(ctx, caller(ctx), options(m.ValidateOnly), req)
+	res, err := reply(k.Server, &keysv1.MintKeyResponse{Key: minted.Key, Hash: minted.Hash, Display: minted.Display}, err)
 	if err == nil {
 		res.Header().Set("Cache-Control", "no-store") // the key is in it
 	}
@@ -29,17 +29,17 @@ func (k keys) MintKey(ctx context.Context, r *connect.Request[keysv1.MintKeyRequ
 
 func (k keys) RevokeKey(ctx context.Context, r *connect.Request[keysv1.RevokeKeyRequest]) (*connect.Response[keysv1.RevokeKeyResponse], error) {
 	m := r.Msg
-	err := k.s.RevokeKey(ctx, caller(ctx), options(m.ValidateOnly), m.Hash)
-	return reply(&keysv1.RevokeKeyResponse{}, err)
+	err := k.Service.RevokeKey(ctx, caller(ctx), options(m.ValidateOnly), m.Hash)
+	return reply(k.Server, &keysv1.RevokeKeyResponse{}, err)
 }
 
 func (k keys) ListKeys(ctx context.Context, r *connect.Request[keysv1.ListKeysRequest]) (*connect.Response[keysv1.ListKeysResponse], error) {
-	vs, err := k.s.ListKeys(ctx, caller(ctx), r.Msg.Scope)
+	vs, err := k.Service.ListKeys(ctx, caller(ctx), r.Msg.Scope)
 	res := &keysv1.ListKeysResponse{}
 	for _, v := range vs {
 		res.Keys = append(res.Keys, keyFromState(v))
 	}
-	return reply(res, err)
+	return reply(k.Server, res, err)
 }
 
 // keyFromState is a key's record as the API shows it: never the key.

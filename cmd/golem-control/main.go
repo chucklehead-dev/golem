@@ -145,7 +145,10 @@ func apiServer(ctx context.Context, listen, tenant, audience string, st *state.S
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true) // gRPC behind the mesh, which ends TLS
+	// The API's calls are small and quick: a slow sender or reader is
+	// cut off rather than held.
 	return &http.Server{Addr: listen, Handler: h, Protocols: &protocols, ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 30 * time.Second, WriteTimeout: time.Minute,
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, nil
 }
 

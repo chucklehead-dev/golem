@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -135,4 +137,64 @@ func TestPlainJSON(t *testing.T) {
 	if resp.StatusCode != 403 || !strings.Contains(string(body), "permission_denied") {
 		t.Fatalf("a non-admin, as JSON: %d %s", resp.StatusCode, body)
 	}
+}
+
+// readFlag is a body that records whether it was read.
+type readFlag struct {
+	io.Reader
+	read bool
+}
+
+func (r *readFlag) Read(p []byte) (int, error) { r.read = true; return r.Reader.Read(p) }
+
+// TestLimits: an unauthenticated call is refused before its body is read;
+// an authenticated one over the size limit is refused; an internal error
+// is answered without its text, which is logged.
+func TestLimits(t *testing.T) {
+	_, st := serve(t)
+	var logged strings.Builder
+	s := &Server{Service: &service.Service{State: st}, Auth: headerAuth{}, MaxRequest: 1024,
+		Log: slog.New(slog.NewTextHandler(&logged, nil))}
+	h := s.Handler()
+	call := func(who string, body io.Reader) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", orgv1connect.OrgServiceCreateScopeProcedure, body)
+		r.Header.Set("Content-Type", "application/json")
+		if who != "" {
+			r.Header.Set("X-Caller", who)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	big := `{"id":"` + strings.Repeat("a", 4096) + `"}`
+	body := &readFlag{Reader: strings.NewReader(big)}
+	if w := call("", body); w.Code != http.StatusUnauthorized || body.read {
+		t.Fatalf("unauthenticated: %d, body read %v; want 401 unread", w.Code, body.read)
+	}
+	if w := call("root", strings.NewReader(big)); !strings.Contains(w.Body.String(), "resource_exhausted") {
+		t.Fatalf("oversized: %d %s", w.Code, w.Body)
+	}
+
+	s.Service.State = &state.Store{Bucket: failing{}}
+	w := call("root", strings.NewReader(`{"id":"team-b"}`))
+	if !strings.Contains(w.Body.String(), `"internal"`) || strings.Contains(w.Body.String(), "s3://secret-bucket") {
+		t.Fatalf("internal error: %s", w.Body)
+	}
+	if !strings.Contains(logged.String(), "s3://secret-bucket") {
+		t.Fatalf("the error was not logged: %q", logged.String())
+	}
+	if c := connect.CodeOf(s.connectError(fmt.Errorf("x: %w", context.DeadlineExceeded))); c != connect.CodeDeadlineExceeded {
+		t.Fatalf("a deadline: %v", c)
+	}
+}
+
+// failing is a bucket whose every call fails with an error naming it.
+type failing struct{}
+
+func (failing) Get(context.Context, string, string) ([]byte, string, error) {
+	return nil, "", errors.New("GET s3://secret-bucket/state/document.json: access denied")
+}
+
+func (failing) Put(context.Context, string, []byte, string) (string, error) {
+	return "", errors.New("PUT s3://secret-bucket/state/document.json: access denied")
 }
