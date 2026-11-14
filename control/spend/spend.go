@@ -57,10 +57,13 @@ type Job struct {
 	// only the counter's minutes it still retains: from B, or no further
 	// back than its retention. A gateway may use a snapshot for its lease
 	// after publication, so a result whose boundary is more than
-	// Retention - Lease - Margin old is dropped (MaxAge): the spend
-	// between its boundary and the retention's start would be counted
-	// nowhere. Snapshots then carry no known spend for the period, and
-	// gateways count their counter's whole total.
+	// Retention - Lease - Margin old (MaxAge) is stale: the spend between
+	// its boundary and the retention's start is in neither its spend nor
+	// the minutes read. It is still published: a gateway's known spend is
+	// never below its counter's period total, so a stale result counts at
+	// least what none would (this site's calls), and its spend adds the
+	// other sites' calls before its boundary. Stale reports it, for an
+	// alert.
 
 	// Retention is the gateways' counter retention (default six hours,
 	// limit.Mem's and limit.Valkey's Retain).
@@ -84,28 +87,34 @@ const (
 	DefaultMargin    = 10 * time.Minute
 )
 
-// MaxAge is how old a result's boundary may be and still be published:
+// MaxAge is how old a result's boundary may be before it is stale:
 // Retention - Lease - Margin.
 func (j *Job) MaxAge() time.Duration {
 	return cmp.Or(j.Retention, DefaultRetention) - cmp.Or(j.Lease, DefaultLease) - cmp.Or(j.Margin, DefaultMargin)
 }
 
+// Validate reports a configuration under which every result is stale: a
+// fresh one is an allowance and a minute old, so a MaxAge no longer than
+// that would alert from the first publication, and gateways at the end of
+// their lease would read past their retention even then. For golem-control
+// to check at start.
+func (j *Job) Validate() error {
+	allowance := cmp.Or(j.Allowance, DefaultAllowance)
+	if maxAge := j.MaxAge(); maxAge <= allowance+time.Minute {
+		return fmt.Errorf("known spend: the retention %v less the lease %v and the margin %v leaves %v, no more than the allowance %v and a minute: every result would be stale; lengthen the gateways' retention or shorten the lease",
+			cmp.Or(j.Retention, DefaultRetention), cmp.Or(j.Lease, DefaultLease), cmp.Or(j.Margin, DefaultMargin), maxAge, allowance)
+	}
+	return nil
+}
+
 // Step reads the ledger's spend at a new boundary. On a failure the last
 // result is kept for its own period (a new period's spend is not the old
-// one's) while its boundary is within MaxAge, and the error returned;
-// Current says what to publish.
+// one's), and the error returned, saying whether it is stale; Current says
+// what to publish.
 func (j *Job) Step(ctx context.Context) error {
 	now := j.now()
 	loc := cmp.Or(j.Location, time.UTC)
-	allowance := cmp.Or(j.Allowance, DefaultAllowance)
-	// A fresh result is an allowance and a minute old: a MaxAge below that
-	// would drop every one, and publish no known spend at all.
-	if maxAge := j.MaxAge(); maxAge <= allowance+time.Minute {
-		j.set(nil)
-		return fmt.Errorf("known spend: the retention %v less the lease %v and the margin %v leaves %v, no more than the allowance %v and a minute: lengthen the gateways' retention or shorten the lease",
-			cmp.Or(j.Retention, DefaultRetention), cmp.Or(j.Lease, DefaultLease), cmp.Or(j.Margin, DefaultMargin), maxAge, allowance)
-	}
-	since := now.Add(-allowance).Truncate(time.Minute)
+	since := now.Add(-cmp.Or(j.Allowance, DefaultAllowance)).Truncate(time.Minute)
 	period := budget.Of(now, loc)
 	// A boundary still in the previous period counts nothing of this one:
 	// this period starts from nothing until B passes its start.
@@ -116,9 +125,9 @@ func (j *Job) Step(ctx context.Context) error {
 	s, err := j.Ledger.Spend(ctx, period, since)
 	if err != nil {
 		j.forgetOtherThan(period)
-		if b, dropped := j.forgetOlder(now); dropped {
-			return fmt.Errorf("known spend for %s: %w (the last result, to %s, is older than %v and dropped: snapshots carry no known spend until the ledger answers)",
-				period, err, b.UTC().Format(time.RFC3339), j.MaxAge())
+		if k, ok := j.Current(); ok && k.Age(now) > j.MaxAge() {
+			return fmt.Errorf("known spend for %s: %w (the last result is kept, but stale: its boundary %s is older than %v, so gateways count this site's counter total as a floor and the stale result's spend, and miss other sites' spend since; alert)",
+				period, err, k.Since.UTC().Format(time.RFC3339), j.MaxAge())
 		}
 		return fmt.Errorf("known spend for %s: %w (the last result is kept)", period, err)
 	}
@@ -150,24 +159,10 @@ func (j *Job) forgetOtherThan(period string) {
 	}
 }
 
-// forgetOlder drops the last result if its boundary is more than MaxAge
-// before now, and reports the boundary dropped.
-func (j *Job) forgetOlder(now time.Time) (time.Time, bool) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.last == nil || j.last.Age(now) <= j.MaxAge() {
-		return time.Time{}, false
-	}
-	b := j.last.Since
-	j.last = nil
-	return b, true
-}
-
-// Current is the latest result, or false if there is none yet or it is
-// older than MaxAge: a snapshot then carries no known spend, and gateways
-// count their site's counter alone.
+// Current is the latest result, or false if there is none yet: a snapshot
+// then carries no known spend, and gateways count their site's counter
+// alone. A stale result is still current (Stale).
 func (j *Job) Current() (Known, bool) {
-	j.forgetOlder(j.now())
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.last == nil {
@@ -184,6 +179,15 @@ func (j *Job) Age() (time.Duration, bool) {
 		return 0, false
 	}
 	return k.Age(j.now()), true
+}
+
+// Stale reports whether the current result's boundary is older than
+// MaxAge: the gateways' known spend is then this site's counter total at
+// least, and the stale result's spend, but misses other sites' spend
+// since the boundary. For an alert.
+func (j *Job) Stale() bool {
+	age, ok := j.Age()
+	return ok && age > j.MaxAge()
 }
 
 // ClickHouse is the ledger over ClickHouse's HTTP interface: one query,

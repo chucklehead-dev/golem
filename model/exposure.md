@@ -709,9 +709,9 @@ The model ends here:
   ledger to its allowance (`tick`'s guard) and keeps every minute; a later
   row undercounts until the next boundary passes it, and a boundary older
   than the retention would lose the minutes between it and the
-  retention's start, but golem-control publishes none that old and known
-  spend is never below the site's counter total (ADR 0048), which in the
-  model, keeping every minute, never binds.
+  retention's start, but known spend is never below the site's counter
+  total, and golem-control reports such a result stale (ADR 0048); in the
+  model, keeping every minute, the floor never binds.
 - **An increment added twice**: a replay whose reply was lost may be sent
   again and added twice; that errs high, and the model's gateways see
   every reply.

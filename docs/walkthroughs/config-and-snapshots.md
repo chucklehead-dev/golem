@@ -186,7 +186,7 @@ Valkey scripts sum in Lua numbers, doubles exact only below 2^53; under
 this bound a period's sums stay exact there as they are in memory. The
 compiler refuses a larger budget (`at most 1125899906842624 (2^50)`,
 `entitlements_test.go:85`), and the gateway clamps the cost one call adds
-to the same bound (`gateway/limit/limit.go:330`).
+to the same bound (`gateway/limit/limit.go:351`).
 
 ## 3. The snapshot format (`lib/snapshot/snapshot.go`)
 

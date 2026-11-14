@@ -72,9 +72,9 @@ answer:
   events, and keeps a retention's minutes (six hours: longer than the
   longest authorization lease plus the ingestion allowance, so a gateway
   on the oldest snapshot it may still use finds every minute it needs,
-  provided the snapshot's boundary was recent when it was published:
-  golem-control publishes no boundary more than retention − lease −
-  margin old, §5).
+  provided the snapshot's boundary was recent when it was published: a
+  boundary more than retention − lease − margin old is stale, which
+  golem-control reports, §5).
 - golem-control's snapshot carries, per scope, a **boundary B** (a whole
   minute, an ingestion allowance before the publication) and the
   **spend**: the ledger's spend of the calls that ended before B,
@@ -300,36 +300,38 @@ minute.)
 
 The job (`control/spend`):
 
-- `Job.Step` (`spend.go:97`) places B: now minus the `Allowance` (five
+- `Job.Step` (`spend.go:114`) places B: now minus the `Allowance` (five
   minutes, `-spend-allowance`), truncated to a minute, in the period now
   falls in. A B still in the previous period gives this period nothing,
   without asking the ledger. Otherwise it asks the `Ledger` for each
   scope's spend before B. On a failure the last result is kept if it is of
   this period (its earlier B is still exact) and forgotten if not
   (`forgetOtherThan`): a new month's spend is not the old one's (TestJob).
-  It is also dropped once its B is more than `MaxAge` old (`forgetOlder`;
-  `Current` drops it too): `Retention` − `Lease` − `Margin` (six hours,
-  four, ten minutes by default: one hour fifty). A gateway may use a
-  snapshot for its whole lease, and reads the counter no further back
-  than its retention, so a B older than that would leave the spend
-  between B and the retention's start counted nowhere: the snapshots
-  carry no known spend instead, and gateways count their counter's whole
-  total (TestJobDropsStaleResult). `Known.Age` and `Job.Age` give the
-  result's age, for a metric. A configuration whose `MaxAge` is no more
-  than the allowance and a minute would drop every result: `Step` refuses
-  it with an error.
-- `ClickHouse.Spend` (`spend.go:209`) is one query (`spendQuery`,
-  `spend.go:202`) over ClickHouse's HTTP interface, the period and B
+  A result whose B is more than `MaxAge` old is **stale** (`Job.Stale`):
+  `Retention` − `Lease` − `Margin` (six hours, four, ten minutes by
+  default: one hour fifty). A gateway may use a snapshot for its whole
+  lease, and reads the counter no further back than its retention, so
+  with a B older than that the spend between B and the retention's start
+  is in neither the snapshot's spend nor the minutes read. A stale result
+  is still published: the gateways floor known spend at their counter's
+  period total (§2), so it never counts less than no result would (this
+  site's calls), and its spend adds other sites' calls before B. What it
+  misses is other sites' spend since, so `Step`'s error says the result is
+  stale, and `Stale`, `Known.Age` and `Job.Age` are there for a metric
+  and an alert (TestJobReportsStaleResult). `Job.Validate` refuses a
+  configuration whose `MaxAge` is no more than the allowance and a
+  minute: every result would be stale from its first publication.
+- `ClickHouse.Spend` (`spend.go:213`) is one query (`spendQuery`,
+  `spend.go:206`) over ClickHouse's HTTP interface, the period and B
   bound as parameters, never in the query's text; `readSpend`
-  (`spend.go:240`) reads its rows (TestClickHouse against a fake;
+  (`spend.go:244`) reads its rows (TestClickHouse against a fake;
   TestClickHouseLedger against a real ClickHouse, below).
 - `Job.Current` is what a publication carries. The controller runs `Step`
   whenever a publication is due and stamps every scope of the
   entitlements with the result's period, B and spend
   (`controller.go:121-133`; TestKnownSpend). With no result (no
-  `-clickhouse`, a failure in a new period, or a result past `MaxAge`) a
-  snapshot carries none, and gateways count their counter's whole total
-  for the period.
+  `-clickhouse`, or a failure in a new period) a snapshot carries none,
+  and gateways count their counter's whole total for the period.
 
 TestClickHouseLedger (`control/spend/clickhouse_test.go:27`) runs
 spend.sql in a database of its own on a real ClickHouse
@@ -392,7 +394,7 @@ spend 0 (nothing ended before 11:55).
 
 ### 6.3 A snapshot's known spend and boundary reaching the gateways
 
-9. **12:06:00, golem-control publishes.** `Job.Step` (`spend.go:97`)
+9. **12:06:00, golem-control publishes.** `Job.Step` (`spend.go:114`)
    places B at 12:01 (12:06 minus five minutes) and asks ClickHouse for
    the spend of 2026-11's rows that ended before 12:01:00.000: a's 3. The
    controller stamps `team-a` with period 2026-11, B 12:01, spend 3
@@ -466,7 +468,7 @@ replica to.
 | A call on one side of the boundary | the row stamped before the increment (`proxy.go:259`); `fromMinute`; the ledger deduplicated by event | TestBoundary; both MBT tests; TestClickHouseLedger |
 | Known spend exact on every gateway, any snapshot (within the allowance) | `since`, `Mem.since`; `ApplySnapshot` leaves the counter | TestBoundary, store_test.go "counter", both MBT tests |
 | Known spend never below the site's period total | `admitScript`'s floor, `Mem.known`, `Limiter.Known` | TestStaleBoundary, store_test.go "known spend is never below the counter's total", TestStoresAgreeVaried (`Admits`) |
-| No boundary published older than the retention allows | `Job.MaxAge`, `forgetOlder` | TestJobDropsStaleResult |
+| A boundary older than the retention allows is reported stale | `Job.MaxAge`, `Job.Stale`, `Step`'s error | TestJobReportsStaleResult |
 | The snapshot's spend counts each event once, before B only | `spendQuery` over `spend_by_event FINAL` | TestClickHouseLedger, TestClickHouse |
 | A boundary on a whole minute, an allowance back; a new period from nothing | `Job.Step` | TestJob, TestKnownSpend |
 | Sums exact | `account`'s clamp to `MaxMicros`; config's budget bound | TestStoresAgreeVaried |
@@ -492,9 +494,10 @@ replica to.
   site's calls that ended after B reach a gateway only with a snapshot
   whose B has passed them (ADR 0048).
 - **A ledger outage longer than `MaxAge`** (about two hours by default):
-  the snapshots carry no known spend until ClickHouse answers, and each
-  gateway counts its own site's period total only, so other sites' spend
-  is missing meanwhile. `Job.Age` is there for a metric to alert on.
+  the snapshots carry the stale result until ClickHouse answers, and each
+  gateway counts at least its own site's period total, so other sites'
+  spend since the stale boundary is missing meanwhile. `Job.Stale` and
+  `Job.Age` are there for a metric to alert on.
 - **A replay counted twice.** A batch whose reply was lost and is sent
   again, or one increment two replays sent at once, is added twice: errs
   high.

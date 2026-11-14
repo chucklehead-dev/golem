@@ -392,17 +392,23 @@ func TestStaleBoundary(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()
 	l := New(st)
-	now := time.Now()
-	l.Now = func() time.Time { return now.Add(-7 * time.Hour) }
-	l.ApplySnapshot(ctx, "s", Known{Period: l.period(now), Since: now.Add(-8 * time.Hour).Truncate(time.Minute)})
+	// One fixed clock for the limiter and the store, mid-month, so the
+	// call seven hours back and the stale boundary are of this period.
+	now := time.Date(2026, 11, 14, 12, 0, 30, 0, time.UTC)
+	clock := now.Add(-7 * time.Hour)
+	l.Now, st.Now = func() time.Time { return clock }, func() time.Time { return clock }
+	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Since: now.Add(-8 * time.Hour).Truncate(time.Minute)})
 	c := scopeCall("a", "p1")
-	c.Started = now.Add(-7 * time.Hour)
+	c.Started = clock
 	tk, err := l.Admit(ctx, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tk.Complete(ctx, 10) // seven hours ago: the budget spent
-	l.Now = func() time.Time { return now }
+	clock = now
+	if k := l.snapshotFor("s", l.period(now)); k.Since.IsZero() {
+		t.Fatal("the stale snapshot is not this period's: the test would not read from its boundary")
+	}
 	c = scopeCall("b", "p2")
 	c.Started = now
 	if _, err := l.Admit(ctx, c); !errors.Is(err, ErrBudget) || l.Known(ctx, "s") != 10 {

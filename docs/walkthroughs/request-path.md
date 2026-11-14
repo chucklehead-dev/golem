@@ -122,7 +122,7 @@ forbidden).
 token, the output cap times `n`); a product that would overflow is refused.
 `admit` (`proxy.go:490`) fills an `admission.Call` with the scope's limits
 and calls the `Admitter`: golem's is `Limiter.Admitter`
-(`gateway/limit/limit.go:674`). A `*admission.Refusal` is rendered with its
+(`gateway/limit/limit.go:731`). A `*admission.Refusal` is rendered with its
 code and Retry-After; an error with the caller gone is a silent end. The
 admitted ticket goes into a `settlement` (`proxy.go:169`, type at
 `proxy.go:293`) with a context that is never cancelled, and a deferred
