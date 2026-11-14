@@ -92,7 +92,9 @@ func parse(args []string) (options, error) {
 
 func main() { os.Exit(run(context.Background(), os.Args[1:])) }
 
-// run is golem-gateway, until ctx ends or SIGTERM: its exit status.
+// run is golem-gateway, until ctx ends or SIGTERM: its exit status. It
+// builds the gateway's parts in dependency order, serves, and on the way
+// out stops them in the order that loses no accounting (lifecycle).
 func run(ctx context.Context, args []string) int {
 	o, err := parse(args)
 	if err != nil {
@@ -130,89 +132,44 @@ func run(ctx context.Context, args []string) int {
 	defer stopBg() // also on a failed start
 	var wg sync.WaitGroup
 
-	var store limit.Store = limit.NewMem() // standalone: in memory (ADR 0023)
-	if o.standalone == "" {
-		c, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true})
-		if err != nil {
-			return failed("-valkey %s: %v", o.valkeyAddr, err)
-		}
-		defer c.Close()
-		v := limit.NewValkey(c, o.site)
-		v.ReplicaAcks = o.replicaAcks
-		store = v
+	limiter, closeStore, err := newLimiter(o, zone)
+	if err != nil {
+		return failed("%v", err)
 	}
-	limiter := limit.New(store)
-	limiter.Location = zone
-	holder := &snapshot.Holder{Env: key.Live, Entra: entra, OnApply: func(c *snapshot.Compiled) {
-		for _, s := range c.Snapshot.Entitlements.Scopes {
-			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since})
-		}
-	}}
-	var deny *auth.DenyFile
+	defer closeStore()
+	holder := newHolder(entra, limiter)
 	if o.denylist != "" {
-		// Read before serving: a gateway started during an incident must
-		// not admit what the list refuses, even once.
-		deny = &auth.DenyFile{Path: o.denylist, Log: slog.Default()}
+		// Read before the source loads: a gateway started during an
+		// incident must not admit what the list refuses, even once, and the
+		// last-good publication a pool source applies at its start is
+		// compiled with it.
+		deny := &auth.DenyFile{Path: o.denylist, Log: slog.Default()}
 		if err := deny.Load(); err != nil {
 			return failed("-denylist: %v", err)
 		}
 		holder.Deny = deny
 		wg.Go(func() { deny.Run(bg) })
 	}
-	var keyPath string
-	if o.standalone != "" {
-		holder.Env = key.Dev
-		var localKey string
-		if localKey, keyPath, err = loadLocalKey(o.localKeyFile); err != nil {
-			return failed("the local key: %v", err)
-		}
-		holder.LocalKey = localKey
-		dir := &snapshot.Dir{Path: o.standalone, Holder: holder, Secrets: snapshot.EnvSecrets{Getenv: os.Getenv}}
-		if err := dir.Load(); err != nil {
-			return failed("%v", err)
-		}
-		wg.Go(func() { dir.Run(bg) })
-	} else {
-		src, err := poolSource(bg, o, holder)
-		if err != nil {
-			return failed("%v", err)
-		}
-		wg.Go(func() { src.Run(bg) })
+	src, keyPath, err := startSource(bg, o, holder)
+	if err != nil {
+		return failed("%v", err)
 	}
+	wg.Go(func() { src.Run(bg) })
 	wg.Go(func() { limiter.Run(bg) })
 	if entra != nil {
 		wg.Go(func() { entra.Run(bg) })
 	}
 
 	lc := &lifecycle{unready: o.unready, drain: o.drainFor, cut: 10 * time.Second}
-	mux := http.NewServeMux()
-	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
-		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel}
-		if o.standalone != "" {
-			h = localOnly(d, h)
-		}
-		mux.Handle(pattern, lc.track(h))
-	}
-	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
-	// Ready once a snapshot is applied and its authorization holds.
-	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))
-	srv := newServer(o.listen, mux)
+	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel))
 	lc.srv = srv
-
 	drained := make(chan struct{})
 	wg.Go(func() {
 		<-sig.Done()
 		lc.shutdown()
 		close(drained)
 	})
-	if o.standalone != "" {
-		fmt.Fprintf(os.Stderr, "golem-gateway standalone: %s on http://%s — for this machine only, not for shared use\n", o.standalone, o.listen)
-		if c, err := holder.Current(); err == nil && c.Snapshot.Entitlements.Implicit {
-			fmt.Fprintf(os.Stderr, "  its local key is in %s: export ANTHROPIC_API_KEY=$(cat %s) OPENAI_API_KEY=$(cat %s)\n", keyPath, keyPath, keyPath)
-		}
-	} else {
-		slog.Info("golem-gateway: serving", "pool", o.pool, "site", o.site, "listen", o.listen)
-	}
+	announce(o, holder, keyPath)
 	code := 0
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { // returns as the shutdown begins
 		slog.Error("golem-gateway", "err", err)
@@ -226,6 +183,89 @@ func run(ctx context.Context, args []string) int {
 	limiter.Finish(fctx)
 	fcancel()
 	return code
+}
+
+// newLimiter is the limiter over its store: in memory standalone (ADR
+// 0023), the site's Valkey in pool mode. The returned func closes the
+// store's client.
+func newLimiter(o options, zone *time.Location) (*limit.Limiter, func(), error) {
+	var store limit.Store = limit.NewMem()
+	closeStore := func() {}
+	if o.standalone == "" {
+		c, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true})
+		if err != nil {
+			return nil, nil, fmt.Errorf("-valkey %s: %w", o.valkeyAddr, err)
+		}
+		v := limit.NewValkey(c, o.site)
+		v.ReplicaAcks = o.replicaAcks
+		store, closeStore = v, c.Close
+	}
+	limiter := limit.New(store)
+	limiter.Location = zone
+	return limiter, closeStore, nil
+}
+
+// newHolder is the snapshot holder of a live installation (startSource
+// makes it a dev one standalone), handing each snapshot's known spend to
+// the limiter as it is applied (ADR 0048).
+func newHolder(v *entra.Verifier, limiter *limit.Limiter) *snapshot.Holder {
+	return &snapshot.Holder{Env: key.Live, Entra: v, OnApply: func(c *snapshot.Compiled) {
+		for _, s := range c.Snapshot.Entitlements.Scopes {
+			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since})
+		}
+	}}
+}
+
+// startSource is the holder's snapshot source, loaded once before the
+// gateway serves: standalone's directory, with the dev installation and
+// its local key (in the file keyPath), or the pool's bucket.
+func startSource(ctx context.Context, o options, holder *snapshot.Holder) (src interface{ Run(context.Context) }, keyPath string, err error) {
+	if o.standalone == "" {
+		b, err := poolSource(ctx, o, holder)
+		if err != nil {
+			return nil, "", err
+		}
+		return b, "", nil
+	}
+	holder.Env = key.Dev
+	if holder.LocalKey, keyPath, err = loadLocalKey(o.localKeyFile); err != nil {
+		return nil, "", fmt.Errorf("the local key: %w", err)
+	}
+	dir := &snapshot.Dir{Path: o.standalone, Holder: holder, Secrets: snapshot.EnvSecrets{Getenv: os.Getenv}}
+	if err := dir.Load(); err != nil {
+		return nil, "", err
+	}
+	return dir, keyPath, nil
+}
+
+// newMux is the gateway's routes: the two dialects' APIs, each call
+// counted by lc (and, standalone, behind localOnly), and the probes.
+func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry) *http.ServeMux {
+	mux := http.NewServeMux()
+	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
+		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel}
+		if o.standalone != "" {
+			h = localOnly(d, h)
+		}
+		mux.Handle(pattern, lc.track(h))
+	}
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
+	// Ready once a snapshot is applied and its authorization holds.
+	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))
+	return mux
+}
+
+// announce says what the gateway serves: standalone, on stderr for the
+// developer, with where its local key is; in pool mode, in the log.
+func announce(o options, holder *snapshot.Holder, keyPath string) {
+	if o.standalone == "" {
+		slog.Info("golem-gateway: serving", "pool", o.pool, "site", o.site, "listen", o.listen)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "golem-gateway standalone: %s on http://%s — for this machine only, not for shared use\n", o.standalone, o.listen)
+	if c, err := holder.Current(); err == nil && c.Snapshot.Entitlements.Implicit {
+		fmt.Fprintf(os.Stderr, "  its local key is in %s: export ANTHROPIC_API_KEY=$(cat %s) OPENAI_API_KEY=$(cat %s)\n", keyPath, keyPath, keyPath)
+	}
 }
 
 // poolSource is the pool's bucket source, its floor raised (Start) before

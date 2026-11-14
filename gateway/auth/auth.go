@@ -205,11 +205,13 @@ func (k *Keys) Deny(f *DenyFile) { k.deny = f }
 // x-api-key (Anthropic's). A caller the site's emergency denylist names is
 // refused, whatever the snapshot says.
 func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
-	p, r := k.authenticateKey(h)
-	if r == nil {
-		if cred, _ := credential(h); k.deny.Current().denies(p, keyCred(cred), p.entraID) {
-			return nil, denied
-		}
+	cred, conflict := credential(h)
+	if conflict {
+		return nil, &Refusal{contract.AuthMissing, "two different credentials (Authorization and x-api-key): send one"}
+	}
+	p, r := k.principal(cred, h)
+	if r == nil && k.deny.Current().denies(p, keyCred(cred), p.entraID) {
+		return nil, denied
 	}
 	return p, r
 }
@@ -223,17 +225,16 @@ func keyCred(cred string) string {
 	return cred
 }
 
-func (k *Keys) authenticateKey(h http.Header) (*Principal, *Refusal) {
-	cred, conflict := credential(h)
-	if conflict {
-		return nil, &Refusal{contract.AuthMissing, "two different credentials (Authorization and x-api-key): send one"}
-	}
+// principal is the snapshot's principal for cred, before the denylist: the
+// implicit principal for the local key, an Entra token's in the scope h's
+// golem-scope header names, or a golem key's.
+func (k *Keys) principal(cred string, h http.Header) (*Principal, *Refusal) {
 	if k.implicit != nil {
 		// Standalone without a LocalIdentity: the one local principal, for
 		// the gateway's own generated key alone (ADR 0023; golem#5). Its
 		// browser guard keeps web pages out; the key keeps out other
 		// programs and users of the machine.
-		if h := key.Hash(cred); k.local != ([32]byte{}) && subtle.ConstantTimeCompare(h[:], k.local[:]) == 1 {
+		if sum := key.Hash(cred); k.local != ([32]byte{}) && subtle.ConstantTimeCompare(sum[:], k.local[:]) == 1 {
 			return k.implicit, nil
 		}
 		return nil, &Refusal{contract.AuthKeyUnknown, "this standalone gateway takes its own local key: the one it printed at start, in the file it named"}

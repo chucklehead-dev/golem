@@ -88,8 +88,12 @@ func (q *LedgerQueue) drop(why string) {
 	}
 }
 
+// Enabled is always true: every ledger row is wanted.
 func (q *LedgerQueue) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }
 
+// run is the worker: it exports a batch when it is full or at every tick,
+// drains on a flush's request, and on the shutdown's drains while its
+// context lasts and counts the rest as failed.
 func (q *LedgerQueue) run() {
 	defer close(q.exited)
 	t := time.NewTicker(q.every)
@@ -136,8 +140,9 @@ func (q *LedgerQueue) drain(ctx context.Context, buf []sdklog.Record) []sdklog.R
 // export delivers a batch, retrying a failure with backoff: a collector
 // restarting is a few seconds, and its rows must not be dropped for it
 // (golem#4). A batch the collector may have partly taken is sent whole
-// again; the ledger deduplicates by event (golem.spend_dedup). After the last attempt, or at the
-// shutdown's deadline, its rows are counted as failed.
+// again; the ledger deduplicates by event (golem.spend_dedup). After the
+// last attempt, or at the shutdown's deadline, its rows are counted as
+// failed.
 func (q *LedgerQueue) export(ctx context.Context, buf []sdklog.Record) []sdklog.Record {
 	if len(buf) == 0 {
 		return buf

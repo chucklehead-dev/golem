@@ -20,9 +20,9 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/chucklehead-dev/golem/lib/otlp"
-	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // OTLP sets up OTLP/HTTP exporters for traces, metrics and logs to the
@@ -75,6 +75,8 @@ type jsonLogs struct {
 	l jsonLogger
 }
 
+// jsonLogger is jsonLogs' one logger, whatever the name asked for: rows are
+// written whole under mu, one buffer and encoder reused for each.
 type jsonLogger struct {
 	embedded.Logger
 	mu  sync.Mutex
@@ -115,6 +117,8 @@ func (j *jsonLogger) Emit(_ context.Context, r otellog.Record) {
 	}
 }
 
+// writeValue writes an attribute's value as its JSON type; the ledger's
+// other types (none today) as their string form.
 func writeValue(enc *jsontext.Encoder, v attribute.Value) error {
 	switch v.Type() {
 	case attribute.BOOL:
@@ -133,9 +137,3 @@ func writeValue(enc *jsontext.Encoder, v attribute.Value) error {
 		return enc.WriteToken(jsontext.String(v.Emit()))
 	}
 }
-
-// plaintextOK reports whether telemetry may go to host unencrypted: only
-// to this machine, named by a literal loopback address. A name, localhost
-// included, is resolved when dialed, by whatever resolver and hosts file
-// the node has, so it would not hold telemetry to this machine: a name
-// gets TLS.

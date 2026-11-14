@@ -44,6 +44,7 @@ func (lc *lifecycle) track(h http.Handler) http.Handler {
 	})
 }
 
+// begin counts a call in, unless the wait has begun.
 func (lc *lifecycle) begin() bool {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
@@ -54,6 +55,7 @@ func (lc *lifecycle) begin() bool {
 	return true
 }
 
+// end counts a call out, ending the wait if it was the last.
 func (lc *lifecycle) end() {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
