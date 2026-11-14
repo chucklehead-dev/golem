@@ -25,7 +25,7 @@ graph_breaks leadership $D 'JOBS="none"' noStaleSync
 graph_breaks leadership $D 'JOBS="readLease"' noStaleSync
 graph_breaks leadership $D 'GUARD=false,ROLLBACK="doc"' floorNeverDrops
 graph_breaks leadership $D 'CP_ATTACK=true,VERIFY=false' noInflation
-graph_breaks leadership $D 'ROLLBACK="both"' epochsUnique
+graph_breaks leadership $A 'ROLLBACK="both"' epochsUnique
 echo "-- the specialist's first design (lease and records in a lead object + epoch copy in the document)"
 for rb in none doc; do graph_holds leadership $H "DESIGN=\"object\",ROLLBACK=\"$rb\"" takeDoc claim claimLost adopt publishLost readLease rollbackDoc rollbackLead restore forgeCheckpoint replayCheckpoint deleteCheckpoint; done
 graph_breaks leadership $D 'DESIGN="object",ROLLBACK="lead"' epochsUnique
@@ -38,7 +38,7 @@ done
 graph_breaks leadership $D 'DESIGN="hybrid",JOBS="none"' noStaleSync
 graph_breaks leadership $D 'DESIGN="hybrid",GUARD=false,ROLLBACK="lead"' floorNeverDrops
 graph_breaks leadership $D 'DESIGN="hybrid",CP_ATTACK=true,VERIFY=false' noInflation
-graph_breaks leadership $D 'DESIGN="hybrid",ROLLBACK="both"' epochsUnique
+graph_breaks leadership $A 'DESIGN="hybrid",ROLLBACK="both"' epochsUnique
 echo "-- today (lease and records in the document)"
 graph_holds leadership $H 'DESIGN="doc"' acquire claim claimLost adopt bump publishLost readLease rollbackDoc rollbackLead restore forgeCheckpoint replayCheckpoint deleteCheckpoint
 graph_breaks leadership $D 'DESIGN="doc",JOBS="none"' noStaleSync

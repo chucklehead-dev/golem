@@ -3,7 +3,7 @@
 # Sourced by the check scripts, which set fail=0 first.
 GOTOGETHER=${GOTOGETHER:-gotogether}
 STATES=${STATES:-300000}
-MEMORY=${MEMORY:-4096} # MiB for the stored graph (gotogether stops at 256 by default)
+MEMORY=${MEMORY:-6000} # MiB for the stored graph (gotogether stops at 256 by default); above the machine's RAM the search is killed
 
 # graph_run MODEL DEPTH [CONST]: the report, its exit status in $graph_rc.
 graph_run() {
