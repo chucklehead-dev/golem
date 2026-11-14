@@ -58,21 +58,29 @@ var pool = sync.Pool{New: func() any {
 	return d
 }}
 
+// decoder takes a pooled decoder over data.
+func decoder(data []byte) *Decoder {
+	d := pool.Get().(*Decoder)
+	d.buf = *bytes.NewBuffer(data)
+	d.dec.Reset(&d.buf)
+	return d
+}
+
+// release returns d to the pool, keeping no view of the data it read.
+func (d *Decoder) release() {
+	d.buf = bytes.Buffer{}
+	d.dec.Reset(&d.buf)
+	pool.Put(d)
+}
+
 // Object scans body, which must be exactly one JSON object, calling visit
 // for each top-level member. The whole document is read: a body with
 // duplicate names at any depth, invalid UTF-8, or trailing data is refused,
 // because an upstream parser could read such a body differently from golem
 // (ADR 0037).
 func Object(body []byte, visit Visitor) error {
-	d := pool.Get().(*Decoder)
-	d.buf = *bytes.NewBuffer(body)
-	d.dec.Reset(&d.buf)
-	defer func() { // the pooled decoder keeps no view of the body
-		d.buf = bytes.Buffer{}
-		d.dec.Reset(&d.buf)
-		pool.Put(d)
-	}()
-
+	d := decoder(body)
+	defer d.release()
 	if d.dec.PeekKind() != '{' {
 		return ErrNotObject
 	}
@@ -137,14 +145,8 @@ func Splice(dst, body []byte, s Span, value string) []byte {
 // Elements calls visit for each element of data, which must be exactly one
 // JSON array.
 func Elements(data []byte, visit func(elem jsontext.Value) error) error {
-	d := pool.Get().(*Decoder)
-	d.buf = *bytes.NewBuffer(data)
-	d.dec.Reset(&d.buf)
-	defer func() {
-		d.buf = bytes.Buffer{}
-		d.dec.Reset(&d.buf)
-		pool.Put(d)
-	}()
+	d := decoder(data)
+	defer d.release()
 	if d.dec.PeekKind() != '[' {
 		return ErrNotArray
 	}

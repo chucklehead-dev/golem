@@ -1,5 +1,6 @@
 // Package canon is the canonical model every dialect's adapters translate
-// to and from (canonical-model.md). The spike needs only usage.
+// to and from (canonical-model.md). The request path needs only usage so
+// far.
 package canon
 
 // Usage is what a call consumed, as the provider reported it: the input to

@@ -206,7 +206,7 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 				if string(name) != "usage" {
 					return d.SkipValue()
 				}
-				_, err = u.readUsage(d)
+				_, err := u.readUsage(d)
 				return err
 			})
 		})
@@ -215,13 +215,7 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 			if string(name) != "usage" {
 				return d.SkipValue()
 			}
-			var output bool
-			output, err = u.readUsage(d)
-			if err == nil && !output {
-				return ErrField
-			}
-			u.Final = err == nil
-			return err
+			return u.readFinal(d)
 		})
 	}
 	if err != nil && u.Err == nil {
@@ -237,13 +231,7 @@ func (u *StreamUsage) Response(body []byte) {
 			return d.SkipValue()
 		}
 		seen = true
-		var output bool
-		output, err := u.readUsage(d)
-		if err == nil && !output {
-			return ErrField
-		}
-		u.Final = err == nil
-		return err
+		return u.readFinal(d)
 	})
 	if err == nil && !seen {
 		u.Final = false
@@ -251,6 +239,17 @@ func (u *StreamUsage) Response(body []byte) {
 	if err != nil && u.Err == nil {
 		u.Err = err
 	}
+}
+
+// readFinal reads a usage object that must report the output count (a
+// message_delta's, or a whole response's): the count is then final.
+func (u *StreamUsage) readFinal(d *jsonscan.Decoder) error {
+	output, err := u.readUsage(d)
+	if err == nil && !output {
+		return ErrField
+	}
+	u.Final = err == nil
+	return err
 }
 
 // readUsage reads a usage object; counts are cumulative, so the last wins.

@@ -75,6 +75,13 @@ func (a *alarm) disarm() (reusable bool) {
 	return a.t.Stop() || !armed
 }
 
+// stopAlarm disarms *a, replacing it if it fired.
+func stopAlarm(a **alarm) {
+	if !(*a).disarm() {
+		*a = newAlarm((*a).cause)
+	}
+}
+
 func newBounds() bounds {
 	return bounds{call: newAlarm(errMaxDuration), headers: newAlarm(errHeadersTimeout), idle: newAlarm(errIdle)}
 }
@@ -95,9 +102,7 @@ func (b *bounds) bound(ctx context.Context, started time.Time, rt *route.Route) 
 
 // gotHeaders ends the wait for headers and arms the idle alarm.
 func (b *bounds) gotHeaders() {
-	if !b.headers.disarm() {
-		b.headers = newAlarm(errHeadersTimeout)
-	}
+	stopAlarm(&b.headers)
 	if b.idleFor > 0 {
 		b.idle.arm(b.cancel, b.idleFor)
 	}
@@ -128,11 +133,9 @@ func (ir *idleReader) Read(p []byte) (int, error) {
 // end disarms the alarms (replacing any that fired) and releases the
 // upstream context.
 func (b *bounds) end() {
-	for _, a := range []**alarm{&b.call, &b.headers, &b.idle} {
-		if !(*a).disarm() {
-			*a = newAlarm((*a).cause)
-		}
-	}
+	stopAlarm(&b.call)
+	stopAlarm(&b.headers)
+	stopAlarm(&b.idle)
 	b.body = idleReader{}
 	b.cancel(nil)
 	b.cancel = nil

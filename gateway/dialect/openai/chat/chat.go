@@ -130,31 +130,29 @@ func (r *Request) Scan(body []byte) error {
 				r.usageOn = v.Kind() == 't'
 				return nil
 			})
+		case "store":
+			r.Flags |= FlagStore
+			v, span, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			r.Store, r.storeSpan = v.Kind() == 't', span
+		case "n":
+			r.Flags |= FlagN
+			v, _, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			if v.Kind() == 'n' {
+				return nil // null: the default, one
+			}
+			n, ok := jsonscan.Int(v)
+			if !ok || n < 1 {
+				return ErrField
+			}
+			r.N = n
 		default:
 			switch string(name) {
-			case "store":
-				r.Flags |= FlagStore
-				v, span, err := d.ReadValue()
-				if err != nil {
-					return err
-				}
-				r.Store, r.storeSpan = v.Kind() == 't', span
-				return nil
-			case "n":
-				r.Flags |= FlagN
-				v, _, err := d.ReadValue()
-				if err != nil {
-					return err
-				}
-				if v.Kind() == 'n' {
-					return nil // null: the default, one
-				}
-				n, ok := jsonscan.Int(v)
-				if !ok || n < 1 {
-					return ErrField
-				}
-				r.N = n
-				return nil
 			case "web_search_options":
 				r.Flags |= FlagWebSearch
 			case "audio":

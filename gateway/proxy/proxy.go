@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/contract"
+	libsnapshot "github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 // Snapshots gives the configuration a request uses: taken once, at the
@@ -86,39 +88,9 @@ var (
 )
 
 var (
-	jsonType   = []string{"application/json"} // read-only
-	retryAfter = []string{"5"}                // read-only
+	jsonType          = []string{"application/json"} // read-only
+	defaultRetryAfter = []string{"5"}                // read-only: a retryable refusal's, when its refuser gave none
 )
-
-// uncertainOutput is the output assumed of an uncertain call that set no
-// max_tokens (OpenAI's is optional): a long answer.
-const uncertainOutput = 8192
-
-// tailEnd is when an ambiguously ended call's slot is freed: the provider's
-// tail from now, but no later than the call's deadline.
-func (h *Handler) tailEnd(deadline time.Time) time.Time {
-	end := time.Now().Add(cmp.Or(h.ProviderTail, 2*time.Minute))
-	if !deadline.IsZero() && deadline.Before(end) {
-		end = deadline
-	}
-	return end
-}
-
-// reachedProvider reports whether a failed round trip may have reached the
-// provider: only a name that did not resolve, a connection that was never
-// made or a TLS handshake that failed certainly did not.
-func reachedProvider(err error) bool {
-	var dns *net.DNSError
-	var cert *tls.CertificateVerificationError
-	var rec tls.RecordHeaderError
-	if errors.As(err, &dns) || errors.As(err, &cert) || errors.As(err, &rec) {
-		return false
-	}
-	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "dial" {
-		return false
-	}
-	return true
-}
 
 // refusal is a request the path will not serve: a contract code and a
 // message that says what to do next.
@@ -129,6 +101,9 @@ type refusal struct {
 	callerGone bool          // nothing to tell: the caller left first
 }
 
+// ServeHTTP serves one call, top to bottom: every refusal is written in the
+// caller's dialect, and every admitted call is accounted for exactly once,
+// whatever ends it.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	ctx, span := h.Telemetry.Start(r.Context(), h.Dialect.Name())
@@ -153,11 +128,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	body, no := h.readBody(w, r, in)
-	requestBytes := int64(len(body)) // for an estimate, once body is gone
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
 	}
+	requestBytes := int64(len(body)) // for an estimate, once body is gone
 
 	// Scan and route. (Hooks go here.)
 	req, err := ex.scan(h.Dialect, body)
@@ -179,30 +154,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := rt.Pick()
+	deployment := target.Backend + "/" + target.Deployment
 	pr := snap.Prices[target.Model]
 	var deadline time.Time // the call's end at the latest: renewals stop there
 	if rt.MaxDuration > 0 {
 		deadline = started.Add(rt.MaxDuration)
 	}
-	worst, ok := price.Worst(int64(len(body)), req.maxTokens, req.n, pr)
+	worst, ok := price.Worst(requestBytes, req.maxTokens, req.n, pr)
 	if !ok {
 		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: "the request's token count is too large to price safely: lower max_tokens or n"})
 		return
 	}
-	ticket, no := h.admit(ctx, reqIDs, started, deadline, principal, rt.Alias, *target, req, worst)
+	ticket, no := h.admit(ctx, principal, req, admission.Call{ID: reqIDs, Alias: rt.Alias, Deployment: deployment,
+		Model: target.Model, Worst: worst, Started: started, Deadline: deadline})
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
 	}
+	// The accounting runs to its end whatever the caller does.
+	acct := settlement{ticket: ticket, ctx: context.WithoutCancel(ctx), deadline: deadline,
+		tail: cmp.Or(h.ProviderTail, 2*time.Minute)}
 	// Every admitted call's ticket ends exactly once. Should anything below
 	// panic before it does (a bug; the abort of a cut response comes after
 	// its end), the call is cancelled at its declared worst case and its
 	// slot held for the tail, rather than held for ever. Its row is not
 	// written: the panic's report is the record.
-	ended := false
 	defer func() {
-		if ticket != nil && !ended {
-			ticket.Cancel(context.WithoutCancel(ctx), worst, h.tailEnd(deadline))
+		if !acct.ended {
+			acct.cancel(worst)
 		}
 	}()
 
@@ -216,13 +195,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	call := telemetry.Call{RequestID: reqIDs, Principal: principal.ID, PrincipalKind: principal.Kind, Key: principal.Key,
 		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Model: target.Model,
-		Deployment: target.Backend + "/" + target.Deployment, Provider: target.Backend, Started: started,
+		Deployment: deployment, Provider: target.Backend, Started: started,
 		Currency: snap.Snapshot.Currency, Counted: ticket != nil, Waived: ticket != nil && ticket.Waived()}
 	if ticket != nil {
 		call.Period = ticket.Period() // the counter's: one period per call
 	}
-	// The accounting runs to its end whatever the caller does.
-	acct := context.WithoutCancel(ctx)
 
 	// One attempt. (Retries and failover before the first byte go here; a
 	// retry needs the rewritten body kept until the attempt is committed.)
@@ -238,36 +215,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if cause := context.Cause(upCtx); cause == errHeadersTimeout || cause == errMaxDuration {
 			msg = cause.Error() + "; retry, or ask the platform team about this route's timeouts"
 		}
-		call.Ended, call.Status, call.Outcome = time.Now(), c.Status, "failed"
-		call.ErrorOrigin, call.ErrorCode = string(c.Origin), c.Name
-		// Absent response bytes are not absent work (golem#4): only a
-		// failure the provider cannot have seen is free. Else the call is
-		// charged an estimate, which reconciliation corrects, and its slot
-		// held for the provider's tail.
-		var cost int64
-		switch {
-		case !reachedProvider(err):
-		case r.Context().Err() != nil: // the caller left first: its input, at least, was read
-			call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
-			cost = price.Cost(canon.Usage{Input: requestBytes}, pr) // a token a byte, as Worst bounds it
-		default: // a timeout or a reset after the request went out: the worst it may have cost
-			call.Outcome = "uncertain"
-			var ok bool
-			if cost, ok = price.Worst(requestBytes, cmp.Or(req.maxTokens, uncertainOutput), req.n, pr); !ok {
-				cost = price.MaxCost // too large to price: the most a call is charged
-			}
-		}
-		if cost > 0 {
-			call.Cost, call.EstimatedFraction = cost, 1
-		}
+		call.Ended, call.Status = time.Now(), c.Status
+		cost := chargeUnanswered(&call, err, r.Context().Err() != nil, requestBytes, req, pr)
 		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
-		if ticket != nil {
-			if cost == 0 {
-				ticket.Complete(acct, 0) // the provider never had it
-			} else {
-				ticket.Cancel(acct, cost, h.tailEnd(deadline))
-			}
-			ended = true
+		if cost == 0 {
+			acct.complete(0) // the provider never had it
+		} else {
+			acct.cancel(cost)
 		}
 		Refuse(w, h.Dialect, c, msg)
 		return
@@ -275,19 +229,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	lim.gotHeaders()
 
-	for _, k := range forwardResponse {
-		if v := resp.Header[k]; v != nil {
-			w.Header()[k] = v
-		}
-	}
+	copyHeaders(w.Header(), resp.Header, forwardResponse)
 	w.WriteHeader(resp.StatusCode)
 	streamed := req.stream && resp.StatusCode == http.StatusOK
 	res := Result{RequestID: reqID, Principal: principal, Target: target, Status: resp.StatusCode}
-	if streamed {
-		res.Usage, res.Err = h.stream(w, lim.bodyOf(resp.Body), ex)
-	} else {
-		res.Usage, res.Err = h.whole(w, lim.bodyOf(resp.Body), ex)
-	}
+	res.Usage, res.Err = h.relay(w, lim.bodyOf(resp.Body), ex, streamed)
 	// The caller is gone if a write to it failed, or if its request ended
 	// first (the upstream read then fails with its context).
 	res.CallerGone = ex.callerGone || r.Context().Err() != nil
@@ -311,18 +257,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// limiter's OnNumbered then emits the event's numbering record
 	// (golem.spend_seq, ADR 0043), joined to the row by event.
 	h.Telemetry.Ended(ctx, call)
-	if ticket != nil {
-		if res.CallerGone || cut {
-			// The response was abandoned or cut: what was seen is charged
-			// (estimated where unreported), and the slot is held for the
-			// provider's tail, which may go on working after the connection
-			// closes (ADR 0041 §7.6; golem#4).
-			resp.Body.Close()
-			ticket.Cancel(acct, res.Cost, h.tailEnd(deadline))
-		} else {
-			ticket.Complete(acct, res.Cost)
-		}
-		ended = true
+	switch {
+	case ticket == nil: // nothing counted
+	case res.CallerGone || cut:
+		// The response was abandoned or cut: what was seen is charged
+		// (estimated where unreported), and the slot is held for the
+		// provider's tail, which may go on working after the connection
+		// closes (ADR 0041 §7.6; golem#4).
+		resp.Body.Close()
+		acct.cancel(res.Cost)
+	default:
+		acct.complete(res.Cost)
 	}
 	if h.Record != nil {
 		h.Record(r, res)
@@ -338,6 +283,85 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// settlement ends an admitted call's ticket, exactly once: by Complete when
+// the call's end is clear, else by Cancel, which holds the slot for the
+// provider's tail. With no ticket (no limiter) it counts nothing.
+type settlement struct {
+	ticket   admission.Ticket
+	ctx      context.Context // the request's, never cancelled
+	deadline time.Time       // the call's, if the route bounds it
+	tail     time.Duration   // the provider's tail
+	ended    bool
+}
+
+func (a *settlement) complete(cost int64) {
+	if a.ticket != nil {
+		a.ticket.Complete(a.ctx, cost)
+	}
+	a.ended = true
+}
+
+// cancel charges seen and holds the slot until the provider's tail from
+// now, but no later than the call's deadline.
+func (a *settlement) cancel(seen int64) {
+	if a.ticket != nil {
+		until := time.Now().Add(a.tail)
+		if !a.deadline.IsZero() && a.deadline.Before(until) {
+			until = a.deadline
+		}
+		a.ticket.Cancel(a.ctx, seen, until)
+	}
+	a.ended = true
+}
+
+// chargeUnanswered is the cost of a call whose round trip failed, and sets
+// its row's outcome. Absent response bytes are not absent work (golem#4):
+// only a failure the provider cannot have seen is free. Else the call is
+// charged an estimate, which reconciliation corrects, and its slot is held
+// for the provider's tail.
+func chargeUnanswered(call *telemetry.Call, err error, callerLeft bool, requestBytes int64, req scanned, pr libsnapshot.Price) int64 {
+	c := contract.UpstreamUnavailable
+	call.Outcome, call.ErrorOrigin, call.ErrorCode = "failed", string(c.Origin), c.Name
+	var cost int64
+	switch {
+	case !reachedProvider(err):
+	case callerLeft: // the caller left first: its input, at least, was read
+		call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
+		cost = price.Cost(canon.Usage{Input: requestBytes}, pr) // a token a byte, as Worst bounds it
+	default: // a timeout or a reset after the request went out: the worst it may have cost
+		call.Outcome = "uncertain"
+		var ok bool
+		if cost, ok = price.Worst(requestBytes, cmp.Or(req.maxTokens, uncertainOutput), req.n, pr); !ok {
+			cost = price.MaxCost // too large to price: the most a call is charged
+		}
+	}
+	if cost > 0 {
+		call.Cost, call.EstimatedFraction = cost, 1
+	}
+	return cost
+}
+
+// uncertainOutput is the output assumed of an uncertain call that set no
+// max_tokens (OpenAI's is optional): a long answer.
+const uncertainOutput = 8192
+
+// reachedProvider reports whether a failed round trip may have reached the
+// provider: only a name that did not resolve, a connection that was never
+// made or a TLS handshake that failed certainly did not.
+func reachedProvider(err error) bool {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return false
+	}
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
+		return false
+	}
+	if _, ok := errors.AsType[tls.RecordHeaderError](err); ok {
+		return false
+	}
+	op, ok := errors.AsType[*net.OpError](err)
+	return !ok || op.Op != "dial"
 }
 
 // authenticate takes the request's snapshot and finds its principal.
@@ -462,8 +486,10 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 }
 
 // admit checks the call against the scope's budget and in-flight limits
-// (ADR 0031) and takes its slots. A nil ticket with no refusal: no limiter.
-func (h *Handler) admit(ctx context.Context, reqID string, started, deadline time.Time, p *auth.Principal, alias string, target route.Target, req scanned, worst int64) (admission.Ticket, *refusal) {
+// (ADR 0031) and takes its slots. c names the call and its route; the
+// principal's scope supplies its limits. A nil ticket with no refusal: no
+// limiter.
+func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c admission.Call) (admission.Ticket, *refusal) {
 	if h.Limiter == nil {
 		return nil, nil
 	}
@@ -471,10 +497,10 @@ func (h *Handler) admit(ctx context.Context, reqID string, started, deadline tim
 	if lim.DeclaredWorstCaseCheck && !req.hasMax {
 		return nil, &refusal{code: contract.RequestInvalid, msg: "this scope checks each call's declared worst case: set max_tokens, so it can be checked against the budget"}
 	}
-	t, err := h.Limiter.Admit(ctx, admission.Call{ID: reqID, Principal: p.ID, Scope: p.Scope,
-		Alias: alias, Deployment: target.Backend + "/" + target.Deployment, Model: target.Model,
-		Budget: lim.BudgetMicros, PrincipalLimit: lim.PrincipalInFlight, ScopeLimit: lim.ScopeInFlight,
-		DeclaredWorstCaseCheck: lim.DeclaredWorstCaseCheck, Worst: worst, Started: started, Deadline: deadline})
+	c.Principal, c.Scope = p.ID, p.Scope
+	c.Budget, c.PrincipalLimit, c.ScopeLimit = lim.BudgetMicros, lim.PrincipalInFlight, lim.ScopeInFlight
+	c.DeclaredWorstCaseCheck = lim.DeclaredWorstCaseCheck
+	t, err := h.Limiter.Admit(ctx, c)
 	if no, ok := errors.AsType[*admission.Refusal](err); ok {
 		return nil, &refusal{code: no.Code, msg: no.Msg, retryAfter: no.RetryAfter}
 	}
@@ -500,15 +526,19 @@ func upstreamRequest(ctx context.Context, r *http.Request, target *route.Target,
 		Host:          target.URL.Host,
 	}).WithContext(ctx)
 	up.Header["Content-Type"] = jsonType
-	for _, k := range forwardRequest {
-		if v := r.Header[k]; v != nil {
-			up.Header[k] = v
+	copyHeaders(up.Header, r.Header, forwardRequest)
+	maps.Copy(up.Header, target.Header)
+	return up, ub
+}
+
+// copyHeaders copies the named headers from src to dst, sharing their
+// values (neither side changes them).
+func copyHeaders(dst, src http.Header, names []string) {
+	for _, k := range names {
+		if v := src[k]; v != nil {
+			dst[k] = v
 		}
 	}
-	for k, v := range target.Header {
-		up.Header[k] = v
-	}
-	return up, ub
 }
 
 // outcome is a finished call's ledger outcome, and the failure's origin and
@@ -526,34 +556,32 @@ func outcome(res Result, cut bool) (outcome, origin, code string) {
 	return "completed", "", ""
 }
 
-// stream copies the response as it arrives, flushing each read, and feeds
-// the same bytes to the dialect's usage reader.
-func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (canon.Usage, error) {
+// relay copies the provider's response to the caller as it arrives (a
+// stream flushed at each read) and reads its usage from the same bytes: a
+// stream's events as they pass, a whole response from a copy of up to
+// maxRetained bytes, read at its end.
+func (h *Handler) relay(w http.ResponseWriter, body io.Reader, ex *exchange, streamed bool) (canon.Usage, error) {
 	ex.startWrites(w, cmp.Or(h.WriteStall, 30*time.Second))
-	filter := ex.startStream(h.Dialect)
-	send := ex.send
+	filter := false
+	if streamed {
+		filter = ex.startStream(h.Dialect)
+	} else {
+		ex.kept = ex.kept[:0]
+	}
+	limit := cmp.Or(h.MaxResponse, defaultMaxResponse)
 	var cut error
 	for {
 		n, err := body.Read(ex.buf)
-		if ex.received += int64(n); ex.received > cmp.Or(h.MaxResponse, defaultMaxResponse) {
+		if ex.received += int64(n); ex.received > limit {
 			cut = errUpstreamCut{errResponseTooLarge}
 			break
 		}
-		if n > 0 {
-			var ok bool
-			if filter {
-				ok = send(ex.filter.Pass(ex.buf[:n]))
-			} else {
-				ok = send(ex.buf[:n])
-				ex.parser.Write(ex.buf[:n])
-			}
-			if !ok {
-				cut = errCallerGone
-				break
-			}
+		if n > 0 && !ex.forward(ex.buf[:n], streamed, filter) {
+			cut = errCallerGone
+			break
 		}
 		if err == io.EOF {
-			if filter && !send(ex.filter.End()) {
+			if filter && !ex.send(ex.filter.End(), true) {
 				cut = errCallerGone
 			}
 			break
@@ -563,39 +591,9 @@ func (h *Handler) stream(w http.ResponseWriter, body io.Reader, ex *exchange) (c
 			break
 		}
 	}
-	return ex.usage(h.Dialect, cut)
-}
-
-// whole copies a non-streamed response, keeping a copy of up to maxRetained
-// bytes to read its usage from.
-func (h *Handler) whole(w http.ResponseWriter, body io.Reader, ex *exchange) (canon.Usage, error) {
-	ex.startWrites(w, cmp.Or(h.WriteStall, 30*time.Second))
-	ex.tail = ex.tail[:0]
-	var cut error
-	for {
-		n, err := body.Read(ex.buf)
-		if ex.received += int64(n); ex.received > cmp.Or(h.MaxResponse, defaultMaxResponse) {
-			cut = errUpstreamCut{errResponseTooLarge}
-			break
-		}
-		if n > 0 {
-			if werr := ex.write(ex.buf[:n], false); werr != nil {
-				cut, ex.callerGone = errCallerGone, true
-				break
-			}
-			if len(ex.tail)+n <= maxRetained {
-				ex.tail = append(ex.tail, ex.buf[:n]...)
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			cut = errUpstreamCut{err}
-			break
-		}
+	if !streamed {
+		ex.readWhole(h.Dialect)
 	}
-	ex.readWhole(h.Dialect)
 	return ex.usage(h.Dialect, cut)
 }
 
@@ -637,7 +635,7 @@ func refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string, after
 	case after > 0:
 		w.Header()["Retry-After"] = []string{strconv.FormatInt(int64((after+time.Second-1)/time.Second), 10)}
 	case c.RetryAfter():
-		w.Header()["Retry-After"] = retryAfter
+		w.Header()["Retry-After"] = defaultRetryAfter
 	}
 	w.WriteHeader(c.Status)
 	var reqID string

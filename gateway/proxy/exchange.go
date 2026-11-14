@@ -27,7 +27,7 @@ type exchange struct {
 	chatUsage  chat.StreamUsage
 	parser     sse.Parser
 	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
-	tail       []byte     // a non-streamed response, for its usage
+	kept       []byte     // a non-streamed response, up to maxRetained bytes, for its usage
 	callerGone bool       // a write to the caller failed
 	received   int64      // the response's bytes so far (MaxResponse; an estimate's bound)
 
@@ -61,9 +61,13 @@ func (ex *exchange) startWrites(w http.ResponseWriter, stall time.Duration) {
 	ex.w, ex.rc, ex.stall, ex.noDeadline = w, http.NewResponseController(w), stall, false
 }
 
-// write writes b to the caller (and flushes it, for a stream), failing if
-// the caller has not taken it within the stall.
-func (ex *exchange) write(b []byte, flush bool) error {
+// send writes b to the caller (and flushes it, for a stream). A failed
+// write, or one the caller has not taken within the stall, is the caller
+// gone (ADR 0041 §7.6): send then reports false.
+func (ex *exchange) send(b []byte, flush bool) bool {
+	if len(b) == 0 {
+		return true
+	}
 	if !ex.noDeadline {
 		ex.noDeadline = ex.rc.SetWriteDeadline(time.Now().Add(ex.stall)) != nil
 	}
@@ -74,18 +78,30 @@ func (ex *exchange) write(b []byte, flush bool) error {
 	if !ex.noDeadline {
 		ex.rc.SetWriteDeadline(time.Time{})
 	}
-	return err
-}
-
-// send forwards a stream's bytes to the caller as they come; a failed or
-// stalled write is the caller gone (ADR 0041 §7.6).
-func (ex *exchange) send(b []byte) bool {
-	if len(b) == 0 {
-		return true
-	}
-	if err := ex.write(b, true); err != nil {
+	if err != nil {
 		ex.callerGone = true
 		return false
+	}
+	return true
+}
+
+// forward sends one read of the response to the caller and to its usage
+// reader: a stream's parser or filter, or a whole response's kept copy. It
+// reports false if the caller is gone.
+func (ex *exchange) forward(b []byte, streamed, filter bool) bool {
+	switch {
+	case filter:
+		return ex.send(ex.filter.Pass(b), true)
+	case streamed:
+		ok := ex.send(b, true)
+		ex.parser.Write(b) // the provider produced it, whether or not the caller took it
+		return ok
+	}
+	if !ex.send(b, false) {
+		return false
+	}
+	if len(ex.kept)+len(b) <= maxRetained {
+		ex.kept = append(ex.kept, b...)
 	}
 	return true
 }
@@ -101,11 +117,11 @@ func getExchange() *exchange {
 }
 
 // release returns the exchange to the pool. The parser and filter keep
-// bounded buffers (their Reset); tail is let go if a response grew it large.
+// bounded buffers (their Reset); kept is let go if a response grew it large.
 func (ex *exchange) release() {
 	ex.w, ex.rc = nil, nil // the pool must not keep a finished response
-	if cap(ex.tail) > maxRetained {
-		ex.tail = nil // a large response's copy is let go, not the exchange
+	if cap(ex.kept) > maxRetained {
+		ex.kept = nil // a large response's copy is let go, not the exchange
 	}
 	exchanges.Put(ex)
 }

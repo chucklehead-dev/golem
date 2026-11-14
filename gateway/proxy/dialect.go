@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json/jsontext"
 	"errors"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -99,11 +100,11 @@ func (ex *exchange) startStream(d Dialect) (filter bool) {
 func (ex *exchange) readWhole(d Dialect) {
 	if d == AnthropicMessages {
 		ex.msgUsage = messages.StreamUsage{}
-		ex.msgUsage.Response(ex.tail)
+		ex.msgUsage.Response(ex.kept)
 		return
 	}
 	ex.chatUsage = chat.StreamUsage{}
-	ex.chatUsage.Response(ex.tail)
+	ex.chatUsage.Response(ex.kept)
 }
 
 // usage is the response's usage and any error reading it, joined with cut.
@@ -124,8 +125,8 @@ func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
 // price.Worst). It can still be low (a provider's work past a cut, input
 // that bytes do not bound): an estimate, not a guarantee (ADR 0044). It
 // replaces no count the provider gave; reconciliation corrects it (ADR
-// 0031). It returns the usage to
-// charge and the estimated part of it (zero when the report was whole).
+// 0031). It returns the usage to charge and the estimated part of it (zero
+// when the report was whole).
 func (ex *exchange) estimate(d Dialect, requestBytes, ceiling int64) (total, estimated canon.Usage) {
 	u, final := ex.chatUsage.Usage, ex.chatUsage.Final
 	if d == AnthropicMessages {
@@ -176,6 +177,11 @@ func appendError(b []byte, d Dialect, c contract.Code, msg, reqID string) []byte
 	b = append(b, `,"request_id":"`...)
 	b = append(b, reqID...)
 	return append(b, `"}}`...)
+}
+
+func appendQuoted(b []byte, s string) []byte {
+	b, _ = jsontext.AppendQuote(b, s) // fails only on invalid UTF-8, which it replaces
+	return b
 }
 
 // streamError is upstream.stream_failed as an event in a dialect's stream.

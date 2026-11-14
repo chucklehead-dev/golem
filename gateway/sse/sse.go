@@ -20,10 +20,8 @@ type Parser struct {
 	// OnEvent receives the event's name (empty if none) and its data lines
 	// joined by "\n". Both are valid only during the call.
 	OnEvent func(event, data []byte)
-	// Dropped counts events over MaxEvent; Skipped, the bytes of the data
-	// Want skipped (an estimate's measure of content seen, at no cost).
+	// Dropped counts events over MaxEvent.
 	Dropped int
-	Skipped int64
 
 	line    []byte
 	event   []byte
@@ -140,14 +138,11 @@ func (p *Parser) field(line []byte) {
 	if line[0] == ':' {
 		return // a comment, often a keep-alive
 	}
-	name, value := line, []byte(nil)
-	for i, c := range line {
-		if c == ':' {
-			name, value = line[:i], line[i+1:]
-			if len(value) > 0 && value[0] == ' ' {
-				value = value[1:]
-			}
-			break
+	name, value := line, []byte(nil) // a line without a colon is a field with no value
+	if i := bytes.IndexByte(line, ':'); i >= 0 {
+		name, value = line[:i], line[i+1:]
+		if len(value) > 0 && value[0] == ' ' {
+			value = value[1:]
 		}
 	}
 	switch string(name) {
@@ -157,11 +152,7 @@ func (p *Parser) field(line []byte) {
 			p.skip = true
 		}
 	case "data":
-		if p.skip {
-			p.Skipped += int64(len(value))
-			return
-		}
-		if p.over {
+		if p.skip || p.over {
 			return
 		}
 		if len(p.data)+len(value)+1 > MaxEvent {
