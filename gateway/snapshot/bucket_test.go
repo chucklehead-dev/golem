@@ -1,0 +1,170 @@
+package snapshot
+
+import (
+	"context"
+	"crypto/ed25519"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/lib/bucket"
+	"github.com/chucklehead-dev/golem/lib/sign"
+	"github.com/chucklehead-dev/golem/lib/snapshot"
+)
+
+// published is a publisher and a gateway's source over one bucket, with
+// the attacker's view: anyone who can write the bucket but not sign.
+type published struct {
+	pub    *publish.Publisher
+	bucket *bucket.Dir
+	keys   sign.Ed25519Keys
+	signer sign.Ed25519
+	dir    string // the gateway's disk
+}
+
+func newPublished(t *testing.T) *published {
+	t.Helper()
+	pk, sk, _ := ed25519.GenerateKey(nil)
+	d, err := bucket.OpenDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	s := sign.Ed25519{ID: "k1", Key: sk}
+	return &published{pub: &publish.Publisher{Bucket: d, Signer: s, Pool: "internal"}, bucket: d,
+		keys: sign.Ed25519Keys{"k1": pk}, signer: s, dir: t.TempDir()}
+}
+
+// gateway starts a gateway on the pool, its checkpoint on its disk.
+func (p *published) gateway(t *testing.T) *Bucket {
+	t.Helper()
+	b := &Bucket{Bucket: p.bucket, Keys: p.keys, Pool: "internal", Holder: &Holder{},
+		Checkpoint: filepath.Join(p.dir, "checkpoint"), GatewayID: "gw-1"}
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func (p *published) publish(t *testing.T) snapshot.Pointer {
+	t.Helper()
+	ptr, err := p.pub.Publish(t.Context(), 1, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+		return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, ValidUntil: time.Now().Add(time.Hour).UTC()}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ptr
+}
+
+// pointerBytes is the stored pointer, as an attacker would copy it.
+func (p *published) pointerBytes(t *testing.T) []byte {
+	b, _, err := p.bucket.Get(t.Context(), snapshot.PointerKey("internal"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func (p *published) put(t *testing.T, key string, b []byte) {
+	if _, err := p.bucket.Put(t.Context(), key, b, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func applied(b *Bucket) uint64 {
+	if c := b.Holder.cur.Load(); c != nil {
+		return c.Snapshot.PublishSeq
+	}
+	return 0
+}
+
+func mustRefuse(t *testing.T, b *Bucket, want string) {
+	t.Helper()
+	before := applied(b)
+	if err := b.Poll(t.Context()); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("poll: %v, want a refusal naming %q", err, want)
+	}
+	if applied(b) != before {
+		t.Fatalf("applied %d after a refusal, held %d", applied(b), before)
+	}
+}
+
+// TestBucketSource: a gateway applies each signed publication in turn, and
+// keeps what it holds against everything else the bucket may hold.
+func TestBucketSource(t *testing.T) {
+	p := newPublished(t)
+	gw := p.gateway(t)
+	if err := gw.Poll(t.Context()); err == nil {
+		t.Fatal("a pool with no pointer yet: want an error")
+	}
+	p.publish(t)
+	old := p.pointerBytes(t)
+	p.publish(t)
+	if err := gw.Poll(t.Context()); err != nil || applied(gw) != 2 {
+		t.Fatalf("poll: %v, applied %d, want 2", err, applied(gw))
+	}
+	if err := gw.Poll(t.Context()); err != nil {
+		t.Fatalf("an unchanged pointer: %v", err)
+	}
+	if st, _, err := p.bucket.Get(t.Context(), "status/internal/gw-1", ""); err != nil || !strings.Contains(string(st), `"publishSeq":2`) {
+		t.Fatalf("status %s %v", st, err)
+	}
+
+	t.Run("an old signed pointer copied back", func(t *testing.T) {
+		p.put(t, snapshot.PointerKey("internal"), old)
+		mustRefuse(t, gw, "below the floor")
+	})
+	t.Run("the same, after a restart with its disk", func(t *testing.T) {
+		restarted := p.gateway(t) // the floor from the checkpoint
+		mustRefuse(t, restarted, "below the floor")
+	})
+	t.Run("a pointer signed by an untrusted key", func(t *testing.T) {
+		_, sk, _ := ed25519.GenerateKey(nil)
+		b, _ := snapshot.SignPointer(t.Context(), snapshot.Pointer{Pool: "internal", PublishSeq: 9, Hash: "x"}, sign.Ed25519{ID: "k1", Key: sk})
+		p.put(t, snapshot.PointerKey("internal"), b)
+		mustRefuse(t, gw, "does not verify")
+	})
+	t.Run("another pool's pointer", func(t *testing.T) {
+		b, _ := snapshot.SignPointer(t.Context(), snapshot.Pointer{Pool: "edge", PublishSeq: 9, Hash: "x"}, p.signer)
+		p.put(t, snapshot.PointerKey("internal"), b)
+		mustRefuse(t, gw, `pool "edge"`)
+	})
+	t.Run("a snapshot object replaced", func(t *testing.T) {
+		ptr := p.publish(t)
+		p.put(t, snapshot.ObjectKey("internal", ptr.Hash), []byte(`{"schema":1,"publishSeq":3}`))
+		mustRefuse(t, gw, "not the object the pointer signed")
+	})
+	t.Run("a pointer naming another publication's snapshot", func(t *testing.T) {
+		older := p.publish(t) // seq 4
+		b, _ := snapshot.SignPointer(t.Context(), snapshot.Pointer{Pool: "internal", PublishSeq: 9, Hash: older.Hash}, p.signer)
+		p.put(t, snapshot.PointerKey("internal"), b)
+		mustRefuse(t, gw, "its pointer says 9")
+	})
+	t.Run("a snapshot not yet readable is retried", func(t *testing.T) {
+		ptr := p.publish(t) // seq 5
+		gw.Bucket = missing{p.bucket, snapshot.ObjectKey("internal", ptr.Hash)}
+		if err := gw.Poll(t.Context()); err == nil {
+			t.Fatal("poll with the object missing: want an error")
+		}
+		gw.Bucket = p.bucket
+		if err := gw.Poll(t.Context()); err != nil || applied(gw) != 5 {
+			t.Fatalf("poll once the object is back: %v, applied %d, want 5", err, applied(gw))
+		}
+	})
+}
+
+// missing is a bucket where one object cannot be read.
+type missing struct {
+	*bucket.Dir
+	key string
+}
+
+func (m missing) Get(ctx context.Context, key, inm string) ([]byte, string, error) {
+	if key == m.key {
+		return nil, "", bucket.ErrNotFound
+	}
+	return m.Dir.Get(ctx, key, inm)
+}

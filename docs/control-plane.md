@@ -116,6 +116,26 @@ control plane.
   signature and that `publish_seq` is at least their floor and above the snapshot they hold (the trusted publisher checkpoint and atomically persisted local
   checkpoint; gateway status is diagnostic), fetch and verify the
   snapshot, compile, swap, and write `status/<pool>/<gateway-id>`.
+- **Built (slice 1, no cloud dependencies):** `lib/bucket` (the
+  interface, with S3's conditional semantics, and a directory
+  implementation), `lib/sign` (Ed25519; KMS is the next implementation),
+  `lib/snapshot`'s signed `Pointer`, `control/publish` (the publisher) and
+  `gateway/snapshot.Bucket` (the gateway's source). As built:
+  - the publisher numbers from the pool's **publication record**, updated
+    by compare-and-swap and fenced by epoch and state version, not from
+    the pointer, which anyone who can write the bucket can replay; the
+    record is written before the pointer, so a publisher that dies between
+    them leaves the record ahead until the next publication;
+  - only the pointer is signed (with a context string, so the key's
+    signature means nothing else); the snapshot object is checked against
+    the pointer's hash and must carry the pointer's sequence;
+  - the gateway persists the last sequence applied to a local checkpoint
+    file and raises its floor from it at start;
+  - open: the record lives in the bucket here, where the design keeps it
+    with the state document; an empty-disk restart's floor from the
+    trusted record has no reader yet (the floor is zero); the gateway
+    binary is not wired to the source (the release gate, golem#7); S3 and
+    KMS adapters are slice 2.
 - **Status**: golem-control reads the status objects for the CRDs'
   `Applied n/m`, `golemctl gateways`, and the per-gateway snapshot age
   alert.
