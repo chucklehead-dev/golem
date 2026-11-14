@@ -58,3 +58,4 @@ baseline one, marked in both.
 | [0046](0046-control-api-registration.md) | The control API has its own Entra registration (`api://golem-control`, `golem.manage`); a gateway token cannot call it; services recognised by `idtyp` |
 | [0047](0047-identity-from-entra-groups.md) | Users and their memberships come from the Entra groups bound to scopes, synced from Graph; only the sync and admins bind an Entra ID; `entra:` reserved |
 | [0048](0048-known-spend-by-time-boundary.md) | Known spend by a time boundary (an ingestion allowance back) and per-minute site counters; no numbering, no watermark job; late rows and lost minutes undercount until the next boundary, stated; recovery converges under load |
+| [0049](0049-lease-object-and-fence.md) | The lease in its own object, the fence in the document; every leader-only write fenced in its own write; one publication write a cycle; the checkpoint guard; lost replies recognised |

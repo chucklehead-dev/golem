@@ -167,10 +167,12 @@ control plane.
   implementation), `lib/sign` (Ed25519; KMS is the next implementation),
   `lib/snapshot`'s signed `Pointer`, `control/publish` (the publisher) and
   `gateway/snapshot.Bucket` (the gateway's source). As built:
-  - the publisher numbers from the pool's **publication record** in the
-    state document, won by a state update that checks the lease's holder
-    and epoch in the same write and fenced by state version, not from the
-    pointer, which anyone who can write the pool's objects can replay;
+  - the publisher numbers above the highest of the pool's **publication
+    record** in the state document, its verified checkpoint and its signed
+    pointer, and stops on a checkpoint that does not verify or has gone
+    (`ErrTampered`); every pool's record is won in one fenced update a
+    cycle (ADR 0049), checking the document's fence in the same write and
+    fenced by state version;
     then it writes the pool's **trusted checkpoint**
     (`control/<pool>/checkpoint`), then the pointer, each only forward
     (conditionally on the object read, never over a later publication's),
@@ -189,7 +191,7 @@ control plane.
     bucket) it does not start. Gateways do not read the state document,
     which holds key hashes and principals;
   - the checkpoint is also protected by where it is: the bucket policy must let
-    only golem-control's role write `state/` and `control/` (and
+    only golem-control's role write `state/`, `lead/` and `control/` (and
     `snapshots/`), and a pool's credentials write only its `status/`.
   - golem-control: `control/controller` and `cmd/golem-control`. While it
     leads, it compiles the config directory and publishes every pool when
@@ -202,10 +204,13 @@ control plane.
     bucket: a change reaches the gateway, a renewal extends its lease, a
     broken edit renews the last good config, a new leader publishes and a
     paused one is fenced;
-  - leadership: `control/lead`, the lease in the state document (ADR
-    0045): taken when lapsed at the next epoch, renewed by its holder,
-    given up by its holder's own clock before another may take it; the
-    publisher publishes at the epoch its elector believes;
+  - leadership: `control/lead` (ADR 0049, model/leadership.md): the lease
+    an object of its own (`lead/lease.json`, 30 s, renewed every 10 s),
+    the fence in the state document. A taker judges a lease lapsed by its
+    own clock on an unchanged object, acquires it at one above the higher
+    of the lease's and the fence's epochs, and leads once it has claimed
+    the fence; every leader-only write (publication, the group sync) is
+    fenced in its own write (`state.FencedUpdate`);
   - slice 2: `lib/bucket/s3bucket` (S3, with its conditional requests:
     If-None-Match on GetObject, If-Match and If-None-Match: * on
     PutObject; 304, 404, 412 and 409 mapped to the bucket's errors; reads

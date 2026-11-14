@@ -1,6 +1,7 @@
 # 0045: golem-control's leadership is a lease in the state document
 
-Status: Accepted. Amends [0003](0003-components-and-layering.md),
+Status: Amended by [0049](0049-lease-object-and-fence.md): the lease is now an
+object of its own, and the document keeps a fence. Amends [0003](0003-components-and-layering.md),
 [0019](0019-background-jobs.md) and [0030](0030-authorization-renewal-and-availability.md)
 (a Kubernetes Lease) and model/publication.md §4.2's description.
 

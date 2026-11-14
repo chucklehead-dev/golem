@@ -19,7 +19,7 @@ The packages, bottom up:
 | Package | Does |
 | --- | --- |
 | `control/state` | the state document and its store: reads, `Update`, the invariants |
-| `control/lead` | the leader's lease, kept in the state document |
+| `control/lead` | leadership: the lease object and the fence in the document (ADR 0049) |
 | `control/publish` | one pool's publisher: record, checkpoint, signed pointer |
 | `control/controller` | the loop: compile the config, publish when due |
 | `control/audit` | ships the document's audit outbox |
@@ -28,7 +28,7 @@ The packages, bottom up:
 ## 1. The state document and its store
 
 Everything golem-control knows is one JSON document, `state/document.json`
-in the bucket (`control/state/state.go:33`). `Document` holds the lease
+in the bucket (`control/state/state.go:33`). `Document` holds the fence
 (`Leader`), each pool's publication record (`Publications`), the
 entitlements (`Principals`, `Scopes`, `Keys`, `Revocations`, `Roles`) and
 the audit outbox (`Audit`, `AuditSeq`). Decoding is strict
@@ -79,7 +79,7 @@ compare-and-swap as the change and a retried change is numbered afresh.
 
 | Invariant | Where | Tested by |
 | --- | --- | --- |
-| The lease's epoch never goes back, and the lease is never dropped | `checkLease`, `state.go:278` | no direct test (a gap); `control/lead` only ever moves the epoch forward |
+| The fence's epoch never goes back, and the fence is never dropped | `checkLease` | no direct test (a gap); `control/lead` only ever moves the epoch forward |
 | A principal is a user or a service; its scopes exist; its default is one of them | `checkPrincipals`, `entitlements.go:110` | `TestEntitlementInvariants` |
 | No two principals share an Entra ID | `checkPrincipals` | `TestEntitlementInvariants` |
 | A key's owner exists; a live key's owner is a member of its scope | `checkKeys`, `entitlements.go:136` | `TestEntitlementInvariants` |
@@ -93,83 +93,87 @@ Every refusal wraps `ErrInvariant`, which the API maps to Connect's
 
 ## 2. Leadership
 
-Only the leader publishes and ships audit. The lease is the document's
-`Leader` field (ADR 0045), not a Kubernetes Lease, so its epoch is written
-by the same compare-and-swap as the publication record it fences, and
-golem-control needs no API server to lead.
+Only the leader publishes and runs the jobs. Leadership is two objects
+(ADR 0049, model/leadership.md's "fence" design):
 
-`Elector.Try` (`control/lead/lead.go:71`) is one `Update`:
+- the **lease**, `lead/lease.json` (`LeaseKey`): holder, epoch, duration.
+  It holds no authority; renewing it rewrites a few hundred bytes, not the
+  document;
+- the **fence**, the document's `Fence`: who leads, at which epoch. Every
+  leader-only write checks it in its own compare-and-swap
+  (`state.FencedUpdate`).
 
-- no lease: take it at epoch 1;
-- held by this replica: renew it, same epoch;
-- held by another and not lapsed by this replica's clock: refuse
-  (`errHeld`), and this replica now knows it does not lead;
-- lapsed: take it at the next epoch.
+`Elector.Try` (control/lead/lead.go) reads the lease, then:
 
-Each renewal stamps `RenewedAt` and the duration (default 15 s; `Run`
-renews every third of it).
+- **mine** (held by this replica at the epoch it leads at, or has
+  acquired): renew it; if its claim is still pending (a lost reply), claim
+  now; if the fence names another, this replica has been deposed;
+- **another's, not lapsed**: this replica does not lead. A lease is lapsed
+  when this replica has seen the same object (its tag) unchanged for the
+  lease's duration *by its own clock*, as client-go judges; the stored
+  `RenewedAt` is only diagnostic, so clock skew does not matter;
+- **free, released or lapsed** (`take`): acquire the lease at one above
+  the higher of its epoch and the fence's, then `claim` the fence, only if
+  the fence's epoch is below that. A rolled-back lease object therefore
+  cannot reuse an epoch, and only delays a takeover.
 
-**Giving up by one's own clock.** `Elector.Epoch` (`lead.go:62`) is what
-the rest of golem-control asks. It returns 0 once the replica has seen
-another holder, or once its own clock passes its last renewal plus the
-duration (`epochLocked`, `lead.go:105`). Belief runs from the time stamped
-*before* the write (`lead.go:101`), so a slow write only shortens it, and a
-store error within the lease keeps it. A paused leader therefore stops
-believing before any other replica, by that replica's clock, may take the
-lease. Clock skew changes only when a lapsed lease may be taken; it cannot
-let an old holder publish, because the record's write checks the lease.
+The replica leads once it has claimed. A claim whose reply was lost is
+adopted at the next try (the fence already names it); the store also
+recognises its own write when a retried put fails its condition (each
+version carries a write ID, `Document.Write`).
+
+Defaults: a 30 s lease renewed every 10 s; a failed try retried after 2 s,
+jittered (`Run`).
+
+**Giving up by one's own clock.** `Elector.Epoch` returns 0 once the
+replica has seen another holder, or once its own clock passes its last
+renewal plus the duration. Belief runs from the time stamped *before* the
+write, so a slow write only shortens it, and a store error within the
+lease keeps it. A paused leader stops believing before any taker can have
+watched its lease for a whole duration. Whatever it believes, its writes
+are refused once another has claimed the fence.
 
 **Giving up.** On SIGTERM, golem-control stops its publishing loop and the
-elector's (`Controller.Run` returns only once both have), then calls
-`Elector.Release`: belief ends first, then the lease is marked lapsed (its
-duration set to zero), so another replica takes it at the next epoch on
-its next try instead of after fifteen seconds. A rolling restart loses no
+elector's, then calls `Elector.Release`, which marks the lease released:
+another replica takes it on its next try, and a rolling restart loses no
 publication time.
 
 ## 3. Publication
 
-`Publisher.Publish` (`control/publish/publish.go:63`) publishes one pool,
-given the lease its elector believes it holds (`Lease`: the replica and
-its epoch) and `source`, the state version the snapshot is built from. In
-order:
+`PublishAll` (control/publish/publish.go) publishes every pool given the
+fence its elector holds (`Lease`, a `state.Fence`) and `source`, the
+state version the snapshots are built from. `Publisher.Publish` is the
+same for one pool. In order:
 
-1. Read the pool's **publication record** (`Record`: a `Refresh`, then
-   the record). **Fencing**: if the state's lease is not this one
-   (`holds`), or the epoch or `source` is below the record's, return
-   `ErrFenced`: this publisher lost its lease or reads stale state. This
-   is the model's FENCE.
-2. Build the snapshot as publication `record.Seq + 1` and write it,
-   content-addressed, as `snapshots/<pool>/<hash>.json` (`publish.go:84`).
-   An object nobody points at is harmless.
-3. Win the record by `Update`, which checks the lease again in the same
-   write: a leader deposed since step 1 is refused even if its successor
-   has not published. If the record changed since step 1, return
-   `ErrConflict`; otherwise write `{epoch, seq, source}`.
-   The store's `checkPublications` makes the record monotonic whatever any
-   writer does.
-4. Write the **trusted checkpoint** `control/<pool>/checkpoint` with the
-   new sequence. A gateway restarted with an empty disk takes it as its
-   floor.
-5. Sign and write the **pointer** `snapshots/<pool>/current`: pool,
-   sequence, epoch, source, issue time and the snapshot's hash. Only the
-   pointer is signed; the snapshot is checked against the pointer's hash.
-
-Steps 4 and 5 only move forward (`advance`): each reads the object, and
-writes conditionally on it (If-Match its tag, or create-only). A leader
-paused between step 3 and them, whose successor has published since,
-finds a later publication there and returns `ErrFenced` rather than set
-the floor or the pointer back. A stored pointer whose sequence is above
-the record's was not written by golem-control (the record is always
-written first) and is replaced.
+1. **Fencing**: refresh the state; if the fence is not this one (`holds`)
+   or a pool's record has a later epoch or source, that is `ErrFenced`.
+2. **Numbering** (`floor`, the model's GUARD and VERIFY): each pool's next
+   publication is one above the highest of its record, its verified
+   checkpoint and its signed pointer, so a rolled-back record, alone or
+   beside an older checkpoint copied back, still numbers above what
+   gateways trust. A checkpoint that does not verify, or is missing once
+   one was written, is `ErrTampered`: that pool is not published until a
+   person looks. (Record 1 without a checkpoint is a publisher that died
+   between the first two writes, not tampering.)
+3. Build each snapshot and write it, content-addressed.
+4. **Win every pool's record in one `FencedUpdate`**: one document
+   version a cycle, whatever the number of pools. If a record changed
+   since step 1, `ErrConflict`. The store's `checkPublications` keeps each
+   record monotonic.
+5. Each pool's signed **checkpoint** `control/<pool>/checkpoint`, then its
+   signed **pointer**, each only forward (`advance`): written conditionally
+   on the object read, refused (`ErrFenced`) over a later publication's
+   (a successor's, while this publisher was paused). A stored checkpoint
+   that does not verify is `ErrTampered`; a stored pointer that does not
+   verify is replaced (gateways refuse it too).
 
 **Why the record, not the pointer.** Anyone who can write the pool's
 objects but cannot sign can copy an old signed pointer back (the model's
-`replayPointer`). Numbering from the pointer would let that replay set the
-sequence back, and the next publication would reuse a number a gateway has
-already passed. The record lives in the state document, which only
-golem-control's role can write, and only moves forward.
+`replayPointer`). Numbering from the pointer alone would let that replay
+set the sequence back; numbering from the highest of all three cannot be
+set back by any one of them.
 
-A publisher that dies after step 3 leaves the checkpoint and pointer behind
+A publisher that dies after step 4 leaves the checkpoint and pointer behind
 the record; the next publication (the renewal, within a minute) moves them
 on.
 
@@ -310,10 +314,17 @@ path with a real gateway source over one bucket.
 
 - `control/state`: the store's update, retry under 8 concurrent writers,
   and every invariant above.
-- `control/lead`: taking, renewing and losing the lease; giving up by the
-  replica's own clock; a stale leader fenced by the record.
-- `control/publish`: numbering from the record, fencing, racing
-  publishers.
+- `control/lead`: taking, renewing and losing the lease; lapse judged by
+  the taker's own clock; giving up by the holder's; a stale leader fenced;
+  a rolled-back lease object (no epoch reused); a lost claim adopted and a
+  landed write recognised as one's own.
+- `control/publish`: numbering, fencing, racing publishers, one state
+  write for every pool, and the guard (`TestGuard`: model/leadership.md's
+  counterexamples, each refused).
+- `control/entrasync`: a sync deposed mid-read writes nothing
+  (`TestSyncFenced`).
+- `model/check-leadership.sh`: the placements compared, each mechanism
+  shown necessary.
 - `control/controller`: two replicas and a gateway over one bucket (a
   change arrives, a renewal extends the lease, a broken edit renews the
   last good config, a paused leader is fenced), and the revocation path.

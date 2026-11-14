@@ -27,7 +27,9 @@ every gateway refuses new requests.
   past the bound.
 - **The control plane is on the availability path.** golem-control's SLO
   rises to match the gateway's: 99.95%, two replicas in different zones,
-  leader failover within 30 seconds (Kubernetes Lease timings set for it),
+  leader failover within 30 seconds (Kubernetes Lease timings set for it;
+  amended by ADR 0049: 30 to 40 s, the lease's duration once a taker has
+  watched it),
   and an alert when any pool's authorization has less than three minutes
   left. The bucket and KMS (signing) are part of the same path and are
   monitored as such.

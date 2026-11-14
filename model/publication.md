@@ -114,6 +114,12 @@ has something to restore.
 
 ### 4.2 Leadership
 
+Here the Lease is one atomic value: who leads, at which epoch. In golem it
+is the state document's fence, claimed by a replica that has first
+acquired the lease object (ADR 0049); how the lease object, the claim and
+rollbacks of either fit together is model/leadership.md's question, and
+this model takes its answer as given.
+
 Leadership is a lease in the state document (ADR 0045): one holder and an epoch that increases
 when it changes hands. The crucial detail is `believes`: what each replica
 *thinks* its epoch is. A replica that was paused (a long GC, a frozen node)
