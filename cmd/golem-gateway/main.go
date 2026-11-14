@@ -67,7 +67,6 @@ func main() {
 	// Standalone: the in-memory limiter, dev keys (ADR 0023).
 	limiter := limit.New(limit.NewMem())
 	limiter.Location = zone
-	limiter.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
 	entra := newEntra(*tenant, *audience)
 	localKey, keyPath, err := loadLocalKey(*localKeyFile)
 	if err != nil {
@@ -75,7 +74,7 @@ func main() {
 	}
 	holder := &snapshot.Holder{Env: key.Dev, Entra: entra, LocalKey: localKey, OnApply: func(c *snapshot.Compiled) {
 		for _, s := range c.Snapshot.Entitlements.Scopes {
-			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Watermark: s.Watermark})
+			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since})
 		}
 	}}
 	var deny *auth.DenyFile

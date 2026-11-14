@@ -278,7 +278,7 @@ Run by the leader; each an idempotent scan.
 |---|---|---|
 | Entra group sync | every 5 min; change notifications in M2 | Bound groups' members as synced memberships, in one state update; revokes keys outside them and all of a disabled user's; refuses a step ending over 50 memberships (ADR 0047) |
 | Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps |
-| Known spend | with every authorization renewal | Reads per-key, member and scope spend for the period from ClickHouse into the snapshot (ADR 0031) |
+| Known spend | with every authorization renewal | Per scope and period: a boundary a minute-aligned ingestion allowance back, and `golem.spend_dedup`'s spend of the calls that ended before it, into the snapshot (ADR 0048); not built yet |
 | Audit shipping | every few seconds | Archive before outbox trim; ClickHouse is a query projection |
 | Authorization renewal | every 60 s | Rebuilds and republishes every pool's snapshot from current state, extending its authorization lease (ADR 0030) |
 | Key, request and registration expiry; reminders | hourly | Expires keys, adjustment requests, registrations past TTL; notifies 7 days and 1 day ahead |

@@ -189,9 +189,8 @@ func (p *partial) ForceFlush(context.Context) error { return nil }
 
 // TestLedgerQueuePartialDelivery: a batch the collector took but did not
 // acknowledge is sent again, whole, each row with its own event_id, so the
-// ledger's deduplication by event (golem.spend_dedup; the watermark job's
-// rows by event, TestAgainstBruteForce's duplicates) counts it once
-// (golem#4).
+// ledger's deduplication by event (golem.spend_dedup, from which a
+// snapshot's spend is summed) counts it once (golem#4).
 func TestLedgerQueuePartialDelivery(t *testing.T) {
 	exp := &partial{seen: map[string]int{}}
 	q := NewLedgerQueue(exp, 100, 10, time.Hour)

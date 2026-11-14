@@ -11,16 +11,15 @@ import (
 )
 
 // SchemaVersion is golem.spend's contract version (contracts.md §3): 2,
-// rows written at their call's end, their counter numbers in
-// golem.spend_seq (ADR 0043).
+// rows written at their call's end (ADR 0043), whose ended_at puts them on
+// one side of a snapshot's boundary (ADR 0048).
 const SchemaVersion = 2
 
 // Ledger writes the access-log records that are golem.spend's rows, one per
-// upstream attempt, and golem.spend_seq's numbering records, as OTel log
-// records whose attributes are the tables' columns; the collector writes
-// them to ClickHouse. A row is written when its call ends, never held for
-// its number: the number follows in its own record (ADR 0043), so an
-// outage of the counter keeps no billing rows in memory.
+// upstream attempt, as OTel log records whose attributes are the table's
+// columns; the collector writes them to ClickHouse. A row is written when
+// its call ends, whatever the site counter's state, so an outage of the
+// counter keeps no billing rows in memory (ADR 0043).
 type Ledger struct {
 	logger     otellog.Logger
 	site, pool string
@@ -38,20 +37,6 @@ func (l *Ledger) Ended(ctx context.Context, c Call) {
 	var row [ledgerColumns]attribute.KeyValue
 	l.row(&row, &c)
 	l.emit(ctx, c.Ended, "golem.spend", row[:])
-}
-
-// Numbered writes an event's numbering record: its number in the site
-// counter of its scope and period, 0 if it never reached the counter.
-func (l *Ledger) Numbered(scope, period, eventID string, seq int64) {
-	s := attribute.String
-	l.emit(context.Background(), time.Now(), "golem.spend_seq", []attribute.KeyValue{
-		attribute.Int64("schema_version", SchemaVersion),
-		s("event_id", eventID),
-		s("site", l.site),
-		s("scope_id", scope),
-		s("period", budget.FirstDay(period)),
-		attribute.Int64("counter_seq", seq),
-	})
 }
 
 func (l *Ledger) emit(ctx context.Context, at time.Time, name string, attrs []attribute.KeyValue) {
@@ -112,10 +97,9 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		s("error_code", c.ErrorCode),
 		f("estimated_fraction", c.EstimatedFraction),
 		attribute.Bool("waived", c.Waived),
-		attribute.Bool("counted", c.Counted),
 	}
 }
 
 // ledgerColumns is golem.spend's column count; the row is built in an
 // array of this size, on the stack, not a slice the record copies again.
-const ledgerColumns = 40
+const ledgerColumns = 39

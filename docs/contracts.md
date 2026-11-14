@@ -93,16 +93,15 @@ prevent double counting.
 | `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away), `failed`, or `uncertain` (the call failed after the provider may have received it: charged its worst case as an estimate until reconciliation, golem#4); the failure's §2 origin and §1 code |
 | `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), each side is charged by rules chosen to err high, not an average: output every byte of the response received a token (whatever its fields or framing), at most the request's `max_tokens × n`; input, if not reported, every byte of the request a token (as the declared worst case; an estimate, not a bound on real spend: ADR 0044). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
-| `counted` | Bool | the site counter counts this event (a limiter numbered, or will number, it): its number comes in a numbering record. A row with no number is left out of known spend, which the counter covers, until its number arrives or the gap timeout passes (ADR 0043) |
 
-- Numbering records (`golem.spend_seq`, ADR 0043) carry an event's number
-  in its site's counter for the scope and period: `schema_version`,
-  `event_id`, `site`, `scope_id`, `period`, `counter_seq` (from 1 each
-  period; 0 when the event never reached the counter). A row is written
-  when its call ends; its numbering record follows when the limiter
-  numbers it, even long after (an outage's replay). golem-control's
-  watermark is the contiguous prefix of the numbers whose rows it holds,
-  per site, scope and period (ADR 0042).
+- Known spend (ADR 0048): a snapshot carries, per scope and period, a
+  boundary B (a minute, an ingestion allowance before the snapshot's
+  time) and the sum of `cost_micros` over `golem.spend_dedup`'s rows of
+  that scope and period with `ended_at` before B, deduplicated by
+  `event_id`. The site counter holds the same calls' costs by the minute
+  of their end, so a call is counted on one side of B only. A row that
+  arrives later than the allowance is counted from the next snapshot
+  whose boundary passes it, and by reconciliation.
 - Rounding: per row, cost is computed in micro-units from integer token
   counts and prices in micro-units per million tokens, rounded half-even
   once, at the end.

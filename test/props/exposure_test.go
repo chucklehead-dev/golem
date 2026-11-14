@@ -2,6 +2,7 @@ package props
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -15,11 +16,13 @@ import (
 )
 
 // Hegel drives the real limiter (one per gateway over one shared store),
-// a provider that bills cancelled calls up to the worst case, a ledger that
-// ingests late and in any order, golem-control publishing watermarked
-// snapshots that each gateway applies on its own, Valkey outages with
-// per-gateway recovery and grace, and failovers; model/exposure.md judges
-// every run. The connect test in gateway/limit covers the other direction.
+// a provider that bills cancelled calls up to the worst case, a clock in
+// minutes, a ledger that ingests late and in any order within its
+// allowance, golem-control publishing snapshots with a boundary the
+// allowance behind, which each gateway applies on its own, Valkey outages
+// with per-gateway recovery and grace, and failovers; model/exposure.md
+// judges every run. The connect test in gateway/limit covers the other
+// direction.
 
 var (
 	requests = []string{"a1", "a2", "b1", "b2", "c1"}
@@ -34,10 +37,11 @@ const (
 	noScopeLimit                // per-principal limits only
 )
 
+// row is a ledger row: its call, cost and the minute the call ended.
 type row struct {
 	id   string
 	cost int64
-	seq  int64
+	at   int64
 }
 
 type limMachine struct {
@@ -48,7 +52,8 @@ type limMachine struct {
 	phase     map[string]string // idle, inflight, cancelled, done
 	tickets   map[string]*limit.Ticket
 	seen      map[string]int64
-	rows      []row // numbered, not yet ingested
+	clock     int64 // the minute
+	rows      []row // written, not yet ingested
 	ledger    []row
 	latest    limit.Known
 	applied   map[string]limit.Known
@@ -62,18 +67,27 @@ var (
 	period   = "2026-11"
 )
 
+// allowance is the ledger's ingestion allowance in minutes: the model's
+// ALLOWANCE.
+const allowance = 1
+
+func (m *limMachine) now() time.Time { return inPeriod.Add(time.Duration(m.clock) * time.Minute) }
+
 func newLimMachine(ctx context.Context, mut limitMutation) *limMachine {
 	st := limit.NewMem()
-	m := &limMachine{ctx: ctx, mut: mut, store: st, gws: map[string]*limit.Limiter{}, latest: limit.Known{Period: period},
+	st.Retain = 1000 * 24 * time.Hour // inPeriod is long past by the store's clock
+	m := &limMachine{ctx: ctx, mut: mut, store: st, gws: map[string]*limit.Limiter{}, latest: limit.Known{Period: period, Since: inPeriod},
 		phase: map[string]string{}, tickets: map[string]*limit.Ticket{}, seen: map[string]int64{},
 		recovered: map[string]bool{}, graced: map[string]bool{}, applied: map[string]limit.Known{}}
 	for _, g := range limitGws {
 		l := limit.New(st)
-		l.Now = func() time.Time { return inPeriod } // the model has one budget period
-		l.OnNumbered = func(n limit.Numbered) { m.rows = append(m.rows, row{n.ID, n.Cost, n.Seq}) }
+		l.Now = m.now                   // the model has one budget period
+		l.Grace = 1000 * 24 * time.Hour // the model ends a grace by graceEnds
 		m.gws[g] = l
 		m.recovered[g] = true
-		m.applied[g] = limit.Known{Period: period} // the model's initial snapshot: nothing, in its one period
+		// The model's initial snapshot: nothing, its boundary minute 0 (a
+		// gateway's zero Known counts the same: every minute).
+		m.applied[g] = limit.Known{Period: period, Since: inPeriod}
 	}
 	for _, r := range requests {
 		m.phase[r] = "idle"
@@ -123,6 +137,7 @@ func (m *limMachine) RuleComplete(tc hegel.TestCase) {
 
 func (m *limMachine) complete(r string, cost int64) {
 	m.tickets[r].Complete(m.ctx, cost)
+	m.rows = append(m.rows, row{r, cost, m.clock}) // its row, written at its end
 	m.phase[r] = "done"
 	qobs.Record(m.ctx, "complete", nil, "request", r, "cost", cost)
 }
@@ -135,6 +150,7 @@ func (m *limMachine) RuleCancel(tc hegel.TestCase) {
 	r := hegel.Draw(tc, hegel.SampledFrom(rs))
 	seen := int64(hegel.Draw(tc, hegel.Integers(1, 3)))
 	m.tickets[r].Cancel(m.ctx, seen)
+	m.rows = append(m.rows, row{r, seen, m.clock})
 	m.phase[r], m.seen[r] = "cancelled", seen
 	qobs.Record(m.ctx, "cancel", nil, "request", r, "seen", seen)
 }
@@ -153,7 +169,17 @@ func (m *limMachine) RuleProviderEnds(tc hegel.TestCase) {
 	qobs.Record(m.ctx, "providerEnds", nil, "request", r, "cost", cost)
 }
 
-// RuleDeliver: the ledger ingests a numbered row, late and in any order.
+// RuleTick: a minute passes, if every row on its way is within the
+// allowance of the next minute (the deployment's assumption).
+func (m *limMachine) RuleTick(hegel.TestCase) {
+	if slices.ContainsFunc(m.rows, func(r row) bool { return r.at < m.clock+1-allowance }) {
+		return
+	}
+	m.clock++
+	qobs.Record(m.ctx, "tick", nil)
+}
+
+// RuleDeliver: the ledger ingests a row, late and in any order.
 func (m *limMachine) RuleDeliver(tc hegel.TestCase) {
 	if len(m.rows) == 0 {
 		return
@@ -162,23 +188,16 @@ func (m *limMachine) RuleDeliver(tc hegel.TestCase) {
 	r := m.rows[i]
 	m.rows = slices.Delete(m.rows, i, i+1)
 	m.ledger = append(m.ledger, r)
-	qobs.Record(m.ctx, "deliver", nil, "id", r.id, "cost", r.cost, "seq", r.seq)
+	qobs.Record(m.ctx, "deliver", nil, "id", r.id, "cost", r.cost, "at", r.at)
 }
 
-// RulePublish: golem-control's snapshot: the ledger's contiguous
-// watermark and the spend of the rows up to it (ADR 0042).
+// RulePublish: golem-control's snapshot: a boundary the allowance behind
+// now, and the spend of the ledger's rows before it (ADR 0048).
 func (m *limMachine) RulePublish(hegel.TestCase) {
-	have := map[int64]bool{}
+	b := m.clock - allowance
+	k := limit.Known{Period: period, Since: inPeriod.Add(time.Duration(b) * time.Minute)}
 	for _, r := range m.ledger {
-		have[r.seq] = true
-	}
-	var w int64
-	for have[w+1] {
-		w++
-	}
-	k := limit.Known{Period: period, Watermark: w}
-	for _, r := range m.ledger {
-		if r.seq <= w {
+		if r.at < b {
 			k.Spend += r.cost
 		}
 	}
@@ -226,14 +245,15 @@ func (m *limMachine) RuleRecover(tc hegel.TestCase) {
 		return
 	}
 	for {
-		e, ok, err := m.gws[g].ReplayOne(m.ctx)
+		in, ok, err := m.gws[g].ReplayOne(m.ctx)
 		if err != nil {
 			tc.Errorf("replay at %s: %v", g, err) // aborts the case (Hegel)
 		}
 		if !ok {
 			break
 		}
-		qobs.Record(m.ctx, "replayOne", nil, "gateway", g, "id", e.ID, "cost", e.Cost)
+		at := (in.At.Unix() - inPeriod.Unix()) / 60
+		qobs.Record(m.ctx, "replayOne", nil, "gateway", g, "id", in.Call, "cost", in.Cost, "at", at)
 	}
 	if err := m.gws[g].Recover(m.ctx); err != nil {
 		tc.Errorf("recover %s: %v", g, err)
@@ -253,15 +273,15 @@ func (m *limMachine) RuleGraceEnds(tc hegel.TestCase) {
 	qobs.Record(m.ctx, "graceEnds", nil, "gateway", g)
 }
 
-// RuleFailover: Valkey loses its counter's tail.
+// RuleFailover: Valkey loses a minute of its counter.
 func (m *limMachine) RuleFailover(tc hegel.TestCase) {
-	n := len(m.store.Counter("s", period))
-	if m.down || n == 0 {
+	minutes := slices.Sorted(maps.Keys(m.store.Buckets("s", period)))
+	if m.down || len(minutes) == 0 {
 		return
 	}
-	keep := hegel.Draw(tc, hegel.Integers(0, n-1))
-	m.store.Failover("s", period, keep)
-	qobs.Record(m.ctx, "failover", nil, "keep", keep)
+	minute := hegel.Draw(tc, hegel.SampledFrom(minutes))
+	m.store.Failover("s", period, minute)
+	qobs.Record(m.ctx, "failover", nil, "t", minute-inPeriod.Unix()/60)
 }
 
 func limBody(mut limitMutation) func(hegel.TestCase, *qhegel.Case) {

@@ -196,7 +196,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call := telemetry.Call{RequestID: reqIDs, Principal: principal.ID, PrincipalKind: principal.Kind, Key: principal.Key,
 		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Model: target.Model,
 		Deployment: deployment, Provider: target.Backend, Started: started,
-		Currency: snap.Snapshot.Currency, Counted: ticket != nil, Waived: ticket != nil && ticket.Waived()}
+		Currency: snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived()}
 	if ticket != nil {
 		call.Period = ticket.Period() // the counter's: one period per call
 	}
@@ -253,9 +253,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call.Ended, call.Status, call.Usage, call.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
 	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
 	call.Outcome, call.ErrorOrigin, call.ErrorCode = outcome(res, cut)
-	// The row is written before the ticket numbers its event: the
-	// limiter's OnNumbered then emits the event's numbering record
-	// (golem.spend_seq, ADR 0043), joined to the row by event.
+	// The row's end is stamped before the ticket adds the cost to the
+	// counter's minute, so the minute is never before the row's end: a
+	// call that ended after a snapshot's boundary is in the counter's
+	// minutes from it (ADR 0048). One that ends at a minute's last
+	// millisecond may land in both, which errs high.
 	h.Telemetry.Ended(ctx, call)
 	switch {
 	case ticket == nil: // nothing counted

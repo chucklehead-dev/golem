@@ -1,7 +1,9 @@
 # 0042: Known spend by counter sequence and ledger watermark
 
-Status: Accepted. Amends ADR 0031 (how known spend is computed) and ADR 0041
-§7.6 (the hand-off between snapshot and site counter).
+Status: Superseded by [0048](0048-known-spend-by-time-boundary.md) (minute
+counters and a time boundary, once budgets were controls: ADR 0044).
+Amended ADR 0031 (how known spend is computed) and ADR 0041 §7.6 (the
+hand-off between snapshot and site counter).
 
 ## Context
 

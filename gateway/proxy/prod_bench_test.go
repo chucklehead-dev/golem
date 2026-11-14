@@ -13,7 +13,6 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/key"
 )
@@ -39,7 +38,7 @@ func BenchmarkProduction(b *testing.B) {
 			k := key.New(key.Dev)
 			events := anthropicStream(200)
 			s := &stub{events: events}
-			h, lim := standaloneHandler(b, `apiVersion: golem.dev/v1alpha1
+			h, _ := standaloneHandler(b, `apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
@@ -59,7 +58,6 @@ spec:
 				b.Fatal(err)
 			}
 			h.Telemetry = tel
-			lim.OnNumbered = func(n limit.Numbered) { tel.Numbered(n.Scope, n.Period, n.ID, n.Seq) }
 			var br bytes.Reader
 			req := httptest.NewRequest("POST", "/v1/messages", nil)
 			req.Header.Set("X-Api-Key", k)

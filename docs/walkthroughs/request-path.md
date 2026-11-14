@@ -22,7 +22,7 @@ the pass-through fast path), [0002](../adr/0002-no-replay-after-first-byte.md)
 declared worst case), [0037](../adr/0037-request-policy-and-cache-stability.md)
 (request policy, duplicate members), [0041](../adr/0041-security-boundaries-and-incident-controls.md)
 §7.6 (the provider's tail) and [0043](../adr/0043-ledger-durability.md) (the
-row before its numbering record). The neighbouring walkthroughs are
+row written at the call's end). The neighbouring walkthroughs are
 [gateway-edges.md](gateway-edges.md) (auth, snapshots, telemetry, the
 binary) and [accounting.md](accounting.md) (the limiter behind admission).
 
@@ -175,8 +175,9 @@ and metrics and writes the `golem.spend` row (`telemetry/ledger.go:37`).
 Only then does the ticket end (`proxy.go:260-271`): `complete` with the
 cost, or, for an abandoned or cut response, `cancel` with the cost seen and
 the slot held for `ProviderTail` (at most to the call's deadline), because
-the provider may go on working after the connection closes. The limiter's
-numbering record follows the row (ADR 0043).
+the provider may go on working after the connection closes. The row's end
+is stamped before the counter's minute, so a snapshot's boundary puts the
+call on one side only (ADR 0048).
 
 **A cut stream.** If the provider's response was cut and the caller is
 still there, the stream gets the contract's `upstream.stream_failed` event

@@ -5,30 +5,29 @@ import (
 	"slices"
 	"strconv"
 	"sync/atomic"
-
-	"github.com/valkey-io/valkey-go"
+	"time"
 )
 
 // valkeyFaults injects the model's environment into a Valkey store: an
-// outage (every call fails, and the slots' TTLs lapse) and a failover (the
-// counter loses its tail, and its numbers are given again).
+// outage (every call fails, and the slots' TTLs lapse) and a failover (a
+// minute of the counter lost).
 type valkeyFaults struct {
 	*Valkey
 	down atomic.Bool
 }
 
-func (f *valkeyFaults) Admit(ctx context.Context, a Admission) (Outcome, int64, bool, error) {
+func (f *valkeyFaults) Admit(ctx context.Context, a Admission) (Outcome, int64, error) {
 	if f.down.Load() {
-		return 0, 0, false, ErrUnavailable
+		return 0, 0, ErrUnavailable
 	}
 	return f.Valkey.Admit(ctx, a)
 }
 
-func (f *valkeyFaults) Complete(ctx context.Context, period string, s Slot, e Event) (int64, error) {
+func (f *valkeyFaults) Complete(ctx context.Context, in Increment, s Slot) error {
 	if f.down.Load() {
-		return 0, ErrUnavailable
+		return ErrUnavailable
 	}
-	return f.Valkey.Complete(ctx, period, s, e)
+	return f.Valkey.Complete(ctx, in, s)
 }
 
 func (f *valkeyFaults) Release(ctx context.Context, s Slot) error {
@@ -45,25 +44,25 @@ func (f *valkeyFaults) Reacquire(ctx context.Context, ss []Slot) error {
 	return f.Valkey.Reacquire(ctx, ss)
 }
 
-func (f *valkeyFaults) Add(ctx context.Context, scope, period string, e Event) (int64, error) {
+func (f *valkeyFaults) Add(ctx context.Context, in Increment) error {
 	if f.down.Load() {
-		return 0, ErrUnavailable
+		return ErrUnavailable
 	}
-	return f.Valkey.Add(ctx, scope, period, e)
+	return f.Valkey.Add(ctx, in)
 }
 
-func (f *valkeyFaults) AddAll(ctx context.Context, incs []Increment) ([]int64, error) {
+func (f *valkeyFaults) AddAll(ctx context.Context, incs []Increment) error {
 	if f.down.Load() {
-		return nil, ErrUnavailable
+		return ErrUnavailable
 	}
 	return f.Valkey.AddAll(ctx, incs)
 }
 
-func (f *valkeyFaults) After(ctx context.Context, scope, period string, w int64) (int64, bool, error) {
+func (f *valkeyFaults) Since(ctx context.Context, scope, period string, since time.Time) (int64, error) {
 	if f.down.Load() {
-		return 0, false, ErrUnavailable
+		return 0, ErrUnavailable
 	}
-	return f.Valkey.After(ctx, scope, period, w)
+	return f.Valkey.Since(ctx, scope, period, since)
 }
 
 // SetDown: going down, every slot lapses (the outage outlasts the TTL).
@@ -80,38 +79,27 @@ func (f *valkeyFaults) SetDown(down bool) {
 	f.down.Store(down)
 }
 
-var truncate = valkey.NewLuaScript(`
-local n = tonumber(redis.call('GET', KEYS[1]) or '0')
-local keep = tonumber(ARGV[1])
-for m = keep + 1, n do
-  local id = redis.call('HGET', KEYS[5], m)
-  if id then redis.call('HDEL', KEYS[4], id) end
-  redis.call('HDEL', KEYS[5], m)
-  redis.call('HDEL', KEYS[3], m)
-  redis.call('ZREM', KEYS[6], m)
-end
-redis.call('SET', KEYS[1], keep)
-redis.call('SET', KEYS[2], keep == 0 and 0 or (redis.call('HGET', KEYS[3], keep) or 0))
-return 1`)
-
-// Failover loses the counter after its first keep events.
-func (f *valkeyFaults) Failover(sc, period string, keep int) {
-	truncate.Exec(context.Background(), f.c, f.counterKeys(sc, period), []string{strconv.Itoa(keep)})
+// Failover loses a minute of the counter, and its share of the total, as a
+// replica missing those writes would.
+func (f *valkeyFaults) Failover(sc, period string, minute int64) {
+	ctx := context.Background()
+	k, field := f.counterKey(sc, period), strconv.FormatInt(minute, 10)
+	lost, _ := f.c.Do(ctx, f.c.B().Hget().Key(k).Field(field).Build()).AsInt64()
+	f.c.Do(ctx, f.c.B().Hdel().Key(k).Field(field).Build())
+	f.c.Do(ctx, f.c.B().Hincrby().Key(k).Field("total").Increment(-lost).Build())
 }
 
-// Counter lists a scope's events in number order.
-func (f *valkeyFaults) Counter(sc, period string) []Event {
-	ctx := context.Background()
-	k := f.counterKeys(sc, period)
-	n, _ := f.c.Do(ctx, f.c.B().Get().Key(k[0]).Build()).AsInt64()
-	var out []Event
-	var prev int64
-	for m := int64(1); m <= n; m++ {
-		ms := strconv.FormatInt(m, 10)
-		id, _ := f.c.Do(ctx, f.c.B().Hget().Key(k[4]).Field(ms).Build()).ToString()
-		cum, _ := f.c.Do(ctx, f.c.B().Hget().Key(k[2]).Field(ms).Build()).AsInt64()
-		out = append(out, Event{id, cum - prev})
-		prev = cum
+// Buckets is the counter, minute to spend.
+func (f *valkeyFaults) Buckets(sc, period string) map[int64]int64 {
+	m, _ := f.c.Do(context.Background(), f.c.B().Hgetall().Key(f.counterKey(sc, period)).Build()).AsStrMap()
+	out := map[int64]int64{}
+	for k, v := range m {
+		minute, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			continue // "total"
+		}
+		spend, _ := strconv.ParseInt(v, 10, 64)
+		out[minute] = spend
 	}
 	return out
 }

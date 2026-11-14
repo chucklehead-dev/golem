@@ -110,8 +110,7 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    tail), or a `*Refusal` rendered with its code and Retry-After; a caller
    gone during admission is told nothing. `gateway/limit` is golem's
    implementation (`Limiter.Admitter`), with its renewal and recovery loop
-   (`Run`) and last accounting (`Finish`), and owes the ledger one
-   numbering record per counted event (ADR 0042, 0043). Admission is a
+   (`Run`) and last accounting (`Finish`). Admission is a
    fixed stage after routing, not a hook: ADR 0014 has no phase after
    routing, its hooks are stateless per phase, and its Complete phase may
    drop work, while an admitted call holds a slot across its life and is
@@ -165,7 +164,7 @@ gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object
 gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
 gateway/admission/     the request path's contract with admission: Call, Admitter, Ticket, Refusal (a leaf)
 gateway/limit/         Limiter (admission's implementation): known-spend checks, concurrency slots; Valkey and in-memory stores
-                       (built: known spend as snapshot spend plus the counter after the ledger watermark, O(1) (ADR 0042);
+                       (built: known spend as snapshot spend plus the site counter's minutes from the snapshot's boundary (ADR 0048);
                        soft and declared-worst-case checks; principal and scope slots; holding on cancel; outages with waivers, replay and a
                        recovery grace; over an in-memory store and Valkey (Lua scripts; slot TTLs on the server's clock);
                        both checked against model/exposure.md)

@@ -61,9 +61,6 @@ type Call struct {
 	// Waived: admitted outside the budget's bound, while the site store was
 	// unreachable or in the grace after a recovery (ADR 0041 §7.3).
 	Waived bool
-	// Counted: the limiter counts this call's event, so a numbering record
-	// follows the row (golem.spend_seq, ADR 0043).
-	Counted bool
 }
 
 // Telemetry records calls. Its methods are safe for concurrent use, and on
@@ -227,11 +224,4 @@ func (t *Telemetry) Refused(ctx context.Context, code contract.Code) {
 			attribute.String("golem.error.code", code.Name), attribute.String("golem.error.origin", string(code.Origin))))}
 	})
 	t.refusals.Add(ctx, 1, opts...) // a 429 storm costs no allocation here
-}
-
-// Numbered is the limiter's OnNumbered: the event's numbering record.
-func (t *Telemetry) Numbered(scope, period, eventID string, seq int64) {
-	if t != nil {
-		t.Ledger.Numbered(scope, period, eventID, seq)
-	}
 }

@@ -51,9 +51,10 @@ baseline one, marked in both.
 | [0040](0040-argo-cd-and-crossplane.md) | Delivery through Argo CD and Argo Rollouts; cloud resources through the platform's Crossplane (`GolemInstallation`, `GolemSite`) |
 
 | [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, the pool capture boundary and a golem-owned capture collector, request feature modes by route class, delivery privileges, composite publication freshness by consistent reads, narrowed budget claims |
-| [0042](0042-known-spend-by-counter-watermark.md) | Known spend by counter sequence and ledger watermark: O(1) admission, exact under snapshot skew; supersedes the hand-off by event |
+| [0042](0042-known-spend-by-counter-watermark.md) | Known spend by counter sequence and ledger watermark: O(1) admission, exact under snapshot skew; supersedes the hand-off by event. Superseded by 0048 |
 | [0043](0043-ledger-durability.md) | Ledger durability in a node-local collector's persistent queue, not a gateway spool; rows written at a call's end with their numbers joined later; gaps reconstructed from the site counter before they are declared lost |
 | [0044](0044-budgets-are-controls-not-ceilings.md) | Budgets are admission and monitoring controls, not spending ceilings; provider-account limits are the financial backstop; reconciliation is authoritative; `strict` renamed `declaredWorstCaseCheck`, described by what it closes on |
 | [0045](0045-leadership-in-the-state-document.md) | golem-control's leadership is a lease in the state document, its epoch beside the publication record it fences |
 | [0046](0046-control-api-registration.md) | The control API has its own Entra registration (`api://golem-control`, `golem.manage`); a gateway token cannot call it; services recognised by `idtyp` |
 | [0047](0047-identity-from-entra-groups.md) | Users and their memberships come from the Entra groups bound to scopes, synced from Graph; only the sync and admins bind an Entra ID; `entra:` reserved |
+| [0048](0048-known-spend-by-time-boundary.md) | Known spend by a time boundary (an ingestion allowance back) and per-minute site counters; no numbering, no watermark job; late rows and lost minutes undercount until the next boundary, stated; recovery converges under load |

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"testing"
 	"time"
 )
@@ -67,8 +66,6 @@ func TestOutage(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()
 	g1, g2 := New(st), New(st)
-	var numbered []int64
-	g1.OnNumbered = func(n Numbered) { numbered = append(numbered, n.Seq) }
 	st.SetDown(true)
 	// Each gateway admits against its own counts: p1 has two calls running.
 	a, err1 := g1.Admit(ctx, scopeCall("a", "p1"))
@@ -77,41 +74,59 @@ func TestOutage(t *testing.T) {
 		t.Fatalf("%v %v: both admitted and both waivers", err1, err2)
 	}
 	a.Complete(ctx, 3)
-	if p := g1.Pending("s"); len(p) != 1 || len(numbered) != 0 {
-		t.Fatalf("pending %v numbered %v: the increment is held, and has no number yet", p, numbered)
+	if p := g1.Pending("s"); len(p) != 1 || len(st.Buckets("s", g1.period(g1.now()))) != 0 {
+		t.Fatalf("pending %v: the increment is held, the counter without it", p)
 	}
 	st.SetDown(false)
 	g1.Recover(ctx)
 	g2.Recover(ctx)
-	if g1.Known(ctx, "s") != 3 || len(st.Slots()) != 1 || !slices.Equal(numbered, []int64{1}) {
-		t.Fatalf("known %d, slots %v, numbered %v: the increment replayed and numbered, b's slot re-acquired",
-			g1.Known(ctx, "s"), st.Slots(), numbered)
+	if g1.Known(ctx, "s") != 3 || len(st.Slots()) != 1 || len(g1.Pending("s")) != 0 {
+		t.Fatalf("known %d, slots %v: the increment replayed, b's slot re-acquired", g1.Known(ctx, "s"), st.Slots())
 	}
 }
 
-// TestWatermark: known spend is the snapshot's plus the counter after its
-// watermark, on each gateway whichever snapshot it holds.
-func TestWatermark(t *testing.T) {
+// TestBoundary: known spend is the snapshot's (the ledger's, for calls
+// that ended before its boundary) plus the counter's minutes from the
+// boundary on, on each gateway whichever snapshot it holds.
+func TestBoundary(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()
 	g1, g2 := New(st), New(st)
-	for i, c := range []int64{3, 5, 2} {
+	now := time.Date(2026, 11, 13, 12, 0, 30, 0, time.UTC)
+	g1.Now, g2.Now, st.Now = func() time.Time { return now }, func() time.Time { return now }, func() time.Time { return now }
+	for i, c := range []int64{3, 5, 2} { // in 12:00, 12:01 and 12:02
 		tk, _ := g1.Admit(ctx, scopeCall(fmt.Sprint(i), "p1"))
 		tk.Complete(ctx, c)
+		now = now.Add(time.Minute)
 	}
-	// The ledger has events 1 and 2 (8); g1 applies that snapshot, g2 not.
-	g1.ApplySnapshot(ctx, "s", Known{Spend: 8, Watermark: 2})
+	// The ledger has the calls that ended before 12:02 (8); g1 applies that
+	// snapshot, g2 has none.
+	g1.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 8, Since: time.Date(2026, 11, 13, 12, 2, 0, 0, time.UTC)})
 	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 10 || b != 10 {
-		t.Fatalf("known %d on the new snapshot, %d on the old: both must be 10", a, b)
+		t.Fatalf("known %d on the new snapshot, %d on none: both must be 10", a, b)
+	}
+	// A minute past retention is gone: a snapshot that old undercounts it,
+	// the stated limit (ADR 0048), and the counter stays bounded. A gateway
+	// with no boundary reads the period's whole total, which keeps it.
+	now = now.Add(st.Retain)
+	late := scopeCall("late", "p1")
+	late.Budget = 0
+	tk, err := g2.Admit(ctx, late)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk.Complete(ctx, 1)
+	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 9 || b != 11 || len(st.Buckets("s", "2026-11")) != 1 {
+		t.Fatalf("known %d (want 9: 12:02's minute gone), %d (want 11, the total), minutes %v", a, b, st.Buckets("s", "2026-11"))
 	}
 }
 
 // blocking is a store whose calls wait for their context.
 type blocking struct{ Store }
 
-func (blocking) Admit(ctx context.Context, _ Admission) (Outcome, int64, bool, error) {
+func (blocking) Admit(ctx context.Context, _ Admission) (Outcome, int64, error) {
 	<-ctx.Done()
-	return 0, 0, false, ctx.Err()
+	return 0, 0, ctx.Err()
 }
 
 // TestCallerCancelIsNoOutage: a caller going away mid-admission returns
@@ -135,16 +150,13 @@ func TestCallerCancelIsNoOutage(t *testing.T) {
 
 // TestPeriodRollover: a new month starts from nothing. The snapshot of the
 // old month is not counted against the new one, and the counter is the
-// new month's (numbered from 1), so last month's watermark cannot make the
-// new month's events disappear or the old month's spend refuse every call.
+// new month's, so the old month's spend cannot refuse every call.
 func TestPeriodRollover(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()
 	l := New(st)
 	now := time.Date(2026, 11, 30, 23, 59, 0, 0, time.UTC)
 	l.Now = func() time.Time { return now }
-	var seqs []int64
-	l.OnNumbered = func(n Numbered) { seqs = append(seqs, n.Seq) }
 	for i := range 3 {
 		tk, err := l.Admit(ctx, scopeCall(fmt.Sprint("nov", i), "p1"))
 		if err != nil {
@@ -152,7 +164,7 @@ func TestPeriodRollover(t *testing.T) {
 		}
 		tk.Complete(ctx, 4)
 	}
-	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 12, Watermark: 3})
+	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 12, Since: now.Add(time.Minute)})
 	if _, err := l.Admit(ctx, scopeCall("late", "p1")); !errors.Is(err, ErrBudget) {
 		t.Fatalf("November is spent (12 of 10): %v", err)
 	}
@@ -165,15 +177,15 @@ func TestPeriodRollover(t *testing.T) {
 	if got := l.Known(ctx, "s"); got != 2 {
 		t.Fatalf("December's known spend %d, want 2", got)
 	}
-	if !slices.Equal(seqs, []int64{1, 2, 3, 1}) || len(st.Counter("s", "2026-12")) != 1 {
-		t.Fatalf("numbers %v: each period's counter numbers from 1", seqs)
+	if len(st.Buckets("s", "2026-12")) != 1 {
+		t.Fatalf("December's counter %v", st.Buckets("s", "2026-12"))
 	}
 	// A call admitted in November and completed in December is November's.
 	now = time.Date(2027, 1, 31, 23, 59, 0, 0, time.UTC)
 	jan, _ := l.Admit(ctx, scopeCall("jan", "p1"))
 	now = now.Add(time.Hour)
 	jan.Complete(ctx, 1)
-	if len(st.Counter("s", "2027-01")) != 1 || len(st.Counter("s", "2027-02")) != 0 {
+	if len(st.Buckets("s", "2027-01")) != 1 || len(st.Buckets("s", "2027-02")) != 0 {
 		t.Fatal("a call's cost belongs to the period it started in")
 	}
 }
@@ -254,25 +266,23 @@ type counting struct {
 	adds, batches int
 }
 
-func (c *counting) Add(ctx context.Context, scope, period string, e Event) (int64, error) {
+func (c *counting) Add(ctx context.Context, in Increment) error {
 	c.adds++
-	return c.Mem.Add(ctx, scope, period, e)
+	return c.Mem.Add(ctx, in)
 }
 
-func (c *counting) AddAll(ctx context.Context, incs []Increment) ([]int64, error) {
+func (c *counting) AddAll(ctx context.Context, incs []Increment) error {
 	c.batches++
 	return c.Mem.AddAll(ctx, incs)
 }
 
 // TestRecoverBatches: an outage's held increments are replayed in batches,
-// each numbered in order, and the held ones are bounded.
+// and the held ones are bounded.
 func TestRecoverBatches(t *testing.T) {
 	ctx := t.Context()
 	st := &counting{Mem: NewMem()}
 	l := New(st)
 	l.MaxPending = 600
-	var numbered []int64
-	l.OnNumbered = func(n Numbered) { numbered = append(numbered, n.Seq) }
 	st.SetDown(true)
 	for i := range 700 {
 		c := scopeCall(fmt.Sprint(i), fmt.Sprint("p", i))
@@ -283,25 +293,97 @@ func TestRecoverBatches(t *testing.T) {
 		}
 		tk.Complete(ctx, 1)
 	}
-	if len(l.Pending("s")) != 600 || len(numbered) != 100 || slices.ContainsFunc(numbered, func(n int64) bool { return n != 0 }) {
-		t.Fatalf("pending %d, numbered %d: past MaxPending the oldest go to the ledger unnumbered", len(l.Pending("s")), len(numbered))
+	if len(l.Pending("s")) != 600 || l.Dropped.Load() != 100 {
+		t.Fatalf("pending %d, dropped %d: past MaxPending the oldest are dropped, and counted", len(l.Pending("s")), l.Dropped.Load())
 	}
 	st.SetDown(false)
 	if err := l.Recover(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if st.batches != 3 || st.adds != 0 || len(st.Counter("s", l.period(l.now()))) != 600 {
-		t.Fatalf("%d batches, %d single adds, counter %d: 600 replayed in three round trips",
-			st.batches, st.adds, len(st.Counter("s", l.period(l.now()))))
+	if st.batches != 3 || st.adds != 0 || l.Known(ctx, "s") != 600 {
+		t.Fatalf("%d batches, %d single adds, known %d: 600 replayed in three round trips", st.batches, st.adds, l.Known(ctx, "s"))
 	}
-	if got := numbered[100:]; got[0] != 1 || got[599] != 600 {
-		t.Fatalf("numbers %d..%d, want 1..600 in order", got[0], got[599])
+}
+
+// busy is a store at which, at every add and every renewal, another of
+// the limiter's calls completes first: a gateway whose calls keep ending
+// while it recovers.
+type busy struct {
+	*Mem
+	l *Limiter
+	n int
+}
+
+func (b *busy) complete(ctx context.Context) {
+	b.n++
+	c := scopeCall(fmt.Sprint("busy", b.n), fmt.Sprint("busy", b.n))
+	c.ScopeLimit, c.Budget = 0, 0
+	if tk, err := b.l.Admit(ctx, c); err == nil {
+		tk.Complete(ctx, 1)
+	}
+}
+
+func (b *busy) AddAll(ctx context.Context, incs []Increment) error {
+	b.complete(ctx)
+	return b.Mem.AddAll(ctx, incs)
+}
+
+func (b *busy) Reacquire(ctx context.Context, slots []Slot) error {
+	b.complete(ctx)
+	return b.Mem.Reacquire(ctx, slots)
+}
+
+// TestRecoverUnderLoad: a gateway whose calls keep completing while it
+// replays and re-registers its slots (each completion held, since it is
+// still down) recovers in one Recover, and loses none of them. A recovery
+// that waited for the held increments to run out before marking itself up
+// would never finish: one is always held by then.
+func TestRecoverUnderLoad(t *testing.T) {
+	ctx := t.Context()
+	st := &busy{Mem: NewMem()}
+	l := New(st)
+	st.l = l
+	st.SetDown(true)
+	tk, _ := l.Admit(ctx, scopeCall("a", "p1"))
+	tk.Complete(ctx, 1) // held
+	st.SetDown(false)
+	if err := l.Recover(ctx); err != nil || l.Down() {
+		t.Fatalf("Recover = %v, down %v: it must converge under load", err, l.Down())
+	}
+	if held, known := len(l.Pending("s")), l.Known(ctx, "s"); held != 0 || known != int64(1+st.n) {
+		t.Fatalf("held %d, known %d: want all %d completions counted", held, known, 1+st.n)
+	}
+}
+
+// TestCompletionRacingRecovery: a completion that found the limiter down,
+// and holds its increment only after a recovery has marked it up and
+// drained what was held, must not be held where no replay will find it:
+// hold refuses it, and it goes to the store itself.
+func TestCompletionRacingRecovery(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	st.SetDown(true)
+	tk, _ := l.Admit(ctx, scopeCall("a", "p1")) // the limiter is down now
+	ran := false
+	l.beforeHold = func() {
+		if !ran { // the recovery runs between the completion's look and its hold
+			ran = true
+			st.SetDown(false)
+			if err := l.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	tk.Complete(ctx, 4)
+	if held, known := len(l.Pending("s")), l.Known(ctx, "s"); !ran || l.Down() || held != 0 || known != 4 {
+		t.Fatalf("ran %v, down %v, held %d, known %d: the increment must reach the counter", ran, l.Down(), held, known)
 	}
 }
 
 // TestPeriodOfStart: a call belongs to the period it started in, though
 // admitted after midnight (its body still arriving): the counter it is
-// numbered in is the one its ledger row names.
+// added to is the one its ledger row names.
 func TestPeriodOfStart(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()
@@ -314,7 +396,7 @@ func TestPeriodOfStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk.Complete(ctx, 1)
-	if tk.Period() != "2026-11" || len(st.Counter("s", "2026-11")) != 1 || len(st.Counter("s", "2026-12")) != 0 {
+	if tk.Period() != "2026-11" || len(st.Buckets("s", "2026-11")) != 1 || len(st.Buckets("s", "2026-12")) != 0 {
 		t.Fatalf("period %s: the call started in November is counted there", tk.Period())
 	}
 }
@@ -356,9 +438,7 @@ func TestRenewalStopsAtDeadline(t *testing.T) {
 // nothing more and frees nothing twice.
 func TestTicketEndsOnce(t *testing.T) {
 	ctx := t.Context()
-	var seen []int64
 	l := New(NewMem())
-	l.OnNumbered = func(n Numbered) { seen = append(seen, n.Cost) }
 	a, _ := l.Admit(ctx, scopeCall("a", "p1"))
 	a.Cancel(ctx, 3)
 	a.Complete(ctx, 5) // after Cancel: ignored
@@ -367,8 +447,8 @@ func TestTicketEndsOnce(t *testing.T) {
 	b.Complete(ctx, 2)
 	b.Complete(ctx, 2)
 	b.Cancel(ctx, 4)
-	if len(seen) != 2 || seen[0] != 3 || seen[1] != 2 || l.Known(ctx, "s") != 5 {
-		t.Fatalf("numbered %v, known %d: each ticket charged once (3 and 2)", seen, l.Known(ctx, "s"))
+	if l.Known(ctx, "s") != 5 {
+		t.Fatalf("known %d: each ticket charged once (3 and 2)", l.Known(ctx, "s"))
 	}
 }
 
