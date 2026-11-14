@@ -30,26 +30,34 @@ type call struct {
 	out  io.Writer
 }
 
-// done reports a change made, or, in a dry run, one that would be.
-func (c *call) done(what string) {
-	if c.dry {
+// done ends a mutating command: with err, the call's, if it failed; else
+// it reports the change made, or, in a dry run, the one that would be.
+func (c *call) done(err error, what string) error {
+	switch {
+	case err != nil:
+		return err
+	case c.dry:
 		fmt.Fprintln(c.out, "ok (dry run, nothing written):", what)
-	} else {
+	default:
 		fmt.Fprintln(c.out, what)
 	}
+	return nil
 }
+
+// runFunc runs a command once its arguments and flags are parsed.
+type runFunc func(context.Context, *call) error
 
 // apiCommand is a command over the control API.
 type apiCommand struct {
 	args int // positional arguments, which come before the flags
 	// flags defines the command's own flags on fs and returns what runs
 	// the command once they are parsed.
-	flags func(fs *flag.FlagSet) func(context.Context, *call) error
+	flags func(fs *flag.FlagSet) runFunc
 }
 
 // noFlags is a command with no flags of its own.
-func noFlags(run func(context.Context, *call) error) func(*flag.FlagSet) func(context.Context, *call) error {
-	return func(*flag.FlagSet) func(context.Context, *call) error { return run }
+func noFlags(run runFunc) func(*flag.FlagSet) runFunc {
+	return func(*flag.FlagSet) runFunc { return run }
 }
 
 // apiCommands are golemctl's commands over the control API, by name.
@@ -91,7 +99,7 @@ var apiCommands = map[string]apiCommand{ // read-only
 			"managers", joined(m.Managers, ", ", "-"),
 			"groups", joined(m.Groups, ", ", "-"))
 	})},
-	"keys list": {flags: func(fs *flag.FlagSet) func(context.Context, *call) error {
+	"keys list": {flags: func(fs *flag.FlagSet) runFunc {
 		scope := fs.String("scope", "", "only this scope's keys")
 		return func(ctx context.Context, c *call) error {
 			res, err := c.keys.ListKeys(ctx, connect.NewRequest(&keysv1.ListKeysRequest{Scope: *scope}))
@@ -114,63 +122,45 @@ var apiCommands = map[string]apiCommand{ // read-only
 			return tw.Flush()
 		}
 	}},
-	"scopes create": {args: 1, flags: func(fs *flag.FlagSet) func(context.Context, *call) error {
+	"scopes create": {args: 1, flags: func(fs *flag.FlagSet) runFunc {
 		models := fs.String("models", "", "the route aliases its members may call, comma-separated")
 		budget := fs.Int64("budget-micros", 0, "the period's budget in micro-units of the currency")
 		return func(ctx context.Context, c *call) error {
-			if _, err := c.org.CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: c.pos[0], ValidateOnly: c.dry,
-				Policy: &orgv1.ScopePolicy{Models: splitList(*models), BudgetMicros: *budget}})); err != nil {
-				return err
-			}
-			c.done("scope " + c.pos[0] + " created")
-			return nil
+			_, err := c.org.CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: c.pos[0], ValidateOnly: c.dry,
+				Policy: &orgv1.ScopePolicy{Models: splitList(*models), BudgetMicros: *budget}}))
+			return c.done(err, "scope "+c.pos[0]+" created")
 		}
 	}},
-	"members add": {args: 2, flags: func(fs *flag.FlagSet) func(context.Context, *call) error {
+	"members add": {args: 2, flags: func(fs *flag.FlagSet) runFunc {
 		kind := fs.String("kind", "user", "user or service")
 		entra := fs.String("entra", "", "the user's Entra object ID, or the service's app ID (admins only; users usually come from bound groups)")
 		return func(ctx context.Context, c *call) error {
-			if _, err := c.org.AddMember(ctx, connect.NewRequest(&orgv1.AddMemberRequest{Scope: c.pos[0], ValidateOnly: c.dry,
-				Member: &orgv1.Member{Id: c.pos[1], Kind: *kind, Entra: *entra}})); err != nil {
-				return err
-			}
-			c.done(c.pos[1] + " is a member of " + c.pos[0])
-			return nil
+			_, err := c.org.AddMember(ctx, connect.NewRequest(&orgv1.AddMemberRequest{Scope: c.pos[0], ValidateOnly: c.dry,
+				Member: &orgv1.Member{Id: c.pos[1], Kind: *kind, Entra: *entra}}))
+			return c.done(err, c.pos[1]+" is a member of "+c.pos[0])
 		}
 	}},
 	"members remove": {args: 2, flags: noFlags(func(ctx context.Context, c *call) error {
-		if _, err := c.org.RemoveMember(ctx, connect.NewRequest(&orgv1.RemoveMemberRequest{Scope: c.pos[0], Principal: c.pos[1],
-			ValidateOnly: c.dry})); err != nil {
-			return err
-		}
-		c.done(c.pos[1] + " removed from " + c.pos[0] + " (its keys there revoked)")
-		return nil
+		_, err := c.org.RemoveMember(ctx, connect.NewRequest(&orgv1.RemoveMemberRequest{Scope: c.pos[0], Principal: c.pos[1],
+			ValidateOnly: c.dry}))
+		return c.done(err, c.pos[1]+" removed from "+c.pos[0]+" (its keys there revoked)")
 	})},
 	"groups bind": {args: 2, flags: noFlags(func(ctx context.Context, c *call) error {
-		if _, err := c.org.BindGroup(ctx, connect.NewRequest(&orgv1.BindGroupRequest{Scope: c.pos[0], Group: c.pos[1],
-			ValidateOnly: c.dry})); err != nil {
-			return err
-		}
-		c.done("group " + c.pos[1] + " is bound to " + c.pos[0] + ": its members join at the next sync")
-		return nil
+		_, err := c.org.BindGroup(ctx, connect.NewRequest(&orgv1.BindGroupRequest{Scope: c.pos[0], Group: c.pos[1],
+			ValidateOnly: c.dry}))
+		return c.done(err, "group "+c.pos[1]+" is bound to "+c.pos[0]+": its members join at the next sync")
 	})},
 	"groups unbind": {args: 2, flags: noFlags(func(ctx context.Context, c *call) error {
-		if _, err := c.org.UnbindGroup(ctx, connect.NewRequest(&orgv1.UnbindGroupRequest{Scope: c.pos[0], Group: c.pos[1],
-			ValidateOnly: c.dry})); err != nil {
-			return err
-		}
-		c.done("group " + c.pos[1] + " is unbound from " + c.pos[0] + ": the memberships it gave end at the next sync")
-		return nil
+		_, err := c.org.UnbindGroup(ctx, connect.NewRequest(&orgv1.UnbindGroupRequest{Scope: c.pos[0], Group: c.pos[1],
+			ValidateOnly: c.dry}))
+		return c.done(err, "group "+c.pos[1]+" is unbound from "+c.pos[0]+": the memberships it gave end at the next sync")
 	})},
 	"managers add": {args: 2, flags: noFlags(func(ctx context.Context, c *call) error {
-		if _, err := c.org.BindManager(ctx, connect.NewRequest(&orgv1.BindManagerRequest{Scope: c.pos[0], Principal: c.pos[1],
-			ValidateOnly: c.dry})); err != nil {
-			return err
-		}
-		c.done(c.pos[1] + " manages " + c.pos[0])
-		return nil
+		_, err := c.org.BindManager(ctx, connect.NewRequest(&orgv1.BindManagerRequest{Scope: c.pos[0], Principal: c.pos[1],
+			ValidateOnly: c.dry}))
+		return c.done(err, c.pos[1]+" manages "+c.pos[0])
 	})},
-	"keys create": {flags: func(fs *flag.FlagSet) func(context.Context, *call) error {
+	"keys create": {flags: func(fs *flag.FlagSet) runFunc {
 		scope := fs.String("scope", "", "the scope the key calls in")
 		owner := fs.String("owner", "", "the principal it acts as (default: you; a service's, if you manage the scope)")
 		models := fs.String("models", "", "narrow the scope's models, comma-separated")
@@ -188,23 +178,16 @@ var apiCommands = map[string]apiCommand{ // read-only
 				req.Expires = timestamppb.New(time.Now().Add(d))
 			}
 			res, err := c.keys.MintKey(ctx, connect.NewRequest(req))
-			if err != nil {
-				return err
-			}
-			if c.dry {
-				c.done("a key in " + *scope)
-				return nil
+			if err != nil || c.dry {
+				return c.done(err, "a key in "+*scope)
 			}
 			fmt.Fprintf(c.out, "%s\n\nThis is the key's only showing: golem keeps its hash, %s.\n", res.Msg.Key, res.Msg.Hash)
 			return nil
 		}
 	}},
 	"keys revoke": {args: 1, flags: noFlags(func(ctx context.Context, c *call) error {
-		if _, err := c.keys.RevokeKey(ctx, connect.NewRequest(&keysv1.RevokeKeyRequest{Hash: c.pos[0], ValidateOnly: c.dry})); err != nil {
-			return err
-		}
-		c.done("key " + c.pos[0] + " revoked")
-		return nil
+		_, err := c.keys.RevokeKey(ctx, connect.NewRequest(&keysv1.RevokeKeyRequest{Hash: c.pos[0], ValidateOnly: c.dry}))
+		return c.done(err, "key "+c.pos[0]+" revoked")
 	})},
 }
 
@@ -232,7 +215,7 @@ func runAPI(ctx context.Context, args []string, out io.Writer) error {
 // parse reads a command's positional arguments (cmd.args of them, first)
 // and then its flags into c, and returns what runs it. Every command takes
 // --dry-run; only the mutating ones send it.
-func parse(name string, args []string, cmd apiCommand, c *call) (func(context.Context, *call) error, error) {
+func parse(name string, args []string, cmd apiCommand, c *call) (runFunc, error) {
 	if len(args) < cmd.args || (cmd.args > 0 && strings.HasPrefix(args[0], "-")) {
 		return nil, usageError(fmt.Sprintf("%s takes %d argument(s) before its flags", name, cmd.args))
 	}

@@ -35,16 +35,22 @@ type Server struct {
 	// MaxRequest bounds a request's message (default 1 MiB): the API's
 	// messages are small, and an oversized one is refused unread.
 	MaxRequest int
-	Log        *slog.Logger
+	// Log takes internal errors in full (default slog.Default()), since a
+	// caller is told only their id.
+	Log *slog.Logger
 }
 
+// defaultMaxRequest is MaxRequest's default.
+const defaultMaxRequest = 1 << 20
+
+// callerKey is the context key of the request's authenticated caller.
 type callerKey struct{}
 
 // Handler is the APIs' routes. Every call is authenticated from its
 // headers before its body is read, so an unauthenticated caller costs a
 // header check, never a decode; a message over MaxRequest is refused.
 func (s *Server) Handler() http.Handler {
-	limit := connect.WithReadMaxBytes(cmp.Or(s.MaxRequest, 1<<20))
+	limit := connect.WithReadMaxBytes(cmp.Or(s.MaxRequest, defaultMaxRequest))
 	mux := http.NewServeMux()
 	mux.Handle(orgv1connect.NewOrgServiceHandler(org{s}, limit))
 	mux.Handle(keysv1connect.NewKeyServiceHandler(keys{s}, limit))
@@ -59,12 +65,13 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// caller is the request's caller, as the interceptor authenticated them.
+// caller is the request's caller, as Handler authenticated them.
 func caller(ctx context.Context) service.Caller {
 	c, _ := ctx.Value(callerKey{}).(service.Caller)
 	return c
 }
 
+// options are a mutating request's service options.
 func options(validateOnly bool) service.Options { return service.Options{ValidateOnly: validateOnly} }
 
 // reply is a method's response: msg, or err as its Connect error.

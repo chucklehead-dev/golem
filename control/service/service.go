@@ -106,9 +106,46 @@ func (s *Service) apply(ctx context.Context, c Caller, o Options, action, target
 	return err
 }
 
+// read is the document as of now (one conditional get).
+func (s *Service) read(ctx context.Context) (*state.Document, error) {
+	if err := s.State.Refresh(ctx); err != nil {
+		return nil, err
+	}
+	return s.State.Current(), nil
+}
+
 // manages reports whether c may manage scope: an admin, or its manager.
 func manages(d *state.Document, c Caller, scope string) bool {
 	return c.Admin || d.Has(c.Principal, manager, scope)
+}
+
+// sees reports whether c may read scope: a member, a manager or an admin.
+func sees(d *state.Document, c Caller, scope string) bool {
+	return manages(d, c, scope) || d.Principals[c.Principal].MemberOf(scope)
+}
+
+// visibleScope is scope's policy if it exists and c sees it. Otherwise it
+// is not found, never denied: a scope's existence is not an outsider's to
+// learn.
+func visibleScope(d *state.Document, c Caller, scope string) (state.Scope, error) {
+	sc, ok := d.Scopes[scope]
+	if !ok || !sees(d, c, scope) {
+		return state.Scope{}, notFound("scope %s", scope)
+	}
+	return sc, nil
+}
+
+// requireManager refuses c's change to scope unless c manages it: not
+// found if the scope does not exist or c does not see it, else denied,
+// since only its managers may do what ("add its members").
+func requireManager(d *state.Document, c Caller, scope, what string) error {
+	if _, err := visibleScope(d, c, scope); err != nil {
+		return err
+	}
+	if !manages(d, c, scope) {
+		return denied("only scope %s's managers %s", scope, what)
+	}
+	return nil
 }
 
 // CreateScope creates a scope with its policy: admins only (a top-level
@@ -139,15 +176,6 @@ type Member struct {
 	Entra string // the user's object ID or the service's app ID; empty: keys only
 }
 
-// unknownScope refuses c's change to scope: not found if c may not see
-// it (its existence is not theirs to learn), else denied for why.
-func unknownScope(d *state.Document, c Caller, scope, why string) error {
-	if _, ok := d.Scopes[scope]; !ok || !sees(d, c, scope) {
-		return notFound("scope %s", scope)
-	}
-	return denied("%s", why)
-}
-
 // AddMember makes m a member of scope: the scope's managers, or admins.
 // Who a principal is in Entra is never a manager's to say (ADR 0047): users
 // come from the groups bound to scopes, and an Entra ID is bound only by
@@ -163,24 +191,12 @@ func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope stri
 		return invalid("member.id", "IDs beginning %q name callers with no principal; choose another", state.ReservedPrefix)
 	}
 	return s.apply(ctx, c, o, "membership.add", m.ID, map[string]string{"scope": scope}, func(d *state.Document) error {
-		if _, ok := d.Scopes[scope]; !ok || !manages(d, c, scope) {
-			return unknownScope(d, c, scope, "only scope "+scope+"'s managers add its members")
+		if err := requireManager(d, c, scope, "add its members"); err != nil {
+			return err
 		}
-		p, exists := d.Principals[m.ID]
-		switch {
-		case exists && (m.Kind != "" && m.Kind != p.Kind || m.Entra != "" && m.Entra != p.Entra):
-			return invalid("member", "principal %s exists as a %s with another identity", m.ID, p.Kind)
-		case exists:
-		case m.Kind != "user" && m.Kind != "service":
-			return invalid("member.kind", "a new principal is a user or a service, not %q", m.Kind)
-		case c.Admin:
-			p = state.Principal{Kind: m.Kind, Entra: m.Entra}
-		case m.Entra != "":
-			return denied("an Entra ID is bound by the group sync or an admin, never by a manager: bind a group to the scope (golemctl groups bind), or ask an admin")
-		case m.Kind != "service":
-			return invalid("member", "no principal %s: users come from the Entra groups bound to a scope (ADR 0047); a manager can create only a service that uses keys", m.ID)
-		default:
-			p = state.Principal{Kind: "service"}
+		p, err := principalToAdd(d, c, m)
+		if err != nil {
+			return err
 		}
 		if slices.Contains(p.Scopes, scope) {
 			return nil
@@ -194,6 +210,29 @@ func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope stri
 	})
 }
 
+// principalToAdd is the principal m names, as AddMember will write it:
+// the one that exists, if m does not contradict its kind or Entra ID, or
+// a new one that c may create.
+func principalToAdd(d *state.Document, c Caller, m Member) (state.Principal, error) {
+	if p, exists := d.Principals[m.ID]; exists {
+		if m.Kind != "" && m.Kind != p.Kind || m.Entra != "" && m.Entra != p.Entra {
+			return state.Principal{}, invalid("member", "principal %s exists as a %s with another identity", m.ID, p.Kind)
+		}
+		return p, nil
+	}
+	switch {
+	case m.Kind != "user" && m.Kind != "service":
+		return state.Principal{}, invalid("member.kind", "a new principal is a user or a service, not %q", m.Kind)
+	case c.Admin:
+		return state.Principal{Kind: m.Kind, Entra: m.Entra}, nil
+	case m.Entra != "":
+		return state.Principal{}, denied("an Entra ID is bound by the group sync or an admin, never by a manager: bind a group to the scope (golemctl groups bind), or ask an admin")
+	case m.Kind != "service":
+		return state.Principal{}, invalid("member", "no principal %s: users come from the Entra groups bound to a scope (ADR 0047); a manager can create only a service that uses keys", m.ID)
+	}
+	return state.Principal{Kind: "service"}, nil // keys only: no Entra ID
+}
+
 // RemoveMember ends principal's membership of scope, and revokes its keys
 // in the scope (a key is honoured only for a member): the scope's
 // managers, or admins.
@@ -203,8 +242,8 @@ func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope stri
 // ways keeps the synced membership, and its keys.
 func (s *Service) RemoveMember(ctx context.Context, c Caller, o Options, scope, principal string) error {
 	return s.apply(ctx, c, o, "membership.remove", principal, map[string]string{"scope": scope}, func(d *state.Document) error {
-		if _, ok := d.Scopes[scope]; !ok || !manages(d, c, scope) {
-			return unknownScope(d, c, scope, "only scope "+scope+"'s managers remove its members")
+		if err := requireManager(d, c, scope, "remove its members"); err != nil {
+			return err
 		}
 		p, ok := d.Principals[principal]
 		switch {
@@ -218,6 +257,7 @@ func (s *Service) RemoveMember(ctx context.Context, c Caller, o Options, scope, 
 		}
 		p.Scopes = slices.DeleteFunc(slices.Clone(p.Scopes), func(x string) bool { return x == scope })
 		if p.MemberOf(scope) {
+			// Still a member through a bound group: its keys and role stay.
 			d.Principals[principal] = p
 			return nil
 		}
@@ -313,20 +353,18 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 	h := key.Hash(plain)
 	m := Minted{Key: plain, Hash: hex.EncodeToString(h[:]), Display: key.Display(plain)}
 	err := s.apply(ctx, c, o, "key.mint", m.Display, map[string]string{"owner": r.Owner, "scope": r.Scope}, func(d *state.Document) error {
-		sc, ok := d.Scopes[r.Scope]
-		if !ok || !sees(d, c, r.Scope) {
-			return notFound("scope %s", r.Scope)
+		sc, err := visibleScope(d, c, r.Scope)
+		if err != nil {
+			return err
 		}
 		owner, ok := d.Principals[r.Owner]
-		switch {
-		case !ok:
+		if !ok {
 			return notFound("principal %s", r.Owner)
-		case !owner.MemberOf(r.Scope):
+		}
+		if !owner.MemberOf(r.Scope) {
 			return invalid("key.owner", "%s is not a member of %s: add them first", r.Owner, r.Scope)
-		case c.Admin:
-		case r.Owner == c.Principal:
-		case owner.Kind == "service" && manages(d, c, r.Scope):
-		default:
+		}
+		if !mayMint(d, c, r, owner) {
 			return denied("a member mints its own keys; a scope's managers mint its services' keys")
 		}
 		for i, model := range r.Models {
@@ -334,29 +372,48 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 				return invalid(fmt.Sprintf("key.models[%d]", i), "scope %s does not allow %q: a key can only narrow its scope", r.Scope, model)
 			}
 		}
-		if !r.Expires.IsZero() && !r.Expires.After(s.now()) {
-			return invalid("key.expires", "already past")
-		}
-		if owner.Kind == "user" {
-			limit := s.now().Add(MaxPersonalKeyLife)
-			switch {
-			case r.Expires.IsZero():
-				r.Expires = limit
-			case r.Expires.After(limit):
-				return invalid("key.expires", "a personal key lives at most %d days (org-model.md §3); a service's key has no limit", int(MaxPersonalKeyLife.Hours()/24))
-			}
+		expires, err := keyExpiry(owner, r.Expires, s.now())
+		if err != nil {
+			return err
 		}
 		if d.Keys == nil {
 			d.Keys = map[string]state.Key{}
 		}
 		d.Keys[m.Hash] = state.Key{Display: m.Display, Owner: r.Owner, Scope: r.Scope,
-			Models: slices.Clone(r.Models), ExpiresAt: r.Expires.UTC()}
+			Models: slices.Clone(r.Models), ExpiresAt: expires.UTC()}
 		return nil
 	})
 	if err != nil || o.ValidateOnly {
 		return Minted{}, err
 	}
 	return m, nil
+}
+
+// mayMint reports whether c may mint r for owner: admins any key, a
+// member its own, and a scope's managers its services'.
+func mayMint(d *state.Document, c Caller, r KeyRequest, owner state.Principal) bool {
+	return c.Admin || r.Owner == c.Principal || owner.Kind == "service" && manages(d, c, r.Scope)
+}
+
+// keyExpiry is when a key for owner expires, asked to at asked (zero: not
+// asked): never in the past, and a personal key (a user's) within
+// MaxPersonalKeyLife of now, at that limit when none is asked for. A
+// service's key lives as long as asked, or until revoked.
+func keyExpiry(owner state.Principal, asked, now time.Time) (time.Time, error) {
+	if !asked.IsZero() && !asked.After(now) {
+		return time.Time{}, invalid("key.expires", "already past")
+	}
+	if owner.Kind != "user" {
+		return asked, nil
+	}
+	limit := now.Add(MaxPersonalKeyLife)
+	switch {
+	case asked.IsZero():
+		return limit, nil
+	case asked.After(limit):
+		return time.Time{}, invalid("key.expires", "a personal key lives at most %d days (org-model.md §3); a service's key has no limit", int(MaxPersonalKeyLife.Hours()/24))
+	}
+	return asked, nil
 }
 
 // RevokeKey revokes a key by its hash: its owner, admins, and, for a
@@ -370,11 +427,12 @@ func (s *Service) RevokeKey(ctx context.Context, c Caller, o Options, hash strin
 		if !ok {
 			return notFound("key %s", hash)
 		}
-		service := d.Principals[k.Owner].Kind == "service"
-		if k.Owner != c.Principal && !c.Admin && !(service && manages(d, c, k.Scope)) {
-			if !sees(d, c, k.Scope) {
-				return notFound("key %s", hash)
-			}
+		switch {
+		case k.Owner == c.Principal, c.Admin:
+		case d.Principals[k.Owner].Kind == "service" && manages(d, c, k.Scope):
+		case !sees(d, c, k.Scope):
+			return notFound("key %s", hash) // its existence is not an outsider's to learn
+		default:
 			return denied("a key is revoked by its owner or an admin, and a service's key by its scope's managers; to end a member's keys, remove the member")
 		}
 		return d.Revoke(hash, s.now())
@@ -407,19 +465,6 @@ func (s *Service) Whoami(ctx context.Context, c Caller) (Me, error) {
 	return me, nil
 }
 
-// read is the document as of now (one conditional get).
-func (s *Service) read(ctx context.Context) (*state.Document, error) {
-	if err := s.State.Refresh(ctx); err != nil {
-		return nil, err
-	}
-	return s.State.Current(), nil
-}
-
-// sees reports whether c may read scope: a member, a manager or an admin.
-func sees(d *state.Document, c Caller, scope string) bool {
-	return manages(d, c, scope) || d.Principals[c.Principal].MemberOf(scope)
-}
-
 // ScopeView is a scope as its members see it.
 type ScopeView struct {
 	ID       string
@@ -450,11 +495,9 @@ func (s *Service) GetScope(ctx context.Context, c Caller, id string) (ScopeView,
 	if err != nil {
 		return ScopeView{}, err
 	}
-	sc, ok := d.Scopes[id]
-	// Not found, not denied, for an outsider: a scope's existence is not
-	// theirs to learn.
-	if !ok || !sees(d, c, id) {
-		return ScopeView{}, notFound("scope %s", id)
+	sc, err := visibleScope(d, c, id)
+	if err != nil {
+		return ScopeView{}, err
 	}
 	v := ScopeView{ID: id, Policy: sc}
 	for _, pid := range slices.Sorted(maps.Keys(d.Principals)) {

@@ -38,6 +38,7 @@ type settings struct {
 	Tokens    map[string]token `json:"tokens,omitempty"` // by resource: "control", "gateway"
 }
 
+// token is a cached access token for one resource.
 type token struct {
 	Access  string    `json:"access"`
 	Expires time.Time `json:"expires"`
@@ -51,6 +52,7 @@ const (
 	gateway resource = "gateway"
 )
 
+// settingsPath is the settings file's path.
 func settingsPath() (string, error) {
 	if h := os.Getenv("GOLEMCTL_HOME"); h != "" {
 		return filepath.Join(h, "golemctl.json"), nil
@@ -62,6 +64,7 @@ func settingsPath() (string, error) {
 	return filepath.Join(d, "golem", "golemctl.json"), nil
 }
 
+// loadSettings reads the settings, or says how to sign in if there are none.
 func loadSettings() (settings, error) {
 	var s settings
 	p, err := settingsPath()
@@ -78,6 +81,8 @@ func loadSettings() (settings, error) {
 	return s, json.Unmarshal(b, &s)
 }
 
+// save writes the settings, owner-only, by a rename so that the file is
+// never half-written.
 func (s settings) save() error {
 	p, err := settingsPath()
 	if err != nil {
@@ -94,6 +99,7 @@ func (s settings) save() error {
 	return os.Rename(tmp, p)
 }
 
+// endpoint is the URL of the tenant's OAuth endpoint path ("token").
 func (s settings) endpoint(path string) string {
 	return strings.TrimRight(cmp.Or(s.Authority, "https://login.microsoftonline.com"), "/") + "/" + url.PathEscape(s.Tenant) + "/oauth2/v2.0/" + path
 }
@@ -120,6 +126,7 @@ type tokenResponse struct {
 	Description  string `json:"error_description"`
 }
 
+// post sends form to endpoint and decodes its JSON answer into into.
 func post(ctx context.Context, endpoint string, form url.Values, into any) error {
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -153,14 +160,7 @@ func login(ctx context.Context, args []string, _, errOut io.Writer) error {
 	if s.Tenant == "" || s.ClientID == "" || s.API == "" {
 		return usageError("login needs --tenant, --client-id and --api (they are remembered)")
 	}
-	var dc struct {
-		DeviceCode string `json:"device_code"`
-		Message    string `json:"message"`
-		Interval   int    `json:"interval"`
-		ExpiresIn  int    `json:"expires_in"`
-		Error      string `json:"error"`
-		Desc       string `json:"error_description"`
-	}
+	var dc deviceCode
 	if err := post(ctx, s.endpoint("devicecode"), url.Values{"client_id": {s.ClientID}, "scope": {s.scope(control)}}, &dc); err != nil {
 		return fmt.Errorf("Entra's device code: %w", err)
 	}
@@ -168,43 +168,67 @@ func login(ctx context.Context, args []string, _, errOut io.Writer) error {
 		return fmt.Errorf("Entra: %s: %s", dc.Error, dc.Desc)
 	}
 	fmt.Fprintln(errOut, dc.Message)
+	tr, err := awaitSignIn(ctx, s, dc)
+	if err != nil {
+		return err
+	}
+	// The sign-in asked for the control API's scope, so its access token
+	// is the control API's; the gateway's is redeemed when first needed.
+	s.Refresh = tr.RefreshToken
+	s.Tokens = map[string]token{string(control): {Access: tr.AccessToken, Expires: expiry(tr)}}
+	if err := s.save(); err != nil {
+		return err
+	}
+	fmt.Fprintln(errOut, "signed in")
+	return nil
+}
+
+// deviceCode is the device code endpoint's answer, or its error.
+type deviceCode struct {
+	DeviceCode string `json:"device_code"`
+	Message    string `json:"message"` // what the user is to do, for them to read
+	Interval   int    `json:"interval"`
+	ExpiresIn  int    `json:"expires_in"`
+	Error      string `json:"error"`
+	Desc       string `json:"error_description"`
+}
+
+// awaitSignIn polls the token endpoint for dc at Entra's interval (slower
+// when it says slow_down) until the user signs in, which yields both an
+// access and a refresh token, or the code expires.
+func awaitSignIn(ctx context.Context, s settings, dc deviceCode) (tokenResponse, error) {
 	interval := time.Duration(cmp.Or(dc.Interval, 5)) * pollUnit
 	deadline := time.Now().Add(time.Duration(cmp.Or(dc.ExpiresIn, 900)) * time.Second)
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return tokenResponse{}, ctx.Err()
 		case <-time.After(interval):
 		}
 		var tr tokenResponse
 		if err := post(ctx, s.endpoint("token"), url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
 			"client_id": {s.ClientID}, "device_code": {dc.DeviceCode}}, &tr); err != nil {
-			return fmt.Errorf("Entra's token endpoint: %w", err)
+			return tokenResponse{}, fmt.Errorf("Entra's token endpoint: %w", err)
 		}
 		switch tr.Error {
 		case "":
 			if tr.AccessToken == "" || tr.RefreshToken == "" {
-				return errors.New("Entra's answer had no access or refresh token: run golemctl login again")
+				return tokenResponse{}, errors.New("Entra's answer had no access or refresh token: run golemctl login again")
 			}
-			s.Refresh = tr.RefreshToken
-			s.Tokens = map[string]token{string(control): {Access: tr.AccessToken, Expires: expiry(tr)}}
-			if err := s.save(); err != nil {
-				return err
-			}
-			fmt.Fprintln(errOut, "signed in")
-			return nil
+			return tr, nil
 		case "authorization_pending":
 		case "slow_down":
 			interval += 5 * pollUnit
 		default:
-			return fmt.Errorf("sign-in failed: %s: %s", tr.Error, tr.Description)
+			return tokenResponse{}, fmt.Errorf("sign-in failed: %s: %s", tr.Error, tr.Description)
 		}
 		if time.Now().After(deadline) {
-			return errors.New("the device code expired before sign-in: run golemctl login again")
+			return tokenResponse{}, errors.New("the device code expired before sign-in: run golemctl login again")
 		}
 	}
 }
 
+// expiry is when tr's access token expires.
 func expiry(tr tokenResponse) time.Time {
 	return time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
 }
