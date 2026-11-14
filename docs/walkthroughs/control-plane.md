@@ -275,6 +275,10 @@ membership that is only a group's.
 | `-entra-sync-client-id` | the jobs registration (entra.md #4): run the group sync by workload identity; needs `-entra-tenant` |
 | `-entra-sync-every`, `-entra-sync-max-removals` | the sync's interval (5m) and its removal guard (50) |
 
+`golem-control pubkey <signing key>` prints the key's public half for
+gateways' `-keys` directories: a PEM with a `Key-ID` header (a KMS key's
+ARN, a file key's name), which `sign.LoadKeys` trusts under that ID.
+
 `golem-control keygen <dir>` writes a development key pair
 (`publishing.key`, never overwritten, and `publishing.pub` for gateways).
 
