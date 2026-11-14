@@ -131,11 +131,22 @@ control plane.
     the pointer's hash and must carry the pointer's sequence;
   - the gateway persists the last sequence applied to a local checkpoint
     file and raises its floor from it at start;
+  - slice 2: `lib/bucket/s3bucket` (S3, with its conditional requests:
+    If-None-Match on GetObject, If-Match and If-None-Match: * on
+    PutObject; 304, 404, 412 and 409 mapped to the bucket's errors; reads
+    bounded) and `lib/sign/kmssign` (the publishing key in KMS,
+    ECC_NIST_P256 for SIGN_VERIFY, signing SHA-256 digests under
+    ECDSA_SHA_256; the key's ARN is the pointer's key ID). Gateways verify
+    with `sign.ECDSAKeys` and the key's public key (`kmssign.PublicKey`
+    fetches it at bootstrap), never calling KMS. One conformance suite
+    (`lib/bucket/buckettest`) runs against the directory bucket and, through
+    the real S3 client, an S3 stand-in;
   - open: the record lives in the bucket here, where the design keeps it
     with the state document; an empty-disk restart's floor from the
-    trusted record has no reader yet (the floor is zero); the gateway
-    binary is not wired to the source (the release gate, golem#7); S3 and
-    KMS adapters are slice 2.
+    trusted record has no reader yet (the floor is zero); neither binary
+    is wired to the bucket (the release gate, golem#7), and nothing tests
+    against real S3 and KMS yet (an integration run in the target
+    account, with the bucket policy that denies other writers).
 - **Status**: golem-control reads the status objects for the CRDs'
   `Applied n/m`, `golemctl gateways`, and the per-gateway snapshot age
   alert.
