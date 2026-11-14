@@ -391,3 +391,31 @@ func TestBindGroup(t *testing.T) {
 		t.Fatalf("unbind again: %v", err)
 	}
 }
+
+// TestCreateScopePriced: a scope with a budget whose models the config
+// prices not is refused (validate-only too), with the check's reason; one
+// without a budget is not checked.
+func TestCreateScopePriced(t *testing.T) {
+	ctx := t.Context()
+	s := setup(t)
+	var checked []string
+	s.Priced = func(d *state.Document, id string) error {
+		checked = append(checked, id)
+		if _, ok := d.Scopes[id]; !ok {
+			t.Fatalf("checked %s before it is in the document", id)
+		}
+		return errors.New(`alias "x" reaches model "m", which no PriceList prices`)
+	}
+	for _, o := range []Options{{ValidateOnly: true}, {}} {
+		err := s.CreateScope(ctx, admin, o, "team-c", state.Scope{Models: []string{"x"}, BudgetMicros: 1})
+		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "no PriceList prices") {
+			t.Fatalf("validate-only %v: %v, want the unpriced scope refused", o.ValidateOnly, err)
+		}
+	}
+	if _, ok := s.State.Current().Scopes["team-c"]; ok {
+		t.Fatal("the refused scope was written")
+	}
+	if err := s.CreateScope(ctx, admin, Options{}, "team-c", state.Scope{Models: []string{"x"}}); err != nil || len(checked) != 2 {
+		t.Fatalf("a scope with no budget: %v, checked %v", err, checked)
+	}
+}

@@ -325,6 +325,12 @@ func union[V any](a, b map[string]V) map[string]bool {
 func (s *Store) Restore(ctx context.Context, backup *Document, actor string, dryRun bool) (Report, error) {
 	var report Report
 	change := func(d *Document) error {
+		if d.StateVersion == 0 {
+			// Restored over nothing, every right would be withheld and an
+			// empty document written: a deletion is undone by putting the
+			// newest version back, not by a restore.
+			return fmt.Errorf("%w: there is no %s to restore over; put its newest version back from the bucket's versions, or run golem-control bootstrap first", ErrInvariant, DocumentKey)
+		}
 		now := time.Now()
 		next, r, err := Restore(d, backup, now)
 		if err != nil {

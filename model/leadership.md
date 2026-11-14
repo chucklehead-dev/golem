@@ -445,6 +445,21 @@ and no signed pointer is not tampering: it is a publisher that died between
 the first record and the first checkpoint, writes this model makes one
 step. From the first checkpoint on, a missing one is refused.
 
+The code's guard is stricter than this model's under a document rollback.
+Here `publishAs` numbers past a record below the verified checkpoint or
+pointer, which keeps the floor. In code (`prepare` and `below`) such a
+record halts the pool's publication (`ErrRegressed`) until a person puts
+the newest document back or adopts the older one (`golem-control
+bootstrap -adopt`): a record is written before its checkpoint and pointer
+and a restore keeps the current records, so a record below them means the
+document went back, and numbering past it would publish the older
+document's entitlements, revoked keys revived, which this model does not
+track (publication.md's PRESERVE_ON_RESTORE is that property). The code's
+behaviours are a subset of the model's (a publication the model allows is
+refused, none is added), so every property checked here still holds of it;
+what is given up is availability after a document rollback, which the
+model reports (`forward`) and does not require.
+
 What the model leaves out: write volume, timing, and the lease object's
 lapse by clocks (any replica may acquire at any time, which only widens the
 behaviours checked).

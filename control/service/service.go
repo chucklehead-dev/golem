@@ -77,6 +77,12 @@ type Options struct {
 type Service struct {
 	State *state.Store
 	Now   func() time.Time
+	// Priced, if set, refuses scope id of d, the document as the change
+	// would write it, if its budget can reach a model the config prices
+	// not (golem-control's controller.CheckScope). A scope with a budget is
+	// charged by price, so one created over an unpriced model is refused
+	// here rather than published failing closed. nil: not checked.
+	Priced func(d *state.Document, id string) error
 }
 
 func (s *Service) now() time.Time {
@@ -165,6 +171,11 @@ func (s *Service) CreateScope(ctx context.Context, c Caller, o Options, id strin
 			d.Scopes = map[string]state.Scope{}
 		}
 		d.Scopes[id] = policy
+		if s.Priced != nil && policy.BudgetMicros != 0 {
+			if err := s.Priced(d, id); err != nil {
+				return invalid("scope.policy.models", "%v", err)
+			}
+		}
 		return nil
 	})
 }

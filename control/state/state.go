@@ -116,6 +116,11 @@ var (
 	// ErrFenced: the document's leadership is not the writer's (it has lost
 	// the lease, or never held it at that epoch). Nothing was written.
 	ErrFenced = errors.New("state: fenced: this replica does not lead at that epoch")
+	// ErrMissing: there is no document, but the bucket shows golem-control
+	// has run on it (one of Store.Installed exists): the document was
+	// deleted. A store adopts no empty document then; only Bootstrap
+	// creates one.
+	ErrMissing = errors.New("state: the document is missing from a bucket golem-control has published from")
 )
 
 // Store is the document in a bucket. The zero Store is not ready: Load it.
@@ -124,13 +129,21 @@ type Store struct {
 	// Attempts bounds an Update's retries after losing to another writer
 	// (default 8).
 	Attempts int
+	// Installed are objects whose presence shows golem-control has run on
+	// this bucket (the lease object, the pools' checkpoints and pointers):
+	// a first read that finds no document but one of these is ErrMissing,
+	// not the empty document. Without them a missing document is a first
+	// start.
+	Installed []string
 
 	mu  sync.Mutex
 	cur *Document
 	tag string // the document's entity tag, or bucket.Absent before the first write
 }
 
-// Load reads the document; none yet is the empty document at version 0.
+// Load reads the document; none yet is the empty document at version 0,
+// unless the bucket shows golem-control has run on it (Installed), which
+// is ErrMissing.
 func (s *Store) Load(ctx context.Context) error { return s.refresh(ctx, true) }
 
 // Refresh re-reads the document if it changed (one conditional get).
@@ -148,8 +161,20 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 	case errors.Is(err, bucket.ErrNotModified):
 		return nil
 	case errors.Is(err, bucket.ErrNotFound):
-		if had, ok := s.version(); ok && had > 0 {
+		had, ok := s.version()
+		if ok && had > 0 {
 			return regressed(had, "none (deleted)")
+		}
+		// A store that has read nothing yet cannot tell a first start from a
+		// deleted document by memory: the bucket's other objects tell it.
+		if !ok {
+			evidence, err := s.installed(ctx)
+			if err != nil {
+				return err
+			}
+			if evidence != "" {
+				return missing(evidence)
+			}
 		}
 		s.set(&Document{Schema: Schema}, bucket.Absent)
 		return nil
@@ -169,7 +194,26 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 
 // regressed is ErrRegressed, saying what to do.
 func regressed(had uint64, now string) error {
-	return fmt.Errorf("%w: from version %d to %s. A restore goes through golemctl state restore, which keeps every later revocation and writes above the current version; restore that way, or put the newer version back (bucket versioning). Until then golem-control serves what it last read and writes nothing", ErrRegressed, had, now)
+	return fmt.Errorf("%w: from version %d to %s. A restore goes through golem-control restore, which keeps every later revocation and writes above the current version; restore that way, or put the newer version back (bucket versioning). Until then golem-control serves what it last read and writes nothing", ErrRegressed, had, now)
+}
+
+// missing is ErrMissing, naming the object that shows golem-control ran
+// here, and what to do.
+func missing(evidence string) error {
+	return fmt.Errorf("%w: there is no %s, but %s exists. Starting from an empty document would publish snapshots with no principals or keys (every caller refused). Put the newest version of %s back from the bucket's versions (or its Object Lock replica) and start again; or, to start over with no entitlements on purpose, run golem-control bootstrap", ErrMissing, DocumentKey, evidence, DocumentKey)
+}
+
+// installed is the first of Installed that exists in the bucket, or "".
+func (s *Store) installed(ctx context.Context) (string, error) {
+	for _, key := range s.Installed {
+		switch _, _, err := s.Bucket.Get(ctx, key, ""); {
+		case err == nil:
+			return key, nil
+		case !errors.Is(err, bucket.ErrNotFound):
+			return "", fmt.Errorf("state: checking for %s, to tell a first start from a deleted document: %w", key, err)
+		}
+	}
+	return "", nil
 }
 
 // version is the state version the store last read or wrote; ok is false

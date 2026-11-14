@@ -199,12 +199,18 @@ func TestBucketSource(t *testing.T) {
 	})
 	t.Run("a pointer naming another publication's snapshot", func(t *testing.T) {
 		older := p.publish(t) // seq 4
+		current := p.pointerBytes(t)
+		// A pointer only the publishing key could sign, above the record:
+		// golem-control's publisher would refuse to publish past it as a
+		// state document gone back (publish.ErrRegressed), so it is put
+		// back once the gateway has refused it.
+		defer p.put(t, snapshot.PointerKey("internal"), current)
 		b, _ := snapshot.SignPointer(t.Context(), snapshot.Pointer{Pool: "internal", PublishSeq: 9, Hash: older.Hash}, p.signer)
 		p.put(t, snapshot.PointerKey("internal"), b)
 		mustRefuse(t, gw, "its pointer says 9")
 	})
 	t.Run("a snapshot not yet readable is retried", func(t *testing.T) {
-		ptr := p.publish(t) // above the signed pointer at 9 planted earlier
+		ptr := p.publish(t)
 		gw.Bucket = missing{p.bucket, snapshot.ObjectKey("internal", ptr.Hash)}
 		if err := gw.Poll(t.Context()); err == nil {
 			t.Fatal("poll with the object missing: want an error")
