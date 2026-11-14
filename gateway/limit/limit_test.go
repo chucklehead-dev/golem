@@ -105,9 +105,10 @@ func TestBoundary(t *testing.T) {
 	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 10 || b != 10 {
 		t.Fatalf("known %d on the new snapshot, %d on none: both must be 10", a, b)
 	}
-	// A minute past retention is gone: a snapshot that old undercounts it,
-	// the stated limit (ADR 0048), and the counter stays bounded. A gateway
-	// with no boundary reads the period's whole total, which keeps it.
+	// A minute past retention is gone, and the counter stays bounded: a
+	// snapshot that old no longer reads it, but known spend is never below
+	// the period's whole total, which keeps it (as a gateway with no
+	// boundary reads it).
 	now = now.Add(st.Retain)
 	late := scopeCall("late", "p1")
 	late.Budget = 0
@@ -116,8 +117,8 @@ func TestBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk.Complete(ctx, 1)
-	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 9 || b != 11 || len(st.Buckets("s", "2026-11")) != 1 {
-		t.Fatalf("known %d (want 9: 12:02's minute gone), %d (want 11, the total), minutes %v", a, b, st.Buckets("s", "2026-11"))
+	if a, b := g1.Known(ctx, "s"), g2.Known(ctx, "s"); a != 11 || b != 11 || len(st.Buckets("s", "2026-11")) != 1 {
+		t.Fatalf("known %d (want 11: 12:02's minute gone, the total kept), %d (want 11, the total), minutes %v", a, b, st.Buckets("s", "2026-11"))
 	}
 }
 
@@ -378,6 +379,34 @@ func TestCompletionRacingRecovery(t *testing.T) {
 	tk.Complete(ctx, 4)
 	if held, known := len(l.Pending("s")), l.Known(ctx, "s"); !ran || l.Down() || held != 0 || known != 4 {
 		t.Fatalf("ran %v, down %v, held %d, known %d: the increment must reach the counter", ran, l.Down(), held, known)
+	}
+}
+
+// TestStaleBoundary: a snapshot whose boundary is older than the counter's
+// retention (golem-control's known-spend job unable to read the ledger for
+// hours, its last result stamped into each renewed snapshot) reads only
+// the minutes retained; the spend between its boundary and the retention's
+// start would vanish, and the budget stop refusing. Known spend is never
+// below this site's counter total.
+func TestStaleBoundary(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	now := time.Now()
+	l.Now = func() time.Time { return now.Add(-7 * time.Hour) }
+	l.ApplySnapshot(ctx, "s", Known{Period: l.period(now), Since: now.Add(-8 * time.Hour).Truncate(time.Minute)})
+	c := scopeCall("a", "p1")
+	c.Started = now.Add(-7 * time.Hour)
+	tk, err := l.Admit(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk.Complete(ctx, 10) // seven hours ago: the budget spent
+	l.Now = func() time.Time { return now }
+	c = scopeCall("b", "p2")
+	c.Started = now
+	if _, err := l.Admit(ctx, c); !errors.Is(err, ErrBudget) || l.Known(ctx, "s") != 10 {
+		t.Fatalf("admit %v, known %d: a boundary older than the retention must not hide this site's 10", err, l.Known(ctx, "s"))
 	}
 }
 

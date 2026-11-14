@@ -92,3 +92,59 @@ func TestJob(t *testing.T) {
 		t.Fatal("November's spend was kept as December's")
 	}
 }
+
+// TestJobDropsStaleResult: a result kept through a ledger outage is
+// published only while a gateway on a snapshot carrying it, for the whole
+// lease, still retains the counter's minutes from its boundary. Past that
+// (here 6h - 4h - 10m) the minutes between the boundary and the retention's
+// start would be counted nowhere: the result is dropped, and snapshots
+// carry no known spend, so gateways count their counter's whole total.
+func TestJobDropsStaleResult(t *testing.T) {
+	now := time.Date(2026, 11, 14, 10, 0, 30, 0, time.UTC)
+	l := &fakeLedger{spend: map[string]int64{"team-a": 7}}
+	j := &Job{Ledger: l, Now: func() time.Time { return now }}
+	if j.MaxAge() != 6*time.Hour-4*time.Hour-10*time.Minute {
+		t.Fatalf("max age %v by default", j.MaxAge())
+	}
+	if err := j.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if age, ok := j.Age(); !ok || age != 5*time.Minute+30*time.Second {
+		t.Fatalf("age %v, %v: want the allowance and the half minute truncated", age, ok)
+	}
+	l.fail = errors.New("connection refused")
+	now = now.Add(time.Hour)
+	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "the last result is kept") {
+		t.Fatalf("an hour into the outage: %v", err)
+	}
+	if k, ok := j.Current(); !ok || k.Spend["team-a"] != 7 {
+		t.Fatal("an hour into the outage the last result is still publishable")
+	}
+	now = now.Add(time.Hour)
+	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "dropped") {
+		t.Fatalf("two hours into the outage: %v", err)
+	}
+	if k, ok := j.Current(); ok {
+		t.Fatalf("a result to %v published at %v: gateways would read no further back than the retention", k.Since, now)
+	}
+	if _, ok := j.Age(); ok {
+		t.Fatal("an age for no result")
+	}
+	// Current drops it too, without a Step in between.
+	l.fail = nil
+	if err := j.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Hour)
+	if _, ok := j.Current(); ok {
+		t.Fatal("a result two hours old, published")
+	}
+	// A configuration that would drop every result is an error.
+	j = &Job{Ledger: l, Now: func() time.Time { return now }, Lease: 6 * time.Hour}
+	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "shorten the lease") {
+		t.Fatalf("a lease as long as the retention: %v", err)
+	}
+	if _, ok := j.Current(); ok {
+		t.Fatal("a result published under a lease as long as the retention")
+	}
+}

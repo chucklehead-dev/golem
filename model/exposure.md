@@ -707,8 +707,11 @@ The model ends here:
 - **The declared-worst-case check** (accounting.md): one call tighter, nothing else changes.
 - **Rows later than the allowance**, and **retention**: the model holds the
   ledger to its allowance (`tick`'s guard) and keeps every minute; a later
-  row, or a snapshot older than the retention, undercounts until the next
-  boundary passes it (ADR 0048).
+  row undercounts until the next boundary passes it, and a boundary older
+  than the retention would lose the minutes between it and the
+  retention's start, but golem-control publishes none that old and known
+  spend is never below the site's counter total (ADR 0048), which in the
+  model, keeping every minute, never binds.
 - **An increment added twice**: a replay whose reply was lost may be sent
   again and added twice; that errs high, and the model's gateways see
   every reply.

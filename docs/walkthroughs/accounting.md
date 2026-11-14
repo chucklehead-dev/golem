@@ -51,7 +51,7 @@ So the limiter has two checks (`overBudget`, `store.go:87`):
 A budget of 0 means none; a negative one refuses everything (config
 refuses one, so this only fails closed). The same check exists three
 times: `overBudget` for `Mem` and for the outage path, and in Lua in the
-admit script (`valkey.go:219`). Change one, change all three; the
+admit script (`valkey.go:222`). Change one, change all three; the
 stores' differential test (§7) catches the Lua drifting from Go, as it
 did once for a negative budget.
 
@@ -71,7 +71,10 @@ answer:
   completion adds its cost to its minute. The counter holds amounts, not
   events, and keeps a retention's minutes (six hours: longer than the
   longest authorization lease plus the ingestion allowance, so a gateway
-  on the oldest snapshot it may still use finds every minute it needs).
+  on the oldest snapshot it may still use finds every minute it needs,
+  provided the snapshot's boundary was recent when it was published:
+  golem-control publishes no boundary more than retention − lease −
+  margin old, §5).
 - golem-control's snapshot carries, per scope, a **boundary B** (a whole
   minute, an ingestion allowance before the publication) and the
   **spend**: the ledger's spend of the calls that ended before B,
@@ -82,6 +85,13 @@ answer:
   before the row's), so a call is on one side of B: in the snapshot, or in
   the minutes counted. A gateway on an older snapshot has an earlier B and
   is just as exact.
+- **Known spend is never below the counter's period total**: known =
+  max(spend + minutes from B, total). The total is this site's own calls
+  of the period, a floor whatever the snapshot: a B older than the
+  retention reads only the minutes retained, and without the floor the
+  spend between B and the retention's start would vanish
+  (TestStaleBoundary). On a current snapshot the floor never binds (the
+  snapshot's spend holds this site's calls before B, and other sites').
 
 It holds while the ledger ingests within the allowance. A row later than
 that, or minutes a Valkey failover lost, undercount until a later boundary
@@ -140,7 +150,7 @@ A ticket ends once (`claimEnd`, `limit.go:141`; TestTicketEndsOnce).
   (`Store.Add`) but **keeps the slot**: the provider may still be working,
   and billing, and freeing the slot would let cancel-and-resend escape the
   in-flight limit (model/exposure.md §5.4). The request path's ticket is
-  `tailed` (`limit.go:744`): its `Cancel(ctx, seen, until)` also calls
+  `tailed` (`limit.go:749`): its `Cancel(ctx, seen, until)` also calls
   `EndAt` (`limit.go:383`), a timer that calls `Ended` (`limit.go:395`)
   at the provider-tail time (now plus `ProviderTail`, default two
   minutes, but no later than the call's deadline: `proxy.go:308`).
@@ -155,7 +165,7 @@ gives either; config refuses a budget above the same bound
 ### 3.3 Renewal
 
 Slots in Valkey expire after a TTL (90 s) unless renewed. `Run`
-(`limit.go:678`) calls `Renew` (`limit.go:442`) every 30 s
+(`limit.go:683`) calls `Renew` (`limit.go:442`) every 30 s
 (`renewInterval`), which re-registers the running calls' slots
 (`reacquire`, `limit.go:455`) without checking limits: the calls are
 already running. A call past its deadline plus a minute is no longer
@@ -217,7 +227,7 @@ not recovered, whose running calls Valkey still lacks, so for `Grace`
 (two renewal intervals) its admissions are waivers too. `EndGrace` ends it
 at once.
 
-At shutdown `Finish` (`limit.go:707`) stops the tail timers (their slots
+At shutdown `Finish` (`limit.go:712`) stops the tail timers (their slots
 expire by TTL), tries one `Recover` if down, and abandons what is still
 held (counted in `Dropped`; the ledger has their rows).
 
@@ -249,28 +259,30 @@ The scripts (`valkey.go:128` on) are built from Lua fragments: `take`
 (the slots), `since` (the read), `trim` and `add` (the counter's write).
 Each script's comment lists its KEYS and ARGV.
 
-- `admitScript` (`valkey.go:211`): `since` reads one `HGET` per minute
+- `admitScript` (`valkey.go:213`): `since` reads one `HGET` per minute
   from the boundary's to the gateway's own minute plus one
   (`clockSkewMinutes`, a peer's clock running ahead), no further back than
-  the retention, or the `total` field alone for no boundary; then the
-  budget check; then `take`. It returns `{outcome, known}`.
-- `completeScript` (`valkey.go:260`): `add` (an `HINCRBY` of the call's
+  the retention, or the `total` field alone for no boundary; known is the
+  snapshot's spend plus that, and with a boundary never below `total`
+  (`Mem.known` the same); then the budget check; then `take`. It returns
+  `{outcome, known}`.
+- `completeScript` (`valkey.go:263`): `add` (an `HINCRBY` of the call's
   minute and of `total`, the counter's life extended, and `trim`: once the
   hash holds more than a retention's minutes and a margin of 60, the older
   ones go), then the slots freed.
-- `addScript` (`valkey.go:249`): `add` for several increments, for a
+- `addScript` (`valkey.go:252`): `add` for several increments, for a
   cancellation and a replay's batch.
-- `registerScript` (`valkey.go:231`): renewal and re-acquisition, in
+- `registerScript` (`valkey.go:234`): renewal and re-acquisition, in
   chunks of 256 slots so one script never holds Valkey's thread for long.
-- `sinceScript` (`valkey.go:272`): `since` alone, for `Limiter.Known`.
+- `sinceScript` (`valkey.go:275`): `since` alone, for `Limiter.Known`.
 
 With `ReplicaAcks`, each add waits for replicas (`WAIT`) so a failover is
 less likely to lose it. WAIT counts only its own connection's writes, so
-`write` (`valkey.go:321`) sends the script and WAIT together in one
+`write` (`valkey.go:324`) sends the script and WAIT together in one
 pipeline (falling back to EVAL by hand on NOSCRIPT); a short
 acknowledgement is counted in `Unreplicated`, not an error
 (TestReplicaAcks). A connection failure is `ErrUnavailable` (an outage),
-keeping its cause; a script error stays itself (`wrap`, `valkey.go:438`;
+keeping its cause; a script error stays itself (`wrap`, `valkey.go:441`;
 TestWrap).
 
 ## 5. The ledger and the known-spend job
@@ -288,25 +300,36 @@ minute.)
 
 The job (`control/spend`):
 
-- `Job.Step` (`spend.go:58`) places B: now minus the `Allowance` (five
+- `Job.Step` (`spend.go:97`) places B: now minus the `Allowance` (five
   minutes, `-spend-allowance`), truncated to a minute, in the period now
   falls in. A B still in the previous period gives this period nothing,
   without asking the ledger. Otherwise it asks the `Ledger` for each
   scope's spend before B. On a failure the last result is kept if it is of
   this period (its earlier B is still exact) and forgotten if not
-  (`forgetOtherThan`, `spend.go:94`): a new month's spend is not the old
-  one's (TestJob).
-- `ClickHouse.Spend` (`spend.go:134`) is one query (`spendQuery`,
-  `spend.go:127`) over ClickHouse's HTTP interface, the period and B
+  (`forgetOtherThan`): a new month's spend is not the old one's (TestJob).
+  It is also dropped once its B is more than `MaxAge` old (`forgetOlder`;
+  `Current` drops it too): `Retention` − `Lease` − `Margin` (six hours,
+  four, ten minutes by default: one hour fifty). A gateway may use a
+  snapshot for its whole lease, and reads the counter no further back
+  than its retention, so a B older than that would leave the spend
+  between B and the retention's start counted nowhere: the snapshots
+  carry no known spend instead, and gateways count their counter's whole
+  total (TestJobDropsStaleResult). `Known.Age` and `Job.Age` give the
+  result's age, for a metric. A configuration whose `MaxAge` is no more
+  than the allowance and a minute would drop every result: `Step` refuses
+  it with an error.
+- `ClickHouse.Spend` (`spend.go:209`) is one query (`spendQuery`,
+  `spend.go:202`) over ClickHouse's HTTP interface, the period and B
   bound as parameters, never in the query's text; `readSpend`
-  (`spend.go:165`) reads its rows (TestClickHouse against a fake;
+  (`spend.go:240`) reads its rows (TestClickHouse against a fake;
   TestClickHouseLedger against a real ClickHouse, below).
 - `Job.Current` is what a publication carries. The controller runs `Step`
   whenever a publication is due and stamps every scope of the
   entitlements with the result's period, B and spend
   (`controller.go:121-133`; TestKnownSpend). With no result (no
-  `-clickhouse`, or a failure in a new period) a snapshot carries none,
-  and gateways count their counter's whole total for the period.
+  `-clickhouse`, a failure in a new period, or a result past `MaxAge`) a
+  snapshot carries none, and gateways count their counter's whole total
+  for the period.
 
 TestClickHouseLedger (`control/spend/clickhouse_test.go:27`) runs
 spend.sql in a database of its own on a real ClickHouse
@@ -328,7 +351,7 @@ spend 0 (nothing ended before 11:55).
 1. **12:00:05, g1 admits a (p1).** `Admit` (`limit.go:194`) names the
    period from the call's start (`period`, `limit.go:168`), takes S1's
    `Known` (`snapshotFor`) and builds the `Admission`. `Valkey.Admit`
-   (`valkey.go:290`) sends `admitScript`: `since` reads minutes 11:55 to
+   (`valkey.go:293`) sends `admitScript`: `since` reads minutes 11:55 to
    12:01, all empty, so known is 0; 0 < 10; `take` trims expired slots,
    finds p1's set and the scope's empty, and adds `a` to both, expiring at
    the server's now plus 90 s. It returns `{0, 0}`; `admitted` records
@@ -353,7 +376,7 @@ spend 0 (nothing ended before 11:55).
    writes b's row (ended 12:02:10, cut), then `settlement.cancel`
    (`proxy.go:308`) computes the tail's end (12:04:10, two minutes, unless
    the call's deadline is sooner) and calls `tailed.Cancel`
-   (`limit.go:746`): `account` without release sends `addScript`, which
+   (`limit.go:751`): `account` without release sends `addScript`, which
    adds 2 to minute 12:02, and `EndAt` sets a timer. b's slot stays in
    both sets, and b stays among g2's running calls.
 7. **12:02:30, p2 sends d to g2.** p2's set still holds b:
@@ -369,7 +392,7 @@ spend 0 (nothing ended before 11:55).
 
 ### 6.3 A snapshot's known spend and boundary reaching the gateways
 
-9. **12:06:00, golem-control publishes.** `Job.Step` (`spend.go:58`)
+9. **12:06:00, golem-control publishes.** `Job.Step` (`spend.go:97`)
    places B at 12:01 (12:06 minus five minutes) and asks ClickHouse for
    the spend of 2026-11's rows that ended before 12:01:00.000: a's 3. The
    controller stamps `team-a` with period 2026-11, B 12:01, spend 3
@@ -437,11 +460,13 @@ replica to.
 
 | Invariant | Enforced | Tested |
 |---|---|---|
-| Budget check and slot taken in one atomic step | `admitScript` (`valkey.go:211`); `Mem`'s lock | store_test.go "limits", "budget"; exposure MBT |
+| Budget check and slot taken in one atomic step | `admitScript` (`valkey.go:213`); `Mem`'s lock | store_test.go "limits", "budget"; exposure MBT |
 | Limits hold while the store is reachable | `take` (`valkey.go:143`), `Mem.acquire` (`store.go:178`) | props TestLimiterAgainstExposureModel, TestNoScopeLimitCaught |
 | The two stores answer alike | one check (`overBudget`, mirrored in Lua); one read window (`since`, `Mem.since`, `clockSkewMinutes`) | TestStoresAgree, TestStoresAgreeVaried |
 | A call on one side of the boundary | the row stamped before the increment (`proxy.go:259`); `fromMinute`; the ledger deduplicated by event | TestBoundary; both MBT tests; TestClickHouseLedger |
 | Known spend exact on every gateway, any snapshot (within the allowance) | `since`, `Mem.since`; `ApplySnapshot` leaves the counter | TestBoundary, store_test.go "counter", both MBT tests |
+| Known spend never below the site's period total | `admitScript`'s floor, `Mem.known`, `Limiter.Known` | TestStaleBoundary, store_test.go "known spend is never below the counter's total", TestStoresAgreeVaried (`Admits`) |
+| No boundary published older than the retention allows | `Job.MaxAge`, `forgetOlder` | TestJobDropsStaleResult |
 | The snapshot's spend counts each event once, before B only | `spendQuery` over `spend_by_event FINAL` | TestClickHouseLedger, TestClickHouse |
 | A boundary on a whole minute, an allowance back; a new period from nothing | `Job.Step` | TestJob, TestKnownSpend |
 | Sums exact | `account`'s clamp to `MaxMicros`; config's budget bound | TestStoresAgreeVaried |
@@ -466,6 +491,10 @@ replica to.
 - **Other sites' spend after B.** The counter is the site's own: another
   site's calls that ended after B reach a gateway only with a snapshot
   whose B has passed them (ADR 0048).
+- **A ledger outage longer than `MaxAge`** (about two hours by default):
+  the snapshots carry no known spend until ClickHouse answers, and each
+  gateway counts its own site's period total only, so other sites' spend
+  is missing meanwhile. `Job.Age` is there for a metric to alert on.
 - **A replay counted twice.** A batch whose reply was lost and is sent
   again, or one increment two replays sent at once, is added twice: errs
   high.

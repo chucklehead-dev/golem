@@ -78,7 +78,7 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 	t.Run("budget", func(t *testing.T) {
 		ctx, st := t.Context(), newStore(t)
-		st.Add(ctx, inc("e1", 3, 1))
+		st.Add(ctx, inc("e1", 2, 1)) // in the snapshot's spend: the total is not above known
 		st.Add(ctx, inc("e2", 5, 2))
 		for _, tc := range []struct {
 			name string
@@ -101,6 +101,25 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 		// Over budget takes no slot.
 		if got := len(slotsOf(t, st)); got != 3 {
 			t.Errorf("%d slots held, want 3 (the admitted)", got)
+		}
+	})
+	t.Run("known spend is never below the counter's total", func(t *testing.T) {
+		// A snapshot whose boundary is older than the retention (the
+		// known-spend job failing for hours, its last result published
+		// still): its minutes before the retention's start are not read,
+		// but the site's own total still counts.
+		ctx, st := t.Context(), newStore(t)
+		st.Add(ctx, inc("old", 10, -7*60)) // seven hours ago: past the retention
+		st.Add(ctx, inc("new", 1, 0))
+		a := Admission{Slot: Slot{"a", "p", "s"}, Period: nov, Since: at(-8 * 60), Spend: 0, Budget: 5}
+		if o, known, err := st.Admit(ctx, a); err != nil || o != OverBudget || known != 11 {
+			t.Fatalf("%v, known %d, %v: a stale boundary must not undercount this site's 11", o, known, err)
+		}
+		// A current snapshot: its spend and the minutes from its boundary,
+		// when they are more than the site's total (other sites' calls).
+		a.Since, a.Spend, a.Budget = at(0), 20, 0
+		if _, known, err := st.Admit(ctx, a); err != nil || known != 21 {
+			t.Fatalf("known %d, %v: want the snapshot's 20 and the minute from its boundary", known, err)
 		}
 	})
 	t.Run("counter", func(t *testing.T) {
@@ -240,10 +259,13 @@ func TestValkeyStore(t *testing.T) {
 			t.Fatal(err)
 		}
 		// A boundary an hour back reads only the retained minutes; none
-		// reads the whole total.
+		// reads the whole total; admission's known spend is never below it.
+		if got, err := st.Since(ctx, "s", nov, now.Add(-time.Hour)); err != nil || got != 3 {
+			t.Fatalf("since %d, %v: want the 3 minutes within retention", got, err)
+		}
 		_, known, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov, Since: now.Add(-time.Hour), Now: now})
-		if err != nil || known != 3 {
-			t.Fatalf("known %d, %v: want the 3 minutes within retention", known, err)
+		if err != nil || known != 80 {
+			t.Fatalf("known %d, %v: want the total, 80, though the boundary is older than the retention", known, err)
 		}
 		if _, known, _ := st.Admit(ctx, Admission{Slot: Slot{"b", "p2", "s"}, Period: nov, Now: now}); known != 80 {
 			t.Fatalf("known %d with no boundary, want the total, 80", known)

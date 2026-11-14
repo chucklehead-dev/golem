@@ -163,7 +163,7 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, int64, error) {
 	if m.down {
 		return 0, 0, ErrUnavailable
 	}
-	known := a.Spend + m.since(a.Scope, a.Period, a.Since)
+	known := m.known(a.Scope, a.Period, a.Spend, a.Since)
 	if overBudget(known, a.Budget, a.DeclaredWorstCaseCheck, a.Worst) {
 		return OverBudget, known, nil
 	}
@@ -296,6 +296,21 @@ func (m *Mem) since(scope, period string, since time.Time) int64 {
 		}
 		return total
 	}
+}
+
+// known is a scope's known spend for a snapshot's spend and boundary: the
+// spend plus the counter's minutes from the boundary on, and never less
+// than the counter's whole total for the period (the admit script's). A
+// boundary older than the retention reads only the minutes retained, so
+// the spend between it and the retention's start would be lost (a
+// known-spend job that cannot read the ledger for hours keeps publishing
+// its last boundary); the site's own total still counts. mu is held.
+func (m *Mem) known(scope, period string, spend int64, since time.Time) int64 {
+	known := spend + m.since(scope, period, since)
+	if c := m.counter[keyOf{scope, period}]; c != nil {
+		known = max(known, c.total)
+	}
+	return known
 }
 
 // SetDown makes the store unreachable (true) or reachable again. Going down

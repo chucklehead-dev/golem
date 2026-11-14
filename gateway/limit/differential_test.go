@@ -24,6 +24,11 @@ import (
 type observed struct {
 	State expState
 	Known map[string]int64
+	// Admits is the known spend an admission computes from each of the
+	// trace's minutes as its boundary (a varied run's): the admit script's
+	// read and Mem's, compared where the boundary is older than the
+	// retention too.
+	Admits map[int64]int64
 }
 
 // Observe is the state and every gateway's known spend (connect.Observer):
@@ -55,13 +60,22 @@ func (u unjudged) Observe() (any, error) {
 		return nil, err
 	}
 	ob := o.(observed)
-	ob.State.Counter = map[int64]int64{}
+	ob.State.Counter, ob.Admits = map[int64]int64{}, map[int64]int64{}
 	for b := int64(1); b <= u.d.clock+1; b++ {
-		n, err := u.d.store.Since(u.d.t.Context(), scope, period, inPeriod.Add(time.Duration(b)*time.Minute))
+		since := inPeriod.Add(time.Duration(b) * time.Minute)
+		n, err := u.d.store.Since(u.d.t.Context(), scope, period, since)
 		if err != nil {
 			n = -1 // down: both stores must be
 		}
 		ob.State.Counter[b] = n
+		// A budget below zero refuses whatever the known spend, so the
+		// probe takes no slot; it still reports what it computed.
+		_, k, err := u.d.store.Admit(u.d.t.Context(), Admission{Slot: Slot{"probe", "probe", scope}, Period: period,
+			Since: since, Spend: 1, Now: u.d.now(), Budget: -1})
+		if err != nil {
+			k = -1
+		}
+		ob.Admits[b] = k
 	}
 	return ob, nil
 }

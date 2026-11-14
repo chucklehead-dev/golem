@@ -637,7 +637,8 @@ func (l *Limiter) EndGrace() {
 }
 
 // Known is a scope's known spend now, for the current period, read afresh
-// when the store answers (else the last computed). It does not change what
+// when the store answers (else the last computed): as admission computes
+// it, never below the counter's whole total. It does not change what
 // admission decides from: only an admission's own read does, as in
 // model/exposure.md.
 func (l *Limiter) Known(ctx context.Context, scope string) int64 {
@@ -646,9 +647,13 @@ func (l *Limiter) Known(ctx context.Context, scope string) int64 {
 		k := l.snapshotFor(scope, period)
 		sctx, cancel := l.storeContext(ctx)
 		since, err := l.store.Since(sctx, scope, period, k.Since)
+		total := since
+		if err == nil && !k.Since.IsZero() {
+			total, err = l.store.Since(sctx, scope, period, time.Time{})
+		}
 		cancel()
 		if err == nil {
-			return k.Spend + since
+			return max(k.Spend+since, total)
 		}
 	}
 	l.mu.Lock()
