@@ -78,11 +78,12 @@ are the two shared predicates.
 | Method | Who may | Notes |
 |---|---|---|
 | `CreateScope` | admins | top-level scopes only for now |
-| `AddMember` | the scope's managers, admins | creates the principal on its first add; an existing one keeps its kind and Entra ID |
-| `RemoveMember` | the scope's managers, admins | revokes the member's keys in the scope and drops its role there |
+| `AddMember` | the scope's managers, admins | a manager adds an existing principal or creates a keys-only service; only admins create a principal with an Entra ID or a user (ADR 0047); an existing one keeps its kind and Entra ID; a new one needs a kind |
+| `RemoveMember` | the scope's managers, admins; a fellow manager only by admins | a membership granted in golem; revokes the member's keys in the scope and drops its role there, unless still a member through a bound group |
+| `BindGroup`, `UnbindGroup` | admins | an Entra group's members become the scope's at the next sync |
 | `BindManager` | admins | `manager` is the only role bound so far |
-| `MintKey` | a member, its own keys; the scope's managers, its services' keys; admins, any | owner must be a member; models within the scope's; expiry in the future |
-| `RevokeKey` | the key's owner, its scope's managers, admins | revoking a revoked key is no change |
+| `MintKey` | a member, its own keys; the scope's managers, its services' keys; admins, any | owner must be a member; models within the scope's; expiry in the future; a personal key within 90 days, by default at 90 |
+| `RevokeKey` | the key's owner, admins; a service's key, its scope's managers | revoking a revoked key is no change; an outsider gets `not found` |
 | `Whoami` | anyone signed in | |
 | `ListScopes` | lists what the caller `sees` | |
 | `GetScope` | members, managers, admins | anyone else gets `not found`, not `permission denied`: a scope's existence is not theirs to learn |

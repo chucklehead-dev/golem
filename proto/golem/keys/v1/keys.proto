@@ -9,9 +9,11 @@ option go_package = "github.com/chucklehead-dev/golem/gen/golem/keys/v1;keysv1";
 
 service KeyService {
   // Mints a key: a member its own, a scope's managers its services', admins
-  // any. The key is in the response once; golem keeps only its hash.
+  // any. A personal key expires within 90 days (by default at 90). The key
+  // is in the response once; golem keeps only its hash.
   rpc MintKey(MintKeyRequest) returns (MintKeyResponse);
-  // Revokes a key: its owner, its scope's managers, or admins.
+  // Revokes a key: its owner or admins; a service's key also its scope's
+  // managers.
   rpc RevokeKey(RevokeKeyRequest) returns (RevokeKeyResponse);
   // The keys the caller may see: its own, those of the scopes it manages,
   // every key for admins. Never the key itself.

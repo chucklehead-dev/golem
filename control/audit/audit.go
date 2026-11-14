@@ -14,7 +14,6 @@ package audit
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -51,7 +50,11 @@ func (s *Shipper) Step(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	events := s.State.Current().Audit
-	events = events[:min(len(events), cmp.Or(s.Batch, 100))]
+	batch := s.Batch
+	if batch <= 0 {
+		batch = 100 // a zero or negative size is the default, never a slice panic
+	}
+	events = events[:min(len(events), batch)]
 	if len(events) == 0 {
 		return 0, nil
 	}

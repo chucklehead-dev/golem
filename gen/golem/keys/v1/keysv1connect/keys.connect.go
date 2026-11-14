@@ -45,9 +45,11 @@ const (
 // KeyServiceClient is a client for the golem.keys.v1.KeyService service.
 type KeyServiceClient interface {
 	// Mints a key: a member its own, a scope's managers its services', admins
-	// any. The key is in the response once; golem keeps only its hash.
+	// any. A personal key expires within 90 days (by default at 90). The key
+	// is in the response once; golem keeps only its hash.
 	MintKey(context.Context, *connect.Request[v1.MintKeyRequest]) (*connect.Response[v1.MintKeyResponse], error)
-	// Revokes a key: its owner, its scope's managers, or admins.
+	// Revokes a key: its owner or admins; a service's key also its scope's
+	// managers.
 	RevokeKey(context.Context, *connect.Request[v1.RevokeKeyRequest]) (*connect.Response[v1.RevokeKeyResponse], error)
 	// The keys the caller may see: its own, those of the scopes it manages,
 	// every key for admins. Never the key itself.
@@ -111,9 +113,11 @@ func (c *keyServiceClient) ListKeys(ctx context.Context, req *connect.Request[v1
 // KeyServiceHandler is an implementation of the golem.keys.v1.KeyService service.
 type KeyServiceHandler interface {
 	// Mints a key: a member its own, a scope's managers its services', admins
-	// any. The key is in the response once; golem keeps only its hash.
+	// any. A personal key expires within 90 days (by default at 90). The key
+	// is in the response once; golem keeps only its hash.
 	MintKey(context.Context, *connect.Request[v1.MintKeyRequest]) (*connect.Response[v1.MintKeyResponse], error)
-	// Revokes a key: its owner, its scope's managers, or admins.
+	// Revokes a key: its owner or admins; a service's key also its scope's
+	// managers.
 	RevokeKey(context.Context, *connect.Request[v1.RevokeKeyRequest]) (*connect.Response[v1.RevokeKeyResponse], error)
 	// The keys the caller may see: its own, those of the scopes it manages,
 	// every key for admins. Never the key itself.

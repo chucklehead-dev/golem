@@ -92,25 +92,63 @@ func TestAuthorization(t *testing.T) {
 	}
 }
 
-// TestRevokeKey: a key is revoked by its owner, its scope's managers or
-// admins, and by no one else.
+// TestRevokeKey: a member's key is revoked by its owner or admins; a
+// service's key also by its scope's managers; nobody else, and an outsider
+// is not told the key exists.
 func TestRevokeKey(t *testing.T) {
 	for _, tc := range []struct {
-		c    Caller
-		want bool
-	}{{admin, true}, {mgrA, true}, {alice, true}, {mgrB, false}, {eve, false}} {
+		owner   string
+		c       Caller
+		want    bool
+		refusal error
+	}{
+		{"alice", admin, true, nil}, {"alice", alice, true, nil}, {"alice", mgrA, false, ErrPermission},
+		{"alice", mgrB, false, ErrNotFound}, {"alice", eve, false, ErrNotFound},
+		{"ci", mgrA, true, nil}, {"ci", mgrB, false, ErrNotFound}, {"ci", alice, false, ErrPermission},
+	} {
 		s := setup(t)
-		k, err := s.MintKey(t.Context(), alice, Options{}, KeyRequest{Owner: "alice", Scope: "team-a"})
+		k, err := s.MintKey(t.Context(), admin, Options{}, KeyRequest{Owner: tc.owner, Scope: "team-a"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		err = s.RevokeKey(t.Context(), tc.c, Options{}, k.Hash)
-		if (err == nil) != tc.want || (!tc.want && !errors.Is(err, ErrPermission)) {
-			t.Errorf("revoke by %s: %v, want allowed=%v", tc.c.Principal, err, tc.want)
+		if (err == nil) != tc.want || (!tc.want && !errors.Is(err, tc.refusal)) {
+			t.Errorf("revoke %s's key by %s: %v, want allowed=%v", tc.owner, tc.c.Principal, err, tc.want)
 		}
 		if revoked := !s.State.Current().Keys[k.Hash].RevokedAt.IsZero(); revoked != tc.want {
-			t.Errorf("revoke by %s: revoked %v", tc.c.Principal, revoked)
+			t.Errorf("revoke %s's key by %s: revoked %v", tc.owner, tc.c.Principal, revoked)
 		}
+	}
+}
+
+// TestManagerRules: a manager cannot unseat another manager; a new
+// principal needs a kind; a personal key expires within the limit, by
+// default at it.
+func TestManagerRules(t *testing.T) {
+	ctx := t.Context()
+	s := setup(t)
+	if err := s.BindManager(ctx, admin, Options{}, "team-a", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveMember(ctx, mgrA, Options{}, "team-a", "alice"); !errors.Is(err, ErrPermission) {
+		t.Fatalf("a manager removing a fellow manager: %v", err)
+	}
+	if err := s.AddMember(ctx, admin, Options{}, "team-a", Member{ID: "nokind"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a new principal with no kind: %v", err)
+	}
+	k, err := s.MintKey(ctx, alice, Options{}, KeyRequest{Owner: "alice", Scope: "team-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp := s.State.Current().Keys[k.Hash].ExpiresAt; !exp.Equal(s.now().Add(MaxPersonalKeyLife)) {
+		t.Fatalf("a personal key without an expiry expires %v", exp)
+	}
+	if _, err := s.MintKey(ctx, alice, Options{}, KeyRequest{Owner: "alice", Scope: "team-a", Expires: s.now().Add(MaxPersonalKeyLife + time.Hour)}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a personal key past the limit: %v", err)
+	}
+	ci, err := s.MintKey(ctx, admin, Options{}, KeyRequest{Owner: "ci", Scope: "team-a"})
+	if err != nil || !s.State.Current().Keys[ci.Hash].ExpiresAt.IsZero() {
+		t.Fatalf("a service key: %v, expiry %v (none required)", err, s.State.Current().Keys[ci.Hash].ExpiresAt)
 	}
 }
 

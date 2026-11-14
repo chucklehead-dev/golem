@@ -58,6 +58,10 @@ func notFound(f string, a ...any) error {
 	return fmt.Errorf("%w: "+f, append([]any{ErrNotFound}, a...)...)
 }
 
+// MaxPersonalKeyLife is the longest a personal key lives (org-model.md §3:
+// policy, ninety days).
+const MaxPersonalKeyLife = 90 * 24 * time.Hour
+
 // manager is the one role golem binds so far (org-model.md §2); admins
 // hold the Entra app role instead of a binding.
 const manager = "manager"
@@ -167,6 +171,8 @@ func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope stri
 		case exists && (m.Kind != "" && m.Kind != p.Kind || m.Entra != "" && m.Entra != p.Entra):
 			return invalid("member", "principal %s exists as a %s with another identity", m.ID, p.Kind)
 		case exists:
+		case m.Kind != "user" && m.Kind != "service":
+			return invalid("member.kind", "a new principal is a user or a service, not %q", m.Kind)
 		case c.Admin:
 			p = state.Principal{Kind: m.Kind, Entra: m.Entra}
 		case m.Entra != "":
@@ -206,6 +212,9 @@ func (s *Service) RemoveMember(ctx context.Context, c Caller, o Options, scope, 
 			return notFound("%s is not a member of %s", principal, scope)
 		case !slices.Contains(p.Scopes, scope):
 			return invalid("member", "%s is a member of %s through an Entra group bound to it: remove them from the group in Entra, or unbind the group", principal, scope)
+		case !c.Admin && d.Has(principal, manager, scope):
+			// Managers are bound by admins; a manager cannot unseat another.
+			return denied("%s manages %s: only admins remove a scope's managers", principal, scope)
 		}
 		p.Scopes = slices.DeleteFunc(slices.Clone(p.Scopes), func(x string) bool { return x == scope })
 		if p.MemberOf(scope) {
@@ -293,7 +302,9 @@ type Minted struct {
 
 // MintKey mints a key for r.Owner in r.Scope. A member mints its own keys;
 // a scope's managers mint its services' keys; admins mint any. The owner
-// must be a member of the scope, and the models within the scope's.
+// must be a member of the scope, and the models within the scope's. A
+// personal key (a user's) must expire (org-model.md §3): within
+// MaxPersonalKeyLife, which is also its expiry when none is asked for.
 func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest) (Minted, error) {
 	if r.Owner == "" {
 		r.Owner = c.Principal // the caller's own key
@@ -326,6 +337,15 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 		if !r.Expires.IsZero() && !r.Expires.After(s.now()) {
 			return invalid("key.expires", "already past")
 		}
+		if owner.Kind == "user" {
+			limit := s.now().Add(MaxPersonalKeyLife)
+			switch {
+			case r.Expires.IsZero():
+				r.Expires = limit
+			case r.Expires.After(limit):
+				return invalid("key.expires", "a personal key lives at most %d days (org-model.md §3); a service's key has no limit", int(MaxPersonalKeyLife.Hours()/24))
+			}
+		}
 		if d.Keys == nil {
 			d.Keys = map[string]state.Key{}
 		}
@@ -339,16 +359,23 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 	return m, nil
 }
 
-// RevokeKey revokes a key by its hash: its owner, its scope's managers, or
-// admins. Revoking a revoked key is no change.
+// RevokeKey revokes a key by its hash: its owner, admins, and, for a
+// service's key, its scope's managers (org-model.md §2: managers mint,
+// rotate and revoke service keys; a member's own keys end with their
+// membership, which a manager can remove). Revoking a revoked key is no
+// change.
 func (s *Service) RevokeKey(ctx context.Context, c Caller, o Options, hash string) error {
 	return s.apply(ctx, c, o, "key.revoke", hash, nil, func(d *state.Document) error {
 		k, ok := d.Keys[hash]
 		if !ok {
 			return notFound("key %s", hash)
 		}
-		if k.Owner != c.Principal && !manages(d, c, k.Scope) {
-			return denied("a key is revoked by its owner, its scope's managers or admins")
+		service := d.Principals[k.Owner].Kind == "service"
+		if k.Owner != c.Principal && !c.Admin && !(service && manages(d, c, k.Scope)) {
+			if !sees(d, c, k.Scope) {
+				return notFound("key %s", hash)
+			}
+			return denied("a key is revoked by its owner or an admin, and a service's key by its scope's managers; to end a member's keys, remove the member")
 		}
 		return d.Revoke(hash, s.now())
 	})
