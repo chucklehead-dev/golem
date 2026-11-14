@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"time"
 
 	v1 "github.com/chucklehead-dev/golem/lib/api/v1alpha1"
@@ -49,9 +50,11 @@ const usage = `usage:
 
 func main() { os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
 
-// run is golemctl: its exit status.
+// run is golemctl: its exit status, 0 on success, 1 when the command
+// failed, 2 when it was used wrongly.
 func run(ctx context.Context, args []string, out, errOut io.Writer) int {
-	if len(args) < 2 && !(len(args) == 1 && (args[0] == "token" || args[0] == "login" || args[0] == "whoami")) {
+	// Every command is two words but these three, which may stand alone.
+	if len(args) == 0 || len(args) == 1 && !slices.Contains([]string{"login", "token", "whoami"}, args[0]) {
 		fmt.Fprintln(errOut, usage)
 		return 2
 	}
@@ -68,22 +71,18 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		if t, err = accessToken(ctx); err == nil {
 			fmt.Fprintln(out, t)
 		}
-	case cmd == "whoami":
-		err = apiCommand(ctx, []string{"whoami", ""}, out)
 	default:
-		err = apiCommand(ctx, args, out)
+		err = runAPI(ctx, args, out)
 	}
-	var u usageError
-	switch {
-	case errors.As(err, &u):
-		fmt.Fprintln(errOut, "golemctl:", err)
+	if err == nil {
+		return 0
+	}
+	fmt.Fprintln(errOut, "golemctl:", err)
+	if _, ok := errors.AsType[usageError](err); ok {
 		fmt.Fprintln(errOut, usage)
 		return 2
-	case err != nil:
-		fmt.Fprintln(errOut, "golemctl:", err)
-		return 1
 	}
-	return 0
+	return 1
 }
 
 // usageError is a command used wrongly.
@@ -132,8 +131,7 @@ func validate(args []string, out, errOut io.Writer) int {
 		o.Lease = 4 * time.Hour // validation does not depend on its length
 	}
 	s, err := compile.Compile(objs, o)
-	var ps compile.Problems
-	if errors.As(err, &ps) {
+	if ps, ok := errors.AsType[compile.Problems](err); ok {
 		for _, p := range ps {
 			fmt.Fprintln(out, p)
 		}

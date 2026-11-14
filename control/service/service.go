@@ -24,7 +24,10 @@ import (
 
 // Caller is who calls, as the transport authenticated them.
 type Caller struct {
-	Principal string // golem's principal ID
+	// Principal is golem's principal ID; a caller with no principal yet
+	// has one that matches none (control/api's "entra:<id>"), so it holds
+	// no membership or role and is recorded by its Entra ID in the audit.
+	Principal string
 	// Admin: the Entra app role golem.admin (org-model.md §2).
 	Admin bool
 }
@@ -48,6 +51,14 @@ func denied(f string, a ...any) error {
 	return fmt.Errorf("%w: "+f, append([]any{ErrPermission}, a...)...)
 }
 
+func notFound(f string, a ...any) error {
+	return fmt.Errorf("%w: "+f, append([]any{ErrNotFound}, a...)...)
+}
+
+// manager is the one role golem binds so far (org-model.md §2); admins
+// hold the Entra app role instead of a binding.
+const manager = "manager"
+
 // Options are every mutating method's.
 type Options struct {
 	// ValidateOnly checks the change, its authorization and the store's
@@ -68,8 +79,11 @@ func (s *Service) now() time.Time {
 	return time.Now().UTC()
 }
 
-// apply runs change, with an audit event, as one update (or a validation).
-func (s *Service) apply(ctx context.Context, o Options, c Caller, action, target string, detail map[string]string, change func(*state.Document) error) error {
+// apply runs change and appends its audit event, by c, as one update; with
+// o.ValidateOnly, it checks them against the store's invariants and writes
+// nothing. change may run more than once (the store retries it when
+// another write won), so it must work from the document it is given.
+func (s *Service) apply(ctx context.Context, c Caller, o Options, action, target string, detail map[string]string, change func(*state.Document) error) error {
 	at := s.now()
 	f := func(d *state.Document) error {
 		if err := change(d); err != nil {
@@ -87,7 +101,7 @@ func (s *Service) apply(ctx context.Context, o Options, c Caller, action, target
 
 // manages reports whether c may manage scope: an admin, or its manager.
 func manages(d *state.Document, c Caller, scope string) bool {
-	return c.Admin || d.Has(c.Principal, "manager", scope)
+	return c.Admin || d.Has(c.Principal, manager, scope)
 }
 
 // CreateScope creates a scope with its policy: admins only (a top-level
@@ -99,7 +113,7 @@ func (s *Service) CreateScope(ctx context.Context, c Caller, o Options, id strin
 	if id == "" {
 		return invalid("scope.id", "required")
 	}
-	return s.apply(ctx, o, c, "scope.create", id, nil, func(d *state.Document) error {
+	return s.apply(ctx, c, o, "scope.create", id, nil, func(d *state.Document) error {
 		if _, exists := d.Scopes[id]; exists {
 			return invalid("scope.id", "scope %q exists", id)
 		}
@@ -125,9 +139,9 @@ func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope stri
 	if m.ID == "" {
 		return invalid("member.id", "required")
 	}
-	return s.apply(ctx, o, c, "membership.add", m.ID, map[string]string{"scope": scope}, func(d *state.Document) error {
+	return s.apply(ctx, c, o, "membership.add", m.ID, map[string]string{"scope": scope}, func(d *state.Document) error {
 		if _, ok := d.Scopes[scope]; !ok {
-			return fmt.Errorf("%w: scope %s", ErrNotFound, scope)
+			return notFound("scope %s", scope)
 		}
 		if !manages(d, c, scope) {
 			return denied("only scope %s's managers add its members", scope)
@@ -155,13 +169,13 @@ func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope stri
 // in the scope (a key is honoured only for a member): the scope's
 // managers, or admins.
 func (s *Service) RemoveMember(ctx context.Context, c Caller, o Options, scope, principal string) error {
-	return s.apply(ctx, o, c, "membership.remove", principal, map[string]string{"scope": scope}, func(d *state.Document) error {
+	return s.apply(ctx, c, o, "membership.remove", principal, map[string]string{"scope": scope}, func(d *state.Document) error {
 		if !manages(d, c, scope) {
 			return denied("only scope %s's managers remove its members", scope)
 		}
 		p, ok := d.Principals[principal]
 		if !ok || !slices.Contains(p.Scopes, scope) {
-			return fmt.Errorf("%w: %s is not a member of %s", ErrNotFound, principal, scope)
+			return notFound("%s is not a member of %s", principal, scope)
 		}
 		for h, k := range d.Keys {
 			if k.Owner == principal && k.Scope == scope {
@@ -185,11 +199,11 @@ func (s *Service) BindManager(ctx context.Context, c Caller, o Options, scope, p
 	if !c.Admin {
 		return denied("only admins assign managers")
 	}
-	return s.apply(ctx, o, c, "role.bind", principal, map[string]string{"role": "manager", "scope": scope}, func(d *state.Document) error {
-		if d.Has(principal, "manager", scope) {
+	return s.apply(ctx, c, o, "role.bind", principal, map[string]string{"role": manager, "scope": scope}, func(d *state.Document) error {
+		if d.Has(principal, manager, scope) {
 			return nil
 		}
-		d.Roles = append(d.Roles, state.RoleBinding{Principal: principal, Role: "manager", Scope: scope})
+		d.Roles = append(d.Roles, state.RoleBinding{Principal: principal, Role: manager, Scope: scope})
 		return nil
 	})
 }
@@ -218,20 +232,20 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 	plain := key.New(key.Live)
 	h := key.Hash(plain)
 	m := Minted{Key: plain, Hash: hex.EncodeToString(h[:]), Display: key.Display(plain)}
-	err := s.apply(ctx, o, c, "key.mint", m.Display, map[string]string{"owner": r.Owner, "scope": r.Scope}, func(d *state.Document) error {
+	err := s.apply(ctx, c, o, "key.mint", m.Display, map[string]string{"owner": r.Owner, "scope": r.Scope}, func(d *state.Document) error {
 		sc, ok := d.Scopes[r.Scope]
 		if !ok {
-			return fmt.Errorf("%w: scope %s", ErrNotFound, r.Scope)
+			return notFound("scope %s", r.Scope)
 		}
 		owner, ok := d.Principals[r.Owner]
 		switch {
 		case !ok:
-			return fmt.Errorf("%w: principal %s", ErrNotFound, r.Owner)
+			return notFound("principal %s", r.Owner)
 		case !slices.Contains(owner.Scopes, r.Scope):
 			return invalid("key.owner", "%s is not a member of %s: add them first", r.Owner, r.Scope)
 		case c.Admin:
 		case r.Owner == c.Principal:
-		case owner.Kind == "service" && d.Has(c.Principal, "manager", r.Scope):
+		case owner.Kind == "service" && manages(d, c, r.Scope):
 		default:
 			return denied("a member mints its own keys; a scope's managers mint its services' keys")
 		}
@@ -259,12 +273,12 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 // RevokeKey revokes a key by its hash: its owner, its scope's managers, or
 // admins. Revoking a revoked key is no change.
 func (s *Service) RevokeKey(ctx context.Context, c Caller, o Options, hash string) error {
-	return s.apply(ctx, o, c, "key.revoke", hash, nil, func(d *state.Document) error {
+	return s.apply(ctx, c, o, "key.revoke", hash, nil, func(d *state.Document) error {
 		k, ok := d.Keys[hash]
 		if !ok {
-			return fmt.Errorf("%w: key %s", ErrNotFound, hash)
+			return notFound("key %s", hash)
 		}
-		if !c.Admin && k.Owner != c.Principal && !d.Has(c.Principal, "manager", k.Scope) {
+		if k.Owner != c.Principal && !manages(d, c, k.Scope) {
 			return denied("a key is revoked by its owner, its scope's managers or admins")
 		}
 		return d.Revoke(hash, s.now())
@@ -307,7 +321,7 @@ func (s *Service) read(ctx context.Context) (*state.Document, error) {
 
 // sees reports whether c may read scope: a member, a manager or an admin.
 func sees(d *state.Document, c Caller, scope string) bool {
-	return c.Admin || d.Has(c.Principal, "manager", scope) || slices.Contains(d.Principals[c.Principal].Scopes, scope)
+	return manages(d, c, scope) || slices.Contains(d.Principals[c.Principal].Scopes, scope)
 }
 
 // ScopeView is a scope as its members see it.
@@ -341,12 +355,10 @@ func (s *Service) GetScope(ctx context.Context, c Caller, id string) (ScopeView,
 		return ScopeView{}, err
 	}
 	sc, ok := d.Scopes[id]
-	if !ok {
-		return ScopeView{}, fmt.Errorf("%w: scope %s", ErrNotFound, id)
-	}
-	if !sees(d, c, id) {
-		// Not found, not denied: a scope's existence is not for outsiders.
-		return ScopeView{}, fmt.Errorf("%w: scope %s", ErrNotFound, id)
+	// Not found, not denied, for an outsider: a scope's existence is not
+	// theirs to learn.
+	if !ok || !sees(d, c, id) {
+		return ScopeView{}, notFound("scope %s", id)
 	}
 	v := ScopeView{ID: id, Policy: sc}
 	for _, pid := range slices.Sorted(maps.Keys(d.Principals)) {
@@ -382,7 +394,7 @@ func (s *Service) ListKeys(ctx context.Context, c Caller, scope string) ([]KeyVi
 		if scope != "" && k.Scope != scope {
 			continue
 		}
-		if c.Admin || k.Owner == c.Principal || d.Has(c.Principal, "manager", k.Scope) {
+		if k.Owner == c.Principal || manages(d, c, k.Scope) {
 			out = append(out, KeyView{Hash: h, Key: k})
 		}
 	}

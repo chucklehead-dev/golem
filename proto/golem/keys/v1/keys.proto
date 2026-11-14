@@ -25,6 +25,8 @@ message MintKeyRequest {
   // Narrows the scope's models; empty: all of them.
   repeated string models = 3;
   google.protobuf.Timestamp expires = 4;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
   bool validate_only = 5;
 }
 
@@ -39,6 +41,8 @@ message MintKeyResponse {
 
 message RevokeKeyRequest {
   string hash = 1;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
   bool validate_only = 2;
 }
 

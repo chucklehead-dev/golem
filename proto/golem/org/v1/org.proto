@@ -12,7 +12,8 @@ service OrgService {
   // Adds a member, creating the user or service on its first add: the
   // scope's managers, or admins.
   rpc AddMember(AddMemberRequest) returns (AddMemberResponse);
-  // Removes a member, revoking its keys in the scope and its role there.
+  // Removes a member, revoking its keys in the scope and its role there:
+  // the scope's managers, or admins.
   rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
   // Makes a principal a manager of a scope: admins.
   rpc BindManager(BindManagerRequest) returns (BindManagerResponse);
@@ -44,6 +45,8 @@ message ScopePolicy {
 message CreateScopeRequest {
   string id = 1;
   ScopePolicy policy = 2;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
   bool validate_only = 3;
 }
 
@@ -60,6 +63,8 @@ message Member {
 message AddMemberRequest {
   string scope = 1;
   Member member = 2;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
   bool validate_only = 3;
 }
 
@@ -68,6 +73,8 @@ message AddMemberResponse {}
 message RemoveMemberRequest {
   string scope = 1;
   string principal = 2;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
   bool validate_only = 3;
 }
 
@@ -76,6 +83,8 @@ message RemoveMemberResponse {}
 message BindManagerRequest {
   string scope = 1;
   string principal = 2;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
   bool validate_only = 3;
 }
 

@@ -30,9 +30,11 @@ type MintKeyRequest struct {
 	Owner string `protobuf:"bytes,1,opt,name=owner,proto3" json:"owner,omitempty"`
 	Scope string `protobuf:"bytes,2,opt,name=scope,proto3" json:"scope,omitempty"`
 	// Narrows the scope's models; empty: all of them.
-	Models        []string               `protobuf:"bytes,3,rep,name=models,proto3" json:"models,omitempty"`
-	Expires       *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires,proto3" json:"expires,omitempty"`
-	ValidateOnly  bool                   `protobuf:"varint,5,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
+	Models  []string               `protobuf:"bytes,3,rep,name=models,proto3" json:"models,omitempty"`
+	Expires *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires,proto3" json:"expires,omitempty"`
+	// Checks the change, its authorization and the store\'s invariants, and
+	// writes nothing (golemctl --dry-run).
+	ValidateOnly  bool `protobuf:"varint,5,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -166,9 +168,11 @@ func (x *MintKeyResponse) GetDisplay() string {
 }
 
 type RevokeKeyRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Hash          string                 `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
-	ValidateOnly  bool                   `protobuf:"varint,2,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Hash  string                 `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
+	// Checks the change, its authorization and the store\'s invariants, and
+	// writes nothing (golemctl --dry-run).
+	ValidateOnly  bool `protobuf:"varint,2,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

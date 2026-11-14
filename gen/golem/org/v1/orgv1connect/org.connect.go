@@ -58,7 +58,8 @@ type OrgServiceClient interface {
 	// Adds a member, creating the user or service on its first add: the
 	// scope's managers, or admins.
 	AddMember(context.Context, *connect.Request[v1.AddMemberRequest]) (*connect.Response[v1.AddMemberResponse], error)
-	// Removes a member, revoking its keys in the scope and its role there.
+	// Removes a member, revoking its keys in the scope and its role there:
+	// the scope's managers, or admins.
 	RemoveMember(context.Context, *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error)
 	// Makes a principal a manager of a scope: admins.
 	BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error)
@@ -181,7 +182,8 @@ type OrgServiceHandler interface {
 	// Adds a member, creating the user or service on its first add: the
 	// scope's managers, or admins.
 	AddMember(context.Context, *connect.Request[v1.AddMemberRequest]) (*connect.Response[v1.AddMemberResponse], error)
-	// Removes a member, revoking its keys in the scope and its role there.
+	// Removes a member, revoking its keys in the scope and its role there:
+	// the scope's managers, or admins.
 	RemoveMember(context.Context, *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error)
 	// Makes a principal a manager of a scope: admins.
 	BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error)

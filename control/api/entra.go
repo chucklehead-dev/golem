@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -21,16 +22,20 @@ type EntraAuth struct {
 	State *state.Store
 }
 
+// Authenticate verifies the request's bearer token and finds its
+// principal in the document as last read: the store refreshes it in the
+// background, so a principal just added elsewhere is found once it has.
 func (a EntraAuth) Authenticate(_ context.Context, h http.Header) (service.Caller, error) {
 	tok, ok := bearer(h)
 	if !ok {
 		return service.Caller{}, errors.New("an Entra access token is required (Authorization: Bearer); golemctl login gets one")
 	}
-	id, no := a.Entra.Verify(tok)
-	if no != nil {
-		return service.Caller{}, errors.New(no.Msg)
+	id, refused := a.Entra.Verify(tok)
+	if refused != nil {
+		return service.Caller{}, errors.New(refused.Msg)
 	}
 	c := service.Caller{Principal: "entra:" + id.ID, Admin: id.Admin}
+	// The store keeps Entra IDs unique, so at most one principal matches.
 	for pid, p := range a.State.Current().Principals {
 		if p.Entra == id.ID && (p.Kind == "service") == id.Service {
 			c.Principal = pid
@@ -38,4 +43,11 @@ func (a EntraAuth) Authenticate(_ context.Context, h http.Header) (service.Calle
 		}
 	}
 	return c, nil
+}
+
+// bearer is an Authorization header's token, if it has a non-empty one.
+func bearer(h http.Header) (string, bool) {
+	tok, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
+	tok = strings.TrimSpace(tok)
+	return tok, ok && tok != ""
 }

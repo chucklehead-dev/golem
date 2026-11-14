@@ -251,3 +251,19 @@ func sameSet(a, b []string) bool {
 	}
 	return true
 }
+
+// TestManagerReadsScope: a scope's manager reads it without being a
+// member (org-model.md §2: managing is its own right).
+func TestManagerReadsScope(t *testing.T) {
+	s := setup(t)
+	ctx := t.Context()
+	if err := s.BindManager(ctx, admin, Options{}, "team-b", "mona"); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := s.ListScopes(ctx, mgrA); err != nil || strings.Join(ids, ",") != "team-a,team-b" {
+		t.Fatalf("mona's scopes: %v %v", ids, err)
+	}
+	if v, err := s.GetScope(ctx, mgrA, "team-b"); err != nil || strings.Join(v.Managers, ",") != "bob,mona" {
+		t.Fatalf("team-b as its non-member manager: %+v %v", v, err)
+	}
+}
