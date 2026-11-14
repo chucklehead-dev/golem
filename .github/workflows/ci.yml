@@ -13,13 +13,26 @@ jobs:
       valkey:
         image: valkey/valkey:8.1
         ports: ["6379:6379"]
+      # The ledger's DDL and the known-spend query run on a real ClickHouse
+      # (control/spend's TestClickHouseLedger).
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        ports: ["8123:8123"]
+        env:
+          CLICKHOUSE_USER: golem
+          CLICKHOUSE_PASSWORD: ci-only
     env:
       GOLEM_VALKEY_ADDR: localhost:6379
+      GOLEM_CLICKHOUSE_URL: http://localhost:8123
+      GOLEM_CLICKHOUSE_USER: golem
+      GOLEM_CLICKHOUSE_PASSWORD: ci-only
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: wait for ClickHouse
+        run: for i in $(seq 60); do curl -fs localhost:8123/ping && exit 0; sleep 1; done; exit 1
       - name: gofmt
         run: |
           out=$(gofmt -l .)
@@ -56,7 +69,7 @@ jobs:
         run: |
           npm install --global @informalsystems/quint@0.33.1
           go install github.com/driusan/lmt@v0.0.0-20210421124901-62fe18f2f6a6
-          go install github.com/chucklehead-dev/gotogether/cmd/gotogether@v0.0.0-20261112171447-7707ddf5f585
+          go install github.com/chucklehead-dev/gotogether/cmd/gotogether@v0.0.0-20261114152351-d16c9df6ce24
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: the generated models match the markdown
         run: make -C model verify-tangled
