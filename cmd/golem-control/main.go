@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -56,6 +57,18 @@ func main() {
 		}
 		return
 	}
+	if err := run(); err != nil {
+		fail("%v", err)
+	}
+}
+
+// run is golem-control: set up, then run until SIGTERM or a component
+// fails. Shutdown is in order: the publishing loop stops (no publication
+// left half-done), the lease is given up so another replica publishes at
+// once rather than after the lease lapses, the API drains, and the audit's
+// log records are flushed. Errors are returned, never an exit from a
+// goroutine, so every deferred step runs.
+func run() error {
 	cfg := flag.String("config", "", "the config CRDs' directory")
 	bkt := flag.String("bucket", "", "the bucket: a directory, or s3://<bucket>/<prefix>")
 	key := flag.String("signing-key", "", "the publishing key: file:<an Ed25519 PKCS#8 PEM> or kms:<a KMS key ARN, ECC_NIST_P256>")
@@ -72,27 +85,30 @@ func main() {
 	syncMax := flag.Int("entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
 	flag.Parse()
 	if *cfg == "" || *bkt == "" || *key == "" {
-		fail("-config, -bucket and -signing-key are required")
+		return errors.New("-config, -bucket and -signing-key are required")
+	}
+	if *archive == "" && *telem != "off" {
+		return errors.New("-telemetry carries the audit's log records, which need -audit-archive: set both, or neither")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	b, err := openBucket(ctx, *bkt)
 	if err != nil {
-		fail("-bucket: %v", err)
+		return fmt.Errorf("-bucket: %w", err)
 	}
 	signer, err := openSigner(ctx, *key)
 	if err != nil {
-		fail("-signing-key: %v", err)
+		return fmt.Errorf("-signing-key: %w", err)
 	}
 	replica := *id
 	if replica == "" {
 		if replica, err = os.Hostname(); err != nil {
-			fail("-id: %v", err)
+			return fmt.Errorf("-id: %w", err)
 		}
 	}
 	st := &state.Store{Bucket: b}
 	if err := st.Load(ctx); err != nil {
-		fail("the state document: %v", err)
+		return fmt.Errorf("the state document: %w", err)
 	}
 	c := &controller.Controller{Dir: *cfg, Lease: *authLease,
 		Elector: &lead.Elector{State: st, ID: replica}, Publishers: map[string]*publish.Publisher{}}
@@ -104,7 +120,7 @@ func main() {
 	if *archive != "" {
 		shipper, shutdown, err := openAudit(ctx, st, *archive, *telem)
 		if err != nil {
-			fail("%v", err)
+			return err
 		}
 		defer shutdown()
 		c.Audit = shipper
@@ -113,32 +129,50 @@ func main() {
 	}
 	if *syncClient != "" {
 		if *tenant == "" {
-			fail("-entra-sync-client-id needs -entra-tenant")
+			return errors.New("-entra-sync-client-id needs -entra-tenant")
 		}
 		tok := &entrasync.FederatedToken{Tenant: *tenant, ClientID: *syncClient}
 		c.Sync = &entrasync.Sync{State: st, Directory: &entrasync.Graph{Token: tok.Token}, MaxRemovals: *syncMax}
 		c.SyncEvery = *syncEvery
 	}
 	slog.Info("golem-control: running", "replica", replica, "pools", *pools, "signing key", signer.KeyID())
-	go st.Run(ctx) //qenv:ok the state refresh loop, ended by ctx
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var failed error // a component's failure, which stops the rest
+	wg.Go(func() { st.Run(ctx) })
 	if *listen != "" {
 		srv, err := apiServer(ctx, *listen, *tenant, *audience, st)
 		if err != nil {
-			fail("-listen: %v", err)
+			return fmt.Errorf("-listen: %w", err)
 		}
-		go func() { //qenv:ok the API server, shut down below
+		wg.Go(func() {
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				fail("the control API: %v", err)
+				failed = fmt.Errorf("the control API: %w", err) // read after wg.Wait
+				cancel()
 			}
-		}()
-		defer func() {
+		})
+		slog.Info("golem-control: the control API is listening", "addr", *listen)
+		// Drained when the context ends, so ListenAndServe returns and the
+		// wait below ends.
+		context.AfterFunc(ctx, func() {
 			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			srv.Shutdown(sctx)
-		}()
-		slog.Info("golem-control: the control API is listening", "addr", *listen)
+		})
 	}
-	c.Run(ctx)
+	c.Run(ctx) // until SIGTERM, or another component cancels
+	wg.Wait()
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	if err := c.Elector.Release(rctx); err != nil {
+		slog.Warn("golem-control: the lease was not given up; another replica takes it when it lapses", "err", err)
+	}
+	if failed != nil {
+		return failed
+	}
+	slog.Info("golem-control: stopped")
+	return nil
 }
 
 // apiServer serves the control API, authenticated by Entra tokens: no

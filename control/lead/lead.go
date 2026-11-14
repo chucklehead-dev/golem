@@ -23,8 +23,12 @@ import (
 	"github.com/chucklehead-dev/golem/control/state"
 )
 
-// errHeld: another replica's lease has not lapsed.
-var errHeld = errors.New("lead: the lease is held")
+// errHeld: another replica's lease has not lapsed; errNotHolder: this
+// replica does not hold it (Release).
+var (
+	errHeld      = errors.New("lead: the lease is held")
+	errNotHolder = errors.New("lead: not the holder")
+)
 
 // Elector is one replica's view of the lease.
 type Elector struct {
@@ -107,6 +111,28 @@ func (e *Elector) epochLocked() uint64 {
 		e.epoch = 0
 	}
 	return e.epoch
+}
+
+// Release gives up the lease if this replica holds it, so another may take
+// it at once rather than when it lapses (a rolling restart then loses no
+// publication time). Belief ends first: nothing this replica does after
+// Release starts is done as leader. The lease's holder and epoch stay;
+// it is marked lapsed, and the next taker's epoch is one more.
+func (e *Elector) Release(ctx context.Context) error {
+	e.mu.Lock()
+	e.epoch = 0
+	e.mu.Unlock()
+	_, err := e.State.Update(ctx, func(doc *state.Document) error {
+		if doc.Leader == nil || doc.Leader.Holder != e.ID {
+			return errNotHolder
+		}
+		doc.Leader.DurationMillis = 0 // lapsed as of its last renewal
+		return nil
+	})
+	if errors.Is(err, errNotHolder) {
+		return nil
+	}
+	return err
 }
 
 // Run tries for the lease every RenewEvery until ctx ends.

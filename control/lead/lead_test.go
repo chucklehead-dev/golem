@@ -124,3 +124,33 @@ func key(t *testing.T) []byte {
 	}
 	return k
 }
+
+// TestRelease: a replica that gives up the lease stops believing at once,
+// and another takes it without waiting for it to lapse, at the next epoch.
+func TestRelease(t *testing.T) {
+	_, rs := replicas(t, "a", "b")
+	a, b := rs["a"], rs["b"]
+	if try(t, a) != 1 {
+		t.Fatal("a takes epoch 1")
+	}
+	b.clock = a.clock // well within a's lease
+	if try(t, b) != 0 {
+		t.Fatal("b took a held lease")
+	}
+	if err := a.Release(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if a.Epoch() != 0 {
+		t.Fatal("a still believes it leads after giving up")
+	}
+	b.State.Refresh(t.Context()) // as its store's loop does
+	if try(t, b) != 2 {
+		t.Fatal("b did not take the given-up lease at the next epoch")
+	}
+	if err := a.Release(t.Context()); err != nil {
+		t.Fatalf("releasing a lease another holds: %v, want no change", err)
+	}
+	if b.State.Refresh(t.Context()); b.State.Current().Leader.Holder != "b" {
+		t.Fatal("a's second release took b's lease")
+	}
+}

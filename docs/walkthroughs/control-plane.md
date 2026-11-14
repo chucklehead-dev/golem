@@ -119,6 +119,13 @@ believing before any other replica, by that replica's clock, may take the
 lease. Clock skew changes only when a lapsed lease may be taken; it cannot
 let an old holder publish, because the record's write checks the lease.
 
+**Giving up.** On SIGTERM, golem-control stops its publishing loop and the
+elector's (`Controller.Run` returns only once both have), then calls
+`Elector.Release`: belief ends first, then the lease is marked lapsed (its
+duration set to zero), so another replica takes it at the next epoch on
+its next try instead of after fifteen seconds. A rolling restart loses no
+publication time.
+
 ## 3. Publication
 
 `Publisher.Publish` (`control/publish/publish.go:63`) publishes one pool,
@@ -260,7 +267,7 @@ membership that is only a group's.
 | `-listen` | serve the control API here; needs `-entra-tenant` |
 | `-entra-tenant`, `-entra-audience` | the Entra tenant, and the control API registration's audiences (default `api://golem-control`, ADR 0046) |
 | `-audit-archive` | the audit archive bucket; empty: the outbox is not shipped and grows |
-| `-telemetry` | `off`, or an OTLP/HTTP collector for the audit's log records (only with `-audit-archive`) |
+| `-telemetry` | `off`, or an OTLP/HTTP collector for the audit's log records; refused without `-audit-archive` |
 | `-entra-sync-client-id` | the jobs registration (entra.md #4): run the group sync by workload identity; needs `-entra-tenant` |
 | `-entra-sync-every`, `-entra-sync-max-removals` | the sync's interval (5m) and its removal guard (50) |
 

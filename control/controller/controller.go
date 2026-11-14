@@ -21,6 +21,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/chucklehead-dev/golem/control/audit"
@@ -159,9 +160,12 @@ func (c *Controller) load() error {
 }
 
 // Run tries for the lease and publishes when due, every second, until
-// ctx ends.
+// ctx ends. It returns once the elector's loop has too, so a Release after
+// it cannot be undone by a renewal still in flight.
 func (c *Controller) Run(ctx context.Context) {
-	go c.Elector.Run(ctx) //qenv:ok the elector's loop, ended by ctx
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	wg.Go(func() { c.Elector.Run(ctx) })
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	var last string
