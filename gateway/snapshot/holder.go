@@ -119,7 +119,9 @@ func (h *Holder) Apply(s *snapshot.Snapshot, hash string, secrets Secrets) error
 	}
 	c, err := h.compile(s, hash, secrets)
 	if err != nil {
-		return err
+		// Not the publication's fault alone: a secret it names may be
+		// mounted later. The bucket source retries it (applyError).
+		return applyError{err}
 	}
 	h.floor = s.PublishSeq
 	h.cur.Store(c)

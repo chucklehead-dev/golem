@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,5 +256,45 @@ func TestOverdue(t *testing.T) {
 	p.publish(t)
 	if err := gw.Poll(t.Context()); err != nil || gw.Overdue() {
 		t.Fatalf("poll %v, overdue %v: a new publication clears it", err, gw.Overdue())
+	}
+}
+
+// mounting is secrets that are not there until mounted.
+type mounting struct{ mounted *atomic.Bool }
+
+func (m mounting) Secret(ref, env string) (string, error) {
+	if !m.mounted.Load() {
+		return "", errors.New("secret " + ref + " not mounted yet")
+	}
+	return "sk", nil
+}
+
+// TestApplyRetried: a verified publication that fails to apply (a secret
+// not mounted yet) is tried again while it is current, every ApplyRetry,
+// not left until the next publication; a refused one is not.
+func TestApplyRetried(t *testing.T) {
+	p := newPublished(t)
+	now := time.Now()
+	var mounted atomic.Bool
+	gw := p.gateway(t)
+	gw.Holder.Now = func() time.Time { return now }
+	gw.Secrets = mounting{&mounted}
+	gw.ApplyRetry = 30 * time.Second
+	if _, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+		s := snap(seq, now.Add(time.Hour))
+		return s, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Poll(t.Context()); err == nil || applied(gw) != 0 {
+		t.Fatalf("poll with the secret missing: %v, applied %d", err, applied(gw))
+	}
+	mounted.Store(true)
+	if err := gw.Poll(t.Context()); err != nil || applied(gw) != 0 {
+		t.Fatalf("within the retry interval: %v, applied %d; want no retry yet", err, applied(gw))
+	}
+	now = now.Add(31 * time.Second)
+	if err := gw.Poll(t.Context()); err != nil || applied(gw) != 1 {
+		t.Fatalf("after the retry interval: %v, applied %d; want 1", err, applied(gw))
 	}
 }

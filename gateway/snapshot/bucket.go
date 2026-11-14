@@ -42,9 +42,13 @@ type Bucket struct {
 	// pool's credentials can overwrite it).
 	GatewayID string
 	Interval  time.Duration // default one second
-	Log       *slog.Logger
+	// ApplyRetry is how often a verified publication that failed to apply
+	// is tried again while it is current (default 30 seconds).
+	ApplyRetry time.Duration
+	Log        *slog.Logger
 
 	tag     string    // the entity tag of the last pointer judged (Poll)
+	retry   time.Time // when to read a pointer whose publication failed to apply again
 	expires time.Time // the last verified pointer's Expires
 	overdue bool      // reported, until a pointer that is not overdue
 }
@@ -122,6 +126,9 @@ func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
 // Poll reads the pointer and applies a newer publication. An unchanged
 // pointer costs one conditional get.
 func (b *Bucket) Poll(ctx context.Context) error {
+	if !b.retry.IsZero() && !b.Holder.now().Before(b.retry) {
+		b.tag, b.retry = "", time.Time{} // read it again, though unchanged
+	}
 	raw, tag, err := b.Bucket.Get(ctx, snapshot.PointerKey(b.Pool), b.tag)
 	if errors.Is(err, bucket.ErrNotModified) {
 		b.checkOverdue()
@@ -132,9 +139,14 @@ func (b *Bucket) Poll(ctx context.Context) error {
 	}
 	err = b.read(ctx, raw)
 	// A pointer judged (applied, held already, or refused) is not read
-	// again until it changes; one whose snapshot could not be fetched is.
+	// again until it changes; one whose snapshot could not be fetched is,
+	// at the next poll; one whose publication failed to apply (a secret not
+	// yet mounted, say) every ApplyRetry, as it may apply later.
 	if _, transient := errors.AsType[fetchError](err); !transient {
 		b.tag = tag
+	}
+	if _, failed := errors.AsType[applyError](err); failed {
+		b.retry = b.Holder.now().Add(cmp.Or(b.ApplyRetry, 30*time.Second))
 	}
 	b.checkOverdue()
 	return err
@@ -161,6 +173,12 @@ func (b *Bucket) Overdue() bool { return b.overdue }
 type fetchError struct{ error }
 
 func (e fetchError) Unwrap() error { return e.error }
+
+// applyError is a verified publication the holder did not apply: retried
+// every ApplyRetry.
+type applyError struct{ error }
+
+func (e applyError) Unwrap() error { return e.error }
 
 // read judges a pointer and applies the publication it names, unless the
 // gateway holds it already.
@@ -198,7 +216,7 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 		return fmt.Errorf("snapshot %s is publication %d, its pointer says %d: refused", ptr.Hash, s.PublishSeq, ptr.PublishSeq)
 	}
 	if err := b.Holder.Apply(s, ptr.Hash, b.Secrets); err != nil {
-		return err
+		return err // an applyError if it may apply later
 	}
 	if err := b.saveCheckpoint(ptr.PublishSeq); err != nil {
 		// Applied but not persisted: a restart's floor is the older one.
@@ -230,8 +248,16 @@ func (b *Bucket) saveCheckpoint(seq uint64) error {
 	}
 	if err != nil {
 		os.Remove(tmp.Name())
+		return err
 	}
-	return err
+	// The rename is durable once the directory is: without this, a power
+	// loss can bring back the previous checkpoint, a lower floor.
+	dir, err := os.Open(filepath.Dir(b.Checkpoint))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (b *Bucket) writeStatus(ctx context.Context, ptr snapshot.Pointer) {
