@@ -193,23 +193,31 @@ The bucket holds, per pool (`PointerKey`, `ObjectKey`, `CheckpointKey`):
 - `snapshots/<pool>/<hash>.json`: the snapshot, content-addressed, so
   writing it twice is harmless;
 - `snapshots/<pool>/current`: the signed **pointer**, `{pool, publishSeq,
-  epoch, source, issuedAt, hash}` (`pointer.go:16`);
-- `control/<pool>/checkpoint`: the **checkpoint**, `{pool, publishSeq}`
-  (`pointer.go:85`).
+  epoch, source, issuedAt, expires, hash}`;
+- `control/<pool>/checkpoint`: the signed **checkpoint**, `{pool,
+  publishSeq}`.
 
-Only the pointer is signed. `SignPointer` (`pointer.go:49`) signs
-`"golem snapshot pointer v1\n"` followed by the payload's bytes
-(`signedBytes`, `pointer.go:39`): the context string means the publishing
-key's signature over a pointer means nothing elsewhere, and vice versa.
-`OpenPointer` (`pointer.go:63`) verifies before it decodes, and decodes the
-verified payload strictly. The snapshot needs no signature of its own: the
-gateway checks its bytes against the pointer's hash.
+Both are signed, each in its own context: `seal` signs
+`"golem snapshot pointer v1\n"` or `"golem snapshot checkpoint v1\n"`
+followed by the payload's bytes (`signedBytes`), so the publishing key's
+signature over one kind means nothing as the other, or elsewhere. `open`
+(behind `OpenPointer` and `OpenCheckpoint`) verifies before it decodes, and
+decodes the verified payload strictly. The snapshot needs no signature of
+its own: the gateway checks its bytes against the pointer's hash.
 
-The checkpoint is trusted by *where* it is, not by a signature: only
-golem-control's role may write `control/` (control-plane.md §3). It gives a
-gateway that starts with an empty disk a floor, so that a replayed old
-pointer (anyone who can write the pool's objects can copy one back) is
-refused.
+The checkpoint gives a gateway that starts with an empty disk a floor, so
+that a replayed old pointer (anyone who can write the pool's objects can
+copy one back) is refused. It is signed and also under a prefix only
+golem-control's role may write (control-plane.md §3): a bucket policy
+mistake alone does not let anyone lower it. A missing checkpoint is floor
+zero only while the pool has no pointer either; a published pool's missing
+checkpoint stops a gateway with an empty disk from starting.
+
+A pointer's `expires` (ten minutes after issue by default, ten renewals)
+is TUF's timestamp role as a signal: a gateway that sees nothing newer
+than an expired pointer reports it overdue (`Bucket.Overdue`, logged once)
+and goes on serving until its snapshot's `validUntil`, which is what bounds
+a frozen or replayed bucket (ADR 0030).
 
 ## 5. The bucket (`lib/bucket`)
 

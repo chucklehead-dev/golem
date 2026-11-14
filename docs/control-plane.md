@@ -174,15 +174,18 @@ control plane.
     so a publisher that dies between them leaves the record ahead until
     the next publication, and one paused between them cannot set either
     back;
-  - only the pointer is signed (with a context string, so the key's
-    signature means nothing else); the snapshot object is checked against
-    the pointer's hash and must carry the pointer's sequence;
+  - the pointer and the checkpoint are signed, each with its own context
+    string; the pointer carries an `expires` (ten minutes), past which a
+    gateway that sees nothing newer reports it overdue and goes on serving
+    to its snapshot's lease end; a published pool's missing checkpoint is
+    not floor zero; the snapshot itself is not signed: it is checked
+    against the pointer's hash and must carry the pointer's sequence;
   - the gateway persists the last sequence applied to a local checkpoint
     file, and at start raises its floor to the higher of it and the
     trusted checkpoint; with neither (an empty disk and an unreadable
     bucket) it does not start. Gateways do not read the state document,
     which holds key hashes and principals;
-  - the checkpoint is trusted by where it is: the bucket policy must let
+  - the checkpoint is also protected by where it is: the bucket policy must let
     only golem-control's role write `state/` and `control/` (and
     `snapshots/`), and a pool's credentials write only its `status/`.
   - golem-control: `control/controller` and `cmd/golem-control`. While it

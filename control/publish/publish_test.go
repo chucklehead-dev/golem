@@ -188,8 +188,8 @@ func TestPausedAfterRecord(t *testing.T) {
 		t.Fatalf("pointer %+v %v: want the successor's publication 3", ptr, err)
 	}
 	cp, _, _ := d.Get(ctx, snapshot.CheckpointKey("internal"), "")
-	if seq, _ := checkpointSeq(cp); seq != 3 {
-		t.Fatalf("checkpoint %d: want 3, the successor's", seq)
+	if c, err := snapshot.OpenCheckpoint(cp, keys); err != nil || c.PublishSeq != 3 {
+		t.Fatalf("checkpoint %+v %v: want 3, the successor's", c, err)
 	}
 
 	// A pointer forged above the record does not block the next publication.

@@ -151,6 +151,32 @@ func TestBucketSource(t *testing.T) {
 			t.Fatalf("with its disk: %v, floor %d; want a start from the local checkpoint", err, withDisk.Holder.Floor())
 		}
 	})
+	t.Run("the trusted checkpoint replaced", func(t *testing.T) {
+		cp, _, _ := p.bucket.Get(t.Context(), snapshot.CheckpointKey("internal"), "")
+		defer p.put(t, snapshot.CheckpointKey("internal"), cp)
+		_, sk, _ := ed25519.GenerateKey(nil)
+		forged, _ := snapshot.SignCheckpoint(t.Context(), snapshot.Checkpoint{Pool: "internal"}, sign.Ed25519{ID: "k1", Key: sk})
+		for name, b := range map[string][]byte{
+			"unsigned":                   []byte(`{"pool":"internal","publishSeq":0}`),
+			"signed by an untrusted key": forged,
+			"a pointer in its place":     p.pointerBytes(t), // signed, but in a pointer's context
+		} {
+			p.put(t, snapshot.CheckpointKey("internal"), b)
+			empty := &Bucket{Bucket: p.bucket, Keys: p.keys, Pool: "internal", Holder: &Holder{}}
+			if err := empty.Start(t.Context()); err == nil {
+				t.Errorf("%s: started with floor %d from a checkpoint golem-control did not sign", name, empty.Holder.Floor())
+			}
+		}
+	})
+	t.Run("the trusted checkpoint deleted", func(t *testing.T) {
+		cp, _, _ := p.bucket.Get(t.Context(), snapshot.CheckpointKey("internal"), "")
+		defer p.put(t, snapshot.CheckpointKey("internal"), cp)
+		gone := missing{p.bucket, snapshot.CheckpointKey("internal")}
+		empty := &Bucket{Bucket: gone, Keys: p.keys, Pool: "internal", Holder: &Holder{}}
+		if err := empty.Start(t.Context()); err == nil || !strings.Contains(err.Error(), "has a pointer") {
+			t.Fatalf("%v (floor %d): a published pool's missing checkpoint is not floor zero", err, empty.Holder.Floor())
+		}
+	})
 	t.Run("a pointer signed by an untrusted key", func(t *testing.T) {
 		_, sk, _ := ed25519.GenerateKey(nil)
 		b, _ := snapshot.SignPointer(t.Context(), snapshot.Pointer{Pool: "internal", PublishSeq: 9, Hash: "x"}, sign.Ed25519{ID: "k1", Key: sk})
@@ -204,4 +230,30 @@ type unreadable struct{ *bucket.Dir }
 
 func (unreadable) Get(context.Context, string, string) ([]byte, string, error) {
 	return nil, "", errors.New("connection refused")
+}
+
+// TestOverdue: a gateway that sees no pointer newer than one past its
+// Expires says so, and keeps serving; a new publication clears it.
+func TestOverdue(t *testing.T) {
+	p := newPublished(t)
+	now := time.Now()
+	p.pub.Now = func() time.Time { return now }
+	p.pub.PointerTTL = 10 * time.Minute
+	gw := p.gateway(t)
+	gw.Holder.Now = func() time.Time { return now }
+	p.publish(t)
+	if err := gw.Poll(t.Context()); err != nil || gw.Overdue() {
+		t.Fatalf("poll %v, overdue %v: a fresh pointer", err, gw.Overdue())
+	}
+	now = now.Add(11 * time.Minute) // the publisher stopped, or the bucket froze
+	if err := gw.Poll(t.Context()); err != nil || !gw.Overdue() {
+		t.Fatalf("poll %v, overdue %v: want overdue on an unchanged pointer", err, gw.Overdue())
+	}
+	if _, err := gw.Holder.Current(); err != nil {
+		t.Fatalf("an overdue pointer stopped serving: %v", err)
+	}
+	p.publish(t)
+	if err := gw.Poll(t.Context()); err != nil || gw.Overdue() {
+		t.Fatalf("poll %v, overdue %v: a new publication clears it", err, gw.Overdue())
+	}
 }

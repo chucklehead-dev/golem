@@ -3,7 +3,6 @@ package snapshot
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -93,7 +92,10 @@ func (d *pubDriver) seed(g pub) error {
 	}); err != nil {
 		return err
 	}
-	cp, _ := json.Marshal(snapshot.Checkpoint{Pool: "pool", PublishSeq: 0})
+	cp, err := snapshot.SignCheckpoint(ctx, snapshot.Checkpoint{Pool: "pool", PublishSeq: 0}, d.pub.Signer)
+	if err != nil {
+		return err
+	}
 	ptr, err := snapshot.SignPointer(ctx, snapshot.Pointer{Pool: "pool", PublishSeq: 0, Epoch: 1, Hash: hash}, d.pub.Signer)
 	if err != nil {
 		return err

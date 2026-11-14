@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,14 +44,18 @@ type Bucket struct {
 	Interval  time.Duration // default one second
 	Log       *slog.Logger
 
-	tag string // the entity tag of the last pointer judged (Poll)
+	tag     string    // the entity tag of the last pointer judged (Poll)
+	expires time.Time // the last verified pointer's Expires
+	overdue bool      // reported, until a pointer that is not overdue
 }
 
 // Start raises the holder's floor to the local checkpoint and the pool's
 // trusted checkpoint, whichever is higher. A gateway with neither (an
-// empty disk, the bucket unreadable) does not start: it could not tell a
-// replayed pointer from the current one. A pool never published has no
-// trusted checkpoint, and its floor is zero.
+// empty disk, the bucket unreadable, the checkpoint missing or not
+// verifying) does not start: it could not tell a replayed pointer from the
+// current one. A pool never published, with no pointer either, has floor
+// zero; a pool with a pointer and no checkpoint has lost its floor, and is
+// not taken as never published.
 func (b *Bucket) Start(ctx context.Context) error {
 	local, haveLocal, err := b.localCheckpoint()
 	if err != nil {
@@ -89,16 +92,26 @@ func (b *Bucket) localCheckpoint() (uint64, bool, error) {
 }
 
 func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
-	raw, _, err := b.Bucket.Get(ctx, snapshot.CheckpointKey(b.Pool), "")
+	key := snapshot.CheckpointKey(b.Pool)
+	raw, _, err := b.Bucket.Get(ctx, key, "")
 	if errors.Is(err, bucket.ErrNotFound) {
-		return 0, nil // never published
+		// Never published, unless a pointer says otherwise: the publisher
+		// writes the checkpoint before the first pointer.
+		_, _, perr := b.Bucket.Get(ctx, snapshot.PointerKey(b.Pool), "")
+		switch {
+		case errors.Is(perr, bucket.ErrNotFound):
+			return 0, nil
+		case perr != nil:
+			return 0, fmt.Errorf("checkpoint %s missing, and the pointer unreadable: %w", key, perr)
+		}
+		return 0, fmt.Errorf("checkpoint %s missing though the pool has a pointer: refused (restore the checkpoint, or start from a local one)", key)
 	}
 	if err != nil {
 		return 0, err
 	}
-	var cp snapshot.Checkpoint
-	if err := jsonv2.Unmarshal(raw, &cp, jsonv2.RejectUnknownMembers(true)); err != nil {
-		return 0, fmt.Errorf("checkpoint %s: %w", snapshot.CheckpointKey(b.Pool), err)
+	cp, err := snapshot.OpenCheckpoint(raw, b.Keys)
+	if err != nil {
+		return 0, fmt.Errorf("checkpoint %s: %w", key, err)
 	}
 	if cp.Pool != b.Pool {
 		return 0, fmt.Errorf("checkpoint %s is pool %q's", snapshot.CheckpointKey(b.Pool), cp.Pool)
@@ -111,6 +124,7 @@ func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
 func (b *Bucket) Poll(ctx context.Context) error {
 	raw, tag, err := b.Bucket.Get(ctx, snapshot.PointerKey(b.Pool), b.tag)
 	if errors.Is(err, bucket.ErrNotModified) {
+		b.checkOverdue()
 		return nil
 	}
 	if err != nil {
@@ -122,8 +136,25 @@ func (b *Bucket) Poll(ctx context.Context) error {
 	if _, transient := errors.AsType[fetchError](err); !transient {
 		b.tag = tag
 	}
+	b.checkOverdue()
 	return err
 }
+
+// checkOverdue reports, once, that the newest pointer seen is past its
+// Expires: the publisher has stopped, or the bucket is showing an old
+// pointer. The gateway goes on serving until its snapshot's ValidUntil.
+func (b *Bucket) checkOverdue() {
+	over := !b.expires.IsZero() && b.Holder.now().After(b.expires)
+	if over && !b.overdue {
+		b.log().Error("the pool's pointer is overdue: no publication seen since it expired; serving the current snapshot until its lease ends",
+			"pool", b.Pool, "expired", b.expires)
+	}
+	b.overdue = over
+}
+
+// Overdue reports whether the newest pointer seen is past its Expires.
+// Poll's goroutine only.
+func (b *Bucket) Overdue() bool { return b.overdue }
 
 // fetchError is a snapshot object the bucket did not return: retried at
 // the next poll.
@@ -140,6 +171,9 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 	}
 	if ptr.Pool != b.Pool {
 		return fmt.Errorf("pointer for pool %q in pool %q's place: refused", ptr.Pool, b.Pool)
+	}
+	if ptr.Expires.After(b.expires) {
+		b.expires = ptr.Expires
 	}
 	// Holder.Apply checks the floor too; checking it here as well refuses a
 	// replayed pointer before its snapshot is fetched.

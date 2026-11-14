@@ -61,3 +61,28 @@ func TestPointer(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckpoint: a checkpoint opens only as signed, and neither kind of
+// object opens as the other: each is signed in its own context.
+func TestCheckpoint(t *testing.T) {
+	signer, keys := keyPair(t, "k1")
+	c := Checkpoint{Pool: "internal", PublishSeq: 4}
+	b, err := SignCheckpoint(t.Context(), c, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := OpenCheckpoint(b, keys); err != nil || got != c {
+		t.Fatalf("open %+v %v", got, err)
+	}
+	// The same payload, signed in a pointer's context.
+	asPointer, _ := seal(t.Context(), pointerContext, c, signer)
+	if _, err := OpenCheckpoint(asPointer, keys); !errors.Is(err, sign.ErrBadSignature) {
+		t.Fatalf("%v: a checkpoint's payload signed as a pointer opened as a checkpoint", err)
+	}
+	if _, err := OpenPointer(b, keys); err == nil {
+		t.Fatal("a checkpoint opened as a pointer")
+	}
+	if seq, err := PeekSeq(b); err != nil || seq != 4 {
+		t.Fatalf("peek %d %v", seq, err)
+	}
+}

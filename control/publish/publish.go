@@ -13,8 +13,8 @@
 package publish
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -43,6 +43,9 @@ type Publisher struct {
 	Signer sign.Signer
 	Pool   string
 	Now    func() time.Time
+	// PointerTTL is how long after its issue a pointer is overdue
+	// (snapshot.Pointer.Expires): ten minutes unless set, ten renewals.
+	PointerTTL time.Duration
 }
 
 // Record is the pool's publication record as last read.
@@ -117,16 +120,21 @@ func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, bui
 	}); err != nil {
 		return snapshot.Pointer{}, err
 	}
-	cp, _ := json.Marshal(snapshot.Checkpoint{Pool: p.Pool, PublishSeq: seq})
-	if err := p.advance(ctx, snapshot.CheckpointKey(p.Pool), seq, cp, checkpointSeq); err != nil {
+	cp, err := snapshot.SignCheckpoint(ctx, snapshot.Checkpoint{Pool: p.Pool, PublishSeq: seq}, p.Signer)
+	if err != nil {
 		return snapshot.Pointer{}, err
 	}
-	ptr := snapshot.Pointer{Pool: p.Pool, PublishSeq: seq, Epoch: epoch, Source: source, IssuedAt: p.now(), Hash: hash}
+	if err := p.advance(ctx, snapshot.CheckpointKey(p.Pool), seq, cp); err != nil {
+		return snapshot.Pointer{}, err
+	}
+	now := p.now()
+	ptr := snapshot.Pointer{Pool: p.Pool, PublishSeq: seq, Epoch: epoch, Source: source, IssuedAt: now,
+		Expires: now.Add(cmp.Or(p.PointerTTL, 10*time.Minute)), Hash: hash}
 	signed, err := snapshot.SignPointer(ctx, ptr, p.Signer)
 	if err != nil {
 		return snapshot.Pointer{}, err
 	}
-	if err := p.advance(ctx, snapshot.PointerKey(p.Pool), seq, signed, pointerSeq); err != nil {
+	if err := p.advance(ctx, snapshot.PointerKey(p.Pool), seq, signed); err != nil {
 		return snapshot.Pointer{}, err
 	}
 	return ptr, nil
@@ -148,8 +156,10 @@ func holds(l *state.Lease, want Lease) error {
 // publication's is there: conditionally on the object it read, so a later
 // one written meanwhile is not overwritten. A stored object whose sequence
 // is later than the record's was not written by golem-control (the record
-// is written before either object), and is replaced.
-func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []byte, seqOf func([]byte) (uint64, error)) error {
+// is written before either object), and is replaced; so is one that does
+// not decode. The stored sequence is read without its signature
+// (snapshot.PeekSeq): it is only compared with the record.
+func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []byte) error {
 	for range 5 {
 		cur, tag, err := p.Bucket.Get(ctx, key, "")
 		switch {
@@ -158,7 +168,7 @@ func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []
 		case err != nil:
 			return err
 		default:
-			if stored, err := seqOf(cur); err == nil && stored > seq {
+			if stored, err := snapshot.PeekSeq(cur); err == nil && stored > seq {
 				rec, err := p.Record(ctx)
 				if err != nil {
 					return err
@@ -174,20 +184,6 @@ func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []
 		}
 	}
 	return fmt.Errorf("%w: %s kept changing", ErrConflict, key)
-}
-
-// checkpointSeq and pointerSeq read a stored object's sequence. The
-// pointer's is read without its signature: a forged one names a sequence
-// above the record's and is replaced (advance).
-func checkpointSeq(b []byte) (uint64, error) {
-	var cp snapshot.Checkpoint
-	err := json.Unmarshal(b, &cp)
-	return cp.PublishSeq, err
-}
-
-func pointerSeq(b []byte) (uint64, error) {
-	ptr, err := snapshot.PeekPointer(b)
-	return ptr.PublishSeq, err
 }
 
 func (p *Publisher) now() time.Time {
