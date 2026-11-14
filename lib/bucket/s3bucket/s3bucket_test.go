@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket/buckettest"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
@@ -41,7 +42,7 @@ func TestS3Publish(t *testing.T) {
 	fake := &fakeS3{objects: map[string][]byte{}}
 	b := against(t, fake)
 	pk, sk, _ := ed25519.GenerateKey(nil)
-	p := &publish.Publisher{Bucket: b, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "internal"}
+	p := &publish.Publisher{State: &state.Store{Bucket: b}, Bucket: b, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "internal"}
 	for range 2 {
 		if _, err := p.Publish(t.Context(), 1, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 			return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, ValidUntil: time.Now().Add(time.Hour).UTC()}, nil

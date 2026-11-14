@@ -70,3 +70,18 @@ func OpenPointer(b []byte, v sign.Verifier) (Pointer, error) {
 	}
 	return p, nil
 }
+
+// Checkpoint is a pool's trusted floor: the last publication golem-control
+// recorded, for a gateway that starts with no local checkpoint (the
+// publication model's TRUSTED_FLOOR). It is trusted by where it is: under
+// a prefix only golem-control's role may write (control-plane.md §3,
+// "Write access"), unlike the pointer, which a writer of the pool's
+// objects could replay. golem-control writes it after the record and
+// before the pointer.
+type Checkpoint struct {
+	Pool       string `json:"pool"`
+	PublishSeq uint64 `json:"publishSeq"`
+}
+
+// CheckpointKey is the checkpoint's object key.
+func CheckpointKey(pool string) string { return "control/" + pool + "/checkpoint" }

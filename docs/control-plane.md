@@ -85,6 +85,14 @@ validate` (the snapshot compiler as a library), not by a live API call
   Nutanix Objects) when a site needs its own store; PostgreSQL (ADR 0006)
   if the state outgrows the envelope.
 
+- **Built (slice 1):** `control/state`, the store over `lib/bucket` as
+  above (reads from memory, refreshed by a conditional get every 500 ms;
+  `Update` on a copy, invariants checked, `state_version` incremented,
+  `If-Match`, a re-read and retry on 412), holding each pool's
+  publication record (`publications`), which no write may remove or move
+  back. JSON, decoded strictly, for now; the rest of §3.1, protobuf with
+  zstd, the audit outbox and restore come as they are built.
+
 ### 3.1 State outline
 
 `principals` (users and services), `scopes` (kind, parent or owner scope,
@@ -121,16 +129,23 @@ control plane.
   implementation), `lib/sign` (Ed25519; KMS is the next implementation),
   `lib/snapshot`'s signed `Pointer`, `control/publish` (the publisher) and
   `gateway/snapshot.Bucket` (the gateway's source). As built:
-  - the publisher numbers from the pool's **publication record**, updated
-    by compare-and-swap and fenced by epoch and state version, not from
-    the pointer, which anyone who can write the bucket can replay; the
-    record is written before the pointer, so a publisher that dies between
-    them leaves the record ahead until the next publication;
+  - the publisher numbers from the pool's **publication record** in the
+    state document, won by a state update and fenced by epoch and state
+    version, not from the pointer, which anyone who can write the pool's
+    objects can replay; then it writes the pool's **trusted checkpoint**
+    (`control/<pool>/checkpoint`), then the pointer, so a publisher that
+    dies between them leaves the record ahead until the next publication;
   - only the pointer is signed (with a context string, so the key's
     signature means nothing else); the snapshot object is checked against
     the pointer's hash and must carry the pointer's sequence;
   - the gateway persists the last sequence applied to a local checkpoint
-    file and raises its floor from it at start;
+    file, and at start raises its floor to the higher of it and the
+    trusted checkpoint; with neither (an empty disk and an unreadable
+    bucket) it does not start. Gateways do not read the state document,
+    which holds key hashes and principals;
+  - the checkpoint is trusted by where it is: the bucket policy must let
+    only golem-control's role write `state/` and `control/` (and
+    `snapshots/`), and a pool's credentials write only its `status/`.
   - slice 2: `lib/bucket/s3bucket` (S3, with its conditional requests:
     If-None-Match on GetObject, If-Match and If-None-Match: * on
     PutObject; 304, 404, 412 and 409 mapped to the bucket's errors; reads
@@ -141,9 +156,7 @@ control plane.
     fetches it at bootstrap), never calling KMS. One conformance suite
     (`lib/bucket/buckettest`) runs against the directory bucket and, through
     the real S3 client, an S3 stand-in;
-  - open: the record lives in the bucket here, where the design keeps it
-    with the state document; an empty-disk restart's floor from the
-    trusted record has no reader yet (the floor is zero); neither binary
+  - open: neither binary
     is wired to the bucket (the release gate, golem#7), and nothing tests
     against real S3 and KMS yet (an integration run in the target
     account, with the bucket policy that denies other writers).

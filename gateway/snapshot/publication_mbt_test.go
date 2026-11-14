@@ -14,6 +14,7 @@ import (
 	"github.com/chucklehead-dev/gotogether/itf"
 
 	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
@@ -72,12 +73,18 @@ func (d *pubDriver) seed(g pub) error {
 		return err
 	}
 	hash := snapshot.Hash(body)
-	rec, _ := json.Marshal(publish.Record{Epoch: 1, Seq: 0, Source: 0})
+	if _, err := d.pub.State.Update(ctx, func(doc *state.Document) error {
+		doc.Publications = map[string]state.Record{"pool": {Epoch: 1, Seq: 0, Source: 0}}
+		return nil
+	}); err != nil {
+		return err
+	}
+	cp, _ := json.Marshal(snapshot.Checkpoint{Pool: "pool", PublishSeq: 0})
 	ptr, err := snapshot.SignPointer(ctx, snapshot.Pointer{Pool: "pool", PublishSeq: 0, Epoch: 1, Hash: hash}, d.pub.Signer)
 	if err != nil {
 		return err
 	}
-	for k, b := range map[string][]byte{snapshot.ObjectKey("pool", hash): body, publish.RecordKey("pool"): rec, snapshot.PointerKey("pool"): ptr} {
+	for k, b := range map[string][]byte{snapshot.ObjectKey("pool", hash): body, snapshot.CheckpointKey("pool"): cp, snapshot.PointerKey("pool"): ptr} {
 		if _, err := d.bucket.Put(ctx, k, b, ""); err != nil {
 			return err
 		}
@@ -113,7 +120,7 @@ func (d *pubDriver) Step(s *connect.Step) error {
 			}
 			pk, sk, _ := ed25519.GenerateKey(nil)
 			d.keys = sign.Ed25519Keys{"k": pk}
-			d.pub = &publish.Publisher{Bucket: d.bucket, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "pool",
+			d.pub = &publish.Publisher{State: &state.Store{Bucket: d.bucket}, Bucket: d.bucket, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "pool",
 				Now: func() time.Time { return at(d.clock) }}
 			d.signed = map[int][]byte{}
 			if err := d.seed(genesis); err != nil {
@@ -175,13 +182,13 @@ func (d *pubDriver) Step(s *connect.Step) error {
 		"restartEmpty": func(s *connect.Step) error {
 			// A restart with an empty disk: the floor comes from the trusted
 			// publisher checkpoint (the design's TRUSTED_FLOOR).
-			rec, _, err := d.pub.LoadRecord(context.Background())
-			if err != nil {
+			// The restarted gateway's floor is the trusted checkpoint
+			// golem-control wrote, read by the source as it starts.
+			src := d.source(d.holder())
+			if err := src.Start(context.Background()); err != nil {
 				return err
 			}
-			h := d.holder()
-			h.RaiseFloor(rec.Seq)
-			d.gateways[gateway()] = d.source(h)
+			d.gateways[gateway()] = src
 			return nil
 		},
 		"serve": func(s *connect.Step) error {
@@ -227,7 +234,7 @@ type pubState struct {
 func (d *pubDriver) State() (any, error) {
 	st := pubState{Gws: map[string]gwState{}}
 	ctx := context.Background()
-	rec, _, err := d.pub.LoadRecord(ctx)
+	rec, err := d.pub.Record(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,10 +32,10 @@ type Bucket struct {
 	Holder  *Holder
 	Secrets Secrets
 	// Checkpoint, if set, is a file on the gateway's own disk holding the
-	// last sequence applied, written atomically after each apply and read
-	// by Start: a restart's floor (the model's checkpoint). A restart with
-	// an empty disk needs the trusted publisher checkpoint instead (TODO:
-	// the trusted record's reader; until then the floor is zero).
+	// last sequence applied, written atomically after each apply. Start
+	// raises the floor to it and to the pool's trusted checkpoint in the
+	// bucket (snapshot.CheckpointKey, which only golem-control writes): a
+	// restart with an empty disk still has the publisher's floor.
 	Checkpoint string
 	// GatewayID, if set, names the status object written after each apply
 	// (status/<pool>/<id>): diagnostic only, never trusted (anyone with the
@@ -46,24 +47,62 @@ type Bucket struct {
 	tag string // the pointer's entity tag last seen
 }
 
-// Start raises the holder's floor from the local checkpoint, if any.
-func (b *Bucket) Start() error {
-	if b.Checkpoint == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(b.Checkpoint)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+// Start raises the holder's floor to the local checkpoint and the pool's
+// trusted checkpoint, whichever is higher. A gateway with neither (an
+// empty disk, the bucket unreadable) does not start: it could not tell a
+// replayed pointer from the current one. A pool never published has no
+// trusted checkpoint, and its floor is zero.
+func (b *Bucket) Start(ctx context.Context) error {
+	local, haveLocal, err := b.localCheckpoint()
 	if err != nil {
 		return err
 	}
+	trusted, err := b.trustedCheckpoint(ctx)
+	switch {
+	case err == nil:
+	case haveLocal:
+		b.log().Warn("the pool's trusted checkpoint is unreadable; starting from the local one", "pool", b.Pool, "err", err)
+	default:
+		return fmt.Errorf("no local checkpoint, and the pool's trusted one is unreadable: %w", err)
+	}
+	b.Holder.RaiseFloor(max(local, trusted))
+	return nil
+}
+
+func (b *Bucket) localCheckpoint() (uint64, bool, error) {
+	if b.Checkpoint == "" {
+		return 0, false, nil
+	}
+	raw, err := os.ReadFile(b.Checkpoint)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
 	seq, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
 	if err != nil {
-		return fmt.Errorf("checkpoint %s: %w (remove it only if the disk is to be treated as empty)", b.Checkpoint, err)
+		return 0, false, fmt.Errorf("checkpoint %s: %w (remove it only if the disk is to be treated as empty)", b.Checkpoint, err)
 	}
-	b.Holder.RaiseFloor(seq)
-	return nil
+	return seq, true, nil
+}
+
+func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
+	raw, _, err := b.Bucket.Get(ctx, snapshot.CheckpointKey(b.Pool), "")
+	if errors.Is(err, bucket.ErrNotFound) {
+		return 0, nil // never published
+	}
+	if err != nil {
+		return 0, err
+	}
+	var cp snapshot.Checkpoint
+	if err := jsonv2.Unmarshal(raw, &cp, jsonv2.RejectUnknownMembers(true)); err != nil {
+		return 0, fmt.Errorf("checkpoint %s: %w", snapshot.CheckpointKey(b.Pool), err)
+	}
+	if cp.Pool != b.Pool {
+		return 0, fmt.Errorf("checkpoint %s is pool %q's", snapshot.CheckpointKey(b.Pool), cp.Pool)
+	}
+	return cp.PublishSeq, nil
 }
 
 // Poll reads the pointer and applies a newer publication. An unchanged

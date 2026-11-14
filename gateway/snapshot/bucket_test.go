@@ -3,12 +3,14 @@ package snapshot
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
@@ -33,7 +35,7 @@ func newPublished(t *testing.T) *published {
 	}
 	t.Cleanup(func() { d.Close() })
 	s := sign.Ed25519{ID: "k1", Key: sk}
-	return &published{pub: &publish.Publisher{Bucket: d, Signer: s, Pool: "internal"}, bucket: d,
+	return &published{pub: &publish.Publisher{State: &state.Store{Bucket: d}, Bucket: d, Signer: s, Pool: "internal"}, bucket: d,
 		keys: sign.Ed25519Keys{"k1": pk}, signer: s, dir: t.TempDir()}
 }
 
@@ -42,7 +44,7 @@ func (p *published) gateway(t *testing.T) *Bucket {
 	t.Helper()
 	b := &Bucket{Bucket: p.bucket, Keys: p.keys, Pool: "internal", Holder: &Holder{},
 		Checkpoint: filepath.Join(p.dir, "checkpoint"), GatewayID: "gw-1"}
-	if err := b.Start(); err != nil {
+	if err := b.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	return b
@@ -121,6 +123,27 @@ func TestBucketSource(t *testing.T) {
 		restarted := p.gateway(t) // the floor from the checkpoint
 		mustRefuse(t, restarted, "below the floor")
 	})
+	t.Run("the same, after a restart with an empty disk", func(t *testing.T) {
+		empty := &Bucket{Bucket: p.bucket, Keys: p.keys, Pool: "internal", Holder: &Holder{}}
+		if err := empty.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if f := empty.Holder.Floor(); f != 2 {
+			t.Fatalf("floor %d, want 2: the trusted checkpoint golem-control wrote", f)
+		}
+		mustRefuse(t, empty, "below the floor")
+	})
+	t.Run("an empty disk and an unreadable bucket", func(t *testing.T) {
+		gone := &Bucket{Bucket: unreadable{p.bucket}, Keys: p.keys, Pool: "internal", Holder: &Holder{}}
+		if err := gone.Start(t.Context()); err == nil {
+			t.Fatal("started with no floor at all: it could not tell a replay from the current pointer")
+		}
+		withDisk := &Bucket{Bucket: unreadable{p.bucket}, Keys: p.keys, Pool: "internal", Holder: &Holder{},
+			Checkpoint: filepath.Join(p.dir, "checkpoint")}
+		if err := withDisk.Start(t.Context()); err != nil || withDisk.Holder.Floor() != 2 {
+			t.Fatalf("with its disk: %v, floor %d; want a start from the local checkpoint", err, withDisk.Holder.Floor())
+		}
+	})
 	t.Run("a pointer signed by an untrusted key", func(t *testing.T) {
 		_, sk, _ := ed25519.GenerateKey(nil)
 		b, _ := snapshot.SignPointer(t.Context(), snapshot.Pointer{Pool: "internal", PublishSeq: 9, Hash: "x"}, sign.Ed25519{ID: "k1", Key: sk})
@@ -167,4 +190,11 @@ func (m missing) Get(ctx context.Context, key, inm string) ([]byte, string, erro
 		return nil, "", bucket.ErrNotFound
 	}
 	return m.Dir.Get(ctx, key, inm)
+}
+
+// unreadable is a bucket that answers nothing.
+type unreadable struct{ *bucket.Dir }
+
+func (unreadable) Get(context.Context, string, string) ([]byte, string, error) {
+	return nil, "", errors.New("connection refused")
 }

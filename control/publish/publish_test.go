@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/sign"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
@@ -20,7 +21,7 @@ func setup(t *testing.T) (*Publisher, sign.Ed25519Keys, *bucket.Dir) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
-	return &Publisher{Bucket: d, Signer: sign.Ed25519{ID: "k", Key: priv}, Pool: "internal"}, sign.Ed25519Keys{"k": pub}, d
+	return &Publisher{State: &state.Store{Bucket: d}, Bucket: d, Signer: sign.Ed25519{ID: "k", Key: priv}, Pool: "internal"}, sign.Ed25519Keys{"k": pub}, d
 }
 
 func build(seq uint64) (*snapshot.Snapshot, error) {
@@ -47,7 +48,7 @@ func TestPublish(t *testing.T) {
 			t.Fatalf("snapshot object: %v", err)
 		}
 	}
-	if rec, _, _ := p.LoadRecord(ctx); rec != (Record{Epoch: 1, Seq: 3, Source: 5}) {
+	if rec, _ := p.Record(ctx); rec != (state.Record{Epoch: 1, Seq: 3, Source: 5}) {
 		t.Fatalf("record %+v", rec)
 	}
 }
@@ -67,7 +68,7 @@ func TestFenced(t *testing.T) {
 		}
 	}
 	after, _, _ := d.Get(ctx, snapshot.PointerKey("internal"), "")
-	if rec, _, _ := p.LoadRecord(ctx); rec.Seq != 1 || string(before) != string(after) {
+	if rec, _ := p.Record(ctx); rec.Seq != 1 || string(before) != string(after) {
 		t.Fatalf("record %+v, pointer changed %v: a fenced publisher changed something", rec, string(before) != string(after))
 	}
 }
@@ -83,7 +84,10 @@ func TestConcurrentPublishers(t *testing.T) {
 	seqs := map[uint64]int{}
 	for range 8 {
 		wg.Go(func() {
-			ptr, err := p.Publish(ctx, 1, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+			// A replica of golem-control: its own view of the state.
+			replica := *p
+			replica.State = &state.Store{Bucket: p.Bucket}
+			ptr, err := replica.Publish(ctx, 1, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 				time.Sleep(time.Millisecond) // all read the record before any swaps it
 				return build(seq)
 			})
@@ -105,7 +109,7 @@ func TestConcurrentPublishers(t *testing.T) {
 			t.Fatalf("publication %d published %d times", seq, n)
 		}
 	}
-	if rec, _, _ := p.LoadRecord(ctx); len(seqs) == 0 || rec.Seq != uint64(len(seqs)) {
+	if rec, _ := p.Record(ctx); len(seqs) == 0 || rec.Seq != uint64(len(seqs)) {
 		t.Fatalf("record %+v after %d publications", rec, len(seqs))
 	}
 }
