@@ -29,9 +29,15 @@ import (
 type Entra struct {
 	// Tenant is the directory (tenant) ID tokens must come from.
 	Tenant string
-	// Audiences are golem API's identifiers: its Application ID URI
-	// (api://golem) and its client ID, either of which a v2 token may carry.
+	// Audiences are the resource's identifiers: its Application ID URI and
+	// its client ID, either of which a v2 token may carry. The gateway's
+	// resource is golem API (api://golem); the control API's is its own
+	// registration (api://golem-control, ADR 0046), so a token for one is
+	// never accepted by the other.
 	Audiences []string
+	// Scope is the delegated scope a user's token must carry: ScopeAccess
+	// (the default) for the gateway, ScopeManage for the control API.
+	Scope string
 	// JWKS is the tenant's key set URL; default
 	// https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys.
 	JWKS string
@@ -53,13 +59,14 @@ type Entra struct {
 // Leeway tolerates clock skew between Entra and the gateway.
 const Leeway = time.Minute
 
-// The delegated scope a user's token must carry, and the app role a
-// service's must (entra.md #1).
+// The delegated scopes a user's token must carry, and the app role a
+// service's must (entra.md #1, #1b; each registration defines its own).
 const (
-	ScopeAccess = "golem.access"
+	ScopeAccess = "golem.access" // golem API's: calling models
+	ScopeManage = "golem.manage" // the control API's: golemctl and the console
 	RoleService = "golem.service"
 	// RoleAdmin is the app role that makes a caller a golem admin
-	// (org-model.md §2): the control API's, not the gateway's.
+	// (org-model.md §2): the control API registration's, not the gateway's.
 	RoleAdmin = "golem.admin"
 )
 
@@ -77,6 +84,10 @@ type entraClaims struct {
 	Scp   string   `json:"scp"`
 	Roles []string `json:"roles"`
 	Ver   string   `json:"ver"`
+	// Idtyp is "app" on an app-only token (an optional claim each
+	// registration must request, entra.md): a service is recognised by it,
+	// not only by the absence of a scope.
+	Idtyp string `json:"idtyp"`
 }
 
 // Verify checks a token and says who it names.
@@ -126,13 +137,16 @@ func (e *Entra) Verify(raw string) (Identity, *Refusal) {
 	case c.Tid != e.Tenant || c.Ver != "2.0":
 		return invalid("not a v2 token of this tenant")
 	}
+	scope := cmp.Or(e.Scope, ScopeAccess)
 	switch {
-	case slices.Contains(strings.Fields(c.Scp), ScopeAccess) && c.Oid != "":
+	case slices.Contains(strings.Fields(c.Scp), scope) && c.Oid != "" && c.Idtyp != "app":
 		return Identity{ID: c.Oid, Admin: slices.Contains(c.Roles, RoleAdmin)}, nil
-	case c.Scp == "" && slices.Contains(c.Roles, RoleService) && c.Azp != "":
+	case c.Scp == "" && c.Idtyp == "app" && slices.Contains(c.Roles, RoleService) && c.Azp != "":
 		return Identity{Service: true, ID: c.Azp, Admin: slices.Contains(c.Roles, RoleAdmin)}, nil
+	case c.Scp == "" && c.Idtyp != "app" && slices.Contains(c.Roles, RoleService):
+		return invalid("an app-only token without idtyp \"app\" (the registration must request the idtyp optional claim, entra.md)")
 	}
-	return invalid("it carries neither the " + ScopeAccess + " scope (a user) nor the " + RoleService + " role (a service)")
+	return invalid("it carries neither the " + scope + " scope (a user) nor the " + RoleService + " role (a service)")
 }
 
 func (e *Entra) now() time.Time {

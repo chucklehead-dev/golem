@@ -20,20 +20,36 @@ import (
 // owner reads (GOLEMCTL_HOME, else the user's config directory). The
 // design keeps tokens in the OS keychain (tools.md §1); a file is this
 // slice's.
+//
+// Two resources take golemctl's tokens (ADR 0046): the control API's
+// registration (Control, scope golem.manage), which the commands call, and
+// golem API (Gateway, scope golem.access), whose tokens golemctl token
+// prints for coding agents. One sign-in's refresh token redeems both; each
+// access token is cached for its own resource, so a gateway token handed
+// to an agent cannot call the control API.
 type settings struct {
-	Tenant    string `json:"tenant"`
-	ClientID  string `json:"clientId"`
-	API       string `json:"api"`
-	Audience  string `json:"audience"`
-	Authority string `json:"authority,omitempty"` // default https://login.microsoftonline.com
-	Token     tokens `json:"token"`
+	Tenant    string           `json:"tenant"`
+	ClientID  string           `json:"clientId"`
+	API       string           `json:"api"`
+	Control   string           `json:"control"`             // the control API's Application ID URI
+	Gateway   string           `json:"gateway"`             // golem API's Application ID URI
+	Authority string           `json:"authority,omitempty"` // default https://login.microsoftonline.com
+	Refresh   string           `json:"refresh"`
+	Tokens    map[string]token `json:"tokens,omitempty"` // by resource: "control", "gateway"
 }
 
-type tokens struct {
+type token struct {
 	Access  string    `json:"access"`
-	Refresh string    `json:"refresh"`
 	Expires time.Time `json:"expires"`
 }
+
+// A resource golemctl gets tokens for.
+type resource string
+
+const (
+	control resource = "control"
+	gateway resource = "gateway"
+)
 
 func settingsPath() (string, error) {
 	if h := os.Getenv("GOLEMCTL_HOME"); h != "" {
@@ -82,8 +98,12 @@ func (s settings) endpoint(path string) string {
 	return strings.TrimRight(cmp.Or(s.Authority, "https://login.microsoftonline.com"), "/") + "/" + url.PathEscape(s.Tenant) + "/oauth2/v2.0/" + path
 }
 
-func (s settings) scope() string {
-	return strings.TrimRight(s.Audience, "/") + "/golem.access offline_access"
+// scope is what a token for r asks for, with a refresh token.
+func (s settings) scope(r resource) string {
+	if r == gateway {
+		return strings.TrimRight(s.Gateway, "/") + "/golem.access offline_access"
+	}
+	return strings.TrimRight(s.Control, "/") + "/golem.manage offline_access"
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second} // read-only
@@ -123,12 +143,13 @@ func login(ctx context.Context, args []string, _, errOut io.Writer) error {
 	tenant := fs.String("tenant", prev.Tenant, "the Entra tenant (directory) ID")
 	client := fs.String("client-id", prev.ClientID, "golemctl's app registration's client ID (entra.md #2)")
 	api := fs.String("api", prev.API, "golem-control's URL")
-	audience := fs.String("audience", cmp.Or(prev.Audience, "api://golem"), "golem API's Application ID URI")
+	ctl := fs.String("control", cmp.Or(prev.Control, "api://golem-control"), "the control API registration's Application ID URI")
+	gw := fs.String("gateway", cmp.Or(prev.Gateway, "api://golem"), "golem API's (the gateway's) Application ID URI")
 	authority := fs.String("authority", prev.Authority, "the Entra authority (default https://login.microsoftonline.com)")
 	if err := fs.Parse(args); err != nil {
 		return usageError(err.Error())
 	}
-	s := settings{Tenant: *tenant, ClientID: *client, API: *api, Audience: *audience, Authority: *authority}
+	s := settings{Tenant: *tenant, ClientID: *client, API: *api, Control: *ctl, Gateway: *gw, Authority: *authority}
 	if s.Tenant == "" || s.ClientID == "" || s.API == "" {
 		return usageError("login needs --tenant, --client-id and --api (they are remembered)")
 	}
@@ -140,7 +161,7 @@ func login(ctx context.Context, args []string, _, errOut io.Writer) error {
 		Error      string `json:"error"`
 		Desc       string `json:"error_description"`
 	}
-	if err := post(ctx, s.endpoint("devicecode"), url.Values{"client_id": {s.ClientID}, "scope": {s.scope()}}, &dc); err != nil {
+	if err := post(ctx, s.endpoint("devicecode"), url.Values{"client_id": {s.ClientID}, "scope": {s.scope(control)}}, &dc); err != nil {
 		return fmt.Errorf("Entra's device code: %w", err)
 	}
 	if dc.Error != "" {
@@ -162,7 +183,11 @@ func login(ctx context.Context, args []string, _, errOut io.Writer) error {
 		}
 		switch tr.Error {
 		case "":
-			s.Token = tokens{Access: tr.AccessToken, Refresh: tr.RefreshToken, Expires: time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)}
+			if tr.AccessToken == "" || tr.RefreshToken == "" {
+				return errors.New("Entra's answer had no access or refresh token: run golemctl login again")
+			}
+			s.Refresh = tr.RefreshToken
+			s.Tokens = map[string]token{string(control): {Access: tr.AccessToken, Expires: expiry(tr)}}
 			if err := s.save(); err != nil {
 				return err
 			}
@@ -180,28 +205,38 @@ func login(ctx context.Context, args []string, _, errOut io.Writer) error {
 	}
 }
 
-// accessToken is a current access token for golem: the cached one while it
-// has a minute left, else a refreshed one (saved).
-func accessToken(ctx context.Context) (string, error) {
+func expiry(tr tokenResponse) time.Time {
+	return time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
+}
+
+// accessToken is a current access token for r: the cached one while it has
+// a minute left, else one redeemed with the refresh token (saved).
+func accessToken(ctx context.Context, r resource) (string, error) {
 	s, err := loadSettings()
 	if err != nil {
 		return "", err
 	}
-	if s.Token.Access != "" && time.Until(s.Token.Expires) > time.Minute {
-		return s.Token.Access, nil
+	if t := s.Tokens[string(r)]; t.Access != "" && time.Until(t.Expires) > time.Minute {
+		return t.Access, nil
 	}
-	if s.Token.Refresh == "" {
+	if s.Refresh == "" {
 		return "", errors.New("signed out: golemctl login")
 	}
 	var tr tokenResponse
 	if err := post(ctx, s.endpoint("token"), url.Values{"grant_type": {"refresh_token"}, "client_id": {s.ClientID},
-		"refresh_token": {s.Token.Refresh}, "scope": {s.scope()}}, &tr); err != nil {
+		"refresh_token": {s.Refresh}, "scope": {s.scope(r)}}, &tr); err != nil {
 		return "", fmt.Errorf("refreshing the token: %w", err)
 	}
 	if tr.Error != "" {
 		return "", fmt.Errorf("the session has ended (%s): golemctl login", tr.Error)
 	}
-	s.Token = tokens{Access: tr.AccessToken, Refresh: cmp.Or(tr.RefreshToken, s.Token.Refresh),
-		Expires: time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)}
-	return s.Token.Access, s.save()
+	if tr.AccessToken == "" {
+		return "", errors.New("Entra's answer had no access token: golemctl login")
+	}
+	if s.Tokens == nil {
+		s.Tokens = map[string]token{}
+	}
+	s.Refresh = cmp.Or(tr.RefreshToken, s.Refresh)
+	s.Tokens[string(r)] = token{Access: tr.AccessToken, Expires: expiry(tr)}
+	return tr.AccessToken, s.save()
 }

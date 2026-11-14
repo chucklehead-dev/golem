@@ -46,12 +46,14 @@ where each handler reads it with `caller(ctx)`. A message over
 cuts off a request not read in 30 seconds or a response not written in a
 minute.
 
-`EntraAuth.Authenticate` (control/api/entra.go:28):
+`EntraAuth.Authenticate` (control/api/entra.go):
 
 1. reads `Authorization: Bearer <token>` (`bearer`);
 2. verifies the token with `gateway/auth`'s `Entra.Verify`: RS256 only,
-   golem's tenant and audience, and `scp` `golem.access` for a user or
-   app role `golem.service` for a service;
+   golem's tenant, the control API registration's audience
+   (`api://golem-control`, ADR 0046; a gateway token's `api://golem` is
+   refused), and `scp` `golem.manage` for a user or app role
+   `golem.service` with `idtyp: app` for a service;
 3. starts from the caller `entra:<id>` (the user's `oid`, or the
    service's `azp`), admin if the token carries app role `golem.admin`;
 4. replaces that with the principal whose `Entra` field equals the ID and
@@ -165,18 +167,21 @@ works (`TestPlainJSON`):
 ## 7. golemctl
 
 **Login.** `golemctl login --tenant … --client-id … --api …`
-(cmd/golemctl/login.go:119) runs Entra's device code flow: it posts to
-`/devicecode` for the scope `<audience>/golem.access offline_access`,
-prints Entra's message, and polls `/token` at Entra's interval (slower on
-`slow_down`) until the code expires. Tenant, client ID, API URL, audience
-and authority are remembered, so a second login needs no flags.
+runs Entra's device code flow: it posts to `/devicecode` for the scope
+`<control>/golem.manage offline_access`, prints Entra's message, and polls
+`/token` at Entra's interval (slower on `slow_down`) until the code
+expires. Tenant, client ID, API URL, both resources' URIs and authority are
+remembered, so a second login needs no flags.
 
 **Token cache.** Settings and tokens live in one JSON file, mode 0600, in
 `$GOLEMCTL_HOME` or the user's config directory (`settingsPath`), written
-by a rename so it is never half-written. `accessToken` (login.go:185)
-returns the cached access token while it has more than a minute left,
-else uses the refresh token and saves the result. `golemctl token` prints
-it, for coding agents' credential helpers.
+by a rename so it is never half-written. One refresh token, and an access
+token per resource (ADR 0046): `accessToken(ctx, r)` returns `r`'s cached
+token while it has more than a minute left, else redeems the refresh
+token for `r`'s scope and saves the result; an answer without a token is
+an error, never saved. The API commands use the control API's;
+`golemctl token` prints the gateway's, for coding agents' credential
+helpers, and it cannot call the control API.
 
 **Commands.** `run` (main.go:55) dispatches the offline commands
 (`config validate`, `keys mint --dev`), `login` and `token`, and sends
@@ -202,7 +207,7 @@ usage.
    `runAPI` (cmd/golemctl/api.go:196).
 2. `runAPI` builds the clients (`clients`, api.go:237): it loads the
    settings for the API URL and installs an interceptor that, on each
-   call, gets a token from `accessToken` (login.go:185), refreshing it if
+   call, gets a token from `accessToken(ctx, control)`, refreshing it if
    it is about to expire, and sets `Authorization: Bearer` (api.go:248).
 3. `runAPI` looks up `keys create` in `apiCommands` (api.go:156); `parse`
    defines `--scope`, `--owner`, `--models`, `--expires` and `--dry-run`
@@ -213,7 +218,7 @@ usage.
    `/golem.keys.v1.KeyService/MintKey`.
 5. On the server, the interceptor in `Server.Handler`
    (control/api/api.go:38) calls `EntraAuth.Authenticate`
-   (control/api/entra.go:28): the token is verified and its `oid` mapped
+   (control/api/entra.go): the token is verified and its `oid` mapped
    to, say, principal `alice`.
 6. `keys.MintKey` (control/api/keys.go:16) converts the request to a
    `service.KeyRequest` and calls `Service.MintKey`

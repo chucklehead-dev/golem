@@ -241,7 +241,7 @@ func clients() (orgv1connect.OrgServiceClient, keysv1connect.KeyServiceClient, e
 	}
 	bearer := connect.WithInterceptors(connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, r connect.AnyRequest) (connect.AnyResponse, error) {
-			t, err := accessToken(ctx)
+			t, err := accessToken(ctx, control)
 			if err != nil {
 				return nil, err
 			}

@@ -59,6 +59,7 @@ func serviceClaims() map[string]any {
 	delete(c, "oid")
 	c["roles"] = []string{"golem.service"}
 	c["azp"] = bot
+	c["idtyp"] = "app"
 	return c
 }
 
@@ -117,6 +118,9 @@ func TestEntra(t *testing.T) {
 		{"another API", sign(t, signingKey, "k1", with(userClaims(), "aud", "api://something-else")), "", contract.AuthTokenInvalid.Name},
 		{"a v1 token", sign(t, signingKey, "k1", with(userClaims(), "ver", "1.0")), "", contract.AuthTokenInvalid.Name},
 		{"neither scope nor role", sign(t, signingKey, "k1", with(userClaims(), "scp", "User.Read")), "", contract.AuthTokenInvalid.Name},
+		{"the control API's scope", sign(t, signingKey, "k1", with(userClaims(), "scp", "golem.manage")), "", contract.AuthTokenInvalid.Name},
+		{"a service token without idtyp", sign(t, signingKey, "k1", with(serviceClaims(), "idtyp", nil)), "", contract.AuthTokenInvalid.Name},
+		{"a user token claiming to be an app", sign(t, signingKey, "k1", with(userClaims(), "idtyp", "app")), "", contract.AuthTokenInvalid.Name},
 		{"a user token naming a service's ID", sign(t, signingKey, "k1", with(userClaims(), "oid", bot)), "", contract.AuthzScopeNotMember.Name},
 		{"an unknown user", sign(t, signingKey, "k1", with(userClaims(), "oid", "cccccccc-0000-0000-0000-000000000003")), "", contract.AuthzScopeNotMember.Name},
 		{"signed by another key under a known kid", sign(t, otherKey, "k1", userClaims()), "", contract.AuthTokenInvalid.Name},

@@ -24,7 +24,8 @@ Status: Accepted (v1 baseline). From archive 0003, 0032; PRD §9.3. Amended by [
   SHA-256; bound to one scope; constrained (org-model §3). Registered as a
   GitHub secret-scanning custom pattern; golem-control's webhook receiver
   revokes reported keys. Entra sync revokes disabled users' keys.
-- **Agents**: `golemctl token` prints a cached Entra access token for agents
+- **Agents**: `golemctl token` prints a cached Entra access token (for the
+  gateway's registration only, ADR 0046) for agents
   with a credential helper (Claude Code's `apiKeyHelper` and equivalents),
   with the scope in a header; agents that take only a static key get a
   minted personal key (12-hour default for `golemctl login`).

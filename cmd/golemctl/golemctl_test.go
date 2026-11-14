@@ -22,7 +22,9 @@ import (
 )
 
 // fakeEntra is Entra's device code and token endpoints: the code is
-// pending twice, then issued; a refresh token gets a new access token.
+// pending twice, then issued for the control API; a refresh token gets a
+// new access token for the resource its scope names (tok-gw for the
+// gateway's).
 type fakeEntra struct {
 	polls   atomic.Int32
 	access  atomic.Value // the access token it issues
@@ -34,7 +36,7 @@ func (f *fakeEntra) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/oauth2/v2.0/devicecode"):
-		if !strings.Contains(r.Form.Get("scope"), "api://golem/golem.access") || !strings.Contains(r.Form.Get("scope"), "offline_access") {
+		if !strings.Contains(r.Form.Get("scope"), "api://golem-control/golem.manage") || !strings.Contains(r.Form.Get("scope"), "offline_access") {
 			http.Error(w, `{"error":"invalid_scope"}`, 400)
 			return
 		}
@@ -42,7 +44,11 @@ func (f *fakeEntra) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"expires_in": 60, "message": "To sign in, open https://microsoft.com/devicelogin and enter ABCD."})
 	case strings.HasSuffix(r.URL.Path, "/oauth2/v2.0/token") && r.Form.Get("grant_type") == "refresh_token":
 		f.refresh.Add(1)
-		json.NewEncoder(w).Encode(map[string]any{"access_token": f.access.Load(), "expires_in": 3600})
+		access := f.access.Load()
+		if strings.Contains(r.Form.Get("scope"), "api://golem/golem.access") {
+			access = "tok-gw"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"access_token": access, "expires_in": 3600})
 	case strings.HasSuffix(r.URL.Path, "/oauth2/v2.0/token"):
 		if f.polls.Add(1) <= 2 {
 			json.NewEncoder(w).Encode(map[string]any{"error": "authorization_pending"})
@@ -134,22 +140,32 @@ func TestGolemctl(t *testing.T) {
 	})
 	t.Run("a denied caller is told why", func(t *testing.T) {
 		s, _ := loadSettings()
-		s.Token.Access = "tok-eve"
+		s.Tokens["control"] = token{Access: "tok-eve", Expires: time.Now().Add(time.Hour)}
 		s.save()
 		if code, _, errOut := golemctl("scopes", "create", "team-c"); code != 1 || !strings.Contains(errOut, "permission_denied") {
 			t.Fatalf("%d %s", code, errOut)
 		}
 	})
-	t.Run("an expired token is refreshed", func(t *testing.T) {
-		s, _ := loadSettings()
-		s.Token.Access, s.Token.Expires = "stale", time.Now().Add(-time.Hour)
-		s.save()
-		entra.access.Store("tok-root")
-		if code, out, _ := golemctl("token"); code != 0 || strings.TrimSpace(out) != "tok-root" || entra.refresh.Load() != 1 {
+	t.Run("the gateway's token is its own", func(t *testing.T) {
+		// golemctl token redeems the refresh token for the gateway, and
+		// leaves the control API's token as it was.
+		if code, out, _ := golemctl("token"); code != 0 || strings.TrimSpace(out) != "tok-gw" || entra.refresh.Load() != 1 {
 			t.Fatalf("token: %d %q, refreshes %d", code, out, entra.refresh.Load())
 		}
-		if s, _ := loadSettings(); s.Token.Access != "tok-root" || s.Token.Refresh != "rt" {
-			t.Fatalf("saved %+v", s.Token)
+		if s, _ := loadSettings(); s.Tokens["gateway"].Access != "tok-gw" || s.Tokens["control"].Access != "tok-eve" || s.Refresh != "rt" {
+			t.Fatalf("saved %+v", s)
+		}
+	})
+	t.Run("an expired token is refreshed", func(t *testing.T) {
+		s, _ := loadSettings()
+		s.Tokens["control"] = token{Access: "stale", Expires: time.Now().Add(-time.Hour)}
+		s.save()
+		entra.access.Store("tok-root")
+		if code, out, errOut := golemctl("whoami"); code != 0 || !strings.Contains(out, "root") || entra.refresh.Load() != 2 {
+			t.Fatalf("whoami: %d %q %s, refreshes %d", code, out, errOut, entra.refresh.Load())
+		}
+		if s, _ := loadSettings(); s.Tokens["control"].Access != "tok-root" {
+			t.Fatalf("saved %+v", s.Tokens)
 		}
 	})
 	t.Run("usage", func(t *testing.T) {

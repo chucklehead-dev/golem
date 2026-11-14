@@ -65,7 +65,7 @@ func main() {
 	archive := flag.String("audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
 	telem := flag.String("telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for the audit's log records (TLS unless a literal loopback address)")
 	tenant := flag.String("entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
-	audience := flag.String("entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated")
+	audience := flag.String("entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
 	flag.Parse()
 	if *cfg == "" || *bkt == "" || *key == "" {
 		fail("-config, -bucket and -signing-key are required")
@@ -136,7 +136,7 @@ func apiServer(ctx context.Context, listen, tenant, audience string, st *state.S
 	if tenant == "" {
 		return nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
 	}
-	e := &auth.Entra{Tenant: tenant, Audiences: strings.Split(audience, ",")}
+	e := &auth.Entra{Tenant: tenant, Audiences: audiences(audience), Scope: auth.ScopeManage}
 	if err := e.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("Entra's signing keys: %w", err)
 	}
@@ -150,6 +150,18 @@ func apiServer(ctx context.Context, listen, tenant, audience string, st *state.S
 	return &http.Server{Addr: listen, Handler: h, Protocols: &protocols, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: time.Minute,
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, nil
+}
+
+// audiences splits a comma-separated list, dropping spaces and empty
+// entries ("api://a, api://b" is two audiences, not one with a space).
+func audiences(list string) []string {
+	var out []string
+	for a := range strings.SplitSeq(list, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // openAudit is the audit shipper over the archive, emitting log records to

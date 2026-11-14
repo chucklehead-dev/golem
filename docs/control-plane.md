@@ -29,7 +29,8 @@ Components and APIs at a glance: architecture.md §1–3.
 `control/service` holds the rules; `control/api` is transport only. Each
 service method:
 
-1. authenticates the caller (an Entra token validated by `lib/entra`;
+1. authenticates the caller (an Entra token for the control API's own
+   registration, ADR 0046, validated by `gateway/auth`'s `Entra`;
    jobs run as a service principal),
 2. loads what it needs and checks authorization against org-model §2,
 3. validates the change (a key's models within its scope's policy; a cap's
@@ -234,7 +235,8 @@ control plane.
   groups) or on their first control-API call; a user unknown to the
   snapshot cannot use the gateway yet (seconds after their first sign-in).
 - **Coding agents**: `golemctl token` prints a cached Entra access token for
-  agents with a credential helper (ADR 0009); others get a minted personal
+  agents with a credential helper (ADR 0009), for the gateway only: the
+  control API has its own registration and scope (ADR 0046); others get a minted personal
   key, 12-hour TTL by default for `golemctl login`, pruned at expiry.
 - **Disabled users**: Entra sync (every 5 minutes; change notifications in
   M2) revokes the keys and memberships of disabled or deleted users.

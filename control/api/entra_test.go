@@ -16,17 +16,18 @@ import (
 
 const tenant = "11111111-2222-3333-4444-555555555555"
 
-// TestEntraAuth: a verified token's user or service is the principal with
-// that Entra ID; golem.admin makes it an admin; a token for no principal
-// is "entra:<id>"; a missing or bad token is refused.
+// TestEntraAuth: a verified token for the control API's registration
+// (ADR 0046) names the principal with its Entra ID; golem.admin makes it an
+// admin; a token for no principal is "entra:<id>"; a missing or bad token,
+// or one for the gateway, is refused.
 func TestEntraAuth(t *testing.T) {
 	k, _ := rsa.GenerateKey(rand.Reader, 2048)
 	now := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
-	e := &auth.Entra{Tenant: tenant, Audiences: []string{"api://golem"}, Now: func() time.Time { return now }}
+	e := &auth.Entra{Tenant: tenant, Audiences: []string{"api://golem-control"}, Scope: auth.ScopeManage, Now: func() time.Time { return now }}
 	e.SetKeys(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &k.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
 	signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: k}, (&jose.SignerOptions{}).WithHeader("kid", "k1").WithType("JWT"))
 	token := func(extra map[string]any) string {
-		c := map[string]any{"iss": "https://login.microsoftonline.com/" + tenant + "/v2.0", "aud": "api://golem", "tid": tenant,
+		c := map[string]any{"iss": "https://login.microsoftonline.com/" + tenant + "/v2.0", "aud": "api://golem-control", "tid": tenant,
 			"ver": "2.0", "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(time.Hour).Unix()}
 		for k, v := range extra {
 			c[k] = v
@@ -63,12 +64,16 @@ func TestEntraAuth(t *testing.T) {
 		who          string
 		admin, fails bool
 	}{
-		"a user":          {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.access"}), who: "alice"},
-		"a user, admin":   {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.access", "roles": []string{"golem.admin"}}), who: "alice", admin: true},
-		"a service":       {tok: token(map[string]any{"azp": "app-ci", "roles": []string{"golem.service"}}), who: "ci"},
-		"no principal":    {tok: token(map[string]any{"oid": "oid-new", "scp": "golem.access", "roles": []string{"golem.admin"}}), who: "entra:oid-new", admin: true},
-		"another tenant":  {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.access", "tid": "x"}), fails: true},
-		"no access scope": {tok: token(map[string]any{"oid": "oid-alice"}), fails: true},
+		"a user":        {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.manage"}), who: "alice"},
+		"a user, admin": {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.manage", "roles": []string{"golem.admin"}}), who: "alice", admin: true},
+		"a service":     {tok: token(map[string]any{"azp": "app-ci", "idtyp": "app", "roles": []string{"golem.service"}}), who: "ci"},
+		// A token for the gateway (golem API's audience and scope), as a
+		// coding agent holds: never the control API's.
+		"a gateway token":     {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.access", "aud": "api://golem"}), fails: true},
+		"the gateway's scope": {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.access"}), fails: true},
+		"no principal":        {tok: token(map[string]any{"oid": "oid-new", "scp": "golem.manage", "roles": []string{"golem.admin"}}), who: "entra:oid-new", admin: true},
+		"another tenant":      {tok: token(map[string]any{"oid": "oid-alice", "scp": "golem.manage", "tid": "x"}), fails: true},
+		"no access scope":     {tok: token(map[string]any{"oid": "oid-alice"}), fails: true},
 	} {
 		c, err := a.Authenticate(t.Context(), hdr(tc.tok))
 		if (err != nil) != tc.fails || (!tc.fails && (c.Principal != tc.who || c.Admin != tc.admin)) {

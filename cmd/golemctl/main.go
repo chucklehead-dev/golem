@@ -33,10 +33,11 @@ const usage = `usage:
       Checks the golem CRD YAML in <dir> (recursively) as golem-control would.
   golemctl keys mint --dev
       Prints a new glm_dev_ key, for a standalone gateway's LocalIdentity.
-  golemctl login --tenant <id> --client-id <id> --api <url> [--audience api://golem]
+  golemctl login --tenant <id> --client-id <id> --api <url> [--control api://golem-control] [--gateway api://golem]
       Signs in with Entra (device code) and saves where golem is.
   golemctl token
-      Prints a current Entra access token for golem (for agents' credential helpers).
+      Prints a current Entra access token for the gateway (for agents' credential helpers);
+      it cannot call the control API.
   golemctl whoami
   golemctl scopes list
   golemctl scopes get <id>
@@ -68,7 +69,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		err = login(ctx, args[1:], out, errOut)
 	case cmd == "token":
 		var t string
-		if t, err = accessToken(ctx); err == nil {
+		if t, err = accessToken(ctx, gateway); err == nil {
 			fmt.Fprintln(out, t)
 		}
 	default:

@@ -253,7 +253,8 @@ enforced, transports kept across swaps; the directory source through
 PriceList, LocalIdentity), golem keys (`lib/key`, `gateway/auth`: by hash
 from the snapshot, Bearer or x-api-key, each refusal its own code), Entra
 v2 tokens (RS256 only; tenant, audience, expiry with a minute's leeway;
-`golem.access` for users by oid, `golem.service` for services by azp; keys
+`golem.access` for users by oid, `golem.service` with `idtyp: app` for
+services by azp; the gateway's audience only, ADR 0046; keys
 cached and refreshed hourly or on an unknown kid, never on the request
 path; the scope from `golem-scope`, else the principal's default, rights
 from the snapshot; `-entra-tenant`), the
