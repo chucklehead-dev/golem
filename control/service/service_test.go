@@ -180,3 +180,74 @@ func mapValues(m map[string]string) []string {
 	}
 	return v
 }
+
+// TestReads: who sees which scopes and keys. A scope is not found by an
+// outsider (its existence is not theirs to learn); keys are seen by their
+// owner, their scope's managers and admins.
+func TestReads(t *testing.T) {
+	s := setup(t)
+	ctx := t.Context()
+	own, _ := s.MintKey(ctx, alice, Options{}, KeyRequest{Scope: "team-a"})
+	svc, _ := s.MintKey(ctx, mgrA, Options{}, KeyRequest{Owner: "ci", Scope: "team-a"})
+	bobs, _ := s.MintKey(ctx, mgrB, Options{}, KeyRequest{Scope: "team-b"})
+	if own.Hash == "" || svc.Hash == "" || bobs.Hash == "" {
+		t.Fatal("setup keys")
+	}
+	for _, tc := range []struct {
+		c      Caller
+		scopes string
+		keys   []string
+	}{
+		{admin, "team-a,team-b", []string{own.Hash, svc.Hash, bobs.Hash}},
+		{mgrA, "team-a", []string{own.Hash, svc.Hash}},
+		{alice, "team-a", []string{own.Hash}},
+		{mgrB, "team-b", []string{bobs.Hash}},
+		{eve, "", nil},
+	} {
+		ids, _ := s.ListScopes(ctx, tc.c)
+		if got := strings.Join(ids, ","); got != tc.scopes {
+			t.Errorf("%s's scopes: %q, want %q", tc.c.Principal, got, tc.scopes)
+		}
+		ks, _ := s.ListKeys(ctx, tc.c, "")
+		var got []string
+		for _, k := range ks {
+			got = append(got, k.Hash)
+		}
+		if !sameSet(got, tc.keys) {
+			t.Errorf("%s's keys: %d, want %d", tc.c.Principal, len(got), len(tc.keys))
+		}
+	}
+	if _, err := s.GetScope(ctx, eve, "team-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an outsider reading a scope: %v, want not found", err)
+	}
+	if _, err := s.GetScope(ctx, mgrB, "team-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("another scope's manager: %v, want not found", err)
+	}
+	v, err := s.GetScope(ctx, alice, "team-a")
+	if err != nil || strings.Join(v.Members, ",") != "alice,ci,mona" || strings.Join(v.Managers, ",") != "mona" {
+		t.Fatalf("team-a as alice: %+v %v", v, err)
+	}
+	me, _ := s.Whoami(ctx, mgrA)
+	if me.Kind != "user" || strings.Join(me.Manages, ",") != "team-a" || strings.Join(me.Scopes, ",") != "team-a" {
+		t.Fatalf("whoami %+v", me)
+	}
+	if ks, _ := s.ListKeys(ctx, admin, "team-b"); len(ks) != 1 || ks[0].Hash != bobs.Hash {
+		t.Fatalf("keys in team-b: %+v", ks)
+	}
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, x := range b {
+		found := false
+		for _, y := range a {
+			found = found || x == y
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}

@@ -9,7 +9,10 @@ Status: draft, third pass. Every tool here is a client of the control API
 device code flow; tenant, client ID and API remembered), `token`, and over
 the control API `scopes create`, `members add|remove`, `managers add`,
 `keys create` (owner defaults to the caller; `--expires 30d`) and
-`keys revoke`, each mutating one with `--dry-run`. Tokens are cached in a
+`keys revoke`, each mutating one with `--dry-run`; and the reads `whoami`,
+`scopes list|get` and `keys list [--scope]` (a scope's members, managers
+and admins read it, and outsiders are told it is not found; keys are seen
+by their owner, their scope's managers and admins, never the key itself). Tokens are cached in a
 file only their owner reads (`GOLEMCTL_HOME`, else the user's config
 directory) and refreshed from the refresh token; the OS keychain, browser
 sign-in with PKCE, `-o json` and the rest of the table below come later.

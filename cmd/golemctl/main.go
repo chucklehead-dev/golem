@@ -36,6 +36,10 @@ const usage = `usage:
       Signs in with Entra (device code) and saves where golem is.
   golemctl token
       Prints a current Entra access token for golem (for agents' credential helpers).
+  golemctl whoami
+  golemctl scopes list
+  golemctl scopes get <id>
+  golemctl keys list [--scope <scope>]
   golemctl scopes create <id> --models a,b [--budget-micros n] [--dry-run]
   golemctl members add <scope> <principal> --kind user|service [--entra <id>] [--dry-run]
   golemctl members remove <scope> <principal> [--dry-run]
@@ -47,7 +51,7 @@ func main() { os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stder
 
 // run is golemctl: its exit status.
 func run(ctx context.Context, args []string, out, errOut io.Writer) int {
-	if len(args) < 2 && !(len(args) == 1 && (args[0] == "token" || args[0] == "login")) {
+	if len(args) < 2 && !(len(args) == 1 && (args[0] == "token" || args[0] == "login" || args[0] == "whoami")) {
 		fmt.Fprintln(errOut, usage)
 		return 2
 	}
@@ -64,6 +68,8 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		if t, err = accessToken(ctx); err == nil {
 			fmt.Fprintln(out, t)
 		}
+	case cmd == "whoami":
+		err = apiCommand(ctx, []string{"whoami", ""}, out)
 	default:
 		err = apiCommand(ctx, args, out)
 	}

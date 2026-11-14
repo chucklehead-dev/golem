@@ -116,6 +116,22 @@ func TestGolemctl(t *testing.T) {
 		t.Fatalf("keys revoke: %d %s", code, errOut)
 	}
 
+	t.Run("reads", func(t *testing.T) {
+		code, out, errOut := golemctl("whoami")
+		if code != 0 || !strings.Contains(out, "root") || !strings.Contains(out, "admin      true") {
+			t.Fatalf("whoami: %d %q %s", code, out, errOut)
+		}
+		if code, out, _ := golemctl("scopes", "list"); code != 0 || strings.TrimSpace(out) != "team-a" {
+			t.Fatalf("scopes list: %d %q", code, out)
+		}
+		if code, out, _ := golemctl("scopes", "get", "team-a"); code != 0 || !strings.Contains(out, "alice") || !strings.Contains(out, "claude, gpt") {
+			t.Fatalf("scopes get: %d %q", code, out)
+		}
+		code, out, _ = golemctl("keys", "list", "--scope", "team-a")
+		if code != 0 || !strings.Contains(out, "alice") || !strings.Contains(out, "revoked") || strings.Contains(out, key) || !strings.Contains(out, hash[:12]) {
+			t.Fatalf("keys list: %d %q", code, out)
+		}
+	})
 	t.Run("a denied caller is told why", func(t *testing.T) {
 		s, _ := loadSettings()
 		s.Token.Access = "tok-eve"

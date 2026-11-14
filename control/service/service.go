@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -268,4 +269,122 @@ func (s *Service) RevokeKey(ctx context.Context, c Caller, o Options, hash strin
 		}
 		return d.Revoke(hash, s.now())
 	})
+}
+
+// Me is who the caller is to golem.
+type Me struct {
+	Principal string
+	Admin     bool
+	Kind      string   // user or service; empty for a caller with no principal yet
+	Scopes    []string // memberships
+	Manages   []string // scopes it manages
+}
+
+// Whoami is the caller as golem sees them: anyone signed in.
+func (s *Service) Whoami(ctx context.Context, c Caller) (Me, error) {
+	d, err := s.read(ctx)
+	if err != nil {
+		return Me{}, err
+	}
+	p := d.Principals[c.Principal]
+	me := Me{Principal: c.Principal, Admin: c.Admin, Kind: p.Kind, Scopes: slices.Sorted(slices.Values(p.Scopes))}
+	for _, r := range d.Roles {
+		if r.Principal == c.Principal {
+			me.Manages = append(me.Manages, r.Scope)
+		}
+	}
+	slices.Sort(me.Manages)
+	return me, nil
+}
+
+// read is the document as of now (one conditional get).
+func (s *Service) read(ctx context.Context) (*state.Document, error) {
+	if err := s.State.Refresh(ctx); err != nil {
+		return nil, err
+	}
+	return s.State.Current(), nil
+}
+
+// sees reports whether c may read scope: a member, a manager or an admin.
+func sees(d *state.Document, c Caller, scope string) bool {
+	return c.Admin || d.Has(c.Principal, "manager", scope) || slices.Contains(d.Principals[c.Principal].Scopes, scope)
+}
+
+// ScopeView is a scope as its members see it.
+type ScopeView struct {
+	ID       string
+	Policy   state.Scope
+	Members  []string
+	Managers []string
+}
+
+// ListScopes is the scopes the caller may read, by ID.
+func (s *Service) ListScopes(ctx context.Context, c Caller) ([]string, error) {
+	d, err := s.read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, id := range slices.Sorted(maps.Keys(d.Scopes)) {
+		if sees(d, c, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// GetScope is a scope's policy, members and managers: for its members,
+// its managers and admins.
+func (s *Service) GetScope(ctx context.Context, c Caller, id string) (ScopeView, error) {
+	d, err := s.read(ctx)
+	if err != nil {
+		return ScopeView{}, err
+	}
+	sc, ok := d.Scopes[id]
+	if !ok {
+		return ScopeView{}, fmt.Errorf("%w: scope %s", ErrNotFound, id)
+	}
+	if !sees(d, c, id) {
+		// Not found, not denied: a scope's existence is not for outsiders.
+		return ScopeView{}, fmt.Errorf("%w: scope %s", ErrNotFound, id)
+	}
+	v := ScopeView{ID: id, Policy: sc}
+	for _, pid := range slices.Sorted(maps.Keys(d.Principals)) {
+		if slices.Contains(d.Principals[pid].Scopes, id) {
+			v.Members = append(v.Members, pid)
+		}
+	}
+	for _, r := range d.Roles {
+		if r.Scope == id {
+			v.Managers = append(v.Managers, r.Principal)
+		}
+	}
+	slices.Sort(v.Managers)
+	return v, nil
+}
+
+// KeyView is a key as its owner and managers see it: never the key.
+type KeyView struct {
+	Hash string
+	state.Key
+}
+
+// ListKeys is the keys the caller may see, in scope if it is given: its
+// own, those of the scopes it manages, or, for admins, every key.
+func (s *Service) ListKeys(ctx context.Context, c Caller, scope string) ([]KeyView, error) {
+	d, err := s.read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []KeyView
+	for _, h := range slices.Sorted(maps.Keys(d.Keys)) {
+		k := d.Keys[h]
+		if scope != "" && k.Scope != scope {
+			continue
+		}
+		if c.Admin || k.Owner == c.Principal || d.Has(c.Principal, "manager", k.Scope) {
+			out = append(out, KeyView{Hash: h, Key: k})
+		}
+	}
+	return out, nil
 }

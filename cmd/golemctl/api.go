@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"connectrpc.com/connect"
@@ -88,7 +89,73 @@ func apiCommand(ctx context.Context, args []string, out io.Writer) error {
 			fmt.Fprintln(out, what)
 		}
 	}
-	switch noun, verb, rest := args[0], args[1], args[2:]; noun + " " + verb {
+	switch noun, verb, rest := args[0], args[1], args[2:]; strings.TrimSpace(noun + " " + verb) {
+	case "whoami":
+		res, err := org.Whoami(ctx, connect.NewRequest(&orgv1.WhoamiRequest{}))
+		if err != nil {
+			return err
+		}
+		m := res.Msg
+		tw := table(out)
+		fmt.Fprintf(tw, "principal\t%s\n", m.Principal)
+		fmt.Fprintf(tw, "kind\t%s\n", or(m.Kind, "(no principal yet)"))
+		fmt.Fprintf(tw, "admin\t%v\n", m.Admin)
+		fmt.Fprintf(tw, "member of\t%s\n", or(strings.Join(m.Scopes, ", "), "-"))
+		fmt.Fprintf(tw, "manages\t%s\n", or(strings.Join(m.Manages, ", "), "-"))
+		return tw.Flush()
+	case "scopes list":
+		if _, _, err := command("scopes list", rest, 0, func(*flag.FlagSet) {}); err != nil {
+			return err
+		}
+		res, err := org.ListScopes(ctx, connect.NewRequest(&orgv1.ListScopesRequest{}))
+		if err != nil {
+			return err
+		}
+		for _, id := range res.Msg.Ids {
+			fmt.Fprintln(out, id)
+		}
+	case "scopes get":
+		pos, _, err := command("scopes get", rest, 1, func(*flag.FlagSet) {})
+		if err != nil {
+			return err
+		}
+		res, err := org.GetScope(ctx, connect.NewRequest(&orgv1.GetScopeRequest{Id: pos[0]}))
+		if err != nil {
+			return err
+		}
+		m, p := res.Msg, res.Msg.GetPolicy()
+		tw := table(out)
+		fmt.Fprintf(tw, "scope\t%s\n", m.Id)
+		fmt.Fprintf(tw, "models\t%s\n", or(strings.Join(p.GetModels(), ", "), "-"))
+		fmt.Fprintf(tw, "budget\t%d micros\n", p.GetBudgetMicros())
+		fmt.Fprintf(tw, "members\t%s\n", or(strings.Join(m.Members, ", "), "-"))
+		fmt.Fprintf(tw, "managers\t%s\n", or(strings.Join(m.Managers, ", "), "-"))
+		return tw.Flush()
+	case "keys list":
+		var scope *string
+		if _, _, err := command("keys list", rest, 0, func(fs *flag.FlagSet) {
+			scope = fs.String("scope", "", "only this scope's keys")
+		}); err != nil {
+			return err
+		}
+		res, err := keys.ListKeys(ctx, connect.NewRequest(&keysv1.ListKeysRequest{Scope: *scope}))
+		if err != nil {
+			return err
+		}
+		tw := table(out)
+		fmt.Fprintln(tw, "KEY\tOWNER\tSCOPE\tMODELS\tEXPIRES\tSTATE\tHASH")
+		for _, k := range res.Msg.Keys {
+			expires, state := "-", "active"
+			if k.Expires != nil {
+				expires = k.Expires.AsTime().Format(time.DateOnly)
+			}
+			if k.Revoked != nil {
+				state = "revoked " + k.Revoked.AsTime().Format(time.DateOnly)
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", k.Display, k.Owner, k.Scope, or(strings.Join(k.Models, ","), "(scope's)"),
+				expires, state, k.Hash[:12])
+		}
+		return tw.Flush()
 	case "scopes create":
 		var models *string
 		var budget *int64
@@ -180,4 +247,13 @@ func apiCommand(ctx context.Context, args []string, out io.Writer) error {
 		return usageError(fmt.Sprintf("no command %q", noun+" "+verb))
 	}
 	return nil
+}
+
+func table(w io.Writer) *tabwriter.Writer { return tabwriter.NewWriter(w, 0, 4, 2, ' ', 0) }
+
+func or(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }

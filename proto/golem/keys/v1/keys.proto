@@ -13,6 +13,9 @@ service KeyService {
   rpc MintKey(MintKeyRequest) returns (MintKeyResponse);
   // Revokes a key: its owner, its scope's managers, or admins.
   rpc RevokeKey(RevokeKeyRequest) returns (RevokeKeyResponse);
+  // The keys the caller may see: its own, those of the scopes it manages,
+  // every key for admins. Never the key itself.
+  rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
 }
 
 message MintKeyRequest {
@@ -40,3 +43,24 @@ message RevokeKeyRequest {
 }
 
 message RevokeKeyResponse {}
+
+message ListKeysRequest {
+  // Only this scope's; empty: every scope the caller may see.
+  string scope = 1;
+}
+
+message Key {
+  // The key's hex SHA-256, which names it.
+  string hash = 1;
+  // The shown prefix.
+  string display = 2;
+  string owner = 3;
+  string scope = 4;
+  repeated string models = 5;
+  google.protobuf.Timestamp expires = 6;
+  google.protobuf.Timestamp revoked = 7;
+}
+
+message ListKeysResponse {
+  repeated Key keys = 1;
+}

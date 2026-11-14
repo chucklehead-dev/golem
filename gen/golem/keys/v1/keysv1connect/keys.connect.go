@@ -38,6 +38,8 @@ const (
 	KeyServiceMintKeyProcedure = "/golem.keys.v1.KeyService/MintKey"
 	// KeyServiceRevokeKeyProcedure is the fully-qualified name of the KeyService's RevokeKey RPC.
 	KeyServiceRevokeKeyProcedure = "/golem.keys.v1.KeyService/RevokeKey"
+	// KeyServiceListKeysProcedure is the fully-qualified name of the KeyService's ListKeys RPC.
+	KeyServiceListKeysProcedure = "/golem.keys.v1.KeyService/ListKeys"
 )
 
 // KeyServiceClient is a client for the golem.keys.v1.KeyService service.
@@ -47,6 +49,9 @@ type KeyServiceClient interface {
 	MintKey(context.Context, *connect.Request[v1.MintKeyRequest]) (*connect.Response[v1.MintKeyResponse], error)
 	// Revokes a key: its owner, its scope's managers, or admins.
 	RevokeKey(context.Context, *connect.Request[v1.RevokeKeyRequest]) (*connect.Response[v1.RevokeKeyResponse], error)
+	// The keys the caller may see: its own, those of the scopes it manages,
+	// every key for admins. Never the key itself.
+	ListKeys(context.Context, *connect.Request[v1.ListKeysRequest]) (*connect.Response[v1.ListKeysResponse], error)
 }
 
 // NewKeyServiceClient constructs a client for the golem.keys.v1.KeyService service. By default, it
@@ -72,6 +77,12 @@ func NewKeyServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(keyServiceMethods.ByName("RevokeKey")),
 			connect.WithClientOptions(opts...),
 		),
+		listKeys: connect.NewClient[v1.ListKeysRequest, v1.ListKeysResponse](
+			httpClient,
+			baseURL+KeyServiceListKeysProcedure,
+			connect.WithSchema(keyServiceMethods.ByName("ListKeys")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -79,6 +90,7 @@ func NewKeyServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 type keyServiceClient struct {
 	mintKey   *connect.Client[v1.MintKeyRequest, v1.MintKeyResponse]
 	revokeKey *connect.Client[v1.RevokeKeyRequest, v1.RevokeKeyResponse]
+	listKeys  *connect.Client[v1.ListKeysRequest, v1.ListKeysResponse]
 }
 
 // MintKey calls golem.keys.v1.KeyService.MintKey.
@@ -91,6 +103,11 @@ func (c *keyServiceClient) RevokeKey(ctx context.Context, req *connect.Request[v
 	return c.revokeKey.CallUnary(ctx, req)
 }
 
+// ListKeys calls golem.keys.v1.KeyService.ListKeys.
+func (c *keyServiceClient) ListKeys(ctx context.Context, req *connect.Request[v1.ListKeysRequest]) (*connect.Response[v1.ListKeysResponse], error) {
+	return c.listKeys.CallUnary(ctx, req)
+}
+
 // KeyServiceHandler is an implementation of the golem.keys.v1.KeyService service.
 type KeyServiceHandler interface {
 	// Mints a key: a member its own, a scope's managers its services', admins
@@ -98,6 +115,9 @@ type KeyServiceHandler interface {
 	MintKey(context.Context, *connect.Request[v1.MintKeyRequest]) (*connect.Response[v1.MintKeyResponse], error)
 	// Revokes a key: its owner, its scope's managers, or admins.
 	RevokeKey(context.Context, *connect.Request[v1.RevokeKeyRequest]) (*connect.Response[v1.RevokeKeyResponse], error)
+	// The keys the caller may see: its own, those of the scopes it manages,
+	// every key for admins. Never the key itself.
+	ListKeys(context.Context, *connect.Request[v1.ListKeysRequest]) (*connect.Response[v1.ListKeysResponse], error)
 }
 
 // NewKeyServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -119,12 +139,20 @@ func NewKeyServiceHandler(svc KeyServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(keyServiceMethods.ByName("RevokeKey")),
 		connect.WithHandlerOptions(opts...),
 	)
+	keyServiceListKeysHandler := connect.NewUnaryHandler(
+		KeyServiceListKeysProcedure,
+		svc.ListKeys,
+		connect.WithSchema(keyServiceMethods.ByName("ListKeys")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/golem.keys.v1.KeyService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case KeyServiceMintKeyProcedure:
 			keyServiceMintKeyHandler.ServeHTTP(w, r)
 		case KeyServiceRevokeKeyProcedure:
 			keyServiceRevokeKeyHandler.ServeHTTP(w, r)
+		case KeyServiceListKeysProcedure:
+			keyServiceListKeysHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -140,4 +168,8 @@ func (UnimplementedKeyServiceHandler) MintKey(context.Context, *connect.Request[
 
 func (UnimplementedKeyServiceHandler) RevokeKey(context.Context, *connect.Request[v1.RevokeKeyRequest]) (*connect.Response[v1.RevokeKeyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.keys.v1.KeyService.RevokeKey is not implemented"))
+}
+
+func (UnimplementedKeyServiceHandler) ListKeys(context.Context, *connect.Request[v1.ListKeysRequest]) (*connect.Response[v1.ListKeysResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.keys.v1.KeyService.ListKeys is not implemented"))
 }

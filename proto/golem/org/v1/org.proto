@@ -16,6 +16,14 @@ service OrgService {
   rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
   // Makes a principal a manager of a scope: admins.
   rpc BindManager(BindManagerRequest) returns (BindManagerResponse);
+  // Who the caller is to golem: anyone signed in.
+  rpc Whoami(WhoamiRequest) returns (WhoamiResponse);
+  // The scopes the caller may read: its own and those it manages; every
+  // scope for admins.
+  rpc ListScopes(ListScopesRequest) returns (ListScopesResponse);
+  // A scope's policy, members and managers: for its members, its managers
+  // and admins; not found for anyone else.
+  rpc GetScope(GetScopeRequest) returns (GetScopeResponse);
 }
 
 // A scope's policy (org-model.md §3).
@@ -72,3 +80,31 @@ message BindManagerRequest {
 }
 
 message BindManagerResponse {}
+
+message WhoamiRequest {}
+
+message WhoamiResponse {
+  string principal = 1;
+  bool admin = 2;
+  // user or service; empty for a caller with no principal yet.
+  string kind = 3;
+  repeated string scopes = 4;
+  repeated string manages = 5;
+}
+
+message ListScopesRequest {}
+
+message ListScopesResponse {
+  repeated string ids = 1;
+}
+
+message GetScopeRequest {
+  string id = 1;
+}
+
+message GetScopeResponse {
+  string id = 1;
+  ScopePolicy policy = 2;
+  repeated string members = 3;
+  repeated string managers = 4;
+}

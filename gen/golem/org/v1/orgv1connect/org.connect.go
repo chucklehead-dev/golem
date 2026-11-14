@@ -43,6 +43,12 @@ const (
 	OrgServiceRemoveMemberProcedure = "/golem.org.v1.OrgService/RemoveMember"
 	// OrgServiceBindManagerProcedure is the fully-qualified name of the OrgService's BindManager RPC.
 	OrgServiceBindManagerProcedure = "/golem.org.v1.OrgService/BindManager"
+	// OrgServiceWhoamiProcedure is the fully-qualified name of the OrgService's Whoami RPC.
+	OrgServiceWhoamiProcedure = "/golem.org.v1.OrgService/Whoami"
+	// OrgServiceListScopesProcedure is the fully-qualified name of the OrgService's ListScopes RPC.
+	OrgServiceListScopesProcedure = "/golem.org.v1.OrgService/ListScopes"
+	// OrgServiceGetScopeProcedure is the fully-qualified name of the OrgService's GetScope RPC.
+	OrgServiceGetScopeProcedure = "/golem.org.v1.OrgService/GetScope"
 )
 
 // OrgServiceClient is a client for the golem.org.v1.OrgService service.
@@ -56,6 +62,14 @@ type OrgServiceClient interface {
 	RemoveMember(context.Context, *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error)
 	// Makes a principal a manager of a scope: admins.
 	BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error)
+	// Who the caller is to golem: anyone signed in.
+	Whoami(context.Context, *connect.Request[v1.WhoamiRequest]) (*connect.Response[v1.WhoamiResponse], error)
+	// The scopes the caller may read: its own and those it manages; every
+	// scope for admins.
+	ListScopes(context.Context, *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error)
+	// A scope's policy, members and managers: for its members, its managers
+	// and admins; not found for anyone else.
+	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
 }
 
 // NewOrgServiceClient constructs a client for the golem.org.v1.OrgService service. By default, it
@@ -93,6 +107,24 @@ func NewOrgServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(orgServiceMethods.ByName("BindManager")),
 			connect.WithClientOptions(opts...),
 		),
+		whoami: connect.NewClient[v1.WhoamiRequest, v1.WhoamiResponse](
+			httpClient,
+			baseURL+OrgServiceWhoamiProcedure,
+			connect.WithSchema(orgServiceMethods.ByName("Whoami")),
+			connect.WithClientOptions(opts...),
+		),
+		listScopes: connect.NewClient[v1.ListScopesRequest, v1.ListScopesResponse](
+			httpClient,
+			baseURL+OrgServiceListScopesProcedure,
+			connect.WithSchema(orgServiceMethods.ByName("ListScopes")),
+			connect.WithClientOptions(opts...),
+		),
+		getScope: connect.NewClient[v1.GetScopeRequest, v1.GetScopeResponse](
+			httpClient,
+			baseURL+OrgServiceGetScopeProcedure,
+			connect.WithSchema(orgServiceMethods.ByName("GetScope")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -102,6 +134,9 @@ type orgServiceClient struct {
 	addMember    *connect.Client[v1.AddMemberRequest, v1.AddMemberResponse]
 	removeMember *connect.Client[v1.RemoveMemberRequest, v1.RemoveMemberResponse]
 	bindManager  *connect.Client[v1.BindManagerRequest, v1.BindManagerResponse]
+	whoami       *connect.Client[v1.WhoamiRequest, v1.WhoamiResponse]
+	listScopes   *connect.Client[v1.ListScopesRequest, v1.ListScopesResponse]
+	getScope     *connect.Client[v1.GetScopeRequest, v1.GetScopeResponse]
 }
 
 // CreateScope calls golem.org.v1.OrgService.CreateScope.
@@ -124,6 +159,21 @@ func (c *orgServiceClient) BindManager(ctx context.Context, req *connect.Request
 	return c.bindManager.CallUnary(ctx, req)
 }
 
+// Whoami calls golem.org.v1.OrgService.Whoami.
+func (c *orgServiceClient) Whoami(ctx context.Context, req *connect.Request[v1.WhoamiRequest]) (*connect.Response[v1.WhoamiResponse], error) {
+	return c.whoami.CallUnary(ctx, req)
+}
+
+// ListScopes calls golem.org.v1.OrgService.ListScopes.
+func (c *orgServiceClient) ListScopes(ctx context.Context, req *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error) {
+	return c.listScopes.CallUnary(ctx, req)
+}
+
+// GetScope calls golem.org.v1.OrgService.GetScope.
+func (c *orgServiceClient) GetScope(ctx context.Context, req *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error) {
+	return c.getScope.CallUnary(ctx, req)
+}
+
 // OrgServiceHandler is an implementation of the golem.org.v1.OrgService service.
 type OrgServiceHandler interface {
 	// Creates a top-level scope: admins.
@@ -135,6 +185,14 @@ type OrgServiceHandler interface {
 	RemoveMember(context.Context, *connect.Request[v1.RemoveMemberRequest]) (*connect.Response[v1.RemoveMemberResponse], error)
 	// Makes a principal a manager of a scope: admins.
 	BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error)
+	// Who the caller is to golem: anyone signed in.
+	Whoami(context.Context, *connect.Request[v1.WhoamiRequest]) (*connect.Response[v1.WhoamiResponse], error)
+	// The scopes the caller may read: its own and those it manages; every
+	// scope for admins.
+	ListScopes(context.Context, *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error)
+	// A scope's policy, members and managers: for its members, its managers
+	// and admins; not found for anyone else.
+	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
 }
 
 // NewOrgServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -168,6 +226,24 @@ func NewOrgServiceHandler(svc OrgServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(orgServiceMethods.ByName("BindManager")),
 		connect.WithHandlerOptions(opts...),
 	)
+	orgServiceWhoamiHandler := connect.NewUnaryHandler(
+		OrgServiceWhoamiProcedure,
+		svc.Whoami,
+		connect.WithSchema(orgServiceMethods.ByName("Whoami")),
+		connect.WithHandlerOptions(opts...),
+	)
+	orgServiceListScopesHandler := connect.NewUnaryHandler(
+		OrgServiceListScopesProcedure,
+		svc.ListScopes,
+		connect.WithSchema(orgServiceMethods.ByName("ListScopes")),
+		connect.WithHandlerOptions(opts...),
+	)
+	orgServiceGetScopeHandler := connect.NewUnaryHandler(
+		OrgServiceGetScopeProcedure,
+		svc.GetScope,
+		connect.WithSchema(orgServiceMethods.ByName("GetScope")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/golem.org.v1.OrgService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case OrgServiceCreateScopeProcedure:
@@ -178,6 +254,12 @@ func NewOrgServiceHandler(svc OrgServiceHandler, opts ...connect.HandlerOption) 
 			orgServiceRemoveMemberHandler.ServeHTTP(w, r)
 		case OrgServiceBindManagerProcedure:
 			orgServiceBindManagerHandler.ServeHTTP(w, r)
+		case OrgServiceWhoamiProcedure:
+			orgServiceWhoamiHandler.ServeHTTP(w, r)
+		case OrgServiceListScopesProcedure:
+			orgServiceListScopesHandler.ServeHTTP(w, r)
+		case OrgServiceGetScopeProcedure:
+			orgServiceGetScopeHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -201,4 +283,16 @@ func (UnimplementedOrgServiceHandler) RemoveMember(context.Context, *connect.Req
 
 func (UnimplementedOrgServiceHandler) BindManager(context.Context, *connect.Request[v1.BindManagerRequest]) (*connect.Response[v1.BindManagerResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.BindManager is not implemented"))
+}
+
+func (UnimplementedOrgServiceHandler) Whoami(context.Context, *connect.Request[v1.WhoamiRequest]) (*connect.Response[v1.WhoamiResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.Whoami is not implemented"))
+}
+
+func (UnimplementedOrgServiceHandler) ListScopes(context.Context, *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.ListScopes is not implemented"))
+}
+
+func (UnimplementedOrgServiceHandler) GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.GetScope is not implemented"))
 }

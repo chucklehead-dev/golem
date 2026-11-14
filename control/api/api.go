@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -138,4 +139,52 @@ func bearer(h http.Header) (string, bool) {
 	v := h.Get("Authorization")
 	tok, ok := strings.CutPrefix(v, "Bearer ")
 	return strings.TrimSpace(tok), ok && strings.TrimSpace(tok) != ""
+}
+
+func (o org) Whoami(ctx context.Context, _ *connect.Request[orgv1.WhoamiRequest]) (*connect.Response[orgv1.WhoamiResponse], error) {
+	me, err := o.s.Service.Whoami(ctx, caller(ctx))
+	if err != nil {
+		return nil, codeOf(err)
+	}
+	return connect.NewResponse(&orgv1.WhoamiResponse{Principal: me.Principal, Admin: me.Admin, Kind: me.Kind,
+		Scopes: me.Scopes, Manages: me.Manages}), nil
+}
+
+func (o org) ListScopes(ctx context.Context, _ *connect.Request[orgv1.ListScopesRequest]) (*connect.Response[orgv1.ListScopesResponse], error) {
+	ids, err := o.s.Service.ListScopes(ctx, caller(ctx))
+	if err != nil {
+		return nil, codeOf(err)
+	}
+	return connect.NewResponse(&orgv1.ListScopesResponse{Ids: ids}), nil
+}
+
+func (o org) GetScope(ctx context.Context, r *connect.Request[orgv1.GetScopeRequest]) (*connect.Response[orgv1.GetScopeResponse], error) {
+	v, err := o.s.Service.GetScope(ctx, caller(ctx), r.Msg.Id)
+	if err != nil {
+		return nil, codeOf(err)
+	}
+	p := v.Policy
+	return connect.NewResponse(&orgv1.GetScopeResponse{Id: v.ID, Members: v.Members, Managers: v.Managers,
+		Policy: &orgv1.ScopePolicy{Models: p.Models, BudgetMicros: p.BudgetMicros, DeclaredWorstCaseCheck: p.DeclaredWorstCaseCheck,
+			PrincipalInFlight: int32(p.PrincipalInFlight), ScopeInFlight: int32(p.ScopeInFlight), StorageAllowed: p.StorageAllowed,
+			MaxOutputTokens: p.MaxOutputTokens, MaxInputBytes: p.MaxInputBytes, Features: p.Features}}), nil
+}
+
+func (k keys) ListKeys(ctx context.Context, r *connect.Request[keysv1.ListKeysRequest]) (*connect.Response[keysv1.ListKeysResponse], error) {
+	ks, err := k.s.Service.ListKeys(ctx, caller(ctx), r.Msg.Scope)
+	if err != nil {
+		return nil, codeOf(err)
+	}
+	res := &keysv1.ListKeysResponse{}
+	for _, v := range ks {
+		pk := &keysv1.Key{Hash: v.Hash, Display: v.Display, Owner: v.Owner, Scope: v.Scope, Models: v.Models}
+		if !v.ExpiresAt.IsZero() {
+			pk.Expires = timestamppb.New(v.ExpiresAt)
+		}
+		if !v.RevokedAt.IsZero() {
+			pk.Revoked = timestamppb.New(v.RevokedAt)
+		}
+		res.Keys = append(res.Keys, pk)
+	}
+	return connect.NewResponse(res), nil
 }

@@ -63,7 +63,9 @@ connect-go as gRPC, gRPC-Web and HTTP/JSON, every call authenticated by an
 Entra token (`EntraAuth`: the token's user or service is the principal
 with that Entra ID; `golem.admin` makes it an admin; one with no principal
 yet is `entra:<id>`), errors mapped to Connect codes with the field path.
-`golem-control -listen` serves it, and only with `-entra-tenant`.
+`golem-control -listen` serves it, and only with `-entra-tenant`. Reads:
+`Whoami`, `ListScopes` and `GetScope` (members, managers, admins; not found
+for anyone else) and `ListKeys` (owner, the scope's managers, admins).
 
 `validate_only` on every mutating method lets `golemctl` and the console
 show errors with field paths before anything is written. Config CRDs are
