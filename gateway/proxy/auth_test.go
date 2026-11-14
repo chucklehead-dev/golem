@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -126,7 +127,7 @@ func TestConcurrencyAndCancel(t *testing.T) {
 	release := make(chan struct{})
 	slow := roundTrip(func(r *http.Request) (*http.Response, error) {
 		r.Body.Close()
-		pr, pw := ioPipe()
+		pr, pw := io.Pipe()
 		go func() {
 			pw.Write(anthropicStream(0)[0])
 			select {
@@ -171,7 +172,7 @@ spec:
 		if lim.Known(t.Context(), "team-a") > 0 {
 			break
 		}
-		syncWait()
+		time.Sleep(5 * time.Millisecond) // for the handler to see the cancellation over a real connection
 	}
 	if got := lim.Known(t.Context(), "team-a"); got == 0 {
 		t.Fatal("the cancelled call's usage so far was not charged")

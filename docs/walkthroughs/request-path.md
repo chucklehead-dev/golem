@@ -40,7 +40,8 @@ path reads only what those decisions need and forwards bytes unchanged:
   is refused: an upstream parser could read it differently (ADR 0037).
 - **Stream, don't buffer.** The response is copied to the caller as it
   arrives, and the same bytes go to an SSE parser that reads usage. Only a
-  non-streamed response is kept, up to 1 MiB, to read its usage at the end.
+  non-streamed response is kept, up to 1 MiB, to read its usage at the end;
+  one larger than that has its usage unread and is estimated.
 - **One attempt, accounted once.** There is no retry or failover yet (the
   places are marked in `ServeHTTP`); after the first response byte there
   never will be (ADR 0002). Each admitted call's ticket ends exactly once,
@@ -56,8 +57,8 @@ path reads only what those decisions need and forwards bytes unchanged:
 
 | Where | What it is |
 |---|---|
-| `gateway/proxy/proxy.go` | `Handler.ServeHTTP`, the request path top to bottom; refusals, policy, admission, the response relay, `settlement` (the ticket's one end) |
-| `gateway/proxy/dialect.go` | everything that differs by dialect: `Dialect`, `scanned`, scan/rewrite/usage dispatch, `estimate`, error shapes |
+| `gateway/proxy/proxy.go` | `Handler.ServeHTTP`, the request path top to bottom; refusals, features and policy, admission, the response relay, `settlement` (the ticket's one end) |
+| `gateway/proxy/dialect.go` | everything that differs by dialect: `Dialect`, the headers each forwards and checks, `scanned`, scan/rewrite/usage dispatch, `estimate`, error shapes |
 | `gateway/proxy/exchange.go` | the pooled `exchange` (copy buffer, scanners, usage readers, writer state), body pools, `upstreamBody` |
 | `gateway/proxy/bounds.go` | the route's time bounds over the upstream call: reusable `alarm`s, the idle reader |
 | `gateway/admission` | the contract with the limiter: `Call`, `Admitter`, `Ticket`, `Refusal` (implemented by `gateway/limit`) |
@@ -65,148 +66,176 @@ path reads only what those decisions need and forwards bytes unchanged:
 | `gateway/dialect/anthropic/messages` | Messages: `Request.Scan`/`Rewrite`, server-tool detection, `StreamUsage` |
 | `gateway/dialect/internal/jsonscan` | the shared top-level member scanner (`Object`, `Elements`), spans and splices (`Splice`, `Apply`) |
 | `gateway/sse` | `Parser` (events from arbitrary chunking) and `Filter` (the same, withholding events) |
-| `gateway/route` | `Table` (alias to `Route`), `Route` (pool and bounds), `Target` (one deployment) |
+| `gateway/route` | `Table` (alias to `Route`), `Route` (pool, bounds, approved betas), `Target` (one deployment) |
 | `gateway/price` | `Cost` and `Worst`: integer micro-units, half-even rounding, saturation at `MaxCost` |
 | `gateway/canon` | `Usage`, the one canonical type the path needs so far |
 
 `proxy` is imported only by the binary (`internal/archtest` checks it).
-The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:87`)
-behind `localOnly` (`cmd/golem-gateway/guard.go`), which refuses
+The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:189`),
+each wrapped by the lifecycle's drain tracking and, in standalone mode
+only, by `localOnly` (`cmd/golem-gateway/guard.go:24`), which refuses
 non-loopback hosts, cross-origin browser requests and non-JSON bodies.
 
 ## A worked example: an OpenAI streaming request
 
 Follow `POST /v1/chat/completions` with
-`{"model":"gpt","stream":true,"max_tokens":100,"messages":[...]}` from a key
-whose scope has a budget, through to the ledger.
+`{"model":"team-chat","stream":true,"max_tokens":100,"messages":[...]}`
+from a key whose scope has a budget, through to the ledger.
 
-**Identity and configuration.** `ServeHTTP` (`proxy.go:107`) starts the
-span and mints a UUIDv7 request ID, formatted into a stack buffer and set on
-the response at once (`proxy.go:111-115`), so every refusal carries it.
-`authenticate` (`proxy.go:368`) takes the current snapshot once, used to the
-end of the call (gateway.md §1): an expired lease refuses with
+**Identity and configuration.** `ServeHTTP` (`proxy.go:104`) starts the
+span and mints a UUIDv7 request ID (`newRequestID`, `proxy.go:283`,
+formatted into a stack buffer), set on the response at once
+(`proxy.go:109`), so every refusal carries it. `authenticate`
+(`proxy.go:379`) takes the current snapshot once, used to the end of the
+call (gateway.md §1): an expired lease refuses with
 `gateway.authorization_expired`, a missing snapshot with
 `gateway.not_ready`, and a snapshot with keys hands the headers to
-`Keys.Authenticate` (`gateway/auth/auth.go:198`).
+`Keys.Authenticate` (`gateway/auth/auth.go:207`).
 
-**The body.** `getExchange` (`exchange.go:113`) takes the pooled working
-memory, and `readBody` (`proxy.go:387`) reads into a pooled buffer sized
+**The body.** `getExchange` (`exchange.go:65`) takes the pooled working
+memory, and `readBody` (`proxy.go:398`) reads into a pooled buffer sized
 from `Content-Length` in one allocation, under a read deadline
-(`BodyTimeout`, so a trickling client cannot hold a buffer before
-admission) and `MaxBody`.
+(`BodyTimeout`, default 30 s, so a trickling client cannot hold a buffer
+before admission) and `MaxBody` (zero means the default, 32 MiB; the
+binary's `-max-body` flag sets it).
 
-**Scan and route.** `ex.scan` (`dialect.go:47`) runs `chat.Request.Scan`
-(`chat/chat.go:62`) over `jsonscan.Object` (`jsonscan/jsonscan.go:81`),
+**Scan and route.** `ex.scan` (`dialect.go:95`) runs `chat.Request.Scan`
+(`chat/chat.go:67`) over `jsonscan.Object` (`jsonscan/jsonscan.go:81`),
 which compares member names unescaped (`"model"` is `model`) and
-records each value's span. Policy members set flags; unknown members are
-counted. `route` (`proxy.go:408`) looks the alias up without allocating
-(`route/route.go:54`), refuses an alias of the other dialect, and checks the
-principal may use it. `features` (`proxy.go:429`) applies restricted mode
-(unknown members, betas and API versions refused unless the route is an
-agent route), and `policy` (`proxy.go:461`) the scope's ceilings and
-storage rule (`store: true` is rewritten to `false` where storage is
+records each value's span. A null `stream` or `max_tokens` is the member
+absent. `stream_options` and its `include_usage` are located by
+`scanStreamOptions` (`chat.go:164`) for the rewrite. Policy members set
+flags; unknown members are counted. `route` (`proxy.go:420`) looks the
+alias up without allocating (`route/route.go:54`), refuses an alias of the
+other dialect, and checks the principal may use it. `features`
+(`proxy.go:437`) applies restricted mode: unknown members are refused
+unless the route is an agent route or the scope compatible, and
+`Dialect.restrictedHeaders` (`dialect.go:63`) checks the dialect's own
+feature headers, which for OpenAI is none (an Anthropic call's betas must
+be the route's, its `anthropic-version` one of `approvedVersions`,
+`dialect.go:57`). `policy` (`proxy.go:459`) applies the scope's ceilings
+and storage rule (`store: true` is rewritten to `false` where storage is
 forbidden).
 
 **Admission.** `rt.Pick` takes the first deployment. `price.Worst`
 (`price/price.go:33`) prices the declared worst case (every input byte a
 token, the output cap times `n`); a product that would overflow is refused.
-`admit` (`proxy.go:492`) fills an `admission.Call` with the scope's limits
+`admit` (`proxy.go:490`) fills an `admission.Call` with the scope's limits
 and calls the `Admitter`: golem's is `Limiter.Admitter`
 (`gateway/limit/limit.go:674`). A `*admission.Refusal` is rendered with its
 code and Retry-After; an error with the caller gone is a silent end. The
-admitted ticket goes into a `settlement` (`proxy.go:175`, type at
-`proxy.go:291`) with a context that is never cancelled, and a deferred
-guard (`proxy.go:182`) cancels it at its worst case if a panic gets there
+admitted ticket goes into a `settlement` (`proxy.go:169`, type at
+`proxy.go:293`) with a context that is never cancelled, and a deferred
+guard (`proxy.go:176`) cancels it at its worst case if a panic gets there
 before its end.
 
-**The upstream request.** `ex.rewrite` (`dialect.go:70`) runs
-`chat.Request.Rewrite` (`chat/chat.go:218`): the model spliced and, since
-the caller did not ask for usage, `"stream_options":{"include_usage":true}`
-added after it. The caller's body goes back to its pool at once
-(`proxy.go:193`): a long stream must not hold a 200 KB agent request. The
-row's fields are gathered into a `telemetry.Call` (`proxy.go:196`).
-`lim.bound` (`bounds.go:91`) derives the upstream context and arms the
-call's and the headers' alarms; `upstreamRequest` (`proxy.go:518`) builds
-the request with allowlisted caller headers and the target's credential, its
-body an `upstreamBody` (`exchange.go:166`) that returns the buffer to the
-pool when the transport closes it.
+**The upstream request.** `ex.rewrite` (`dialect.go:118`) runs
+`chat.Request.Rewrite` (`chat/chat.go:230`): the model spliced and, since
+the caller did not ask for usage, `usageEdit` (`chat.go:247`) adds
+`"stream_options":{"include_usage":true}` after it (or fills in an
+existing `stream_options`). The caller's body goes back to its pool at
+once (`proxy.go:187`): a long stream must not hold a 200 KB agent request.
+The row's fields are gathered into a `telemetry.Call` (`proxy.go:190`).
+`lim.bound` (`bounds.go:114`) derives the upstream context and arms the
+call's and the headers' alarms; `upstreamRequest` (`proxy.go:516`) builds
+the request with the dialect's allowlisted caller headers
+(`Dialect.forwardRequest`, `dialect.go:38`: `OpenAI-Organization` here,
+never an `anthropic-*` header) and the target's credential, its body an
+`upstreamBody` (`exchange.go:175`) that returns the buffer to the pool when
+the transport closes it.
 
-**If the round trip fails** (`proxy.go:212-228`), `chargeUnanswered`
-(`proxy.go:324`) decides what the provider may have seen: a DNS, dial or TLS
-failure (`reachedProvider`, `proxy.go:353`) is free and completes the
+**If the round trip fails** (`proxy.go:206-219`), `chargeUnanswered`
+(`proxy.go:326`) decides what the provider may have seen: a DNS, dial or TLS
+failure (`reachedProvider`, `proxy.go:364`) is free and completes the
 ticket at zero; a caller who left first is charged its input; anything else
 is `uncertain`, charged its worst case (with 8192 output tokens if it set no
 `max_tokens`) and its slot held for the provider's tail. The row is written
 before the ticket ends, and the caller gets `upstream.unavailable`, naming
-the route's timeout if one fired.
+the route's timeout if one fired (`unavailableMessage`, `proxy.go:350`).
 
-**The response.** `gotHeaders` (`bounds.go:104`) stops the headers alarm
-and arms the idle one, reset by every read (`bounds.go:125`). Allowlisted
-headers are copied and the status written. `relay` (`proxy.go:563`) is the
-copy loop. For this request `startStream` (`dialect.go:81`) sees that golem
-injected `include_usage` and routes the stream through `ex.filter`, whose
-`Drop` is `dropUsageOnly` (`exchange.go:111`, over `chat.UsageOnly`): the
-usage-only chunk is read but withheld, because SDK loops that read
-`choices[0]` of every chunk crash on it. Each read goes through
-`ex.forward` (`exchange.go:91`) into `Filter.Pass` (`sse/sse.go:213`),
-whose `Parser.Write` (`sse.go:58`) finds line ends with `bytes.IndexByte`
-and dispatches each event (`sse.go:170`) to `chat.StreamUsage.OnEvent`
-(`chat/chat.go:288`). That checks `mayHaveUsage` (`chat.go:267`) before
-scanning, since every chunk but the last carries `"usage":null`. What the
-filter passes is written by `ex.send` (`exchange.go:67`) under a write
-deadline (`WriteStall`) and flushed; a failed or stalled write marks the
-caller gone and ends the loop. At EOF `Filter.End` forwards an unterminated
-last event, and `ex.usage` (`dialect.go:111`) returns the usage with any
-malformed-report error joined to the cut.
+**The response.** `gotHeaders` (`bounds.go:127`) stops the headers alarm
+and arms the idle one, whose clock every read stamps (`bounds.go:154`).
+Allowlisted headers are copied and the status written. `relay`
+(`proxy.go:561`) is the copy loop. For this request `startStream`
+(`dialect.go:129`) sees that golem injected `include_usage` and routes the
+stream through `ex.filter`, whose `Drop` is `dropUsageOnly`
+(`exchange.go:136`, over `chat.UsageOnly`): the usage-only chunk is read
+but withheld, because SDK loops that read `choices[0]` of every chunk
+crash on it. Each read goes through `ex.forward` (`exchange.go:113`) into
+`Filter.Pass` (`sse/sse.go:213`), whose `Parser.Write` (`sse.go:58`) finds
+line ends with `bytes.IndexByte` and dispatches each event (`sse.go:170`)
+to `chat.StreamUsage.OnEvent` (`chat/chat.go:315`). That checks
+`mayHaveUsage` (`chat.go:294`) before scanning, since every chunk but the
+last carries `"usage":null`. What the filter passes is written by
+`ex.send` (`exchange.go:89`) under a write deadline (`WriteStall`) and
+flushed; a failed or stalled write marks the caller gone and ends the
+loop. At EOF `Filter.End` forwards an unterminated last event, and
+`ex.usage` (`dialect.go:176`) returns the usage with any malformed-report
+error joined to the cut.
+
+A non-streamed response takes the other branch of `forward`: it is written
+unflushed and appended to `ex.kept`. Once a read would take the copy past
+1 MiB, `overflow` is set and nothing after it is kept, though a later read
+would fit (`exchange.go:128`): a head and a tail spliced together could
+read as a body with another usage. `readWhole` (`dialect.go:150`) then
+records `errResponseUnread` instead of reading the copy, and the call is
+estimated.
 
 **Usage, estimate, cost.** The caller is gone if a write failed or its
-request ended (`proxy.go:239`); the response was cut if `relay` returned an
+request ended (`proxy.go:230`); the response was cut if `relay` returned an
 `errUpstreamCut` (a provider error, an idle or duration bound, or more
-than `MaxResponse` bytes). For a 200, `ex.estimate` (`dialect.go:130`)
-keeps the provider's report if it was final; otherwise output is every byte
-received, capped at `max_tokens × n`, and input, if unreported, every
-request byte; `EstimatedFraction` records the estimated share of the cost.
-`price.Cost` (`price.go:14`) prices it.
+than `MaxResponse` bytes, default 64 MiB). For a 200, `ex.estimate`
+(`dialect.go:193`) keeps the provider's report if it was final; otherwise
+output is every byte received, capped at `max_tokens × n`, and input, if
+unreported, every request byte; `EstimatedFraction` records the estimated
+share of the cost. `price.Cost` (`price.go:14`) prices it.
 
-**The row and the ticket.** `outcome` (`proxy.go:546`) names the ledger
+**The row and the ticket.** `outcome` (`proxy.go:544`) names the ledger
 outcome (`completed`, `failed`, `cancelled`) with its error origin and code.
-`Telemetry.Ended` (`gateway/telemetry/telemetry.go:185`) records the span
-and metrics and writes the `golem.spend` row (`telemetry/ledger.go:37`).
-Only then does the ticket end (`proxy.go:260-271`): `complete` with the
-cost, or, for an abandoned or cut response, `cancel` with the cost seen and
-the slot held for `ProviderTail` (at most to the call's deadline), because
-the provider may go on working after the connection closes. The row's end
-is stamped before the counter's minute, so a snapshot's boundary puts the
-call on one side only (ADR 0048).
+`Telemetry.Ended` (`gateway/telemetry/telemetry.go:182`) records the span
+and metrics and writes the `golem.spend` row (`Ledger.Ended`,
+`telemetry/ledger.go:36`). Only then does the ticket end
+(`proxy.go:253-264`): `complete` with the cost, or, for an abandoned or cut
+response, `cancel` with the cost seen and the slot held for `ProviderTail`
+(default 2 minutes, at most to the call's deadline: `settlement.cancel`,
+`proxy.go:310`), because the provider may go on working after the
+connection closes. The row's end is stamped before the counter's minute,
+so a snapshot's boundary puts the call on one side only (ADR 0048).
 
 **A cut stream.** If the provider's response was cut and the caller is
 still there, the stream gets the contract's `upstream.stream_failed` event
-(`streamError`, `dialect.go:188`) and the handler panics with
-`http.ErrAbortHandler` (`proxy.go:284`): the connection is reset, not ended,
+(`streamError`, `dialect.go:248`) and the handler panics with
+`http.ErrAbortHandler` (`proxy.go:277`): the connection is reset, not ended,
 so no client can mistake a short answer for a whole one (contracts.md §1).
 
 An Anthropic stream differs only inside the dialect seam: no usage is
 injected, so the plain parser runs with `StreamUsage.Want`
-(`messages/messages.go:184`) skipping every event but `message_start` and
+(`messages/messages.go:189`) skipping every event but `message_start` and
 `message_delta` without copying their data; `message_start` gives the input
-side and each `message_delta` the cumulative output (`messages.go:193`).
+side and each `message_delta` the cumulative output (`messages.go:198`).
+Its `Rewrite` (`messages.go:172`) is the model splice alone
+(`jsonscan.Splice`); its `anthropic-version` and `anthropic-beta` headers
+are checked in restricted mode and forwarded.
 
 ## Invariants, where they are enforced and tested
 
 | Invariant | Enforced | Tested |
 |---|---|---|
-| Every admitted ticket ends exactly once, whatever ends the call (a panic included) | `settlement` and its deferred guard (`proxy.go:175-186`); `admission.Ticket`'s contract | `TestAdmitterContract` (`limits_test.go:69`), `TestConcurrencyAndCancel` (`auth_test.go:124`) |
-| The row is written before the ticket numbers its event | `Telemetry.Ended` before `complete`/`cancel` (`proxy.go:220`, `proxy.go:259`) | `TestLedgerRows` (`telemetry_test.go:21`) |
-| Golem routes by exactly what the provider will read | `jsonscan.Object`: whole document, unescaped names, duplicates and trailing data refused | `TestObject` (`jsonscan_test.go:27`), `chat`'s and `messages`' `TestScan*` |
+| Every admitted ticket ends exactly once, whatever ends the call (a panic included) | `settlement` and its deferred guard (`proxy.go:169-180`); `admission.Ticket`'s contract | `TestAdmitterContract` (`limits_test.go:69`), `TestConcurrencyAndCancel` (`auth_test.go:125`) |
+| The row is written before the ticket numbers its event | `Telemetry.Ended` before `complete`/`cancel` (`proxy.go:211`, `proxy.go:252`) | `TestLedgerRows` (`telemetry_test.go:20`) |
+| Golem routes by exactly what the provider will read | `jsonscan.Object`: whole document, unescaped names, duplicates and trailing data refused | `TestObject` (`jsonscan_test.go:27`), `FuzzObject`, `TestRefusals` (`proxy_test.go:163`), `messages`' `TestScan` (`messages_test.go:13`) and `chat`'s `TestScanMaxTokens`, `TestScanPolicyFields` |
+| A null `stream` or `max_tokens` is the member absent | the dialects' `Scan` | `TestScan`'s null case (`messages_test.go:38`) |
 | Work the provider may have done is never free; estimates err high | `chargeUnanswered`, `estimate` | `TestEstimates` (`estimate_test.go:65`), `TestUncertainUpstream` (`uncertain_test.go:23`) |
-| A cut response is never taken for whole | `streamError` and the abort (`proxy.go:275-285`) | `TestUpstreamCut` (`proxy_test.go:240`) |
-| An ambiguous end holds the slot for the provider's tail, at most to the deadline | `settlement.cancel` (`proxy.go:308`) | `TestConcurrencyAndCancel`, `TestUncertainUpstream` |
-| The injected usage chunk never reaches the caller | `startStream` and `sse.Filter` | `TestInjectedUsageWithheld` (`proxy_test.go:111`), `TestFilter` (`sse/filter_test.go:24`) |
-| Only allowlisted headers cross; golem's own never reach the provider | `forwardRequest`, `forwardResponse`, `copyHeaders` | `TestHeaders` (`proxy_test.go:61`) |
-| Refusals use contract codes, in the caller's dialect, with the request ID | `fail`, `refuse`, `appendError` | `TestRefusals` (`proxy_test.go:139`), `TestWrongFrontend` |
-| A slow client or a silent provider is bounded | write deadlines in `send`; `bounds` | `TestStalledClient`, `TestSilentProviderKeepsClient`, `TestRouteBounds` (`proxy_test.go:311-460`), `TestRequestBoundary` |
-| A fired alarm never cancels a later call | `alarm.disarm`, `stopAlarm` replaces a fired one | `TestBoundsReuse`, `TestBoundsRace` (`bounds_test.go`) |
-| Policy: ceilings, storage, server tools, restricted features | `policy`, `features`, the dialects' flags | `TestPolicy`, `TestStoreOff`, `TestPolicyUnits`, `TestFeatureModes` |
+| A whole response's usage is read from all of it or not at all | `forward`'s `overflow`, `readWhole`'s `errResponseUnread` | `TestKeptNotSpliced` (`exchange_test.go:14`) |
+| A cut response is never taken for whole | `streamError` and the abort (`proxy.go:268-278`) | `TestUpstreamCut` (`proxy_test.go:266`) |
+| An ambiguous end holds the slot for the provider's tail, at most to the deadline | `settlement.cancel` (`proxy.go:310`) | `TestTailClampedToDeadline` (`settlement_test.go:21`), `TestConcurrencyAndCancel`, `TestUncertainUpstream` |
+| The injected usage chunk never reaches the caller | `startStream` and `sse.Filter` | `TestInjectedUsageWithheld` (`proxy_test.go:135`), `TestFilter` (`sse/filter_test.go:24`) |
+| Only allowlisted headers cross, each API's own; golem's never reach the provider | `Dialect.forwardRequest` (`dialect.go:38`), `forwardResponse` (`proxy.go:85`), `copyHeaders` | `TestHeaders` (`proxy_test.go:61`), `TestOpenAIHeaders` (`proxy_test.go:90`) |
+| Refusals use contract codes, in the caller's dialect, with the request ID | `fail`, `refuse` (`proxy.go:616`, `proxy.go:630`), `appendError` (`dialect.go:225`) | `TestRefusals` (`proxy_test.go:163`), `TestWrongFrontend` (`proxy_test.go:237`) |
+| A body cap of zero is the default (32 MiB), not "no body" | `readBody` (`proxy.go:399`) | `TestRefusals`' two default-cap cases |
+| A slow client or a silent provider is bounded | write deadlines in `send`; `bounds` | `TestStalledClient`, `TestSilentProviderKeepsClient`, `TestRouteBounds` (`proxy_test.go:337-485`), `TestRequestBoundary` (`boundary_test.go:70`) |
+| A fired alarm never cancels a later call | `alarm.disarm`, `stopAlarm` replaces a fired one | `TestBoundsReuse`, `TestBoundsRace`, `TestIdleAlarm` (`bounds_test.go`) |
+| Policy: ceilings, storage, server tools, restricted features | `policy`, `features`, `restrictedHeaders`, the dialects' flags | `TestPolicy`, `TestStoreOff`, `TestPolicyUnits` (`policy_test.go`), `TestFeatureModes` (`boundary_test.go:18`), `TestOpenAIHeaders` |
 | Prices are integers, rounded once, and never wrap | `price.numerator`, `product`, `halfEven`, `MaxCost` | `TestCost` (`price_test.go:11`) |
 
 ## Performance choices, and how they are measured
@@ -217,11 +246,12 @@ side and each `message_delta` the cumulative output (`messages.go:193`).
   separately and released as soon as they are sent, so a long stream holds
   about the copy buffer and the parser's bounded buffers (PRD §7: under
   64 KiB a stream). `sse.Parser.Reset` and `Filter.Reset` keep buffers up to
-  16 KiB; the body pool drops buffers over 1 MiB.
+  16 KiB; the body pool drops buffers over 1 MiB, and `release` drops a
+  kept copy that grew past that.
 - **Bound method values.** The usage readers' methods are bound once, when
-  the exchange is made (`exchange.go:51`): a method value allocates each
+  the exchange is made (`exchange.go:56`): a method value allocates each
   time it is taken.
-- **Reusable alarms** (`bounds.go:39`). Each bound is a `time.AfterFunc`
+- **Reusable alarms** (`bounds.go:48`). Each bound is a `time.AfterFunc`
   timer armed per call; only one that fired is replaced, since its callback
   may still be running. A call allocates its cancellable context and
   nothing else for its bounds.
@@ -232,35 +262,42 @@ side and each `message_delta` the cumulative output (`messages.go:193`).
   straight into a reused slice; `Route.Lookup` uses the `string(bytes)` map
   lookup the compiler does not allocate for; `chat.mayHaveUsage` skips the
   scan of every chunk with `"usage":null`; the Anthropic parser skips
-  content deltas' data entirely.
+  content deltas' data entirely. `jsonscan.Apply` sorts its few edits by
+  insertion, so they do not escape, and `chat`'s spliced literals are
+  package-level: an OpenAI scan and rewrite allocate once (the quoted model
+  name, which `jsontext.AppendQuote` makes escape).
 - **Measured** by the benchmarks in `gateway/proxy/bench_test.go`:
   `BenchmarkScan` (the scan alone, 0 allocations), `BenchmarkHandler`
-  (the in-memory fast path with a 200-event stream: 21 allocations a call),
-  `BenchmarkHandlerAdmitted` (with a key, an alias check and the in-memory
-  limiter: 24), `BenchmarkStub` (the stub's share, to subtract),
-  `BenchmarkLoopback` (over real sockets, direct against proxied) and
-  `prod_bench_test.go`'s `BenchmarkProduction` (with real telemetry
-  exporters), and `chat`'s `BenchmarkChunkNullUsage` (0 allocations).
-  `TestOverheadPercentiles` and `TestMemoryPerStream` are spike
-  measurements, run with `GOLEM_SPIKE=1`. Run them before and after a
-  change: `go test -run '^$' -bench . -benchmem ./gateway/proxy/`.
+  (the in-memory Anthropic fast path with a 200-event stream: 21
+  allocations a call), `BenchmarkHandlerAdmitted` (with a key, an alias
+  check and the in-memory limiter: 25), `BenchmarkStub` (the stub's share,
+  to subtract), `BenchmarkLoopback` (over real sockets, direct against
+  proxied) and `prod_bench_test.go`'s `BenchmarkProduction` (with real
+  telemetry exporters), and `chat`'s `BenchmarkChunkNullUsage` (0
+  allocations). `TestOverheadPercentiles` and `TestMemoryPerStream` are
+  spike measurements, run with `GOLEM_SPIKE=1`. Run them before and after a
+  change: `go test -run '^$' -bench . -benchmem ./gateway/...`.
 
 ## Extending it: a new dialect
 
 Everything that differs by dialect is in `gateway/proxy/dialect.go`, as
-methods of the exchange; the rest of the path is dialect-free. To add one:
+methods of `Dialect` or of the exchange; the rest of the path is
+dialect-free. To add one:
 
 1. Write its package under `gateway/dialect/<provider>/<api>`, on
    `jsonscan`: a `Request` with `Scan` (model, stream, max tokens, policy
-   flags, unknown members) and `Rewrite` (the model spliced, anything golem
-   needs asked for), and a `StreamUsage` with `OnEvent` (and `Want`, if
-   some events can be skipped unread) and `Response`, setting `Final` only
-   for a complete report and `Err` for a malformed one.
-2. Add a `Dialect` constant and its `Name` (the Backend's `spec.dialect`).
+   flags, unknown members; null read as absent) and `Rewrite` (the model
+   spliced, anything golem needs asked for), and a `StreamUsage` with
+   `OnEvent` (and `Want`, if some events can be skipped unread) and
+   `Response`, setting `Final` only for a complete report and `Err` for a
+   malformed one.
+2. Add a `Dialect` constant and its `Name` (the Backend's `spec.dialect`),
+   its caller headers in `forwardRequest`, and any of them restricted mode
+   must approve in `restrictedHeaders`.
 3. Give the exchange fields for its request and usage reader (bind their
    methods in the pool's `New`), and a branch in each dialect method:
-   `scan`, `forbidStorage`, `rewrite`, `startStream`, `readWhole`, `usage`,
-   `estimate`, `appendError` and `streamError`.
+   `scan`, `forbidStorage`, `rewrite`, `startStream`, `readWhole`,
+   `reported`, `appendError` and `streamError`.
 4. Mount it in `cmd/golem-gateway/main.go`, and add it to the tests that
    run per dialect (`TestUpstreamCut`, `TestEstimates`, `TestRefusals`).
 
@@ -271,10 +308,14 @@ methods of the exchange; the rest of the path is dialect-free. To add one:
   (gateway.md §3 steps 4, 5 and 7).
 - No cross-dialect conversion: a route speaks its frontend's dialect or is
   refused (`route.wrong_frontend`); `canon` holds only `Usage`.
-- A non-streamed response over 1 MiB keeps only part of itself, so its
-  usage (usually at the end) is lost and the call is estimated from its
-  bytes.
+- A non-streamed response over 1 MiB has its usage unread
+  (`errResponseUnread`), so the call is estimated from its bytes even when
+  the provider reported usage at the end.
 - Estimates are byte counts: they do not bound images, audio or files, or
   units billed outside tokens (ADR 0044), and the provider's work past a cut
   is unseen until reconciliation.
-- `Handler.MaxBody` has no default: a zero cap refuses every body.
+- Unknown request members are counted, not logged by name (the sanitized
+  names ADR 0037 describes are not built).
+- Restricted mode checks only the first `anthropic-version` value
+  (`hdr.Get`), while every value is forwarded: a request with two such
+  headers passes an unapproved second one to the provider.

@@ -1,7 +1,5 @@
 package jsonscan
 
-import "slices"
-
 // Edit replaces body[Span.Start:Span.End] with With; an empty span inserts.
 type Edit struct {
 	Span Span
@@ -10,7 +8,14 @@ type Edit struct {
 
 // Apply appends body with edits applied to dst. Edits must not overlap.
 func Apply(dst, body []byte, edits ...Edit) []byte {
-	slices.SortFunc(edits, func(a, b Edit) int { return a.Span.Start - b.Span.Start })
+	// An insertion sort: a request has a few edits, and slices.SortFunc's
+	// comparison made the compiler leak them, so a caller's stack buffers
+	// (a quoted model name, the inserted members) were heap allocations.
+	for i := 1; i < len(edits); i++ {
+		for j := i; j > 0 && edits[j].Span.Start < edits[j-1].Span.Start; j-- {
+			edits[j], edits[j-1] = edits[j-1], edits[j]
+		}
+	}
 	dst = dst[:0]
 	at := 0
 	for _, e := range edits {

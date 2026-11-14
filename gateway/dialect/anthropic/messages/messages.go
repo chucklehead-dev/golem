@@ -63,7 +63,7 @@ func serverTool(tools []byte) (found bool, err error) {
 }
 
 // known lists the request members golem forwards without comment; others
-// are forwarded and counted (and logged by name, ADR 0037).
+// are forwarded and counted (restricted mode refuses them, ADR 0037).
 var known = map[string]bool{ // read-only
 	"model": true, "messages": true, "max_tokens": true, "system": true, "metadata": true,
 	"stop_sequences": true, "stream": true, "temperature": true, "top_p": true, "top_k": true,
@@ -83,6 +83,8 @@ type Request struct {
 	Unknown      int
 }
 
+// Scan's refusals: a body with no model to route by, and a member golem
+// reads (routing, policy or usage) with a value it cannot read.
 var (
 	ErrNoModel = errors.New(`messages: the request has no "model" string; name a model or alias`)
 	ErrField   = errors.New("messages: a routing field has the wrong type")

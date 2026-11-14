@@ -6,6 +6,7 @@ package chat
 
 import (
 	"bytes"
+	"encoding/json/jsontext"
 	"errors"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -22,6 +23,8 @@ const (
 	FlagAudio                       // audio: another modality and price
 )
 
+// known lists the request members golem forwards without comment; others
+// are forwarded and counted (restricted mode refuses them, ADR 0037).
 var known = map[string]bool{ // read-only
 	"model": true, "messages": true, "stream": true, "stream_options": true, "max_tokens": true,
 	"max_completion_tokens": true, "n": true, "store": true, "metadata": true, "tools": true,
@@ -53,6 +56,8 @@ type Request struct {
 	usageOn       bool
 }
 
+// Scan's refusals: a body with no model to route by, and a member golem
+// reads (routing, policy or usage) with a value it cannot read.
 var (
 	ErrNoModel = errors.New(`chat: the request has no "model" string; name a model or alias`)
 	ErrField   = errors.New("chat: a routing field has the wrong type")
@@ -82,7 +87,7 @@ func (r *Request) Scan(body []byte) error {
 			switch v.Kind() {
 			case 't':
 				r.Stream = true
-			case 'f', 'n':
+			case 'f', 'n': // null: the default, not streamed
 			default:
 				return ErrField
 			}
@@ -93,12 +98,13 @@ func (r *Request) Scan(body []byte) error {
 				return err
 			}
 			if v.Kind() == 'n' {
-				return nil
+				return nil // null: absent, which the scope's ceiling refuses where it has one
 			}
 			n, ok := jsonscan.Int(v)
 			if !ok || n < 0 {
 				return ErrField
 			}
+			// max_completion_tokens supersedes max_tokens, whichever comes first.
 			if completion || !hasCompletionTokens {
 				r.MaxTokens, r.HasMaxTokens = n, true
 			}
@@ -108,28 +114,7 @@ func (r *Request) Scan(body []byte) error {
 			if err != nil {
 				return err
 			}
-			if v.Kind() == 'n' {
-				// Recorded, so Rewrite replaces it rather than adding a
-				// second stream_options member (a duplicate, ADR 0037).
-				r.streamOptions, r.optionsNull = span, true
-				return nil
-			}
-			if v.Kind() != '{' {
-				return ErrField
-			}
-			r.streamOptions = span
-			return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
-				if string(name) != "include_usage" {
-					return d.SkipValue()
-				}
-				v, s, err := d.ReadValue()
-				if err != nil {
-					return err
-				}
-				r.includeUsage = jsonscan.Span{Start: span.Start + s.Start, End: span.Start + s.End}
-				r.usageOn = v.Kind() == 't'
-				return nil
-			})
+			return r.scanStreamOptions(v, span)
 		case "store":
 			r.Flags |= FlagStore
 			v, span, err := d.ReadValue()
@@ -172,6 +157,33 @@ func (r *Request) Scan(body []byte) error {
 		return ErrNoModel
 	}
 	return nil
+}
+
+// scanStreamOptions records where stream_options (at span in the body)
+// and its include_usage lie, for Rewrite to ask for usage.
+func (r *Request) scanStreamOptions(v jsontext.Value, span jsonscan.Span) error {
+	if v.Kind() == 'n' {
+		// Recorded, so Rewrite replaces it rather than adding a second
+		// stream_options member (a duplicate, ADR 0037).
+		r.streamOptions, r.optionsNull = span, true
+		return nil
+	}
+	if v.Kind() != '{' {
+		return ErrField
+	}
+	r.streamOptions = span
+	return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
+		if string(name) != "include_usage" {
+			return d.SkipValue()
+		}
+		v, s, err := d.ReadValue()
+		if err != nil {
+			return err
+		}
+		r.includeUsage = jsonscan.Span{Start: span.Start + s.Start, End: span.Start + s.End} // in the body, not in v
+		r.usageOn = v.Kind() == 't'
+		return nil
+	})
 }
 
 // InjectedUsage reports whether Rewrite asks the provider for usage the
@@ -220,30 +232,45 @@ func (r *Request) Rewrite(dst, body []byte, model string) []byte {
 	edits := [3]jsonscan.Edit{{Span: r.ModelSpan, With: jsonscan.Quote(quoted[:0], model)}}
 	n := 1
 	if r.noStore {
-		edits[n] = jsonscan.Edit{Span: r.storeSpan, With: []byte("false")}
+		edits[n] = jsonscan.Edit{Span: r.storeSpan, With: jsonFalse}
 		n++
 	}
-	if r.Stream && !r.usageOn {
-		switch {
-		case r.optionsNull: // "stream_options": null
-			edits[n] = jsonscan.Edit{Span: r.streamOptions, With: []byte(`{"include_usage":true}`)}
-		case r.includeUsage.End > 0: // "include_usage": false
-			edits[n] = jsonscan.Edit{Span: r.includeUsage, With: []byte("true")}
-		case r.streamOptions.End > 0: // stream_options without it
-			at := r.streamOptions.Start + 1
-			with := []byte(`"include_usage":true,`)
-			if len(bytes.TrimSpace(body[at:r.streamOptions.End-1])) == 0 { // {}
-				with = with[:len(with)-1]
-			}
-			edits[n] = jsonscan.Edit{Span: jsonscan.Span{Start: at, End: at}, With: with}
-		default: // no stream_options: add one after the model
-			edits[n] = jsonscan.Edit{Span: jsonscan.Span{Start: r.ModelSpan.End, End: r.ModelSpan.End},
-				With: []byte(`,"stream_options":{"include_usage":true}`)}
-		}
+	if r.InjectedUsage() {
+		edits[n] = r.usageEdit(body)
 		n++
 	}
 	return jsonscan.Apply(dst, body, edits[:n]...)
 }
+
+// usageEdit is the edit that asks for a stream's usage, wherever the
+// caller's body leaves room for it.
+func (r *Request) usageEdit(body []byte) jsonscan.Edit {
+	switch {
+	case r.optionsNull: // "stream_options": null
+		return jsonscan.Edit{Span: r.streamOptions, With: usageOptions}
+	case r.includeUsage.End > 0: // "include_usage": false
+		return jsonscan.Edit{Span: r.includeUsage, With: jsonTrue}
+	case r.streamOptions.End > 0: // stream_options without it
+		at := r.streamOptions.Start + 1
+		with := usageMember
+		if len(bytes.TrimSpace(body[at:r.streamOptions.End-1])) == 0 { // {}
+			with = with[:len(with)-1]
+		}
+		return jsonscan.Edit{Span: jsonscan.Span{Start: at, End: at}, With: with}
+	}
+	// No stream_options: add one after the model.
+	return jsonscan.Edit{Span: jsonscan.Span{Start: r.ModelSpan.End, End: r.ModelSpan.End}, With: usageAfterModel}
+}
+
+// The bytes Rewrite splices in; package-level, so an edit holding one is
+// not a heap allocation per request.
+var (
+	jsonFalse       = []byte("false")                                    // read-only
+	jsonTrue        = []byte("true")                                     // read-only
+	usageOptions    = []byte(`{"include_usage":true}`)                   // read-only
+	usageMember     = []byte(`"include_usage":true,`)                    // read-only; resliced, never written
+	usageAfterModel = []byte(`,"stream_options":{"include_usage":true}`) // read-only
+)
 
 // StreamUsage reads usage from a response: the last chunk of a stream that
 // asked for it, or a whole response's usage object.
@@ -339,6 +366,8 @@ func (u *StreamUsage) Response(body []byte) {
 	}
 }
 
+// readInt reads a token count into dst: a non-negative integer, or null
+// (not reported, dst unchanged).
 func readInt(d *jsonscan.Decoder, dst *int64) error {
 	v, _, err := d.ReadValue()
 	if err != nil || v.Kind() == 'n' {
@@ -352,6 +381,7 @@ func readInt(d *jsonscan.Decoder, dst *int64) error {
 	return nil
 }
 
+// readDetail reads one count from a usage details object, if it is one.
 func readDetail(d *jsonscan.Decoder, field string, dst *int64) error {
 	v, _, err := d.ReadValue()
 	if err != nil || v.Kind() != '{' {

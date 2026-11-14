@@ -49,6 +49,8 @@ type exchange struct {
 	lim bounds // the route's limits over the upstream call, timers reused
 }
 
+// exchanges pools the per-request working memory; New binds the usage
+// readers' methods once, at the addresses they keep.
 var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
 	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
@@ -56,6 +58,25 @@ var exchanges = sync.Pool{New: func() any {
 	ex.lim = newBounds()
 	return ex
 }}
+
+// getExchange takes a pooled exchange, its per-call state cleared; the
+// rest is reset where a call starts using it (scan, relay, startStream,
+// startWrites, bound).
+func getExchange() *exchange {
+	ex := exchanges.Get().(*exchange)
+	ex.callerGone, ex.received = false, 0
+	return ex
+}
+
+// release returns the exchange to the pool. The parser and filter keep
+// bounded buffers (their Reset); kept is let go if a response grew it large.
+func (ex *exchange) release() {
+	ex.w, ex.rc = nil, nil // the pool must not keep a finished response
+	if cap(ex.kept) > maxRetained {
+		ex.kept = nil // a large response's copy is let go, not the exchange
+	}
+	exchanges.Put(ex)
+}
 
 // startWrites readies the exchange to write a response to w.
 func (ex *exchange) startWrites(w http.ResponseWriter, stall time.Duration) {
@@ -113,22 +134,6 @@ func (ex *exchange) forward(b []byte, streamed, filter bool) bool {
 // dropUsageOnly withholds the usage-only chunk golem asked for: the caller
 // did not, and some SDKs fail on a chunk with no choices.
 func dropUsageOnly(_, data []byte) bool { return chat.UsageOnly(data) }
-
-func getExchange() *exchange {
-	ex := exchanges.Get().(*exchange)
-	ex.callerGone, ex.received = false, 0
-	return ex
-}
-
-// release returns the exchange to the pool. The parser and filter keep
-// bounded buffers (their Reset); kept is let go if a response grew it large.
-func (ex *exchange) release() {
-	ex.w, ex.rc = nil, nil // the pool must not keep a finished response
-	if cap(ex.kept) > maxRetained {
-		ex.kept = nil // a large response's copy is let go, not the exchange
-	}
-	exchanges.Put(ex)
-}
 
 // bodies pools request body buffers. maxRetained bounds what an idle entry
 // keeps, so one large request does not pin its size in the pool.
