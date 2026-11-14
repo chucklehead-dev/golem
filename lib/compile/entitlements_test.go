@@ -61,6 +61,15 @@ func TestImplicit(t *testing.T) {
 	}
 }
 
+// mistype changes k's last character (to another: a generated key may
+// already end in any one).
+func mistype(k string) string {
+	if strings.HasSuffix(k, "x") {
+		return k[:len(k)-1] + "y"
+	}
+	return k[:len(k)-1] + "x"
+}
+
 func TestEntitlementProblems(t *testing.T) {
 	for _, tc := range []struct {
 		name, yaml string
@@ -68,7 +77,7 @@ func TestEntitlementProblems(t *testing.T) {
 		want       string
 	}{
 		{"live key in a file", strings.Replace(identity(""), devKey, key.New(key.Live), 1), standalone, "takes only glm_dev_ keys"},
-		{"mistyped key", strings.Replace(identity(""), devKey, devKey[:len(devKey)-1]+"x", 1), standalone, "checksum"},
+		{"mistyped key", strings.Replace(identity(""), devKey, mistype(devKey), 1), standalone, "checksum"},
 		{"key wider than its scope", identity(", models: [claude, gpt]"), standalone, `scope "team-a" does not allow "gpt"`},
 		{"unknown scope", strings.Replace(identity(""), "scope: team-a", "scope: team-b", 1), standalone, `no scope named "team-b"`},
 		{"unknown alias", strings.Replace(identity(""), "models: [claude]", "models: [claude, opus]", 1), standalone, `no ModelRoute has alias "opus"`},

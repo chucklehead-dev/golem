@@ -35,6 +35,7 @@ func TestScan(t *testing.T) {
 		{"a tool not an object", `{"model":"m","tools":["web_search_20250305"]}`, Request{}, true},
 		{"no model", `{"messages":[]}`, Request{}, true},
 		{"model not a string", `{"model":1}`, Request{}, true},
+		{"null stream and max_tokens: absent", `{"model":"m","stream":null,"max_tokens":null}`, Request{Model: []byte("m")}, false},
 		{"stream not a bool", `{"model":"m","stream":"yes"}`, Request{}, true},
 		{"negative max_tokens", `{"model":"m","max_tokens":-1}`, Request{}, true},
 		{"fractional max_tokens", `{"model":"m","max_tokens":1.5}`, Request{}, true},

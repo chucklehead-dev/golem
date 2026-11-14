@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -80,6 +81,9 @@ type jsonLogger struct {
 	w   io.Writer
 	buf bytes.Buffer
 	enc jsontext.Encoder
+	// failed counts rows not written (an encoding or a write error):
+	// standalone has no meter, so each power of two is logged instead.
+	failed int64
 }
 
 func (j *jsonLogs) Logger(string, ...otellog.LoggerOption) otellog.Logger { return &j.l }
@@ -93,32 +97,40 @@ func (j *jsonLogger) Emit(_ context.Context, r otellog.Record) {
 	defer j.mu.Unlock()
 	j.buf.Reset()
 	j.enc.Reset(&j.buf)
-	j.enc.WriteToken(jsontext.BeginObject)
+	err := j.enc.WriteToken(jsontext.BeginObject)
 	r.WalkAttributes(func(kv attribute.KeyValue) bool {
-		j.enc.WriteToken(jsontext.String(string(kv.Key)))
-		writeValue(&j.enc, kv.Value)
-		return true
+		err = errors.Join(err, j.enc.WriteToken(jsontext.String(string(kv.Key))), writeValue(&j.enc, kv.Value))
+		return err == nil
 	})
-	j.enc.WriteToken(jsontext.EndObject) // the encoder ends a top-level value with "\n"
-	j.w.Write(j.buf.Bytes())
+	if err == nil {
+		err = j.enc.WriteToken(jsontext.EndObject) // the encoder ends a top-level value with "\n"
+	}
+	if err == nil {
+		_, err = j.w.Write(j.buf.Bytes())
+	}
+	if err != nil {
+		if j.failed++; j.failed&(j.failed-1) == 0 {
+			slog.Error("telemetry: a ledger row was not written to stdout; rows are being lost", "failed", j.failed, "err", err)
+		}
+	}
 }
 
-func writeValue(enc *jsontext.Encoder, v attribute.Value) {
+func writeValue(enc *jsontext.Encoder, v attribute.Value) error {
 	switch v.Type() {
 	case attribute.BOOL:
-		enc.WriteToken(jsontext.Bool(v.AsBool()))
+		return enc.WriteToken(jsontext.Bool(v.AsBool()))
 	case attribute.INT64:
-		enc.WriteToken(jsontext.Int(v.AsInt64()))
+		return enc.WriteToken(jsontext.Int(v.AsInt64()))
 	case attribute.FLOAT64:
-		enc.WriteToken(jsontext.Float(v.AsFloat64()))
+		return enc.WriteToken(jsontext.Float(v.AsFloat64()))
 	case attribute.STRINGSLICE:
-		enc.WriteToken(jsontext.BeginArray)
+		err := enc.WriteToken(jsontext.BeginArray)
 		for _, s := range v.AsStringSlice() {
-			enc.WriteToken(jsontext.String(s))
+			err = errors.Join(err, enc.WriteToken(jsontext.String(s)))
 		}
-		enc.WriteToken(jsontext.EndArray)
+		return errors.Join(err, enc.WriteToken(jsontext.EndArray))
 	default:
-		enc.WriteToken(jsontext.String(v.Emit()))
+		return enc.WriteToken(jsontext.String(v.Emit()))
 	}
 }
 

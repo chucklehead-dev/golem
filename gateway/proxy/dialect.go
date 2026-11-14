@@ -29,6 +29,21 @@ func (d Dialect) Name() string {
 	return "anthropic.messages"
 }
 
+// forwardRequest are the caller's headers its provider may see: an API's
+// own, never another's (an anthropic-beta on an OpenAI call is the
+// caller's mistake, not a feature to approve or pass on).
+func (d Dialect) forwardRequest() []string {
+	if d == OpenAIChat {
+		return openAIForward
+	}
+	return anthropicForward
+}
+
+var (
+	anthropicForward = []string{"Anthropic-Version", "Anthropic-Beta"} // read-only
+	openAIForward    = []string{"Openai-Organization"}                 // read-only
+)
+
 // scanned is what routing and admission need of a request body.
 type scanned struct {
 	alias     []byte // valid until the exchange's next scan
@@ -96,16 +111,28 @@ func (ex *exchange) startStream(d Dialect) (filter bool) {
 	return true
 }
 
-// readWhole reads a non-streamed response's usage from its kept bytes.
+// readWhole reads a non-streamed response's usage from its kept bytes; a
+// response larger than those has its usage unread (errResponseUnread), and
+// is charged its estimate.
 func (ex *exchange) readWhole(d Dialect) {
 	if d == AnthropicMessages {
 		ex.msgUsage = messages.StreamUsage{}
+		if ex.overflow {
+			ex.msgUsage.Err = errResponseUnread
+			return
+		}
 		ex.msgUsage.Response(ex.kept)
 		return
 	}
 	ex.chatUsage = chat.StreamUsage{}
+	if ex.overflow {
+		ex.chatUsage.Err = errResponseUnread
+		return
+	}
 	ex.chatUsage.Response(ex.kept)
 }
+
+var errResponseUnread = errors.New("proxy: a whole response over 1 MiB: its usage was not read")
 
 // usage is the response's usage and any error reading it, joined with cut.
 func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {

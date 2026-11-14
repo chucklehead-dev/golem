@@ -90,3 +90,32 @@ func TestShutdownAccounts(t *testing.T) {
 		t.Fatalf("row %v: the cut call is a cancellation", row)
 	}
 }
+
+// TestTrackAfterWait: a call that starts once the wait has begun is
+// refused, not counted after the count was taken; the wait ends with the
+// last call that started before it.
+func TestTrackAfterWait(t *testing.T) {
+	lc := &lifecycle{}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	h := lc.track(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { close(started); <-release }))
+	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/", nil))
+	<-started
+	idle := lc.wait()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/", nil))
+	if w.Code != 503 {
+		t.Fatalf("a call after the wait began: %d, want 503", w.Code)
+	}
+	select {
+	case <-idle:
+		t.Fatal("the wait ended with a call in flight")
+	default:
+	}
+	close(release)
+	select {
+	case <-idle:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait did not end with the last call")
+	}
+}

@@ -2,12 +2,12 @@ package limit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -261,7 +261,7 @@ func TestValkeyStore(t *testing.T) {
 		c.Close()
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		if _, _, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov}); err == nil || !strings.Contains(err.Error(), ErrUnavailable.Error()) {
+		if _, _, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov}); !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("%v, want ErrUnavailable", err)
 		}
 	})
@@ -333,5 +333,18 @@ func TestReplicaAcks(t *testing.T) {
 	st.ReplicaAcks = 2 // more than there are
 	if err := st.Add(ctx, inc("x", 1, 0)); err != nil || st.Unreplicated.Load() != 1 {
 		t.Fatalf("err %v, unreplicated %d: one replica short must be counted", err, st.Unreplicated.Load())
+	}
+}
+
+// TestWrap: a transport failure is ErrUnavailable and keeps its cause, so a
+// caller can tell a deadline from a refused connection; a server's reply
+// is not unavailability.
+func TestWrap(t *testing.T) {
+	err := wrap(context.DeadlineExceeded)
+	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("%v: want both ErrUnavailable and its cause", err)
+	}
+	if wrap(nil) != nil || wrap(valkey.Nil) != nil {
+		t.Fatal("no error, or a nil reply, is not a failure")
 	}
 }

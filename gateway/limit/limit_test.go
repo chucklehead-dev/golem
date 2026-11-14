@@ -490,3 +490,49 @@ func TestAdmitter(t *testing.T) {
 		t.Fatalf("%d tails still timed after Finish", n)
 	}
 }
+
+// overlapping runs another replay inside its first Add, as a replay running
+// at the same time would finish first.
+type overlapping struct {
+	*Mem
+	l    *Limiter
+	once bool
+}
+
+func (o *overlapping) Add(ctx context.Context, in Increment) error {
+	if !o.once {
+		o.once = true
+		if _, _, err := o.l.ReplayOne(ctx); err != nil {
+			return err
+		}
+	}
+	return o.Mem.Add(ctx, in)
+}
+
+// TestOverlappingReplays: two replays of the same held increment (a
+// ReplayOne racing another) take it off once: the later finds it gone and
+// leaves the next one held, rather than dropping an increment no replay
+// has sent.
+func TestOverlappingReplays(t *testing.T) {
+	ctx := t.Context()
+	st := &overlapping{Mem: NewMem()}
+	l := New(st)
+	st.l = l
+	st.SetDown(true)
+	for _, id := range []string{"a", "b"} {
+		c := scopeCall(id, "p-"+id)
+		c.ScopeLimit = 0
+		tk, err := l.Admit(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tk.Complete(ctx, 1)
+	}
+	st.SetDown(false)
+	if _, ok, err := l.ReplayOne(ctx); !ok || err != nil {
+		t.Fatalf("replay: %v, %v", ok, err)
+	}
+	if p := l.Pending("s"); len(p) != 1 || p[0].Call != "b" {
+		t.Fatalf("held %+v after two replays of a: want b still held", p)
+	}
+}

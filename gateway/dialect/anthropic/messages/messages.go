@@ -113,7 +113,7 @@ func (r *Request) Scan(body []byte) error {
 			switch v.Kind() {
 			case 't':
 				r.Stream = true
-			case 'f':
+			case 'f', 'n': // null: the default, not streamed
 			default:
 				return ErrField
 			}
@@ -121,6 +121,9 @@ func (r *Request) Scan(body []byte) error {
 			v, _, err := d.ReadValue()
 			if err != nil {
 				return err
+			}
+			if v.Kind() == 'n' {
+				return nil // null: absent, which the scope's ceiling refuses where it has one
 			}
 			n, ok := jsonscan.Int(v)
 			if !ok || n < 0 {

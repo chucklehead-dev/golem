@@ -28,6 +28,7 @@ type exchange struct {
 	parser     sse.Parser
 	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
 	kept       []byte     // a non-streamed response, up to maxRetained bytes, for its usage
+	overflow   bool       // the response outgrew kept: its usage is not read from a part
 	callerGone bool       // a write to the caller failed
 	received   int64      // the response's bytes so far (MaxResponse; an estimate's bound)
 
@@ -100,7 +101,10 @@ func (ex *exchange) forward(b []byte, streamed, filter bool) bool {
 	if !ex.send(b, false) {
 		return false
 	}
-	if len(ex.kept)+len(b) <= maxRetained {
+	// Once a read does not fit, nothing after it is kept either: a later,
+	// smaller read appended to the head would splice two parts of the body
+	// into one the usage reader could misread.
+	if ex.overflow = ex.overflow || len(ex.kept)+len(b) > maxRetained; !ex.overflow {
 		ex.kept = append(ex.kept, b...)
 	}
 	return true

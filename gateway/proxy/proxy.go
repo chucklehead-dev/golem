@@ -58,7 +58,7 @@ type Handler struct {
 	// Limiter admits calls against budgets and in-flight limits (golem's:
 	// limit.Limiter.Admitter); nil admits everything uncounted.
 	Limiter admission.Admitter
-	MaxBody int64 // request body cap in bytes
+	MaxBody int64 // request body cap in bytes (default 32 MiB)
 	// Telemetry records each request's span, metrics and ledger row; nil
 	// records nothing.
 	Telemetry *telemetry.Telemetry
@@ -80,12 +80,10 @@ type Handler struct {
 	Record func(*http.Request, Result)
 }
 
-// Request headers a caller may pass to the provider, and response headers
-// returned to the caller (contracts.md §5: golem's own are never forwarded).
-var (
-	forwardRequest  = []string{"Anthropic-Version", "Anthropic-Beta", "Openai-Organization"} // read-only
-	forwardResponse = []string{"Content-Type", "Request-Id", "X-Request-Id", "Retry-After"}  // read-only
-)
+// Response headers returned to the caller (contracts.md §5: golem's own
+// are never forwarded); the request headers a caller may pass are its
+// dialect's (Dialect.forwardRequest).
+var forwardResponse = []string{"Content-Type", "Request-Id", "X-Request-Id", "Retry-After"} // read-only
 
 var (
 	jsonType          = []string{"application/json"} // read-only
@@ -207,7 +205,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	lim := &ex.lim
 	upCtx := lim.bound(ctx, started, rt)
 	defer lim.end()
-	up, ub := upstreamRequest(upCtx, r, target, out)
+	up, ub := upstreamRequest(upCtx, r, target, out, h.Dialect.forwardRequest())
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
@@ -387,7 +385,8 @@ func (h *Handler) authenticate(r *http.Request) (*snapshot.Compiled, *auth.Princ
 // readBody reads the request body into the pooled buffer in, at most
 // MaxBody bytes.
 func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) ([]byte, *refusal) {
-	if n := r.ContentLength; n > 0 && n <= h.MaxBody && int64(cap(*in)) < n+1 {
+	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero is the default, not "no body"
+	if n := r.ContentLength; n > 0 && n <= maxBody && int64(cap(*in)) < n+1 {
 		*in = make([]byte, 0, n+1) // one allocation, not a doubling series
 	}
 	// The body must arrive within BodyTimeout: a client trickling it in
@@ -395,7 +394,7 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) (
 	rc := http.NewResponseController(w)
 	rc.SetReadDeadline(time.Now().Add(cmp.Or(h.BodyTimeout, 30*time.Second))) // a test's recorder has none
 	var err error
-	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, h.MaxBody))
+	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, maxBody))
 	rc.SetReadDeadline(time.Time{})
 	switch _, tooBig := errors.AsType[*http.MaxBytesError](err); {
 	case tooBig:
@@ -446,6 +445,9 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 	}
 	if req.unknown > 0 {
 		return &refusal{code: contract.AuthzFeatureForbidden, msg: fmt.Sprintf("%d request member(s) golem does not know: this route forwards approved features only (restricted mode); its managers can approve them", req.unknown)}
+	}
+	if h.Dialect != AnthropicMessages {
+		return nil // anthropic-* headers are neither checked nor forwarded on another API
 	}
 	for _, v := range hdr.Values("Anthropic-Beta") {
 		for b := range strings.SplitSeq(v, ",") {
@@ -522,7 +524,7 @@ func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c a
 
 // upstreamRequest is the provider's request: the rewritten body, the
 // route's credential, and the caller headers the provider may see.
-func upstreamRequest(ctx context.Context, r *http.Request, target *route.Target, body *[]byte) (*http.Request, *upstreamBody) {
+func upstreamRequest(ctx context.Context, r *http.Request, target *route.Target, body *[]byte, forward []string) (*http.Request, *upstreamBody) {
 	ub := newUpstreamBody(body)
 	up := (&http.Request{
 		Method:        http.MethodPost,
@@ -533,7 +535,7 @@ func upstreamRequest(ctx context.Context, r *http.Request, target *route.Target,
 		Host:          target.URL.Host,
 	}).WithContext(ctx)
 	up.Header["Content-Type"] = jsonType
-	copyHeaders(up.Header, r.Header, forwardRequest)
+	copyHeaders(up.Header, r.Header, forward)
 	maps.Copy(up.Header, target.Header)
 	return up, ub
 }
@@ -573,7 +575,7 @@ func (h *Handler) relay(w http.ResponseWriter, body io.Reader, ex *exchange, str
 	if streamed {
 		filter = ex.startStream(h.Dialect)
 	} else {
-		ex.kept = ex.kept[:0]
+		ex.kept, ex.overflow = ex.kept[:0], false
 	}
 	limit := cmp.Or(h.MaxResponse, defaultMaxResponse)
 	var cut error

@@ -408,5 +408,5 @@ func wrap(err error) error {
 	if _, ok := valkey.IsValkeyErr(err); ok {
 		return err
 	}
-	return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	return fmt.Errorf("%w: %w", ErrUnavailable, err) // both: a caller can tell a timeout from a refusal
 }

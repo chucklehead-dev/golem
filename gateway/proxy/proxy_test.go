@@ -84,6 +84,30 @@ func TestHeaders(t *testing.T) {
 	}
 }
 
+// TestOpenAIHeaders: an anthropic-* header on an OpenAI call is neither
+// checked against the route's approvals (restricted mode would refuse an
+// unapproved beta) nor passed to the provider; OpenAI's own is passed.
+func TestOpenAIHeaders(t *testing.T) {
+	var got http.Header
+	h := handler(OpenAIChat, roundTrip(func(r *http.Request) (*http.Response, error) {
+		got = r.Header
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`))}, nil
+	}), nil)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"claude","messages":[]}`))
+	req.Header.Set("Anthropic-Beta", "unapproved-2026")
+	req.Header.Set("Anthropic-Version", "2099-01-01")
+	req.Header.Set("Openai-Organization", "org-1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status %d %s: an Anthropic header refused an OpenAI call", w.Code, w.Body)
+	}
+	if got.Get("Anthropic-Beta") != "" || got.Get("Anthropic-Version") != "" || got.Get("Openai-Organization") != "org-1" {
+		t.Fatalf("upstream headers %v; want OpenAI's own only", got)
+	}
+}
+
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -149,6 +173,8 @@ func TestRefusals(t *testing.T) {
 		{"escaped duplicate", `{"model":"claude","model":"other"}`, 1 << 20, 400, "request.invalid"},
 		{"trailing value", `{"model":"claude"}{"model":"other"}`, 1 << 20, 400, "request.invalid"},
 		{"too large", `{"model":"claude","pad":"` + strings.Repeat("x", 100) + `"}`, 64, 413, "request.too_large"},
+		{"zero is the default cap, not none", `{"model":"gpt-9"}`, 0, 404, "route.unknown_model"},
+		{"over the default cap", `{"model":"claude","pad":"` + strings.Repeat("x", 32<<20) + `"}`, 0, 413, "request.too_large"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := handler(AnthropicMessages, &stub{}, nil)

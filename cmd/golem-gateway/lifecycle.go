@@ -17,8 +17,15 @@ import (
 // would have no ledger row and no counter add.
 type lifecycle struct {
 	srv      *http.Server
-	inflight sync.WaitGroup
 	draining atomic.Bool
+	// The calls in flight. Not a WaitGroup: after Close a handler whose
+	// connection was accepted can still start while the wait runs, an Add
+	// at zero concurrent with Wait. Once the wait has begun (closed), a
+	// call that starts is refused rather than counted after it.
+	mu       sync.Mutex
+	inflight int
+	closed   bool
+	idle     chan struct{} // closed when closed and none is in flight
 	// unready is how long /readyz fails before the server stops taking
 	// connections, for the endpoints to follow; drain, how long calls in
 	// flight may finish; cut, how long cut calls have to account.
@@ -28,10 +35,45 @@ type lifecycle struct {
 // track counts h's calls in flight.
 func (lc *lifecycle) track(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lc.inflight.Add(1)
-		defer lc.inflight.Done()
+		if !lc.begin() {
+			http.Error(w, "shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		defer lc.end()
 		h.ServeHTTP(w, r)
 	})
+}
+
+func (lc *lifecycle) begin() bool {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if lc.closed {
+		return false
+	}
+	lc.inflight++
+	return true
+}
+
+func (lc *lifecycle) end() {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if lc.inflight--; lc.inflight == 0 && lc.closed {
+		close(lc.idle)
+	}
+}
+
+// wait stops counting new calls and returns a channel closed when the
+// last call in flight has ended.
+func (lc *lifecycle) wait() <-chan struct{} {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if !lc.closed {
+		lc.closed, lc.idle = true, make(chan struct{})
+		if lc.inflight == 0 {
+			close(lc.idle)
+		}
+	}
+	return lc.idle
 }
 
 // readyz fails while draining, else as check says.
@@ -62,13 +104,8 @@ func (lc *lifecycle) shutdown() {
 		slog.Warn("golem-gateway: cutting the calls still in flight at the drain deadline", "err", err)
 		lc.srv.Close()
 	}
-	done := make(chan struct{})
-	go func() { // ends when the last call does; the process exits after
-		lc.inflight.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case <-lc.wait():
 	case <-time.After(lc.cut):
 		slog.Error("golem-gateway: calls had not accounted when the cut's time ran out; their rows are lost", "after", lc.cut)
 	}
