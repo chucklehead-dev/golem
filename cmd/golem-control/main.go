@@ -265,10 +265,11 @@ func openSigner(ctx context.Context, spec string) (sign.Signer, error) {
 			return nil, err
 		}
 		c := kms.NewFromConfig(awsCfg)
-		if _, err := kmssign.PublicKey(ctx, c, ref); err != nil { // the key exists and is the right kind
+		pub, err := kmssign.PublicKey(ctx, c, ref) // the key exists and is the right kind
+		if err != nil {
 			return nil, err
 		}
-		return kmssign.Signer{Client: c, Key: ref}, nil
+		return kmssign.Signer{Client: c, Key: ref, Public: pub}, nil
 	default:
 		return nil, fmt.Errorf("%q: want file:<path> or kms:<arn>", spec)
 	}

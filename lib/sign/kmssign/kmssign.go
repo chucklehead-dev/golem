@@ -27,6 +27,7 @@ type API interface {
 type Signer struct {
 	Client API
 	Key    string
+	Public *ecdsa.PublicKey // the key's public half, for Verifier; optional
 }
 
 func (s Signer) KeyID() string { return s.Key }
@@ -63,6 +64,15 @@ func PublicKey(ctx context.Context, c PublicKeyAPI, keyID string) (*ecdsa.Public
 		return nil, fmt.Errorf("kms key %s is %s for %s; the publishing key must be ECC_NIST_P256 for SIGN_VERIFY", keyID, out.KeySpec, out.KeyUsage)
 	}
 	return sign.ParseECDSAPublicKey(out.PublicKey)
+}
+
+// Verifier is the key's own verifier, if its public half was fetched
+// (Public); nil otherwise.
+func (s Signer) Verifier() sign.Verifier {
+	if s.Public == nil {
+		return nil
+	}
+	return sign.ECDSAKeys{s.Key: s.Public}
 }
 
 var _ sign.Signer = Signer{}

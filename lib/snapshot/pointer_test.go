@@ -82,7 +82,4 @@ func TestCheckpoint(t *testing.T) {
 	if _, err := OpenPointer(b, keys); err == nil {
 		t.Fatal("a checkpoint opened as a pointer")
 	}
-	if seq, err := PeekSeq(b); err != nil || seq != 4 {
-		t.Fatalf("peek %d %v", seq, err)
-	}
 }

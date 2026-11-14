@@ -46,6 +46,11 @@ func (e Ed25519) Sign(_ context.Context, msg []byte) ([]byte, error) {
 	return ed25519.Sign(e.Key, msg), nil
 }
 
+// Verifier is the key's own verifier: its public half, under its ID.
+func (e Ed25519) Verifier() Verifier {
+	return Ed25519Keys{e.ID: e.Key.Public().(ed25519.PublicKey)}
+}
+
 // Ed25519Keys is a Verifier: the public keys it trusts, by ID.
 type Ed25519Keys map[string]ed25519.PublicKey
 

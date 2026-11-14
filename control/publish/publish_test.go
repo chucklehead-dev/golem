@@ -217,3 +217,130 @@ func (b *pauseAfterRecord) Put(ctx context.Context, key string, body []byte, ifM
 	}
 	return b.Bucket.Put(ctx, key, body, ifMatch)
 }
+
+// TestGuard: model/leadership.md's counterexamples, each refused. A
+// rolled-back record, met by an older checkpoint copied back, still
+// numbers above what gateways trust (the signed pointer); a forged or
+// deleted checkpoint stops publication; the first publication's crash
+// window (a record with no checkpoint yet) is not mistaken for tampering.
+func TestGuard(t *testing.T) {
+	ctx := t.Context()
+	// fresh is another replica, started after the bucket changed under
+	// it: its store has no memory of newer versions.
+	fresh := func(p *Publisher, d *bucket.Dir) *Publisher {
+		q := *p
+		q.State = &state.Store{Bucket: d}
+		return &q
+	}
+	cpSeq := func(d *bucket.Dir, keys sign.Ed25519Keys) uint64 {
+		raw, _, _ := d.Get(ctx, snapshot.CheckpointKey("internal"), "")
+		cp, err := snapshot.OpenCheckpoint(raw, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cp.PublishSeq
+	}
+
+	t.Run("a rolled-back record and an older checkpoint copied back", func(t *testing.T) {
+		p, keys, d := setup(t)
+		l := leads(t, p.State, "r1", 1)
+		p.Publish(ctx, l, 1, build)
+		oldDoc, _, _ := d.Get(ctx, state.DocumentKey, "")
+		oldCp, _, _ := d.Get(ctx, snapshot.CheckpointKey("internal"), "")
+		for range 2 {
+			if _, err := p.Publish(ctx, l, 1, build); err != nil {
+				t.Fatal(err)
+			}
+		}
+		d.Put(ctx, state.DocumentKey, oldDoc, "")                 // record back to 1
+		d.Put(ctx, snapshot.CheckpointKey("internal"), oldCp, "") // checkpoint back to 1
+		ptr, err := fresh(p, d).Publish(ctx, l, 1, build)
+		if err != nil || ptr.PublishSeq != 4 || cpSeq(d, keys) != 4 {
+			t.Fatalf("published %d (%v), checkpoint %d; want 4: above the signed pointer at 3", ptr.PublishSeq, err, cpSeq(d, keys))
+		}
+	})
+	t.Run("a rolled-back record alone", func(t *testing.T) {
+		p, keys, d := setup(t)
+		l := leads(t, p.State, "r1", 1)
+		p.Publish(ctx, l, 1, build)
+		oldDoc, _, _ := d.Get(ctx, state.DocumentKey, "")
+		p.Publish(ctx, l, 1, build)
+		p.Publish(ctx, l, 1, build)
+		d.Put(ctx, state.DocumentKey, oldDoc, "")
+		if ptr, err := fresh(p, d).Publish(ctx, l, 1, build); err != nil || ptr.PublishSeq != 4 || cpSeq(d, keys) != 4 {
+			t.Fatalf("published %d (%v); want 4, not 2 (today's advance lowered the checkpoint)", ptr.PublishSeq, err)
+		}
+	})
+	// Each tampering returns the bucket as the publisher then sees it.
+	for name, tamper := range map[string]func(d *bucket.Dir) bucket.Bucket{
+		"a forged checkpoint": func(d *bucket.Dir) bucket.Bucket {
+			_, sk, _ := ed25519.GenerateKey(nil)
+			forged, _ := snapshot.SignCheckpoint(ctx, snapshot.Checkpoint{Pool: "internal", PublishSeq: 1 << 40}, sign.Ed25519{ID: "k", Key: sk})
+			d.Put(ctx, snapshot.CheckpointKey("internal"), forged, "")
+			return d
+		},
+		"an unsigned checkpoint": func(d *bucket.Dir) bucket.Bucket {
+			d.Put(ctx, snapshot.CheckpointKey("internal"), []byte(`{"pool":"internal","publishSeq":99}`), "")
+			return d
+		},
+		"a deleted checkpoint": func(d *bucket.Dir) bucket.Bucket {
+			return &hidden{Bucket: d, key: snapshot.CheckpointKey("internal")}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, _, d := setup(t)
+			l := leads(t, p.State, "r1", 1)
+			p.Publish(ctx, l, 1, build)
+			p.Publish(ctx, l, 1, build)
+			before, _, _ := d.Get(ctx, snapshot.PointerKey("internal"), "")
+			p.Bucket = tamper(d)
+			if _, err := p.Publish(ctx, l, 1, build); !errors.Is(err, ErrTampered) {
+				t.Fatalf("%v, want ErrTampered", err)
+			}
+			if rec, _ := p.Record(ctx); rec.Seq != 2 {
+				t.Fatalf("record %d: a publication was won past the tampering", rec.Seq)
+			}
+			if after, _, _ := d.Get(ctx, snapshot.PointerKey("internal"), ""); string(after) != string(before) {
+				t.Fatal("the pointer moved past the tampering")
+			}
+		})
+	}
+	t.Run("the first publication's crash window", func(t *testing.T) {
+		p, _, d := setup(t)
+		l := leads(t, p.State, "r1", 1)
+		dying := *p
+		dying.Bucket = &failAt{Bucket: d, key: snapshot.CheckpointKey("internal")}
+		if _, err := dying.Publish(ctx, l, 1, build); err == nil {
+			t.Fatal("the dying publisher wrote its checkpoint")
+		}
+		if ptr, err := p.Publish(ctx, l, 1, build); err != nil || ptr.PublishSeq != 2 {
+			t.Fatalf("after a death between record 1 and its checkpoint: %+v %v", ptr, err)
+		}
+	})
+}
+
+// failAt is a bucket whose puts of key fail.
+type failAt struct {
+	bucket.Bucket
+	key string
+}
+
+func (f *failAt) Put(ctx context.Context, key string, body []byte, ifMatch string) (string, error) {
+	if key == f.key {
+		return "", errors.New("the publisher died")
+	}
+	return f.Bucket.Put(ctx, key, body, ifMatch)
+}
+
+// hidden is a bucket where one object has been deleted.
+type hidden struct {
+	bucket.Bucket
+	key string
+}
+
+func (h *hidden) Get(ctx context.Context, key, inm string) ([]byte, string, error) {
+	if key == h.key {
+		return nil, "", bucket.ErrNotFound
+	}
+	return h.Bucket.Get(ctx, key, inm)
+}

@@ -440,6 +440,11 @@ Lock, are what detects and recovers them. Running gateways refuse the
 lower publications either way (availability, not safety); only one
 restarting with an empty disk would take the lower floor.
 
+In code (control/publish's `floor`), a checkpoint missing beside record 1
+and no signed pointer is not tampering: it is a publisher that died between
+the first record and the first checkpoint, writes this model makes one
+step. From the first checkpoint on, a missing one is refused.
+
 What the model leaves out: write volume, timing, and the lease object's
 lapse by clocks (any replica may acquire at any time, which only widens the
 behaviours checked).

@@ -90,21 +90,6 @@ func OpenCheckpoint(b []byte, v sign.Verifier) (Checkpoint, error) {
 	return c, open(b, checkpointContext, v, &c, "checkpoint")
 }
 
-// PeekSeq decodes a stored pointer's or checkpoint's sequence without
-// verifying it: for the publisher, which compares what is stored with the
-// record, never for trusting what it says.
-func PeekSeq(b []byte) (uint64, error) {
-	var s signed
-	if err := jsonv2.Unmarshal(b, &s); err != nil {
-		return 0, err
-	}
-	var p struct {
-		PublishSeq uint64 `json:"publishSeq"`
-	}
-	err := jsonv2.Unmarshal(s.Payload, &p)
-	return p.PublishSeq, err
-}
-
 func seal(ctx context.Context, context string, v any, s sign.Signer) ([]byte, error) {
 	payload, err := jsonv2.Marshal(v)
 	if err != nil {

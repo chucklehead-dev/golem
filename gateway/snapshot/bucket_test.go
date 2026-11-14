@@ -201,14 +201,14 @@ func TestBucketSource(t *testing.T) {
 		mustRefuse(t, gw, "its pointer says 9")
 	})
 	t.Run("a snapshot not yet readable is retried", func(t *testing.T) {
-		ptr := p.publish(t) // seq 5
+		ptr := p.publish(t) // above the signed pointer at 9 planted earlier
 		gw.Bucket = missing{p.bucket, snapshot.ObjectKey("internal", ptr.Hash)}
 		if err := gw.Poll(t.Context()); err == nil {
 			t.Fatal("poll with the object missing: want an error")
 		}
 		gw.Bucket = p.bucket
-		if err := gw.Poll(t.Context()); err != nil || applied(gw) != 5 {
-			t.Fatalf("poll once the object is back: %v, applied %d, want 5", err, applied(gw))
+		if err := gw.Poll(t.Context()); err != nil || applied(gw) != ptr.PublishSeq {
+			t.Fatalf("poll once the object is back: %v, applied %d, want %d", err, applied(gw), ptr.PublishSeq)
 		}
 	})
 }
