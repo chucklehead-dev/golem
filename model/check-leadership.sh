@@ -10,8 +10,8 @@ fail=0
 if ! command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
   echo "  skipped: gotogether is not installed"; exit 0
 fi
+STATES=${STATES:-3000000} # set before graph.sh, whose default is smaller
 . ./graph.sh
-STATES=${STATES:-3000000}
 D=${DEPTH:-10}
 echo "== exhaustive: leadership.small.yaml, every run up to depth $D"
 echo "-- the architect's design (lease object + fence and records in the document)"

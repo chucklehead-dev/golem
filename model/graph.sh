@@ -3,12 +3,13 @@
 # Sourced by the check scripts, which set fail=0 first.
 GOTOGETHER=${GOTOGETHER:-gotogether}
 STATES=${STATES:-300000}
+MEMORY=${MEMORY:-4096} # MiB for the stored graph (gotogether stops at 256 by default)
 
 # graph_run MODEL DEPTH [CONST]: the report, its exit status in $graph_rc.
 graph_run() {
   # The scripts run under set -e: keep a failing search from ending them.
   graph_rc=0
-  graph_out=$("$GOTOGETHER" simulate -binding "$1.small.yaml" -graph -depth "$2" -states "$STATES" ${3:+-const "$3"} 2>&1) || graph_rc=$?
+  graph_out=$("$GOTOGETHER" simulate -binding "$1.small.yaml" -graph -depth "$2" -states "$STATES" -memory "$MEMORY" ${3:+-const "$3"} 2>&1) || graph_rc=$?
 }
 
 # graph_holds MODEL DEPTH CONST [ALLOWED_DEAD...]: the instance holds every
@@ -21,8 +22,9 @@ graph_holds() {
   local extra=""
   for a in $dead; do [[ " $* " == *" $a "* ]] || extra+=" $a"; done
   local scope; scope=$( { grep -E '^  graph' <<<"$graph_out" || true; } | sed -E 's/^  graph +//; s/: .*//')
-  if [[ $scope == *"state bound"* ]]; then
-    echo "${c:-design}: the search hit its state bound before depth $d: lower the depth or raise STATES"; fail=1
+  if [[ $scope == *"state bound"* || $scope == *"memory bound"* || $graph_out == *"memory bound cut"* ]]; then
+    local done; done=$( { grep -oE 'complete to depth [0-9]+' <<<"$graph_out" || true; } | head -1)
+    echo "${c:-design}: the search's bound stopped it before depth $d (${done:-no depth complete}): lower the depth, or raise STATES or MEMORY"; fail=1
   elif [[ $graph_rc == 0 && -z $extra ]]; then
     echo "${c:-design} holds in every run of up to $d steps ($( { grep -E '^  graph' <<<"$graph_out" || true; } | { grep -oE '[0-9]+ states' || true; } | head -1))"
   else
