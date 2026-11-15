@@ -180,7 +180,7 @@ Status:
     budget bound (the call bills twice), not only one answer per caller and
     the provider's work within the slots.
 
-- **Code: built, but for the storm simulation.**
+- **Code: built.**
   The loop (`gateway/proxy`, ServeHTTP; `attempt.go`), deployment health
   and retry budgets (`gateway/route/health.go`), a route's
   `spec.retries.maxAttempts` (default 2, at most 5) and a deployment's
@@ -203,11 +203,26 @@ Status:
   fail it; the ninth (a failed probe not re-ejected) is a matter of time,
   which the model leaves out, and `TestEjection` catches it.
 
+- **Storm simulation: built, and narrower than planned.** route's
+  `TestRetryBudgetBoundsTheStorm` (qload, the real `route.Health` budget
+  inside the SDKs' three retries with backoff, a provider at a third of its
+  speed for two minutes): the gateway adds 0.12 retries per call, against
+  0.48 for a gateway that always retries once, so the gateway's layer
+  adds at most about 1.25x the SDK's attempts (the plan's bound was 1.5x).
+  Every budgeted run recovers. Ablated (no cap): 0.48, and the test fails.
+  The recovery claim the plan expected does not hold up: where the
+  provider's queue outlasts the timeout, the SDK's own retries keep every
+  policy down, the SDK's alone included, and near the tipping point
+  recovery is a coin toss with no ordering between the policies. The
+  gateway's layer bounds its amplification; it does not decide recovery.
+  (The real gateway retries no timeout, so its share in a brownout is
+  smaller still than the simulation's.)
+
 Done when:
 - ~~the model's exhaustive check holds, and finds each mutant~~ (done);
 - ~~each mutant's code counterpart fails a test (ablated)~~ (done);
 - ~~connect-driven tests run the proxy's loop against the model~~ (done);
-- the storm simulation holds its bound;
+- ~~the storm simulation holds its bound~~ (done: the amplification bound; recovery is not the gateway's to decide);
 - two stubs, one killed under load, show calls succeeding and one ledger
   row per attempt.
 
