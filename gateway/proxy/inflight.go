@@ -165,6 +165,14 @@ func (f *InFlight) Sweep() (ended int) {
 				continue // ended by an earlier sweep, still settling
 			}
 			if no := k.Honours(&c.grant); no != nil {
+				// A snapshot applied since k was read may honour a call
+				// that authenticated under it (a key minted a moment ago,
+				// unknown to k): the current keys must refuse it too.
+				// Revocations are never undone, so they refuse what k
+				// refused for that reason.
+				if cur := f.keys(); cur != nil && cur != k && cur.Honours(&c.grant) == nil {
+					continue
+				}
 				c.cancel(&errTerminated{no.Code, no.Msg})
 				c.ended = true
 				ended++
