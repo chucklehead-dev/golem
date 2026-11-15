@@ -5,13 +5,14 @@ go 1.27.3
 require (
 	connectrpc.com/connect v1.21.1
 	github.com/aws/aws-sdk-go-v2 v1.48.0
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.27
 	github.com/aws/aws-sdk-go-v2/config v1.33.18
 	github.com/aws/aws-sdk-go-v2/credentials v1.21.0
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/aws/smithy-go v1.28.9
-	github.com/chucklehead-dev/gotogether v0.0.0-20261115081345-fcee5dc84dd1
-	github.com/chucklehead-dev/gotogether/qhegel v0.0.0-20261115081345-fcee5dc84dd1
+	github.com/chucklehead-dev/gotogether v0.0.0-20261115194443-19f4f5794336
+	github.com/chucklehead-dev/gotogether/qhegel v0.0.0-20261115194443-19f4f5794336
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/valkey-io/valkey-go v1.0.79
 	go.opentelemetry.io/otel v1.47.0
@@ -31,7 +32,6 @@ require (
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.27 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.9 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.12 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.12 // indirect
