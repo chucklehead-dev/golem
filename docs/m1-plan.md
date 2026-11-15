@@ -180,7 +180,7 @@ Status:
     budget bound (the call bills twice), not only one answer per caller and
     the provider's work within the slots.
 
-- **Code: built, but for the connect tests and the storm simulation.**
+- **Code: built, but for the storm simulation.**
   The loop (`gateway/proxy`, ServeHTTP; `attempt.go`), deployment health
   and retry budgets (`gateway/route/health.go`), a route's
   `spec.retries.maxAttempts` (default 2, at most 5) and a deployment's
@@ -192,11 +192,21 @@ Status:
   `TestEjection`, `TestProbeAbandoned`, `TestCeiling`, `TestRetryBudget`.
   Sixteen ablations, each failing its test. Allocations per admitted call
   unchanged (`BenchmarkHandlerAdmitted`).
+- **Connect: built.** `TestAttemptsModel` replays model/attempts.md's
+  `gateway` and `gatewayWide` instances (§11: the gateway's own choices,
+  `ORDERED`) on the real request path against scripted providers: 50
+  traces each and a witness for each of five required states (a
+  failover, an ejection and its probe, the route's retries spent, a
+  call's attempts spent, a probe passed by another call). The deployment
+  each attempt takes and when a call gives up are the code's, checked
+  against the model's. Of nine ablations of the loop and its health, eight
+  fail it; the ninth (a failed probe not re-ejected) is a matter of time,
+  which the model leaves out, and `TestEjection` catches it.
 
 Done when:
 - ~~the model's exhaustive check holds, and finds each mutant~~ (done);
 - ~~each mutant's code counterpart fails a test (ablated)~~ (done);
-- connect-driven tests run the proxy's loop against the model;
+- ~~connect-driven tests run the proxy's loop against the model~~ (done);
 - the storm simulation holds its bound;
 - two stubs, one killed under load, show calls succeeding and one ledger
   row per attempt.

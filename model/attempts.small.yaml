@@ -4,6 +4,9 @@
 # Each variant is a design: the attempt loop, and each mechanism shown
 # necessary by the design without it (gotogether simulate -matrix). A
 # broken design lists exactly what it breaks: safe is their conjunction.
+# Ejection's one probe shows only where a deployment takes two attempts at
+# once (with one, its ceiling already allows a single probe): its variant,
+# and the design's beside it, have a ceiling of two.
 spec: attempts.qnt
 module: small
 actions: {}
@@ -14,6 +17,8 @@ simulate:
   search: {depth: 14, states: 2000000}
   variants:
     - name: design
+    - name: design, two a deployment
+      constants: {QUOTA: '2'}
     - name: retry after commit
       constants: {COMMIT_FINAL: 'false'}
       holds: [ledgerMatches, covered, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped, probeOnly]
@@ -43,6 +48,6 @@ simulate:
       holds: [oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, probeOnly]
       allows: [safe, retriesCapped]
     - name: no ejection
-      constants: {EJECTION: 'false'}
+      constants: {EJECTION: 'false', QUOTA: '2'}
       holds: [oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped]
       allows: [safe, probeOnly]

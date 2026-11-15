@@ -80,7 +80,7 @@ jobs:
       - name: the design matrices in the model documents are the models'
         run: git diff --exit-code -- model/*.md
       - name: "the gateway against its models (connect: the model drives)"
-        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/... ./control/...   # TestExposureModelValkey too
+        run: go test -count=1 -run 'TestPublicationModel|TestExposureModel|TestAttemptsModel' ./gateway/... ./control/...   # TestExposureModelValkey too
         env:
           QUINT_BACKEND: typescript
       # The Hegel machines sit in the packages they test, behind the hegel

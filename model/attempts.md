@@ -77,6 +77,14 @@ flight, for the model).
   const RETRY_BUDGET: bool
   const POOL_CAP: bool
   const EJECTION: bool
+
+  // ORDERED is the gateway's own choice, for the instance its tests drive
+  // (§11): an attempt takes the first deployment of ORDER its health
+  // admits, one the call has not tried first, and a call gives up only
+  // when no attempt can follow. Unset, any deployment may be tried and a
+  // call may give up at any point: the design checked for every choice.
+  const ORDERED: bool
+  const ORDER: List[str]
 ```
 
 An attempt ends in one of four ways, as the request path classifies them:
@@ -103,7 +111,8 @@ An attempt ends in one of four ways, as the request path classifies them:
   ghost).
 - `retries`: the pool's retries so far; `load`: attempts in flight per
   deployment; `fails`: consecutive failures; `ejected`, `probes`: a
-  deployment's ejection and the attempts sent it since.
+  deployment's ejection and its probes in flight; `probing`: the calls
+  whose attempt in flight is a probe; `tried`: each call's deployments.
 
 ```quint attempts.qnt +=
   var phase: str -> str
@@ -119,6 +128,8 @@ An attempt ends in one of four ways, as the request path classifies them:
   var fails: str -> int
   var ejected: str -> bool
   var probes: str -> int
+  var probing: Set[str]
+  var tried: str -> Set[str]
 ```
 
 ## 5. The initial state and helpers
@@ -138,6 +149,8 @@ An attempt ends in one of four ways, as the request path classifies them:
     fails' = DEPLOYMENTS.mapBy(d => 0),
     ejected' = DEPLOYMENTS.mapBy(d => false),
     probes' = DEPLOYMENTS.mapBy(d => 0),
+    probing' = Set(),
+    tried' = CALLS.mapBy(c => Set()),
   }
 
   // A call holds its slot from its start until it ends, and past its end
@@ -155,6 +168,27 @@ An attempt ends in one of four ways, as the request path classifies them:
   def eventOf(c: str): (str, int) = if (ATTEMPT_EVENTS) (c, attempts.get(c)) else (c, 1)
   def charged(c: str, amount: int): (str, int) -> int =
     if (ledger.keys().contains(eventOf(c))) ledger else ledger.put(eventOf(c), amount)
+
+  // Whether call c's next attempt may go to d: below d's quota (each
+  // attempt's, or the first's alone), and not ejected unless it is d's one
+  // probe.
+  def admits(c: str, d: str): bool = and {
+    if (attempts.get(c) == 0 or QUOTA_PER_ATTEMPT) load.get(d) < QUOTA else true,
+    if (EJECTION and ejected.get(d)) probes.get(d) == 0 else true,
+  }
+  // The gateway's choice (ORDERED): the first deployment of ORDER that
+  // admits c, an untried one first; "" if none does.
+  def firstOf(c: str, untried: bool): str =
+    ORDER.foldl("", (acc, d) => if (acc == "" and admits(c, d) and (not(untried) or not(tried.get(c).contains(d)))) d else acc)
+  def choiceOf(c: str): str = if (firstOf(c, true) != "") firstOf(c, true) else firstOf(c, false)
+  // Whether call c may make another attempt: its budget, the pool's, the
+  // budget of spend for a first attempt, and a deployment to take it.
+  def canAttempt(c: str): bool = and {
+    if (RETRY_BUDGET) attempts.get(c) < MAX_ATTEMPTS else true,
+    if (POOL_CAP and attempts.get(c) > 0) retries < POOL_RETRIES else true,
+    if (attempts.get(c) == 0) known < BUDGET else true,
+    DEPLOYMENTS.exists(d => admits(c, d)),
+  }
 ```
 
 ## 6. Actions
@@ -170,7 +204,7 @@ It takes a slot; its attempts check the budget.
     phase' = phase.put(c, "waiting"),
     attempts' = attempts, commits' = commits, on' = on, tails' = tails, known' = known,
     ledger' = ledger, billed' = billed, retries' = retries, load' = load, fails' = fails,
-    ejected' = ejected, probes' = probes,
+    ejected' = ejected, probes' = probes, probing' = probing, tried' = tried,
   }
 ```
 
@@ -191,8 +225,8 @@ sent only its probe.
       if (RETRY_BUDGET) attempts.get(c) < MAX_ATTEMPTS else true,
       if (POOL_CAP and not(first)) retries < POOL_RETRIES else true,
       if (first) known < BUDGET else true,
-      if (first or QUOTA_PER_ATTEMPT) load.get(d) < QUOTA else true,
-      if (EJECTION and ejected.get(d)) probes.get(d) == 0 else true,
+      admits(c, d),
+      if (ORDERED) d == choiceOf(c) else true,
       retries' = if (first) retries else retries + 1,
     },
     phase' = phase.put(c, "trying"),
@@ -200,6 +234,8 @@ sent only its probe.
     on' = on.put(c, d),
     load' = load.setBy(d, n => n + 1),
     probes' = if (ejected.get(d)) probes.setBy(d, n => n + 1) else probes,
+    probing' = if (ejected.get(d)) probing.union(Set(c)) else probing,
+    tried' = tried.setBy(c, s => s.union(Set(d))),
     commits' = commits, tails' = tails, known' = known, ledger' = ledger, billed' = billed,
     fails' = fails, ejected' = ejected,
   }
@@ -210,7 +246,9 @@ sent only its probe.
 Unreached and refused attempts are free and retried. An uncertain one is
 charged its worst case, and its tail goes on at the provider; with
 `UNCERTAIN_FINAL` the call fails, keeping its slot for the tail. Every
-failure counts towards its deployment's ejection.
+failure counts towards its deployment's ejection; a failed probe frees its
+probe, the deployment still ejected, so a later one may follow (as
+`route.Health` does after its next ejection).
 
 ```quint attempts.qnt +=
   action failed(c: str, outcome: str): bool = all {
@@ -227,9 +265,11 @@ failure counts towards its deployment's ejection.
       load' = load.setBy(d, n => n - 1),
       fails' = fails.setBy(d, n => n + 1),
       ejected' = ejected.put(d, ejected.get(d) or fails.get(d) + 1 >= EJECT_AFTER),
+      probes' = if (probing.contains(c)) probes.setBy(d, n => n - 1) else probes,
+      probing' = probing.exclude(Set(c)),
     },
     attempts' = attempts, commits' = commits, on' = on, billed' = billed, retries' = retries,
-    probes' = probes,
+    tried' = tried,
   }
 ```
 
@@ -250,11 +290,12 @@ contract's error event.
       fails' = fails.put(d, 0),
       ejected' = ejected.put(d, false),
       probes' = probes.put(d, 0),
+      probing' = probing.filter(x => on.get(x) != d),
     },
     phase' = phase.put(c, "streaming"),
     commits' = commits.setBy(c, n => n + 1),
     attempts' = attempts, on' = on, tails' = tails, known' = known, ledger' = ledger,
-    billed' = billed, retries' = retries, load' = load,
+    billed' = billed, retries' = retries, load' = load, tried' = tried,
   }
 
   action end(c: str, cost: int, cut: bool): bool = all {
@@ -265,24 +306,26 @@ contract's error event.
     ledger' = charged(c, cost),
     load' = load.setBy(on.get(c), n => n - 1),
     attempts' = attempts, commits' = commits, on' = on, tails' = tails, retries' = retries,
-    fails' = fails, ejected' = ejected, probes' = probes,
+    fails' = fails, ejected' = ejected, probes' = probes, probing' = probing, tried' = tried,
   }
 ```
 
 ### 6.5 A call gives up; a tail ends
 
 A waiting call may give up at any point (its attempts or the budget spent,
-no deployment left): the caller gets 503 with `Retry-After`. An uncertain
+no deployment left): the caller gets 503 with `Retry-After`. The gateway
+(`ORDERED`) gives up only when no attempt can follow. An uncertain
 attempt's tail ends when the provider finishes or drops it, billing at
 most the worst case; a failed call's slot is then free.
 
 ```quint attempts.qnt +=
   action giveUp(c: str): bool = all {
     phase.get(c) == "waiting",
+    if (ORDERED) not(canAttempt(c)) else true,
     phase' = phase.put(c, "failed"),
     attempts' = attempts, commits' = commits, on' = on, tails' = tails, known' = known,
     ledger' = ledger, billed' = billed, retries' = retries, load' = load, fails' = fails,
-    ejected' = ejected, probes' = probes,
+    ejected' = ejected, probes' = probes, probing' = probing, tried' = tried,
   }
 
   action tailEnds(c: str, cost: int): bool = all {
@@ -291,7 +334,7 @@ most the worst case; a failed call's slot is then free.
     billed' = billed + cost,
     phase' = phase, attempts' = attempts, commits' = commits, on' = on, known' = known,
     ledger' = ledger, retries' = retries, load' = load, fails' = fails, ejected' = ejected,
-    probes' = probes,
+    probes' = probes, probing' = probing, tried' = tried,
   }
 ```
 
@@ -341,7 +384,7 @@ most the worst case; a failed call's slot is then free.
   val quotaHonoured = DEPLOYMENTS.forall(d => load.get(d) <= QUOTA)
   val attemptsBounded = CALLS.forall(c => attempts.get(c) <= MAX_ATTEMPTS)
   val retriesCapped = retries <= POOL_RETRIES
-  // An ejected deployment gets one probe, until a success readmits it.
+  // An ejected deployment has at most one probe in flight.
   val probeOnly = DEPLOYMENTS.forall(d => probes.get(d) <= 1)
 
   val safe = and {
@@ -491,7 +534,7 @@ module attemptsDesign {
     WORST = 3, BUDGET = 6, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true).*
+    EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
 }
 
 module retryUncertain {
@@ -499,7 +542,7 @@ module retryUncertain {
     WORST = 3, BUDGET = 6, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = false, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true).*
+    EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
 }
 
 module retryCut {
@@ -507,7 +550,7 @@ module retryCut {
     WORST = 3, BUDGET = 6, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
     COMMIT_FINAL = false, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true).*
+    EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
 }
 
 module sharedEvent {
@@ -515,7 +558,7 @@ module sharedEvent {
     WORST = 3, BUDGET = 6, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = false, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true).*
+    EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
 }
 ```
 
@@ -533,18 +576,18 @@ table, the properties by the designs (a cell "breaks in N steps" is its
 shortest counterexample):
 
 <!-- gotogether:matrix -->
-| | design | retry after commit | retry uncertain | shared event | uncertain free | quota once | no retry budget | no pool cap | no ejection |
-|---|---|---|---|---|---|---|---|---|---|
-| safe | holds | breaks in 6 steps | breaks in 6 steps | breaks in 5 steps | breaks in 4 steps | breaks in 6 steps | breaks in 8 steps | breaks in 14 steps | breaks in 6 steps |
-| oneCommit | holds | breaks in 6 steps | holds | holds | holds | holds | holds | holds | holds |
-| ledgerMatches | holds | holds | holds | breaks in 5 steps | holds | holds | holds | holds | holds |
-| covered | holds | holds | holds | holds | breaks in 4 steps | holds | holds | holds | holds |
-| withinBound | holds | breaks in 14 steps | breaks in 14 steps | holds | holds | holds | holds | holds | holds |
-| workWithinLimit | holds | holds | breaks in 6 steps | holds | holds | holds | holds | holds | holds |
-| quotaHonoured | holds | holds | holds | holds | holds | breaks in 6 steps | holds | holds | holds |
-| attemptsBounded | holds | holds | holds | holds | holds | holds | breaks in 8 steps | holds | holds |
-| retriesCapped | holds | holds | holds | holds | holds | holds | holds | breaks in 14 steps | holds |
-| probeOnly | holds | holds | holds | holds | holds | holds | holds | holds | breaks in 6 steps |
+| | design | design, two a deployment | retry after commit | retry uncertain | shared event | uncertain free | quota once | no retry budget | no pool cap | no ejection |
+|---|---|---|---|---|---|---|---|---|---|---|
+| safe | holds | holds | breaks in 6 steps | breaks in 6 steps | breaks in 5 steps | breaks in 4 steps | breaks in 6 steps | breaks in 8 steps | breaks in 12 steps | breaks in 6 steps |
+| oneCommit | holds | holds | breaks in 6 steps | holds | holds | holds | holds | holds | holds | holds |
+| ledgerMatches | holds | holds | holds | holds | breaks in 5 steps | holds | holds | holds | holds | holds |
+| covered | holds | holds | holds | holds | holds | breaks in 4 steps | holds | holds | holds | holds |
+| withinBound | holds | holds | breaks in 14 steps | breaks in 14 steps | holds | holds | holds | holds | holds | holds |
+| workWithinLimit | holds | holds | holds | breaks in 6 steps | holds | holds | holds | holds | holds | holds |
+| quotaHonoured | holds | holds | holds | holds | holds | holds | breaks in 6 steps | holds | holds | holds |
+| attemptsBounded | holds | holds | holds | holds | holds | holds | holds | breaks in 8 steps | holds | holds |
+| retriesCapped | holds | holds | holds | holds | holds | holds | holds | holds | breaks in 12 steps | holds |
+| probeOnly | holds | holds | holds | holds | holds | holds | holds | holds | holds | breaks in 6 steps |
 <!-- /gotogether:matrix -->
 
 ```quint attempts.qnt +=
@@ -554,6 +597,56 @@ module small {
     WORST = 3, BUDGET = 4, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 1,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true).*
+    EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
+}
+```
+
+## 11. The instance the gateway's tests drive
+
+`gateway/proxy`'s `TestAttemptsModel` replays this instance's traces on the
+real request path (connect): two calls on a pool of two deployments, each
+with a ceiling of one attempt, ejected after two failures, three attempts
+a call and three retries for the route (`gatewayWide`: a ceiling of two, and four retries).
+Its choices are the gateway's
+(`ORDERED`): the deployment each attempt takes and when a call gives up
+are checked against the code's, not chosen for it. The budget and the
+slots are the limiter's, already the accounting and exposure models', so
+they do not bind here.
+
+```quint attempts.qnt +=
+
+module gateway {
+  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
+    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
+    COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
+    QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
+    EJECTION = true, ORDERED = true, ORDER = ["d1", "d2"]).*
+
+  // What the traces must reach: a failover, a call ended by an uncertain
+  // attempt, a deployment ejected and then readmitted by its probe, and the
+  // route's retries spent.
+  val failedOver = failsOver
+  val ejectedThenProbed = DEPLOYMENTS.exists(d => ejected.get(d) and probes.get(d) == 1)
+  val retriesSpent = retries == POOL_RETRIES
+  val attemptsSpent = CALLS.exists(c => attempts.get(c) == MAX_ATTEMPTS and phase.get(c) == "failed")
+}
+
+// The same with a ceiling of two attempts a deployment, where ejection's
+// one probe is its own guard (with a ceiling of one, the ceiling already
+// allows a single probe).
+module gatewayWide {
+  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
+    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 4, EJECT_AFTER = 2,
+    COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
+    QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
+    EJECTION = true, ORDERED = true, ORDER = ["d1", "d2"]).*
+
+  // The pool's first deployment ejected, its probe in flight, and another
+  // call's last attempt sent past it: the call had tried every deployment,
+  // so the gateway's order would have taken it to the first but for the
+  // probe (the state is the step after that choice, which a witness run
+  // must take).
+  val probePassedBy = ejected.get("d1") and probes.get("d1") == 1 and
+    CALLS.exists(c => phase.get(c) == "trying" and on.get(c) == "d2" and attempts.get(c) == MAX_ATTEMPTS)
 }
 ```

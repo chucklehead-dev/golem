@@ -196,3 +196,26 @@ func (h *Health) budget(alias string) *float64 {
 	}
 	return b
 }
+
+// DeploymentHealth is what Health knows of a deployment, for its metrics
+// and its tests.
+type DeploymentHealth struct {
+	InFlight int  // attempts holding a lease
+	Ejected  bool // until a commit readmits it
+	Probing  bool // its one probe is in flight
+}
+
+// Deployment reports t's health.
+func (h *Health) Deployment(t *Target) DeploymentHealth {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d := h.dep(t)
+	return DeploymentHealth{InFlight: d.inflight, Ejected: !d.until.IsZero(), Probing: d.probing}
+}
+
+// Retries reports the retries a route's budget holds.
+func (h *Health) Retries(alias string) float64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return *h.budget(alias)
+}

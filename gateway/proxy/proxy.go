@@ -94,6 +94,9 @@ type Handler struct {
 	MaxKept int64
 	// record, if set, is told each call's result (tests).
 	record func(*http.Request, Result)
+	// beforePick, if set, runs before each attempt's deployment is picked,
+	// the first included (tests: the attempt model's traces drive when).
+	beforePick func(*http.Request)
 
 	healthOnce sync.Once
 	ownHealth  *route.Health
@@ -185,6 +188,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hl := h.health()
 	hl.Called(rt.Alias)
 	tried := make([]bool, len(rt.Pool))
+	if h.beforePick != nil {
+		h.beforePick(r)
+	}
 	target, lease, retryAt := pick(hl, rt, tried)
 	if target == nil {
 		h.fail(ctx, w, &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
@@ -287,6 +293,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// output) and reports whether the call goes on.
 		retry := func(status int, after time.Duration) bool {
 			lease.Fail(after)
+			if h.beforePick != nil {
+				h.beforePick(r)
+			}
 			if !kept || attempt >= rt.MaxAttempts || r.Context().Err() != nil || terminatedBy(upCtx) != nil {
 				return false
 			}
