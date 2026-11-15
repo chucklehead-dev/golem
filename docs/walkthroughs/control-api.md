@@ -33,13 +33,13 @@ store is `EntraAuth`, which looks up a token's principal in the current
 document; it never writes.
 
 `cmd/golem-control` wires it up (`apiServer`,
-cmd/golem-control/main.go:263): an `api.Server` over a `service.Service`
+cmd/golem-control/main.go:424): an `api.Server` over a `service.Service`
 over the shared `state.Store`, with `api.EntraAuth` as the
 authenticator. The API is served only with `-listen`, and refuses to
 start without `-entra-tenant` (`TestAPINeedsTenant`); `-entra-audience`
-(default `api://golem-control`, main.go:153) is the control API
+(default `api://golem-control`, main.go:254) is the control API
 registration's, never the gateway's. The `http.Server` cuts off a slow
-peer (main.go:279): headers within 10 seconds, the whole request within
+peer (main.go:430): headers within 10 seconds, the whole request within
 30, the response within a minute, idle connections after two, headers
 at most 64 KiB.
 
@@ -125,7 +125,7 @@ shared helpers sit together near the top (service.go:123-156):
 | Every call is authenticated before its body is read | `Server.Handler` (api.go:52) | `TestLimits`, `TestAPI` |
 | A request message is at most 1 MiB | `connect.WithReadMaxBytes` in `Handler` (api.go:53) | `TestLimits` (with a 1 KiB limit) |
 | An internal error's text (bucket, S3) never reaches the caller | `connectError` (api.go:89): logged with an id, answered "internal error <id>" | `TestLimits` |
-| Only control API tokens (`golem.manage`, `api://golem-control`) are accepted; a gateway token is not | `entra.Verifier` with `Scope: entra.ScopeManage` (main.go:267) | `TestEntraAuth` |
+| Only control API tokens (`golem.manage`, `api://golem-control`) are accepted; a gateway token is not | `entra.Verifier` with `Scope: entra.ScopeManage` (main.go:419) | `TestEntraAuth` |
 | Each method's callers are exactly those of §3 | the methods, through `manages`, `sees`, `visibleScope`, `requireManager`, `mayMint` | `TestAuthorization` (service_test.go:47), `TestRevokeKey` (:98), `TestBindGroup` (:373) |
 | An outsider learns nothing of a scope or key: `not found`, not `permission denied` | `visibleScope`, `RevokeKey` | `TestAuthorization`, `TestRevokeKey`, `TestReads` (:231) |
 | A manager cannot remove a fellow manager | `RemoveMember` | `TestManagerRules` (:127) |
@@ -139,6 +139,7 @@ shared helpers sit together near the top (service.go:123-156):
 | A dry run checks everything and writes nothing | `Service.apply` → `state.Store.Validate` | `TestValidateOnly` (:156), `TestGolemctl` |
 | A change and its audit event are one write | `Service.apply` | `TestKeyRules` (the event is in the document written with the key) |
 | A revocation is never undone | `checkRevocations` in control/state | `TestEntitlementInvariants` |
+| Past 80% of the audit outbox's bound a method that grants (`CreateScope`, `AddMember`, `BindGroup`, `BindManager`, `MintKey`) is refused, `validate_only` too, and the restrictive ones (`RevokeKey`, `RemoveMember`, `UnbindGroup`) land; at the bound all are refused and nothing grows | `checkOutbox` in control/state (`state.ErrOutboxFull`), judged by the events a write adds and its effective diff | `TestOutboxBackpressure`, `TestOutboxFullCode`; control/state's `TestOutboxBound` |
 | A minted key's response is not cached | `keys.MintKey` sets `Cache-Control: no-store` (keys.go:25) | none |
 | golemctl's gateway token cannot call the control API | per-resource tokens in golemctl (`Tokens`, `accessToken`); the audience check above | `TestGolemctl` ("the gateway's token is its own"), `TestEntraAuth` |
 
@@ -163,7 +164,13 @@ small detail map; service.go:105), then hands it to the store:
 
 The change and its audit event are one write: there is no change without
 its event, and no event without its change. The leader's `control/audit`
-then ships the outbox to the archive and to ClickHouse. A key's plaintext
+then ships the outbox to the archive and to ClickHouse. The outbox is
+bounded (control-plane walkthrough §1, *The audit outbox's bound*): past
+80% of `-audit-outbox-max` the store refuses a change that grants or
+widens access, by the class of each event's action (`state.ClassOf`) and
+by what the change does; at the bound it refuses every change, since a
+change is never written without its event. A new action is classed in
+`control/state/outbox.go`'s table, or every write of it is refused. A key's plaintext
 is never in an event; `TestKeyRules` checks it.
 
 ## 6. Errors
@@ -178,6 +185,7 @@ context's:
 | `service.ErrPermission` | `permission_denied` | 403 |
 | `service.ErrNotFound` | `not_found` | 404 |
 | `service.ErrInvalid` (an `*Invalid` with a field path, such as `key.models[0]`) | `invalid_argument` | 400 |
+| `state.ErrOutboxFull` (the audit outbox past its reserve for a grant, or at its bound) | `resource_exhausted` | 429 |
 | `state.ErrInvariant` | `failed_precondition` | 400 |
 | `state.ErrContended` | `aborted` | 409 |
 | context past its deadline | `deadline_exceeded` | 504 |
@@ -186,7 +194,13 @@ context's:
 | anything else | `internal` | 500 |
 
 The message is the service's, which names the field and what to do; tests
-assert on the codes and on field paths (`TestAPI`). An internal error
+assert on the codes and on field paths (`TestAPI`). The outbox's refusal
+is `resource_exhausted`, not `unavailable`: the service answers and
+restrictive changes still land, and the space comes back only when the
+archive drains the outbox, an operator's fix, so a client backs off as it
+would from a quota rather than retrying at once; its message names the
+action refused and the fix (`-audit-archive`, operations.md's *Audit
+outbox not draining*) (`TestOutboxFullCode`). An internal error
 (the bucket's or S3's, whose text names buckets, keys and endpoints) is
 logged in full with an id (`Server.Log`, default `slog.Default()`), and
 the caller is told only "internal error <id>: see golem-control's log"
@@ -346,6 +360,11 @@ end against a fake Entra and a real `api.Server`.
 - A request with fields the API no longer has (a `policy` in
   `CreateScope`, from before ADR 0050) is not refused: Connect's JSON and
   binary codecs discard unknown fields. golemctl sends none.
+- At the audit outbox's bound a revocation is refused like every
+  audited change (the document must not grow without limit, and no change
+  is written without its event); the site's emergency denylist is the
+  path until the archive drains it. golemctl prints the refusal as it is;
+  it does not retry.
 - Responses carry no etag (control-plane.md §2 step 5) and there are no
   conditional updates by the client.
 - `golemctl` loads its settings before it looks up the command, so an

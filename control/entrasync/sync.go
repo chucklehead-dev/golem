@@ -140,26 +140,42 @@ func (s *Sync) Step(ctx context.Context, fence state.Fence) (Result, error) {
 	var res Result
 	var tripped bool
 	var guarded int
-	_, err := s.State.FencedUpdate(ctx, fence, func(d *state.Document) error {
-		// Built afresh from the document this attempt is given: the update
-		// may retry against a newer one.
-		res, guarded, tripped = reconcile(d, members, accounts, s.now(), limit)
-		if !res.changed {
-			return errNoChange
+	write := func(restrictOnly bool) error {
+		_, err := s.State.FencedUpdate(ctx, fence, func(d *state.Document) error {
+			// Built afresh from the document this attempt is given: the
+			// update may retry against a newer one.
+			res, guarded, tripped = reconcile(d, members, accounts, s.now(), limit, restrictOnly)
+			if !res.changed {
+				return errNoChange
+			}
+			return nil
+		})
+		if errors.Is(err, errNoChange) {
+			res = Result{}
+			return nil
 		}
-		return nil
-	})
-	switch {
-	case errors.Is(err, errNoChange):
-		res = Result{}
-	case err != nil:
+		return err
+	}
+	err := write(false)
+	// Past the audit outbox's reserve the store refuses a write that grants
+	// (a user created, a membership added): the removals and offboarding
+	// are written alone, into the capacity kept for them, and the additions
+	// wait for the outbox to drain.
+	var held error
+	if full, ok := errors.AsType[*state.OutboxFull](err); ok && !full.Hard() {
+		n := res.Created + res.Added
+		if err = write(true); err == nil {
+			held = fmt.Errorf("%w; only removals and offboarding were written (%d removed, %d keys revoked, %d offboarded), and %d creation(s) and addition(s) wait for the outbox to drain", full, res.Removed, res.Revoked, res.Offboarded, n)
+		}
+	}
+	if err != nil {
 		return Result{}, err
 	}
 	if tripped {
-		return res, fmt.Errorf("%w: %d, over the limit of %d; only the offboarding of %d disabled or deleted user(s) was written. Check the bound groups (one re-bound or emptied, a directory answering empty), or raise -entra-sync-max-removals for one run if the removal is intended",
-			ErrTooManyRemovals, guarded, limit, res.Offboarded)
+		return res, errors.Join(held, fmt.Errorf("%w: %d, over the limit of %d; only the offboarding of %d disabled or deleted user(s) was written. Check the bound groups (one re-bound or emptied, a directory answering empty), or raise -entra-sync-max-removals for one run if the removal is intended",
+			ErrTooManyRemovals, guarded, limit, res.Offboarded))
 	}
-	return res, nil
+	return res, held
 }
 
 // left is the object ID of every user principal of d's with synced
@@ -233,7 +249,10 @@ func wanted(d *state.Document, members map[string][]User) map[string]*want {
 // offboarded (offboarded: disabled or deleted, as the directory
 // affirmatively reports). Over limit, only the offboarding is applied, and
 // tripped is true.
-func reconcile(d *state.Document, members map[string][]User, accounts map[string]User, at time.Time, limit int) (res Result, guarded int, tripped bool) {
+//
+// restrictOnly applies only what narrows access: no user is created and no
+// membership added (the audit outbox past its reserve, state.OutboxFull).
+func reconcile(d *state.Document, members map[string][]User, accounts map[string]User, at time.Time, limit int, restrictOnly bool) (res Result, guarded int, tripped bool) {
 	wants := wanted(d, members)
 	byEntra := map[string]string{} // a user's object ID to its principal
 	for id, p := range d.Principals {
@@ -290,10 +309,17 @@ func reconcile(d *state.Document, members map[string][]User, accounts map[string
 			continue
 		}
 		id := c.id
-		if id == "" {
+		switch {
+		case id == "" && restrictOnly:
+			continue
+		case id == "":
 			id = r.create(c.upn, c.oid)
 		}
 		p := d.Principals[id]
+		if restrictOnly {
+			// Of the memberships wanted, only those it has: removals alone.
+			c.synced = slices.DeleteFunc(slices.Clone(c.synced), func(s string) bool { return !slices.Contains(p.Synced, s) })
+		}
 		if c.upn != "" && p.UPN != c.upn {
 			p.UPN = c.upn
 			d.Principals[id] = p
@@ -363,8 +389,16 @@ func (r *reconciler) setSynced(id string, p state.Principal, synced []string, di
 	r.res.Removed += len(removed)
 	r.res.Revoked += revoked
 	r.res.changed = true
-	r.audit("membership.sync", id, map[string]string{"added": strings.Join(added, ","), "removed": strings.Join(removed, ","),
-		"keysRevoked": fmt.Sprint(revoked), "disabled": fmt.Sprint(disabled)})
+	// Additions and removals are events of their own: a removal is
+	// restrictive, and lands when the audit outbox holds back grants
+	// (state.OutboxFull).
+	if len(added) > 0 {
+		r.audit("membership.sync.add", id, map[string]string{"added": strings.Join(added, ",")})
+	}
+	if len(removed)+revoked > 0 || lostDefault {
+		r.audit("membership.sync.remove", id, map[string]string{"removed": strings.Join(removed, ","),
+			"keysRevoked": fmt.Sprint(revoked), "disabled": fmt.Sprint(disabled)})
+	}
 	return true
 }
 

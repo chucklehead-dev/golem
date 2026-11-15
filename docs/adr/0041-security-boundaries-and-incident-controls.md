@@ -303,3 +303,34 @@ failures are added, the two terms reported rather than bounded in advance.
 Several sites are not modelled: each active site adds its own `scope limit
 × W` and what the others spend within one snapshot lag. Simulation, not
 proof.
+
+**7.7 Audit backpressure, as built (adapts §1).** The state document's
+outbox is bounded by a count of events (`state.Store.MaxOutbox`,
+`golem-control -audit-outbox-max`, default 10,000: a few MB of the
+document). The ordinary capacity is the first 80%; the last 20% is the
+reserved capacity for restrictive changes, and the bound is the emergency
+capacity's end:
+
+- Past 80% the store refuses a write that grants or widens access
+  (`state.OutboxFull`, which the control API answers `ResourceExhausted`,
+  naming the archive and the alert). Restrictive writes (revoking a key,
+  removing a member, unbinding a group, the group sync's removals and
+  offboarding, a restore, which never widens) land up to the bound.
+- At the bound every write that adds an audit event is refused, revocations
+  too: no write without its audit record, and no unbounded document.
+  Revocation then is the site's denylist, as §1 says; the alert pages at
+  80%, while revocations still land.
+- Writes that add no audit event (publication records, the fence, the
+  shipper's trim) are never refused: publication goes on, and the trim is
+  what makes room.
+
+Classification is in the store, so no write path can bypass it: each
+audit action has a class in a table beside the action names
+(`control/state/outbox.go`; an unclassified action is refused at every
+write, and a test finds every action the code writes), and a write is
+restrictive only if all its events are restrictive **and** its effective
+authorization diff, computed from the documents before and after, widens
+nothing. A mixed change is therefore a widening one: the group sync writes
+additions and removals as separate events and, refused, writes its
+removals alone. Capture enablement and policy widening are config (ADR
+0050), not state writes, and are outside this bound.

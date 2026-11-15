@@ -205,7 +205,11 @@ This protects retained history, not the honesty of a compromised event producer.
 Bound outbox growth. Widening mutations fail closed before ordinary audit
 capacity is exhausted; reserve bounded audit capacity for restrictive changes.
 At emergency-capacity exhaustion use the separately audited local denylist,
-not unaudited writes or blocked revocation. See ADR 0041 §1.
+not unaudited writes or blocked revocation. See ADR 0041 §1. Built: the
+outbox is bounded at `-audit-outbox-max` (10,000 events), widening writes
+refused past 80% by each event's class and the write's effective diff, the
+last 20% kept for restrictive ones, every audited write refused at the
+bound (ADR 0041 §7.7).
 
 Standalone binds only to loopback unless explicitly configured, rejects
 unexpected Host/Origin values and browser cross-site requests, and requires

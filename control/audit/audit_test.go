@@ -199,3 +199,33 @@ type noWrites struct{ bucket.Bucket }
 func (noWrites) Put(context.Context, string, []byte, string) (string, error) {
 	return "", errors.New("connection refused")
 }
+
+// TestShippingReopensGrants: while the archive is unreachable the outbox
+// fills past its reserve and grants are refused; once a step ships and
+// trims it, they land again.
+func TestShippingReopensGrants(t *testing.T) {
+	w := newWorld(t, 0)
+	w.state.MaxOutbox = 10
+	w.ship.Archive = noWrites{w.archive}
+	w.add(t, state.Reserve(10)) // scope.create events: grants, up to the reserve
+	if _, err := w.ship.Step(t.Context(), lead1); err == nil {
+		t.Fatal("a step with the archive unreachable succeeded")
+	}
+	grant := func() error {
+		_, err := w.state.Update(t.Context(), func(d *state.Document) error {
+			d.Audit = append(d.Audit, state.AuditEvent{At: time.Unix(99, 0).UTC(), Actor: "root", Action: "key.mint", Target: "k"})
+			return nil
+		})
+		return err
+	}
+	if err := grant(); !errors.Is(err, state.ErrOutboxFull) {
+		t.Fatalf("a grant past the reserve, the archive unreachable: %v, want ErrOutboxFull", err)
+	}
+	w.ship.Archive = w.archive
+	if n, err := w.ship.Step(t.Context(), lead1); err != nil || n != state.Reserve(10) {
+		t.Fatalf("the step once the archive is back: %d %v", n, err)
+	}
+	if err := grant(); err != nil {
+		t.Fatalf("a grant after the outbox was shipped: %v", err)
+	}
+}

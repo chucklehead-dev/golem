@@ -478,3 +478,64 @@ func TestSyncFenced(t *testing.T) {
 		t.Fatalf("the new leader's sync: %v", err)
 	}
 }
+
+// TestSyncOutboxBackpressure: past the audit outbox's reserve a step
+// writes its removals and offboarding and holds back its creations and
+// additions, reporting state.ErrOutboxFull; a user moved between groups
+// loses the old membership and waits for the new. Once the outbox is
+// trimmed, the next step writes the rest.
+func TestSyncOutboxBackpressure(t *testing.T) {
+	d := &dir{groups: map[string][]User{
+		"g-a":      {{ID: "oid-c", UPN: "carol@example.com", Enabled: true}},
+		"g-b":      {{ID: "oid-d", UPN: "dan@example.com", Enabled: true}},
+		"g-nested": {},
+	}}
+	s := setup(t, d)
+	if _, err := s.Step(t.Context(), lead1); err != nil {
+		t.Fatal(err)
+	}
+	s.State.MaxOutbox = 20
+	if _, err := s.State.Update(t.Context(), func(doc *state.Document) error {
+		for len(doc.Audit) < state.Reserve(20) {
+			doc.Audit = append(doc.Audit, state.AuditEvent{At: at, Actor: Actor, Action: "membership.sync.remove", Target: "none"})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// carol is disabled (offboarding), dan moves from g-b to g-a, and erin
+	// joins g-b (a creation).
+	d.groups["g-a"] = []User{{ID: "oid-c", UPN: "carol@example.com", Disabled: true}, {ID: "oid-d", UPN: "dan@example.com", Enabled: true}}
+	d.groups["g-b"] = []User{{ID: "oid-e", UPN: "erin@example.com", Enabled: true}}
+	res, err := s.Step(t.Context(), lead1)
+	if !errors.Is(err, state.ErrOutboxFull) || !strings.Contains(err.Error(), "only removals and offboarding were written") {
+		t.Fatalf("a step past the reserve: %+v %v, want ErrOutboxFull with the removals written", res, err)
+	}
+	doc := s.State.Current()
+	if c := doc.Principals["carol"]; len(c.Synced) != 0 || alive(doc, "kc") {
+		t.Fatalf("carol not offboarded: %+v, kc alive %v", c, alive(doc, "kc"))
+	}
+	if dan := doc.Principals["dan@example.com"]; len(dan.Synced) != 0 {
+		t.Fatalf("dan %+v: his team-b membership should end, his team-a one wait", dan)
+	}
+	if _, ok := doc.Principals["erin@example.com"]; ok || res.Created != 0 || res.Added != 0 || res.Offboarded != 1 {
+		t.Fatalf("held back: erin created %v, %+v", ok, res)
+	}
+	for _, e := range doc.Audit[state.Reserve(20):] {
+		if c, _ := state.ClassOf(e.Action); c != state.Restrictive {
+			t.Errorf("a %s event written past the reserve", e.Action)
+		}
+	}
+
+	// The shipper trims the outbox: the next step writes the rest.
+	if _, err := s.State.Update(t.Context(), func(doc *state.Document) error { doc.Audit = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.Step(t.Context(), lead1); err != nil || res.Created != 1 || res.Added != 2 {
+		t.Fatalf("after the trim: %+v %v, want erin created and dan and erin added", res, err)
+	}
+	doc = s.State.Current()
+	if !doc.Principals["dan@example.com"].MemberOf("team-a") || !doc.Principals["erin@example.com"].MemberOf("team-b") {
+		t.Fatalf("after the trim: dan %+v, erin %+v", doc.Principals["dan@example.com"], doc.Principals["erin@example.com"])
+	}
+}

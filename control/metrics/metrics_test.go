@@ -263,16 +263,26 @@ func TestMetrics(t *testing.T) {
 	})
 }
 
-// TestOutbox: the outbox's length is the document's, read without a copy.
+// TestOutbox: the outbox's length is the document's, read without a copy,
+// and its bound the store's.
 func TestOutbox(t *testing.T) {
 	r := newRig(t)
 	if _, err := r.c.Elector.State.Update(t.Context(), func(d *state.Document) error {
-		d.Audit = append(d.Audit, state.AuditEvent{At: r.clock, Actor: "root", Action: "a"}, state.AuditEvent{At: r.clock, Actor: "root", Action: "b"})
+		d.Audit = append(d.Audit, state.AuditEvent{At: r.clock, Actor: "root", Action: "key.revoke"}, state.AuditEvent{At: r.clock, Actor: "root", Action: "membership.remove"})
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if v := value(t, r.collect(), AuditOutbox); v != 2 {
+	got := r.collect()
+	if v := value(t, got, AuditOutbox); v != 2 {
 		t.Fatalf("%s = %v, want 2", AuditOutbox, v)
+	}
+	// Its bound, for the alert's ratio.
+	if v := value(t, got, AuditOutboxMax); v != state.DefaultMaxOutbox {
+		t.Fatalf("%s = %v, want %d", AuditOutboxMax, v, state.DefaultMaxOutbox)
+	}
+	r.c.Elector.State.MaxOutbox = 500
+	if v := value(t, r.collect(), AuditOutboxMax); v != 500 {
+		t.Fatalf("%s = %v with the bound set to 500", AuditOutboxMax, v)
 	}
 }

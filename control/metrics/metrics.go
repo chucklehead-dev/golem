@@ -39,6 +39,7 @@ const (
 	SyncTime          = "golem.control.entra_sync.time"
 	SyncGuardTrips    = "golem.control.entra_sync.guard_trips"
 	AuditOutbox       = "golem.control.audit.outbox"
+	AuditOutboxMax    = "golem.control.audit.outbox_max"
 	AuditShippedTime  = "golem.control.audit.shipped.time"
 )
 
@@ -78,7 +79,10 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 	}
 	// The outbox grows whether or not it is shipped (no -audit-archive).
 	outbox := r.igauge(m, AuditOutbox, "{count}", "Audit events in the state document's outbox, waiting to be archived")
-	insts = append(insts, outbox)
+	// Its bound, so an alert is a ratio: past 80% grants are refused, at
+	// it every change that adds an audit event (state.OutboxFull).
+	outboxMax := r.igauge(m, AuditOutboxMax, "{count}", "The audit outbox's bound (-audit-outbox-max): past 80% of it changes that grant access are refused, at it every change that adds an audit event")
+	insts = append(insts, outbox, outboxMax)
 	var shipped metric.Float64ObservableGauge
 	if c.Audit != nil {
 		shipped = r.fgauge(m, AuditShippedTime, "s", "When an audit shipping step last succeeded on this replica (Unix time)")
@@ -144,6 +148,7 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 			o.ObserveInt64(guard, c.GuardTrips())
 		}
 		o.ObserveInt64(outbox, int64(c.Elector.State.OutboxLen()))
+		o.ObserveInt64(outboxMax, int64(c.Elector.State.OutboxMax()))
 		if c.Audit != nil {
 			if t := c.ShippedAt(); !t.IsZero() {
 				o.ObserveFloat64(shipped, unix(t))

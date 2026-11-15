@@ -473,3 +473,81 @@ func TestBindManager(t *testing.T) {
 		t.Errorf("no principal: %v, want invalid", err)
 	}
 }
+
+// TestOutboxBackpressure: past the audit outbox's reserve every method
+// that grants is refused with ErrOutboxFull, validate_only too, and the
+// restrictive ones land; at its bound a revocation is refused too, and
+// nothing grows; once the outbox is trimmed, grants land again.
+func TestOutboxBackpressure(t *testing.T) {
+	s := setup(t)
+	ctx := t.Context()
+	var keys []string
+	for _, owner := range []string{"alice", "alice", "ci"} {
+		k, err := s.MintKey(ctx, admin, Options{}, KeyRequest{Owner: owner, Scope: "team-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, k.Hash)
+	}
+	s.State.MaxOutbox = 20
+	fill := func(n int) {
+		t.Helper()
+		if _, err := s.State.Update(ctx, func(d *state.Document) error {
+			for len(d.Audit) < n {
+				d.Audit = append(d.Audit, state.AuditEvent{Actor: "root", Action: "key.revoke", Target: "none"})
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fill(state.Reserve(20))
+	v := s.State.Current().StateVersion
+	grants := map[string]func(Options) error{
+		"mint a key": func(o Options) error {
+			_, err := s.MintKey(ctx, alice, o, KeyRequest{Scope: "team-a"})
+			return err
+		},
+		"add a member":   func(o Options) error { return s.AddMember(ctx, mgrA, o, "team-a", Member{ID: "bot", Kind: "service"}) },
+		"create a scope": func(o Options) error { return s.CreateScope(ctx, admin, o, "team-c") },
+		"bind a manager": func(o Options) error { return s.BindManager(ctx, admin, o, "team-a", "alice") },
+		"bind a group":   func(o Options) error { return s.BindGroup(ctx, admin, o, "team-a", "g-1") },
+	}
+	for name, grant := range grants {
+		for _, o := range []Options{{}, {ValidateOnly: true}} {
+			if err := grant(o); !errors.Is(err, state.ErrOutboxFull) || !strings.Contains(err.Error(), "-audit-archive") {
+				t.Errorf("%s past the reserve (validate only %v): %v, want ErrOutboxFull naming the fix", name, o.ValidateOnly, err)
+			}
+		}
+	}
+	if d := s.State.Current(); d.StateVersion != v {
+		t.Fatalf("refused grants wrote version %d", d.StateVersion)
+	}
+	// Restrictive changes land in the reserve.
+	if err := s.RevokeKey(ctx, alice, Options{}, keys[0]); err != nil {
+		t.Fatalf("a revocation past the reserve: %v", err)
+	}
+	if err := s.RemoveMember(ctx, mgrA, Options{}, "team-a", "ci"); err != nil {
+		t.Fatalf("a removal past the reserve: %v", err)
+	}
+	if d := s.State.Current(); d.Keys[keys[0]].RevokedAt.IsZero() || d.Keys[keys[2]].RevokedAt.IsZero() || d.Principals["ci"].MemberOf("team-a") {
+		t.Fatal("the revocation and the removal did not take effect")
+	}
+	// At the bound, a revocation is refused too, and nothing grows.
+	fill(20)
+	v = s.State.Current().StateVersion
+	err := s.RevokeKey(ctx, alice, Options{}, keys[1])
+	if full, ok := errors.AsType[*state.OutboxFull](err); !ok || !full.Hard() {
+		t.Fatalf("a revocation at the bound: %v, want the outbox full", err)
+	}
+	if d := s.State.Current(); d.StateVersion != v || len(d.Audit) != 20 || !d.Keys[keys[1]].RevokedAt.IsZero() {
+		t.Fatalf("at the bound: version %d (was %d), outbox %d", d.StateVersion, v, len(d.Audit))
+	}
+	// Trimmed (as the shipper does once archived), grants land again.
+	if _, err := s.State.Update(ctx, func(d *state.Document) error { d.Audit = d.Audit[len(d.Audit)-5:]; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := grants["mint a key"](Options{}); err != nil {
+		t.Fatalf("a mint after the trim: %v", err)
+	}
+}

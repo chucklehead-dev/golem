@@ -204,3 +204,40 @@ func (failing) Get(context.Context, string, string) ([]byte, string, error) {
 func (failing) Put(context.Context, string, []byte, string) (string, error) {
 	return "", errors.New("PUT s3://secret-bucket/state/document.json: access denied")
 }
+
+// TestOutboxFullCode: a grant refused by the audit outbox's bound is
+// ResourceExhausted, with the store's message (the cause and the fix); a
+// revocation in the reserve lands.
+func TestOutboxFullCode(t *testing.T) {
+	srv, st := serve(t)
+	ctx := t.Context()
+	org := orgv1connect.NewOrgServiceClient(srv.Client(), srv.URL, as("root"))
+	keys := keysv1connect.NewKeyServiceClient(srv.Client(), srv.URL, as("alice"))
+	if _, err := org.CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: "team-a"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := org.AddMember(ctx, connect.NewRequest(&orgv1.AddMemberRequest{Scope: "team-a",
+		Member: &orgv1.Member{Id: "alice", Kind: "user", Entra: "oid-alice"}})); err != nil {
+		t.Fatal(err)
+	}
+	k, err := keys.MintKey(ctx, connect.NewRequest(&keysv1.MintKeyRequest{Owner: "alice", Scope: "team-a"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.MaxOutbox = 10
+	if _, err := st.Update(ctx, func(d *state.Document) error {
+		for len(d.Audit) < state.Reserve(10) {
+			d.Audit = append(d.Audit, state.AuditEvent{Actor: "root", Action: "key.revoke", Target: "none"})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = keys.MintKey(ctx, connect.NewRequest(&keysv1.MintKeyRequest{Owner: "alice", Scope: "team-a"}))
+	if code(err) != connect.CodeResourceExhausted || !strings.Contains(err.Error(), "-audit-archive") {
+		t.Fatalf("a mint past the reserve: %v, want ResourceExhausted naming the fix", err)
+	}
+	if _, err := keys.RevokeKey(ctx, connect.NewRequest(&keysv1.RevokeKeyRequest{Hash: k.Msg.Hash})); err != nil {
+		t.Fatalf("a revocation past the reserve: %v", err)
+	}
+}
