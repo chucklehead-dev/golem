@@ -222,7 +222,15 @@ deployment) and `url` (a VPC endpoint; else the region's
   error event (throttling a rate limit, unavailability an overload), so
   the commit point refuses one that comes first and the call fails over
   (ADR 0051); a bad CRC or a cut is a read error, the request path's cut;
-- returns a Bedrock error answer in Anthropic's shape, its status kept.
+- returns a Bedrock error answer in Anthropic's shape, its status kept;
+- sends the attempt's attribution as Bedrock's request metadata
+  (`X-Amzn-Bedrock-Request-Metadata`, signed, as Bedrock requires):
+  `golem_request_id`, `golem_attempt_id` (the ledger row's `event_id`),
+  `golem_principal`, `golem_scope` and `golem_key` (the key's display ID;
+  none for an Entra token). Bedrock's invocation logs then carry it, so
+  each of its records joins the ledger row for the same attempt. The proxy
+  attaches the attribution only for an enveloped deployment
+  (`gateway/envelope`), so other calls pay nothing for it.
 
 Usage is read from the events as for Anthropic (`message_start`,
 `message_delta`); Bedrock's `amazon-bedrock-invocationMetrics` in

@@ -172,6 +172,21 @@ environment credentials. The role needs:
   may invoke it (ADR 0038, 0039: the account's SCP denies invocation to
   every role but the gateway's).
 
+Attribution on the AWS side, set up with the dedicated account:
+
+- **Cost by caller:** a CUR 2.0 export with "Include caller identity (IAM
+  principal) allocation data", and the gateway's role tagged and the tags
+  activated as cost allocation tags. CUR then shows golem's Bedrock spend
+  as the gateway role's, apart from any other caller's (bypass, ADR 0039).
+  Per scope, cost is golem's ledger's; CUR does not split one role.
+- **Per request:** model invocation logging on in every region the routes
+  use, delivering metadata only: text, image, embedding and video data
+  delivery off, so no prompt or completion is stored at the provider (ADR
+  0027). Each record carries golem's request metadata (gateway.md §4a),
+  which joins it to its ledger row: reconciliation per request, not only
+  per day. (Verify on the account that a log with every data delivery off
+  holds the metadata alone.)
+
 Without credentials a bedrock call fails with `upstream.unavailable` and
 the gateway logs, at start, that it has none; the snapshot still applies.
 A deployment in another region needs model access granted there too.

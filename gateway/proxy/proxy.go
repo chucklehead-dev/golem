@@ -25,6 +25,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/canon"
+	"github.com/chucklehead-dev/golem/gateway/envelope"
 	"github.com/chucklehead-dev/golem/gateway/price"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
@@ -317,7 +318,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 
-		up, ub := upstreamRequest(upCtx, r, target, out, h.Dialect.forwardRequest())
+		attemptCtx := upCtx
+		if target.Envelope != "" {
+			// An envelope may pass the attempt's attribution to its provider
+			// (Bedrock's request metadata: the ledger's IDs in its invocation
+			// logs, so the two join per request). Only an envelope's calls
+			// pay for the context.
+			attemptCtx = envelope.WithAttribution(upCtx, &envelope.Attribution{RequestID: reqIDs, AttemptID: call.AttemptID(),
+				Principal: principal.ID, Scope: principal.Scope, Key: principal.Key})
+		}
+		up, ub := upstreamRequest(attemptCtx, r, target, out, h.Dialect.forwardRequest())
 		var err error
 		resp, err = target.Transport.RoundTrip(up)
 		if err != nil {

@@ -256,6 +256,14 @@ Status:
   stub verifying every signature, usage on the row); ablated: unsigned,
   one region for all, exceptions dropped. Allocations per admitted call
   unchanged on other envelopes.
+- **Attribution: built.** Each attempt's attribution (golem's request and
+  attempt IDs, principal, scope, key display ID) goes to Bedrock as its
+  signed request metadata, so Bedrock's invocation logs join the ledger
+  per request: reconciliation (exit 2) can compare call by call. The AWS
+  side (CUR 2.0 caller identity, metadata-only invocation logging) is in
+  operations.md. Tests: `TestMetadata`, and `TestBedrockEndToEnd`'s stub
+  refusing unsigned metadata and checking each attempt's IDs against its
+  row; ablated (set after signing), both fail.
 - **Open:** the run against real Bedrock (docs/acceptance/m1-bedrock.md,
   needing an AWS account with model access), non-streaming calls on real
   Bedrock, and `count_tokens` (step 4's endpoints).

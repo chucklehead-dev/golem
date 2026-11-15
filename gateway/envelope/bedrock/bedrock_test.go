@@ -14,6 +14,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
+
+	"github.com/chucklehead-dev/golem/gateway/envelope"
 )
 
 var creds = aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
@@ -263,5 +265,44 @@ func TestErrorResponse(t *testing.T) {
 		if resp.StatusCode != c.status || e.Type != "error" || e.Error.Type != c.want || e.Error.Message != "bedrock: no" {
 			t.Errorf("%s: status %d, %s", c.exception, resp.StatusCode, b)
 		}
+	}
+}
+
+// TestMetadata: an attempt's attribution goes to Bedrock as its request
+// metadata, a JSON object of golem's IDs (no secret: the key's display
+// ID), among the signed headers (Bedrock refuses it unsigned); a request
+// with no attribution sends none.
+func TestMetadata(t *testing.T) {
+	c := &capture{}
+	ctx := envelope.WithAttribution(context.Background(), &envelope.Attribution{RequestID: "r1", AttemptID: "r1.2",
+		Principal: "alice", Scope: "team-a", Key: "glm_live_ab12"})
+	r, _ := http.NewRequestWithContext(ctx, "POST", "https://x/v1/messages", strings.NewReader(`{"model":"m","stream":true}`))
+	if _, err := transport(c).RoundTrip(r); err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]string
+	if err := json.Unmarshal([]byte(c.req.Header.Get(MetadataHeader)), &meta); err != nil {
+		t.Fatalf("metadata %q: %v", c.req.Header.Get(MetadataHeader), err)
+	}
+	want := map[string]string{"golem_request_id": "r1", "golem_attempt_id": "r1.2", "golem_principal": "alice",
+		"golem_scope": "team-a", "golem_key": "glm_live_ab12"}
+	for k, v := range want {
+		if meta[k] != v {
+			t.Fatalf("metadata %v: want %v", meta, want)
+		}
+	}
+	if !strings.Contains(c.req.Header.Get("Authorization"), "x-amzn-bedrock-request-metadata") {
+		t.Fatalf("Authorization %q: the metadata header must be signed", c.req.Header.Get("Authorization"))
+	}
+
+	c = &capture{}
+	r, _ = http.NewRequest("POST", "https://x/v1/messages", strings.NewReader(`{"model":"m"}`))
+	transport(c).RoundTrip(r)
+	if c.req.Header.Get(MetadataHeader) != "" {
+		t.Fatal("metadata without an attribution")
+	}
+	// An Entra token's call has no key: left out, not empty.
+	if m := metadata(&envelope.Attribution{RequestID: "r", AttemptID: "r", Principal: "p", Scope: "s"}); strings.Contains(m, "golem_key") {
+		t.Fatalf("%s", m)
 	}
 }

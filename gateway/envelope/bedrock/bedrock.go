@@ -31,6 +31,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+
+	"github.com/chucklehead-dev/golem/gateway/envelope"
 )
 
 // Version is the Messages API version Bedrock takes in the body.
@@ -56,6 +58,29 @@ type Transport struct {
 	Now func() time.Time
 
 	signer *v4.Signer
+}
+
+// MetadataHeader carries a request's metadata to Bedrock's invocation
+// logs (InvokeModel's per-request metadata tagging).
+const MetadataHeader = "X-Amzn-Bedrock-Request-Metadata"
+
+// metadata is an attribution as Bedrock's request metadata: a JSON object
+// of strings, the empty ones left out.
+func metadata(a *envelope.Attribution) string {
+	b := []byte{'{'}
+	for _, kv := range [...][2]string{{"golem_request_id", a.RequestID}, {"golem_attempt_id", a.AttemptID},
+		{"golem_principal", a.Principal}, {"golem_scope", a.Scope}, {"golem_key", a.Key}} {
+		if kv[1] == "" {
+			continue
+		}
+		if len(b) > 1 {
+			b = append(b, ',')
+		}
+		b, _ = jsontext.AppendQuote(b, kv[0])
+		b = append(b, ':')
+		b, _ = jsontext.AppendQuote(b, kv[1])
+	}
+	return string(append(b, '}'))
 }
 
 // EndpointFor is a region's Bedrock runtime endpoint.
@@ -98,6 +123,13 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		up.Header.Set("Accept", "application/vnd.amazon.eventstream")
 	} else {
 		up.Header.Set("Accept", "application/json")
+	}
+	// The attempt's attribution as Bedrock's request metadata, set before
+	// signing (Bedrock refuses the header unsigned): its invocation logs
+	// then carry golem's request and attempt IDs beside the principal,
+	// scope and key, so a call joins the ledger row for it.
+	if a := envelope.AttributionOf(r.Context()); a != nil {
+		up.Header.Set(MetadataHeader, metadata(a))
 	}
 	if err := t.sign(r.Context(), up, body); err != nil {
 		return nil, err

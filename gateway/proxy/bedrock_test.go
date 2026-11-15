@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,8 +37,9 @@ type bedrockStub struct {
 	mu       sync.Mutex
 	regions  []string // each request's signed region, in order
 	paths    []string
-	bad      []string     // what failed the signature check
-	rows     lockedBuffer // the gateway's ledger rows
+	bad      []string            // what failed the signature check
+	rows     lockedBuffer        // the gateway's ledger rows
+	metas    []map[string]string // each request's Bedrock request metadata
 }
 
 func (s *bedrockStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +78,14 @@ func (s *bedrockStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "the signature does not match the request")
 		return
 	}
+	if !signed[http.CanonicalHeaderKey("X-Amzn-Bedrock-Request-Metadata")] {
+		s.fail(w, "the request metadata is not signed")
+		return
+	}
+	var meta map[string]string
+	json.Unmarshal([]byte(r.Header.Get("X-Amzn-Bedrock-Request-Metadata")), &meta)
 	s.mu.Lock()
+	s.metas = append(s.metas, meta)
 	first := !strings.Contains(strings.Join(s.regions, " "), region)
 	s.regions, s.paths = append(s.regions, region), append(s.paths, r.URL.EscapedPath())
 	s.mu.Unlock()
@@ -220,6 +229,15 @@ func TestBedrockEndToEnd(t *testing.T) {
 	if len(rows) != 2 || rows[0]["envelope"] != "bedrock" || rows[1]["envelope"] != "bedrock" ||
 		rows[0]["cost_micros"].(float64) != 0 || rows[1]["deployment"] != "bedrock/west" {
 		t.Fatalf("rows %v: the throttled attempt free, the west's charged, both of the bedrock envelope", rows)
+	}
+	// Bedrock's records of each attempt name the ledger's: they join per
+	// request, attempt by attempt.
+	for i, row := range rows {
+		m := stub.metas[i]
+		if m["golem_attempt_id"] != row["event_id"] || m["golem_request_id"] != row["request_id"] ||
+			m["golem_principal"] != "alice" || m["golem_scope"] != "team-a" || m["golem_key"] != row["key_id"] {
+			t.Fatalf("attempt %d: metadata %v, row %v", i, m, row)
+		}
 	}
 
 	// No credentials: refused before anything is sent.
