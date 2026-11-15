@@ -55,7 +55,7 @@ request:   ztunnel (mesh mTLS) → listener → frontend (dialect, scan) → aut
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
 inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
            or, standalone (ADR 0023), CRD YAML in a local directory compiled in-process
-state:     the site's Valkey (spend since the snapshot, concurrency slots; rate windows and provider quota shares planned) (ADR 0031)
+state:     the site's Valkey, over TLS with AUTH (spend since the snapshot, concurrency slots; rate windows and provider quota shares planned) (ADR 0031)
 outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
            status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)

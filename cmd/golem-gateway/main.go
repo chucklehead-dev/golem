@@ -4,7 +4,7 @@
 // mounted Secrets:
 //
 //	golem-gateway -pool internal -bucket s3://golem-state/golem/ -keys /etc/golem/keys \
-//	  -checkpoint /var/lib/golem/checkpoint -valkey valkey:6379 -site eu-west-1 \
+//	  -checkpoint /var/lib/golem/checkpoint -valkey valkey:6379 -valkey-tls -valkey-user golem-gateway -site eu-west-1 \
 //	  -secrets /var/run/golem/secrets -listen :8080 -accept-unreleased
 //
 // or, for a developer's own machine, standalone (ADR 0023):
@@ -19,6 +19,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -59,6 +61,10 @@ type options struct {
 	pool, bucket, keys, checkpoint, gatewayID, valkeyAddr, site, secrets string
 	replicaAcks                                                          int
 	acceptUnreleased                                                     bool
+	// the site's Valkey: TLS (with a CA file's roots, else the system's)
+	// and an AUTH user; the password is $VALKEY_PASSWORD's, never a flag
+	valkeyTLS            bool
+	valkeyCA, valkeyUser string
 }
 
 func parse(args []string) (options, error) {
@@ -82,6 +88,9 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.gatewayID, "id", "", "pool mode: this gateway's name, for its status object (default the host name)")
 	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey (host:port) for the limiter")
 	fs.IntVar(&o.replicaAcks, "valkey-replica-acks", 0, "pool mode: replicas each spend add waits for (WAIT), so a failover cannot lose it")
+	fs.BoolVar(&o.valkeyTLS, "valkey-tls", false, "pool mode: connect to Valkey over TLS (ElastiCache's in-transit encryption), verifying its certificate against the system's roots for the address's host name")
+	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "pool mode, with -valkey-tls: a PEM file of the CA certificates to verify Valkey's certificate against, in place of the system's roots")
+	fs.StringVar(&o.valkeyUser, "valkey-user", "", "pool mode: the Valkey user to AUTH as (an ACL user; ElastiCache RBAC); its password in $VALKEY_PASSWORD. Empty with the password set: AUTH as the default user")
 	fs.StringVar(&o.site, "site", "", "pool mode: this gateway's site (its Valkey's keys and ledger rows)")
 	fs.StringVar(&o.secrets, "secrets", "/var/run/golem/secrets", "pool mode: where provider Secrets are mounted, one directory per Secret")
 	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run although golem#7's deployment evidence is not in (test sites only)")
@@ -208,9 +217,11 @@ func newLimiter(o options, zone *time.Location) (limiter *limit.Limiter, connect
 	closeStore = func() {}
 	var down error
 	if o.standalone == "" {
-		v, err := limit.DialValkey(o.site, func() (valkey.Client, error) {
-			return valkey.NewClient(valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true})
-		})
+		opt, err := valkeyOption(o, os.Getenv)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		v, err := limit.DialValkey(o.site, func() (valkey.Client, error) { return valkey.NewClient(opt) })
 		if err != nil {
 			down = fmt.Errorf("-valkey %s: %w", o.valkeyAddr, err)
 			slog.Error("golem-gateway: the site's Valkey is unreachable; starting with the limiter in its outage mode (calls admitted on local counts, recorded as waivers) and retrying the connection",
@@ -225,6 +236,38 @@ func newLimiter(o options, zone *time.Location) (limiter *limit.Limiter, connect
 		limiter.MarkDown(down)
 	}
 	return limiter, connect, closeStore, nil
+}
+
+// valkeyOption is the site's Valkey client's options: its address, TLS and
+// AUTH from the flags, the password from getenv's VALKEY_PASSWORD (a flag
+// would show it in the process list and the pod spec).
+func valkeyOption(o options, getenv func(string) string) (valkey.ClientOption, error) {
+	opt := valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true,
+		Username: o.valkeyUser, Password: getenv("VALKEY_PASSWORD")}
+	if o.valkeyCA != "" && !o.valkeyTLS {
+		return opt, errors.New("-valkey-ca is the CA for -valkey-tls: add -valkey-tls, or drop -valkey-ca")
+	}
+	if o.valkeyUser != "" && opt.Password == "" {
+		return opt, fmt.Errorf("-valkey-user %s needs its password in $VALKEY_PASSWORD", o.valkeyUser)
+	}
+	if !o.valkeyTLS {
+		return opt, nil
+	}
+	// No ServerName: tls.Dialer takes each dial's host, so a cluster's
+	// nodes, discovered at run time, are each verified by their own name.
+	opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	if o.valkeyCA != "" {
+		pem, err := os.ReadFile(o.valkeyCA)
+		if err != nil {
+			return opt, fmt.Errorf("-valkey-ca: %w", err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return opt, fmt.Errorf("-valkey-ca %s holds no PEM certificate: give the CA's certificate, PEM-encoded", o.valkeyCA)
+		}
+		opt.TLSConfig.RootCAs = roots
+	}
+	return opt, nil
 }
 
 // newHolder is the snapshot holder of a live installation (startSource

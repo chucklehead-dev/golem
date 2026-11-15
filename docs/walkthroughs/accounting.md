@@ -25,7 +25,7 @@ spend by a time boundary and minute counters).
 | `control/spend/spend.go` | the known-spend job: `Job`, the `Ledger` it reads, and `ClickHouse`, the ledger's query |
 | `deploy/clickhouse/spend.sql` | the ledger (`golem.spend`), its deduplicated view, and `golem.spend_by_event`, which the job sums |
 | `control/controller/controller.go:281` | where each publication runs the job and stamps every scope with its result |
-| `cmd/golem-gateway/main.go:150` | `OnApply`: each applied snapshot's known spend handed to the limiter |
+| `cmd/golem-gateway/main.go:159` | `OnApply`: each applied snapshot's known spend handed to the limiter |
 | `gateway/proxy/proxy.go:291` | the request path: `settlement` ends each ticket once (`complete`, `cancel`) |
 | `model/exposure.md`, `model/accounting.md` | the Quint models the design is checked against |
 
@@ -100,7 +100,7 @@ passes them or reconciliation books them: soft controls, stated in ADR
 
 The gateway side is `Known` (`limit.go:34`): `Period`, `Spend`, `Since`
 (B), applied per scope by `ApplySnapshot` (`limit.go:448`; the gateway's
-`OnApply` calls it, `cmd/golem-gateway/main.go:152`). The counter is left
+`OnApply` calls it, `cmd/golem-gateway/main.go:161`). The counter is left
 as it is at an apply: a gateway still on an older snapshot needs the
 minutes from its own boundary. `snapshotFor` (`limit.go:183`) treats a
 snapshot of another period as none: a new month starts from nothing. The
