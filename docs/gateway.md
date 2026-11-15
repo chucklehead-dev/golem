@@ -131,7 +131,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    backend's encoder through `canon`), wrap it in the deployment's envelope
    (URL, model placement, auth, stream framing), send it on the deployment's
    `http.Transport`. Retry or fail over on a retryable outcome *before the
-   first response byte*; after it, the attempt is committed.
+   attempt commits*: a stream commits when its first event is written to
+   the caller, so a 200 whose first event is an error is still retryable
+   (`gateway/proxy/commit.go`); after it, the attempt is committed.
 8. **Respond.** Fast path: copy headers through an allowlist, copy the
    body through a tee whose other side is an SSE scanner feeding the usage
    extractor; flush per event. Translated: decode upstream events, encode

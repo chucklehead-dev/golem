@@ -212,8 +212,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		call.OverBudget = h.overBudget(w, principal, ticket)
 	}
 
-	// One attempt. (Retries and failover before the first byte go here; a
-	// retry needs the rewritten body kept until the attempt is committed.)
+	// One attempt. (Retries and failover before its commit go here, the
+	// commit being its first event (commit.go); a retry needs the rewritten
+	// body kept until then.)
 	// The route's bounds: the caller's going away still cancels it too.
 	lim := &ex.lim
 	upCtx := lim.bound(ctx, started, rt)
@@ -256,11 +257,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	lim.gotHeaders()
 
+	streamed := req.stream && resp.StatusCode == http.StatusOK
+	upBody := lim.bodyOf(resp.Body)
+	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
+	if streamed {
+		// Nothing is written until the first event (commit.go): one that is
+		// an error is an attempt that failed before commit, refused as
+		// retryable, the provider billing nothing for it.
+		if ex.first.await(h.Dialect, upBody, ex.buf) {
+			resp.Body.Close()
+			c := contract.UpstreamUnavailable
+			call.Ended, call.Status = time.Now(), c.Status
+			call.Outcome, call.ErrorOrigin, call.ErrorCode = "failed", string(c.Origin), c.Name
+			h.Telemetry.Ended(ctx, call)
+			acct.complete(0)
+			if h.record != nil {
+				h.record(r, Result{RequestID: reqID, Principal: principal, Target: target, Status: c.Status})
+			}
+			refuse(w, h.Dialect, c, "the provider failed before its response began (its first event was an error); retry shortly", providerRetryAfter(resp.Header))
+			return
+		}
+		upBody = &ex.first
+	}
 	copyHeaders(w.Header(), resp.Header, forwardResponse)
 	w.WriteHeader(resp.StatusCode)
-	streamed := req.stream && resp.StatusCode == http.StatusOK
 	res := Result{RequestID: reqID, Principal: principal, Target: target, Status: resp.StatusCode}
-	res.Usage, res.Err = h.relay(w, lim.bodyOf(resp.Body), ex, streamed)
+	res.Usage, res.Err = h.relay(w, upBody, ex, streamed)
 	// The caller is gone if a write to it failed, or if its request ended
 	// first (the upstream read then fails with its context).
 	res.CallerGone = ex.callerGone || r.Context().Err() != nil
@@ -285,7 +307,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res.Cost = price.Cost(res.Usage, pr)
 
 	call.Ended, call.Status, call.Usage, call.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
-	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
 	call.Outcome, call.ErrorOrigin, call.ErrorCode = outcome(res, cut, ended)
 	// The row's end is stamped before the ticket adds the cost to the
 	// counter's minute, so the minute is never before the row's end: a

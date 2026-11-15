@@ -62,7 +62,7 @@ calls `auth.Compile` (`gateway/auth/auth.go:93`), which builds a `Keys`:
 the local key (`RequireLocalKey`).
 
 `Keys.Authenticate` (`auth.go:207`) is called once per request by
-`proxy.Handler.authenticate` (`gateway/proxy/proxy.go:368`). Its order:
+`proxy.Handler.authenticate` (`gateway/proxy/proxy.go:376`). Its order:
 
 1. `credential` (`auth.go:317`) reads `Authorization: Bearer` and
    `x-api-key`. Two different credentials are refused rather than one

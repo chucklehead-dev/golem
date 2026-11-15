@@ -29,7 +29,7 @@ retry pointlessly and users wait through backoff before seeing why.
 | A malformed request (not one JSON object, duplicate members, a routing or policy field of the wrong type, such as a `store` that is not a boolean, unreadable) or one over the size limit; one over its scope's ceilings (output tokens asked for, input size) | 400 or 413 | `request.invalid`, `request.unreadable`, `request.too_large`, `request.over_ceiling` | no |
 | Request golem cannot route (no deployment with the capabilities used, unknown alias, frontend that cannot reach the model) | 400 or 404 | `route.unknown_model`, `route.no_capable_deployment`, `route.wrong_frontend` | no |
 | A feature the translation cannot express | 400 | `translate.unsupported_feature` | no |
-| Every deployment failed before the first byte | 503 + `Retry-After` | `upstream.unavailable` | yes |
+| Every deployment failed before the first byte (a stream: before its first event, an error as that event included) | 503 + `Retry-After` | `upstream.unavailable` | yes |
 | Upstream failure after the first byte | an error event in the stream | `upstream.stream_failed` | the client decides |
 | The gateway's authorization lease has expired (ADR 0030) | 503 + `Retry-After` | `gateway.authorization_expired` | yes, once renewed |
 | The gateway has no configuration yet, cannot check Entra tokens yet (their signing keys not yet fetched; golem keys are served), or is shutting down (another of the pool's gateways takes the retry) | 503 + `Retry-After` | `gateway.not_ready` | yes |

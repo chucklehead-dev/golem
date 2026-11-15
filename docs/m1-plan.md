@@ -101,13 +101,22 @@ body, and the provider's status goes to the caller once its headers arrive
   test account, compared with that account's ledger by exit 2's rule.
   Access to CUR and the usage APIs is arranged here, not at the end.
 
-Done when:
-- the `plain` envelope passes every existing test unchanged;
-- a stub that answers 200 and then an overloaded event shows the call
-  refused as retryable (503 with Retry-After) and not committed (ablated:
-  committed at headers);
-- the spike's note is in docs/spikes/reconciliation.md, with the day's
-  difference and its causes.
+Status:
+- **Commit point: built.** `gateway/proxy/commit.go`;
+  `TestFailedBeforeCommit` (and the OpenAI case) refuses a 200 whose first
+  event is an error as 503 with the provider's Retry-After, uncharged,
+  its slot freed; `TestCommitAtFirstEvent` relays every other stream byte
+  for byte, one byte a read included. Ablated: committed at headers, both
+  refusal tests fail. Allocations per call unchanged (`BenchmarkHandler`).
+- **Envelope seam: with its first envelope, in step 3.** Its contract is
+  fixed here: an envelope delivers its dialect's framing, a failure before
+  output as the dialect's error event, which the commit point reads. A
+  seam with only `plain` behind it would be untested abstraction.
+- **Reconciliation spike: open,** blocked on access to CUR and the OpenAI
+  usage API for a test account.
+
+Done when (open): the spike's note is in docs/spikes/reconciliation.md,
+with the day's difference and its causes.
 
 ### 2. The attempt loop, on the accounting model
 

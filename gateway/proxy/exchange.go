@@ -48,6 +48,8 @@ type exchange struct {
 
 	lim bounds // the route's limits over the upstream call, timers reused
 
+	first firstEvent // a stream's bytes until its first event: the commit point
+
 	call inFlightCall // the call's entry in Handler.InFlight, while admitted
 }
 
@@ -57,6 +59,7 @@ var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
 	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
 	ex.filter.Drop = dropUsageOnly
+	ex.first.parser.OnEvent = ex.first.onEvent
 	ex.lim = newBounds()
 	return ex
 }}
