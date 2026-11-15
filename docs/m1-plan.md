@@ -349,8 +349,12 @@ Status:
   breaks `memberWithinBound` in 4 steps). Tests: `TestCaps` (limiter and
   auth), the store suite's `accounts` on Mem and Valkey, `TestCapModes`,
   `TestWithKnownSpend`, `TestEntitlementsCaps`; ablated: no member
-  account, the Lua checking the scope alone. Open: setting caps through
-  the control API and golemctl; team pools (grants).
+  account, the Lua checking the scope alone. Set through the control API
+  (`SetMemberCap`, `SetKeyCap`, a cap on `MintKey`; audited, widening)
+  and golemctl (`members cap`, `keys cap`, `keys create --cap`, amounts in
+  the currency): `TestCaps` (service: who may, the bounds, removal with
+  the membership), `TestGolemctl`, `TestAmounts`. Open: team pools
+  (grants).
 
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.

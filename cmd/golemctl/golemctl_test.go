@@ -71,6 +71,23 @@ func (tokenAuth) Authenticate(_ context.Context, h http.Header) (service.Caller,
 	return service.Caller{Principal: p, Admin: p == "root"}, nil
 }
 
+// TestAmounts: amounts in the currency are exact micro-units both ways.
+func TestAmounts(t *testing.T) {
+	for in, want := range map[string]int64{"50": 50_000_000, "12.50": 12_500_000, "0.000001": 1, ".5": 500_000, "0": 0} {
+		if got, err := parseAmount(in); err != nil || got != want {
+			t.Errorf("parseAmount(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "-1", "+1", "1.0000001", "abc", "1.2.3", "2000000000"} {
+		if _, err := parseAmount(in); err == nil {
+			t.Errorf("parseAmount(%q) accepted", in)
+		}
+	}
+	if amount(12_500_000) != "12.5" || amount(50_000_000) != "50" || amount(1) != "0.000001" {
+		t.Errorf("amount: %q %q %q", amount(12_500_000), amount(50_000_000), amount(1))
+	}
+}
+
 func TestGolemctl(t *testing.T) {
 	pollUnit = time.Millisecond
 	home := t.TempDir()
@@ -118,6 +135,26 @@ func TestGolemctl(t *testing.T) {
 	k := st.Current().Keys[hash]
 	if k.Owner != "alice" || k.ExpiresAt.Before(time.Now().Add(29*24*time.Hour)) {
 		t.Fatalf("the key's record %+v", k)
+	}
+	// Caps, in the currency: a member's, then a key's.
+	if code, out, errOut := golemctl("members", "cap", "team-a", "alice", "12.5"); code != 0 || !strings.Contains(out, "12.5 a period") ||
+		st.Current().Principals["alice"].Caps["team-a"] != 12_500_000 {
+		t.Fatalf("members cap: %d %q %s", code, out, errOut)
+	}
+	if code, _, errOut := golemctl("keys", "cap", hash, "3"); code != 0 || st.Current().Keys[hash].CapMicros != 3_000_000 {
+		t.Fatalf("keys cap: %d %s", code, errOut)
+	}
+	if code, out, _ := golemctl("scopes", "get", "team-a"); code != 0 || !strings.Contains(out, "alice=12.5") {
+		t.Fatalf("scopes get shows no cap: %q", out)
+	}
+	if code, out, _ := golemctl("keys", "list"); code != 0 || !strings.Contains(out, "  3  ") {
+		t.Fatalf("keys list shows no cap: %q", out)
+	}
+	if code, _, _ := golemctl("members", "cap", "team-a", "alice", "-1"); code != 2 {
+		t.Fatalf("a negative cap: %d, want a usage error", code)
+	}
+	if code, _, _ := golemctl("members", "cap", "team-a", "alice", "0"); code != 0 || st.Current().Principals["alice"].Caps != nil {
+		t.Fatalf("a cap of 0 removes it: %v", st.Current().Principals["alice"].Caps)
 	}
 	if code, _, errOut := golemctl("keys", "revoke", hash); code != 0 || st.Current().Keys[hash].RevokedAt.IsZero() {
 		t.Fatalf("keys revoke: %d %s", code, errOut)

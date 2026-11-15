@@ -279,6 +279,9 @@ func (s *Service) RemoveMember(ctx context.Context, c Caller, o Options, scope, 
 		if _, capped := p.Caps[scope]; capped {
 			p.Caps = maps.Clone(p.Caps)
 			delete(p.Caps, scope)
+			if len(p.Caps) == 0 {
+				p.Caps = nil
+			}
 		}
 		d.Principals[principal] = p
 		d.Roles = slices.DeleteFunc(slices.Clone(d.Roles), func(r state.RoleBinding) bool { return r.Principal == principal && r.Scope == scope })
