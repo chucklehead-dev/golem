@@ -55,7 +55,14 @@ had practical costs:
   `scope_policy_unmatched` failure reason and the
   `golem.control.scope_policy.unmatched` gauge) and neither stops the
   publication: the two change apart, in either order, as the unpriced
-  scope's handling (now gone) already established. A renewal from a
+  scope's handling (now gone) already established. One exception, by
+  decision: an edit that deletes the ScopePolicy of a scope the state has
+  is refused (the last good config stays published), as it would leave
+  that scope's members refused everything by accident; stopping a scope
+  is `models: []` in its ScopePolicy, deliberately. The check is against
+  the replica's last good config (`policiesRemoved`), so a golem-control
+  that starts over a directory already without the policy publishes the
+  scope with no models and reports it unmatched. A renewal from a
   published snapshot (no config compiled since a restart) keeps the
   policies it published.
 - **Budget modes** (PRD §9.1): `observe` (the default for a scope with a

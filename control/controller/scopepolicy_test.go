@@ -3,6 +3,8 @@ package controller
 import (
 	"errors"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -176,5 +178,54 @@ func TestScopeModels(t *testing.T) {
 	w.policy("team-a", "{models: [nowhere]}")
 	if _, ok := other.ScopeModels("team-a"); ok {
 		t.Fatal("a directory that does not compile told")
+	}
+}
+
+// TestRemovedPolicyRefused: a config edit that deletes a live scope's
+// ScopePolicy is refused (the last good config stays published, the scope
+// keeps its models); deleting a policy of a scope the state does not have
+// is not; and models: [] is the way to stop a live scope.
+func TestRemovedPolicyRefused(t *testing.T) {
+	w := newWorld(t)
+	r1 := w.replicas["r1"]
+	w.lead("r1")
+	w.policy("team-a", "{models: [claude]}")
+	w.policy("team-z", "{models: [claude]}") // no such scope in the state
+	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+		d.Scopes = map[string]state.Scope{"team-a": {}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := w.step("r1"); !p {
+		t.Fatal("not published")
+	}
+	models := func() string {
+		c, _ := w.gateway.Holder.Current()
+		for _, s := range c.Snapshot.Entitlements.Scopes {
+			if s.ID == "team-a" {
+				return strings.Join(s.Models, ",")
+			}
+		}
+		return "absent"
+	}
+	os.Remove(filepath.Join(w.dir, "policy-team-a.yaml"))
+	r1.clock = r1.clock.Add(61 * time.Second)
+	w.lead("r1")
+	if _, err := w.step("r1"); err == nil || !strings.Contains(err.Error(), "ScopePolicy of live scope team-a removed") {
+		t.Fatalf("%v: want the edit refused, naming team-a", err)
+	}
+	if m := models(); m != "claude" {
+		t.Fatalf("team-a's models %q after a refused edit: want the last good config's", m)
+	}
+	w.policy("team-a", "{models: []}")
+	os.Remove(filepath.Join(w.dir, "policy-team-z.yaml"))
+	r1.clock = r1.clock.Add(61 * time.Second)
+	w.lead("r1")
+	if _, err := w.step("r1"); err != nil && strings.Contains(err.Error(), "removed") {
+		t.Fatalf("%v: models: [] and a policy of no live scope removed are accepted", err)
+	}
+	if m := models(); m != "" {
+		t.Fatalf("team-a's models %q: want none", m)
 	}
 }

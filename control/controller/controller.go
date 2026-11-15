@@ -574,9 +574,39 @@ func (c *Controller) load(doc *state.Document) error {
 		return fmt.Errorf("config not applied, the last good one is published: %w", err)
 	}
 	c.mu.Lock()
+	prev := c.good
+	c.mu.Unlock()
+	if gone := policiesRemoved(prev, objs, doc); len(gone) > 0 {
+		return fmt.Errorf("config not applied, the last good one is published: the ScopePolicy of live scope %s removed: its members would be refused everything; restore it (to stop a scope, set its models to [] in its ScopePolicy)",
+			strings.Join(gone, ", "))
+	}
+	c.mu.Lock()
 	c.good, c.goodSum = objs, sum
 	c.mu.Unlock()
 	return nil
+}
+
+// policiesRemoved lists the scopes of doc's whose ScopePolicy prev had and
+// next has not (ADR 0050): such an edit is refused, as a live scope with
+// no policy can call nothing. Against this replica's last good config
+// only: one that starts over a directory already without it publishes the
+// scope with no models, reported as unmatched.
+func policiesRemoved(prev, next v1.Objects, doc *state.Document) []string {
+	had := map[string]bool{}
+	for _, p := range prev.Policies {
+		had[p.Object.Metadata.Name] = true
+	}
+	for _, p := range next.Policies {
+		delete(had, p.Object.Metadata.Name)
+	}
+	var gone []string
+	for id := range had {
+		if _, live := doc.Scopes[id]; live {
+			gone = append(gone, id)
+		}
+	}
+	slices.Sort(gone)
+	return gone
 }
 
 // loadPublished reads each pool's current publication from the bucket,

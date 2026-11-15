@@ -258,7 +258,7 @@ are checked in restricted mode and forwarded.
 | Work the provider may have done is never free; estimates err high | `chargeUnanswered`, `estimate` | `TestEstimates` (`estimate_test.go:65`), `TestUncertainUpstream` (`uncertain_test.go:23`) |
 | A whole response's usage is read from all of it or not at all | `forward`'s `overflow`, `readWhole`'s `errResponseUnread` | `TestKeptNotSpliced` (`exchange_test.go:14`) |
 | A cut response is never taken for whole | `streamError` and the abort (`proxy.go:268-278`) | `TestUpstreamCut` (`proxy_test.go:266`) |
-| A call whose key is revoked, or whose key or principal is denied, ends within seconds in its dialect's error (an event, a refusal, a cut), as a caller gone is charged and held, its row `terminated`; other calls and the lease's expiry end none | `InFlight` (`inflight.go`), `terminatedBy`, `outcome`, `chargeUnanswered` | `TestTerminateStream`, `TestTerminateWhole`, `TestLeaseExpiryEndsNoCall`, `TestTerminateRace` (`terminate_test.go`) |
+| A call whose key is revoked, or whose key or principal is denied, ends within seconds in its dialect's error (an event, a refusal, a cut), as a caller gone is charged and held, its row `terminated`; other calls, the lease's expiry, a key's own expiry and a scope losing a model end none (by decision: they stop new requests only) | `InFlight` (`inflight.go`), `terminatedBy`, `outcome`, `chargeUnanswered` | `TestTerminateStream`, `TestTerminateWhole`, `TestLeaseExpiryEndsNoCall`, `TestTerminateRace` (`terminate_test.go`) |
 | An ambiguous end holds the slot for the provider's tail, at most to the deadline | `settlement.cancel` (`proxy.go:310`) | `TestTailClampedToDeadline` (`settlement_test.go:21`), `TestConcurrencyAndCancel`, `TestUncertainUpstream` |
 | The injected usage chunk never reaches the caller | `startStream` and `sse.Filter` | `TestInjectedUsageWithheld` (`proxy_test.go:135`), `TestFilter` (`sse/filter_test.go:24`) |
 | Only allowlisted headers cross, each API's own; golem's never reach the provider | `Dialect.forwardRequest` (`dialect.go:38`), `forwardResponse` (`proxy.go:85`), `copyHeaders` | `TestHeaders` (`proxy_test.go:61`), `TestOpenAIHeaders` (`proxy_test.go:90`) |
@@ -349,11 +349,9 @@ dialect-free. To add one:
   is unseen until reconciliation.
 - A terminated whole response whose headers were already forwarded can
   only be cut: its caller sees a reset, not the refusal's code (a stream
-  gets the code as its error event). Termination ends nothing a snapshot
-  narrows short of the key or principal (a model or route taken from a
-  scope ends no call already on it).
+  gets the code as its error event). By decision, termination ends
+  nothing a snapshot narrows short of the key or principal (a model or
+  route taken from a scope ends no call already on it), nor a key's own
+  expiry or the lease's: those stop new requests only.
 - Unknown request members are counted, not logged by name (the sanitized
   names ADR 0037 describes are not built).
-- Restricted mode checks only the first `anthropic-version` value
-  (`hdr.Get`), while every value is forwarded: a request with two such
-  headers passes an unapproved second one to the provider.
