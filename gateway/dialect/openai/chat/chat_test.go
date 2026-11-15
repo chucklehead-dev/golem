@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -46,6 +47,30 @@ func TestUsageOnly(t *testing.T) {
 	} {
 		if got := UsageOnly([]byte(data)); got != want {
 			t.Errorf("UsageOnly(%s) = %v, want %v", data, got, want)
+		}
+	}
+}
+
+// TestScanStore: store is a boolean or null; any other value is refused,
+// naming the field, rather than read as not storing (the storage policy
+// must not fail open on a wrong type).
+func TestScanStore(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"model":"a","store":true}`:  true,
+		`{"model":"a","store":false}`: false,
+		`{"model":"a","store":null}`:  false,
+		`{"model":"a"}`:               false,
+	} {
+		var r Request
+		if err := r.Scan([]byte(body)); err != nil || r.Store != want {
+			t.Errorf("%s: %v, Store %v; want %v", body, err, r.Store, want)
+		}
+	}
+	for _, body := range []string{`{"model":"a","store":"true"}`, `{"model":"a","store":1}`, `{"model":"a","store":{}}`, `{"model":"a","store":[true]}`} {
+		var r Request
+		err := r.Scan([]byte(body))
+		if !errors.Is(err, ErrField) || !strings.Contains(err.Error(), `"store"`) {
+			t.Errorf("%s: %v; want ErrField naming \"store\"", body, err)
 		}
 	}
 }

@@ -55,7 +55,7 @@ request:   ztunnel (mesh mTLS) → listener → frontend (dialect, scan) → aut
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
 inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
            or, standalone (ADR 0023), CRD YAML in a local directory compiled in-process
-state:     the site's Valkey (spend since the snapshot, concurrency slots; rate windows and provider quota shares planned) (ADR 0031)
+state:     the site's Valkey, over TLS with AUTH (spend since the snapshot, concurrency slots; rate windows and provider quota shares planned) (ADR 0031)
 outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
            status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
@@ -85,7 +85,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    service, scope, key) or an error in the
    caller's dialect. Keys are
    looked up by hash in the entitlements snapshot (no network call); Entra
-   JWTs are verified locally against cached JWKS. Effective rights are
+   JWTs are verified locally against cached JWKS (fetched at start, but
+   not required to start: until the first fetch, tokens are refused as
+   `gateway.not_ready` and golem keys work). Effective rights are
    computed from the snapshot: scope policy ∩ membership ∩ key constraints
    (org model §3).
 4. **Request hooks**, selected by precompiled CEL programs; they may
@@ -117,7 +119,10 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    counted exactly once. Nor does the limiter's outage behaviour fit a
    hook's fail-open or fail-closed: it admits on its own in-flight counts,
    each admission a waiver, then replays and re-acquires in a grace after
-   recovery (ADR 0041 §7.3). Stateless refusals (deny lists, size rules)
+   recovery (ADR 0041 §7.3). A gateway that starts while the site's
+   Valkey is unreachable starts in that mode, retries the connection in
+   the background, and is ready all the same: readiness never depends on
+   the site store. Stateless refusals (deny lists, size rules)
    fit a Request hook; rate limits do not, since a hook that took a token
    before a budget refusal would spend it on a refused call: they belong
    in the admitter's round trip.
@@ -232,7 +237,11 @@ except OTel's API.
   holds (the trusted publisher checkpoint and atomically persisted local
   checkpoint; status is diagnostic and cannot set the trusted floor), then fetches the snapshot by hash and verifies its signature and
   hash (ADR 0007). Anything unsigned, wrongly signed or older is ignored and
-  alarmed. Once the signed authorization lease has expired (five minutes
+  alarmed, as is a pointer issued more than `-clock-skew` (two minutes) in
+  the gateway's future, or a snapshot whose lease runs further ahead than
+  `-max-lease` (four hours, the publisher's `-lease`) plus that skew:
+  refused rather than clamped, failing closed, so a publisher's clock a day
+  ahead cannot grant a day-long lease. Once the signed authorization lease has expired (five minutes
   by default, ADR 0030) the gateway refuses new model requests.
 - An **emergency denylist** (a ConfigMap mounted as a file, read with
   `os.Root`) is applied over every snapshot: a site admin's way to revoke a
@@ -256,9 +265,11 @@ from the snapshot, Bearer or x-api-key, each refusal its own code), Entra
 v2 tokens (RS256 only; tenant, audience, expiry with a minute's leeway;
 `golem.access` for users by oid, `golem.service` with `idtyp: app` for
 services by azp; the gateway's audience only, ADR 0046; keys
-cached and refreshed hourly or on an unknown kid, never on the request
-path; the scope from `golem-scope`, else the principal's default, rights
-from the snapshot; `-entra-tenant`), the
+cached and refreshed hourly or on an unknown kid (at most once a minute,
+a request within it deferred, not dropped), never on the request path; a
+gateway started while Entra is unreachable serves golem keys and refuses
+tokens as `gateway.not_ready` until a retried fetch succeeds; the scope from `golem-scope`, else the principal's default, rights
+from the snapshot; `-entra-tenant`, `-entra-jwks`), the
 limiter in the request path (402 budgets, 429 concurrency, cancellation
 holding the slot until the upstream closes), `golemctl config validate`
 and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway
@@ -271,7 +282,9 @@ listed owner of its kind in its scope. Pool mode reads the bucket source,
 writes status objects, applies the emergency denylist, and keeps the last
 publication applied on disk beside its checkpoint (`last-good.json`):
 restarted while the bucket is unreachable, it serves that copy, verified
-as a publication from the bucket is, until its lease ends.
+as a publication from the bucket is, until its lease ends (a copy that
+does not compile yet, its Secret not yet mounted, is retried from disk
+every 30 seconds until it does or the bucket's publication applies).
 
 `golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop
 from the same CRD YAML as the GitOps repository, compiled in-process by

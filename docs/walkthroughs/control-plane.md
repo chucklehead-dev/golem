@@ -664,7 +664,7 @@ The subcommands:
    `Revoked: true` (`entitlements.go:289`). Every pool's record is won in
    one `FencedUpdate` (`publish.go:154`), then each checkpoint and signed
    pointer is written (`publish.go:265`, `:275`).
-5. **The gateway's poll** (`gateway/snapshot/bucket.go:179`, `Bucket.Poll`),
+5. **The gateway's poll** (`gateway/snapshot/bucket.go:242`, `Bucket.Poll`),
    every second: a conditional get of the pointer, now changed. `read`
    (`bucket.go:284`) verifies the signature, the pool and the floor
    (`openPointer`), fetches the snapshot, checks its hash and sequence

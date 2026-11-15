@@ -272,6 +272,16 @@ func (l *Limiter) markDown(err error) {
 	}
 }
 
+// MarkDown starts the limiter in its outage mode: the store was found
+// unreachable before any call (a gateway starting during a Valkey outage).
+// Calls are admitted on local counts as waivers, increments held, until
+// Run's Recover finds the store answering.
+func (l *Limiter) MarkDown(err error) { l.markDown(err) }
+
+// pinger is a store that can tell whether it answers without changing
+// anything (Valkey's PING).
+type pinger interface{ Ping(context.Context) error }
+
 // track records a running call; mu is held.
 func (l *Limiter) track(c Call, period string, waived bool) *Ticket {
 	t := &Ticket{l: l, call: c, period: period, waived: waived}
@@ -518,6 +528,17 @@ func (l *Limiter) renewable() []Slot {
 // hold refuses, and completions go to the store themselves), and drains
 // the rest, which can only shrink.
 func (l *Limiter) Recover(ctx context.Context) error {
+	// With nothing held and nothing running, the replay and the renewal
+	// touch no store: ask it first, or an unreachable one would be marked
+	// up (and found down again by the next call).
+	if p, ok := l.store.(pinger); ok {
+		sctx, cancel := l.storeContext(ctx)
+		err := p.Ping(sctx)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
 	l.mu.Lock()
 	began := l.heldSeq
 	l.mu.Unlock()

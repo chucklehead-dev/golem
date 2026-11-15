@@ -71,7 +71,7 @@ path reads only what those decisions need and forwards bytes unchanged:
 | `gateway/canon` | `Usage`, the one canonical type the path needs so far |
 
 `proxy` is imported only by the binary (`internal/archtest` checks it).
-The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:198`),
+The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:311`),
 each wrapped by the lifecycle's drain tracking and, in standalone mode
 only, by `localOnly` (`cmd/golem-gateway/guard.go:24`), which refuses
 non-loopback hosts, cross-origin browser requests and non-JSON bodies.
@@ -99,13 +99,16 @@ from `Content-Length` in one allocation, under a read deadline
 before admission) and `MaxBody` (zero means the default, 32 MiB; the
 binary's `-max-body` flag sets it).
 
-**Scan and route.** `ex.scan` (`dialect.go:95`) runs `chat.Request.Scan`
-(`chat/chat.go:67`) over `jsonscan.Object` (`jsonscan/jsonscan.go:81`),
+**Scan and route.** `ex.scan` (`dialect.go:101`) runs `chat.Request.Scan`
+(`chat/chat.go:72`) over `jsonscan.Object` (`jsonscan/jsonscan.go:81`),
 which compares member names unescaped (`"model"` is `model`) and
 records each value's span. A null `stream` or `max_tokens` is the member
 absent. `stream_options` and its `include_usage` are located by
-`scanStreamOptions` (`chat.go:164`) for the rewrite. Policy members set
-flags; unknown members are counted. `route` (`proxy.go:420`) looks the
+`scanStreamOptions` (`chat.go:175`) for the rewrite. Policy members set
+flags; unknown members are counted. `store` must be a boolean or null: any
+other value (`"true"`, `1`) is refused as `request.invalid` naming it
+(`ErrStore`), since read as not storing it would let the storage policy
+fail open on a wrong type (TestScanStore, TestStoreNotBoolean). `route` (`proxy.go:420`) looks the
 alias up without allocating (`route/route.go:54`), refuses an alias of the
 other dialect, and checks the principal may use it. `features`
 (`proxy.go:437`) applies restricted mode: unknown members are refused
@@ -122,7 +125,7 @@ forbidden).
 token, the output cap times `n`); a product that would overflow is refused.
 `admit` (`proxy.go:490`) fills an `admission.Call` with the scope's limits
 and calls the `Admitter`: golem's is `Limiter.Admitter`
-(`gateway/limit/limit.go:744`). A `*admission.Refusal` is rendered with its
+(`gateway/limit/limit.go:765`). A `*admission.Refusal` is rendered with its
 code and Retry-After; an error with the caller gone is a silent end. The
 admitted ticket goes into a `settlement` (`proxy.go:169`, type at
 `proxy.go:293`) with a context that is never cancelled, and a deferred
@@ -130,8 +133,8 @@ guard (`proxy.go:176`) cancels it at its worst case if a panic gets there
 before its end.
 
 **The upstream request.** `ex.rewrite` (`dialect.go:118`) runs
-`chat.Request.Rewrite` (`chat/chat.go:230`): the model spliced and, since
-the caller did not ask for usage, `usageEdit` (`chat.go:247`) adds
+`chat.Request.Rewrite` (`chat/chat.go:241`): the model spliced and, since
+the caller did not ask for usage, `usageEdit` (`chat.go:258`) adds
 `"stream_options":{"include_usage":true}` after it (or fills in an
 existing `stream_options`). The caller's body goes back to its pool at
 once (`proxy.go:187`): a long stream must not hold a 200 KB agent request.
@@ -164,8 +167,8 @@ but withheld, because SDK loops that read `choices[0]` of every chunk
 crash on it. Each read goes through `ex.forward` (`exchange.go:113`) into
 `Filter.Pass` (`sse/sse.go:213`), whose `Parser.Write` (`sse.go:58`) finds
 line ends with `bytes.IndexByte` and dispatches each event (`sse.go:170`)
-to `chat.StreamUsage.OnEvent` (`chat/chat.go:315`). That checks
-`mayHaveUsage` (`chat.go:294`) before scanning, since every chunk but the
+to `chat.StreamUsage.OnEvent` (`chat/chat.go:326`). That checks
+`mayHaveUsage` (`chat.go:305`) before scanning, since every chunk but the
 last carries `"usage":null`. A usage object is the provider's final
 report only with both `prompt_tokens` and `completion_tokens` present and
 not null (`readInt` reports presence): a null count is not reported, and

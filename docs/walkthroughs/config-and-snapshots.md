@@ -254,7 +254,7 @@ copy one back) is refused. It is signed and also under a prefix only
 golem-control's role may write (control-plane.md §3): a bucket policy
 mistake alone does not let anyone lower it. golem-control writes it after
 the publication record and before the pointer. At start
-(`Bucket.Start`, `gateway/snapshot/bucket.go:75`) a gateway takes the
+(`Bucket.Start`, `gateway/snapshot/bucket.go:93`) a gateway takes the
 higher of its local checkpoint and the pool's trusted one; a missing
 checkpoint is floor zero only while the pool has no pointer either
 (`trustedCheckpoint`, `:149`), and a published pool's missing or
@@ -265,7 +265,7 @@ after issue unless `Publisher.PointerTTL` says otherwise, ten renewals at
 the default one-minute renew) is TUF's timestamp role as a signal, not a
 refusal: a gateway that sees nothing newer than an expired pointer reports
 it overdue (`Bucket.Overdue`, logged once by `checkOverdue`,
-`gateway/snapshot/bucket.go:209`) and goes on serving until its snapshot's
+`gateway/snapshot/bucket.go:273`) and goes on serving until its snapshot's
 `ValidUntil`, which is what bounds a frozen or replayed bucket (ADR 0030).
 
 ## 5. The bucket (`lib/bucket`)
@@ -367,7 +367,7 @@ Both moved here from the gateway when golem-control came to need them too.
 verifies Entra ID v2 access tokens locally, for one API: the gateway's
 (golem API's registration, scope `golem.access`) or the control API's
 (its own registration, scope `golem.manage`, ADR 0046), so a token for one
-is never accepted by the other. `Verify` (`entra.go:108`) accepts RS256
+is never accepted by the other. `Verify` (`entra.go:115`) accepts RS256
 only (`:114`), a key from the cached set, an expiry, this tenant's v2
 issuer and one of the `Audiences`, then names a user (the scope and an
 `oid`, not an app-only token) or a service (no scope, `idtyp` "app", the
@@ -427,12 +427,12 @@ deployment under one alias, and a ConfigMap.
    ADR 0049); then `finish` (`publish.go:208`) signs and writes the
    checkpoint (`SignCheckpoint`, `pointer.go:85`), then signs the pointer
    with its `Expires` (`SignPointer`, `pointer.go:73`) and writes it.
-5. **Verify.** A gateway's `Poll` (`gateway/snapshot/bucket.go:179`) does
-   a conditional GET of the pointer; it changed, so `read` (`:284`) calls
-   `openPointer` (`:241`), which calls `OpenPointer` with its `sign.Keys`
+5. **Verify.** A gateway's `Poll` (`gateway/snapshot/bucket.go:242`) does
+   a conditional GET of the pointer; it changed, so `read` (`:371`) calls
+   `openPointer` (`:305`), which calls `OpenPointer` with its `sign.Keys`
    (`pointer.go:79`) and refuses another pool's pointer or one below its
    floor. It notes the pointer's `Expires`, fetches the object, and
-   `openSnapshot` (`:246`) checks `snapshot.Hash(body) == ptr.Hash`,
+   `openSnapshot` (`:342`) checks `snapshot.Hash(body) == ptr.Hash`,
    `Decode`s it strictly and checks the snapshot's `PublishSeq` against
    the pointer's. The holder applies it, and the gateway saves its
    last-good copy and its local checkpoint.
@@ -460,7 +460,7 @@ publishing the last good config.
 | A mistyped or truncated key is refused | `Parse`, `lib/key/key.go:57` | `TestRefused`, `lib/key/key_test.go:23` |
 | Codes and headers match contracts.md | `lib/contract/codes.go` | `lib/contract/contract_test.go:37`, `:73` |
 | Telemetry goes over TLS unless to a literal loopback address, whatever the environment says | `Base`, `lib/otlp/otlp.go:103` | `TestPlaintextOK`, `otlp_test.go:26`; `TestOTLPIgnoresInsecureEnv`, `:41` |
-| An Entra token is accepted only RS256, for its API's audience and scope, with keys not too old | `Verifier.Verify`, `lib/entra/entra.go:108` | `gateway/auth/entra_test.go` (`TestEntra`, `TestStaleKeys`), `control/api/entra_test.go` |
+| An Entra token is accepted only RS256, for its API's audience and scope, with keys not too old | `Verifier.Verify`, `lib/entra/entra.go:115` | `gateway/auth/entra_test.go` (`TestEntra`, `TestStaleKeys`), `control/api/entra_test.go` |
 
 ## Known gaps
 

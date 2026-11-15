@@ -64,7 +64,7 @@ the local key (`RequireLocalKey`).
 `Keys.Authenticate` (`auth.go:207`) is called once per request by
 `proxy.Handler.authenticate` (`gateway/proxy/proxy.go:368`). Its order:
 
-1. `credential` (`auth.go:313`) reads `Authorization: Bearer` and
+1. `credential` (`auth.go:317`) reads `Authorization: Bearer` and
    `x-api-key`. Two different credentials are refused rather than one
    silently preferred (`auth.go:209`, golem#5).
 2. `principal` (`auth.go:231`) finds the snapshot's principal for the
@@ -75,11 +75,11 @@ the local key (`RequireLocalKey`).
      (`auth.go:95`). It admits exactly one credential: the gateway's own
      local key, compared by hash in constant time (`auth.go:237`). Without
      `RequireLocalKey` it admits no one.
-   - An Entra token, recognised by shape (`looksLikeJWS`, `auth.go:331`),
+   - An Entra token, recognised by shape (`looksLikeJWS`, `auth.go:335`),
      goes to `Keys.token` (`auth.go:283`): `entra.Verifier.Verify` proves who
      is calling, the snapshot says in which scope (`golem-scope` header,
      else the default) and with which rights; a user's token cannot act as
-     a service's principal or the reverse (`auth.go:304`).
+     a service's principal or the reverse (`auth.go:308`).
    - A golem key is looked up by hash only if it carries this
      installation's prefix (`glm_live_` or `glm_dev_`, `auth.go:254`): a
      publisher's mistake must not let another installation's key in.
@@ -88,15 +88,22 @@ the local key (`RequireLocalKey`).
    refused, with `auth.denied`, if the site's emergency denylist names its
    key, its principal or its Entra ID.
 
-`Verifier.Verify` (`lib/entra/entra.go:105`) takes RS256 only, refuses
-tokens once the cached key set is older than `MaxKeyAge` (24 hours by
-default, `entra.go:118`), checks issuer, audience, expiry (a minute's
-`Leeway`, `entra.go:62`), tenant and version, and then requires either the
-`golem.access` scope with an oid (a user) or, with no scope at all, the
-`golem.service` role with an azp (a service). An unknown key ID asks `Run`
-for a refresh (`entra.go:123`), which `Run` (`entra.go:243`) grants at most
-once a minute; it also refreshes hourly. The request path never fetches
-keys.
+`Verifier.Verify` (`lib/entra/entra.go:115`) takes RS256 only, refuses
+every token as `Unavailable` while no key set has ever been fetched
+(`entra.go:128`: "Entra's signing keys not yet fetched"; `Keys.token`
+answers it `gateway.not_ready`, a 503 with Retry-After, since it is the
+gateway's state and not the token's fault), refuses tokens once the cached
+key set is older than `MaxKeyAge` (24 hours by default, `entra.go:132`),
+checks issuer, audience, expiry (a minute's `Leeway`, `entra.go:62`),
+tenant and version, and then requires either the `golem.access` scope with
+an oid (a user) or, with no scope at all, the `golem.service` role with an
+azp (a service). An unknown key ID asks `Run` for a refresh
+(`entra.go:137`). `Run` (`entra.go:274`) fetches at once if it has no key
+set, hourly after a fetch, and when asked, at most once a minute: a request
+within the minute after the last refresh is deferred to the minute's end,
+not dropped, so a key Entra rotated in just after a refresh is fetched a
+minute later rather than at the next hour. A failed fetch is retried from
+a second, doubling to five minutes. The request path never fetches keys.
 
 ### The emergency denylist (`deny.go`)
 
@@ -163,10 +170,10 @@ the previous one served. `Dir.Run` (`file.go:71`) reloads every second.
 `Bucket` (`bucket.go:29`) reads a pool's signed pointer
 (`snapshots/<pool>/current`) and the snapshot object it names.
 
-- `Start` (`bucket.go:75`) raises the floor to the higher of the local
-  checkpoint (`localCheckpoint`, `bucket.go:140`: the last sequence this
+- `Start` (`bucket.go:93`) raises the floor to the higher of the local
+  checkpoint (`localCheckpoint`, `bucket.go:192`: the last sequence this
   gateway applied, in the `-checkpoint` file) and the pool's trusted
-  checkpoint in the bucket (`trustedCheckpoint`, `bucket.go:160`:
+  checkpoint in the bucket (`trustedCheckpoint`, `bucket.go:212`:
   `control/<pool>/checkpoint`, signed, written only by golem-control).
   With neither readable it refuses to start: it could not tell a replayed
   pointer from the current one. A pool with no checkpoint and no pointer
@@ -174,29 +181,34 @@ the previous one served. `Dir.Run` (`file.go:71`) reloads every second.
   has lost its floor and is refused. This is the model's `TRUSTED_FLOOR`
   (model/publication.md §6.8); the status object is never trusted, since
   anyone with the pool's credentials can write it.
-- Then `loadLastGood` (`bucket.go:103`) applies the last-good copy on disk,
+- Then `loadLastGood` (`bucket.go:122`) applies the last-good copy on disk,
   if there is one (`LastGood`, `last-good.json` beside the checkpoint): the
   signed pointer and snapshot exactly as the bucket held them, verified
-  again as a fresh read would be (`applyLastGood`, `bucket.go:125`, through
-  `verify`, `bucket.go:284`), so a gateway restarted while the bucket is
+  again as a fresh read would be (`applyLastGood`, `bucket.go:177`, through
+  `verify`, `bucket.go:357`), so a gateway restarted while the bucket is
   unreachable serves until the lease ends. A copy that was altered, is
   below the floor, or is past its lease is logged and left; the bucket's
-  next publication replaces it. Until a publication read from the bucket
-  replaces it, `ServingLastGood` (`bucket.go:236`) reports that the copy
+  next publication replaces it. A copy that verifies but does not compile
+  yet (an `applyError`: a Secret not yet mounted) is kept by
+  `tryLastGood` (`bucket.go:140`) and tried again from disk by
+  `retryLastGood` (`bucket.go:161`) at the start of each `Poll`, every
+  `ApplyRetry`, whether or not the bucket answers, until it applies, fails
+  for good, or a publication has applied (`read` drops it then). Until a publication read from the bucket
+  replaces it, `ServingLastGood` (`bucket.go:289`) reports that the copy
   from disk is what is served (`golem.snapshot.last_good`).
-- `Poll` (`bucket.go:190`) makes a conditional get with the last judged
+- `Poll` (`bucket.go:242`) makes a conditional get with the last judged
   entity tag, so an unchanged pointer costs one request.
-- `read` (`bucket.go:295`) judges a changed pointer, as traced below.
-- `checkOverdue` (`bucket.go:220`) logs, once, that the newest pointer
+- `read` (`bucket.go:371`) judges a changed pointer, as traced below.
+- `checkOverdue` (`bucket.go:273`) logs, once, that the newest pointer
   seen is past its `Expires`: the publisher has stopped, or the bucket
   shows an old pointer. The gateway serves on until its snapshot's
   `ValidUntil`. The flag is an `atomic.Bool`, so `Overdue`
-  (`bucket.go:231`) can be read from a metric's collection
+  (`bucket.go:284`) can be read from a metric's collection
   (`golem.snapshot.pointer_overdue`) while `Poll` writes it.
 
 Both sources loop through `repeat` (`loop.go:12`), which reports a failure
 once until it changes or clears rather than every second. `Bucket.Run`
-(`bucket.go:396`) polls at once; `Dir.Run` waits an interval, because the
+(`bucket.go:476`) polls at once; `Dir.Run` waits an interval, because the
 binary has loaded the directory already.
 
 ### Worked example: a publication arriving
@@ -205,48 +217,56 @@ golem-control publishes sequence 7 for pool `internal`: it writes the
 snapshot object, the trusted checkpoint, then the signed pointer
 (control-plane.md §4). On a gateway holding sequence 6:
 
-1. `repeat` ticks and calls `Bucket.Poll` (`loop.go:21`, `bucket.go:397`).
-2. `Poll` gets the pointer with its tag (`bucket.go:194`); the pointer
+1. `repeat` ticks and calls `Bucket.Poll` (`loop.go:21`, `bucket.go:477`).
+2. `Poll` gets the pointer with its tag (`bucket.go:247`); the pointer
    changed, so the get returns the body and a new tag.
-3. `read` opens it with `openPointer` (`bucket.go:296`, `bucket.go:252`):
+3. `read` opens it with `openPointer` (`bucket.go:372`, `bucket.go:305`):
    `snapshot.OpenPointer` (`lib/snapshot/pointer.go:77`) verifies the
    signature against the pinned keys, or the pointer is refused. It must
-   be this pool's (`bucket.go:257`), and at least the floor
-   (`bucket.go:262`): an old signed pointer copied back stops here, before
-   any fetch. Its `Expires` is noted for `checkOverdue` (`bucket.go:300`).
+   be this pool's (`bucket.go:310`), and at least the floor
+   (`bucket.go:315`): an old signed pointer copied back stops here, before
+   any fetch. A pointer issued more than `MaxSkew` (`-clock-skew`, two
+   minutes) in the gateway's future is refused too (`bucket.go:318`):
+   a publisher whose clock runs ahead, caught before its snapshot. Its `Expires` is noted for `checkOverdue` (`bucket.go:376`).
    A pointer for the publication already held returns at
-   `bucket.go:303`.
+   `bucket.go:379`.
 4. The snapshot object is fetched by the pointer's hash
-   (`bucket.go:306`). A failed fetch is a `fetchError` (`bucket.go:308`),
+   (`bucket.go:382`). A failed fetch is a `fetchError` (`bucket.go:384`),
    the one failure for which `Poll` does not record the tag
-   (`bucket.go:207`), so the next poll reads the pointer again.
-5. `openSnapshot` (`bucket.go:310`, `bucket.go:269`): the body must hash
-   to the pointer's hash (`bucket.go:270`), decode strictly
-   (`bucket.go:273`) and carry the pointer's sequence (`bucket.go:277`): a
+   (`bucket.go:260`), so the next poll reads the pointer again.
+5. `openSnapshot` (`bucket.go:386`, `bucket.go:342`): the body must hash
+   to the pointer's hash (`bucket.go:343`), decode strictly
+   (`bucket.go:346`) and carry the pointer's sequence (`bucket.go:350`): a
    swapped object or a pointer naming another publication's snapshot is
-   refused.
-6. `Holder.Apply` (`bucket.go:314`, `holder.go:113`) rechecks the floor
+   refused. Then `checkLease` (`bucket.go:390`, `bucket.go:327`) refuses a
+   snapshot whose `ValidUntil` is more than `MaxLease` (`-max-lease`, four
+   hours: golem-control's `-lease` default and an internal pool's maximum,
+   ADR 0032) plus the skew ahead of the gateway's clock. Refused, not
+   clamped: a lease the gateway cannot trust is not one to shorten and
+   serve, so it fails closed, keeping what it holds until that expires.
+   The last-good copy is held to both bounds too (`verify`).
+6. `Holder.Apply` (`bucket.go:393`, `holder.go:113`) rechecks the floor
    and the order under its mutex, refuses an expired lease, compiles
    (credentials, targets, routes, entitlements with the denylist, prices),
    stores the new `Compiled`, sets the floor to 7 and calls `OnApply` (the
    limiter takes each scope's known spend and boundary, ADR 0048). If the
    compile fails (a Secret not yet mounted), the `applyError` makes `Poll`
-   set `retry` (`bucket.go:210`): after `ApplyRetry` (30 seconds by
-   default) it forgets the tag (`bucket.go:191`) and reads the unchanged
+   set `retry` (`bucket.go:263`): after `ApplyRetry` (30 seconds by
+   default) it forgets the tag (`bucket.go:244`) and reads the unchanged
    pointer again.
-7. `saveLastGood` (`bucket.go:320`, `bucket.go:333`) writes the pointer
+7. `saveLastGood` (`bucket.go:400`, `bucket.go:413`) writes the pointer
    and the snapshot to `last-good.json`, then `saveCheckpoint`
-   (`bucket.go:323`, `bucket.go:345`) writes "7"; last-good first, so a
+   (`bucket.go:403`, `bucket.go:425`) writes "7"; last-good first, so a
    crash between them leaves a copy at or above the floor, never one
-   below it. Both go through `writeAtomic` (`bucket.go:353`): a temporary
+   below it. Both go through `writeAtomic` (`bucket.go:433`): a temporary
    file, written and synced, renamed into place, then the directory
    synced, so a power loss cannot bring back the older checkpoint. A
    failure of either is logged, not returned: the snapshot is applied, and
    a restart's floor will be the older checkpoint (or the trusted one).
-8. `writeStatus` (`bucket.go:327`, `bucket.go:384`) writes
+8. `writeStatus` (`bucket.go:407`, `bucket.go:464`) writes
    `status/internal/<gateway-id>` for golem-control's diagnostics.
    Requests that took sequence 6 before the swap finish on it; new ones
-   take 7. Back in `Poll`, the tag is recorded (`bucket.go:208`): every
+   take 7. Back in `Poll`, the tag is recorded (`bucket.go:261`): every
    outcome but a failed fetch or a failed apply is final until the
    pointer changes.
 
@@ -315,7 +335,7 @@ minute over OTLP), so nothing is added to a request:
 (`ValidUntil` − now, negative once run out), `golem.snapshot.seq`, the bucket
 source's `golem.snapshot.pointer_overdue` and `golem.snapshot.last_good`
 (0/1), the limiter's `golem.limit.down` (0/1), `golem.limit.waivers`
-(`Limiter.Waived`, counted where a waived ticket is made, `limit.go:279`),
+(`Limiter.Waived`, counted where a waived ticket is made, `limit.go:289`),
 `golem.limit.held` (`Limiter.Held`, under the limiter's lock for a
 `len`) and `golem.limit.dropped`, and `golem.denylist.entries`. They carry
 no attributes of their own: the resource's site and pool name the
@@ -326,17 +346,17 @@ increment, a lease run out).
 
 ## 4. The binary's lifecycle (`cmd/golem-gateway`)
 
-`parse` (`main.go:64`) reads the flags and applies `releaseGate`
-(`main.go:398`). The gateway has two modes:
+`parse` (`main.go:71`) reads the flags and applies `releaseGate`
+(`main.go:457`). The gateway has two modes:
 
 - **standalone** (`-standalone <dir>`, ADR 0023): only on a loopback
   address; the in-memory limiter; dev keys, with the local key
-  (`loadLocalKey`, `main.go:429`: a dev key in a 0600 file, kept across
+  (`loadLocalKey`, `main.go:491`: a dev key in a 0600 file, kept across
   restarts); the directory source, which must load once before the server
   starts; provider credentials from the environment;
 - **pool** (`-pool <name>`): `-bucket`, `-keys`, `-valkey` and `-site` are
   required, and until golem#7's deployment evidence is in, so is
-  `-accept-unreleased`. `poolSource` (`main.go:283`) opens the bucket
+  `-accept-unreleased`. `poolSource` (`main.go:340`) opens the bucket
   (`s3bucket.Open`; a directory for tests), loads the trusted publishing
   keys (`sign.LoadKeys`: a directory of PEM public keys, a KMS key's named
   by its `Key-ID` header), opens the Secrets mounted under `-secrets`
@@ -344,66 +364,88 @@ increment, a lease run out).
   name) and starts the bucket source: `Start` raises the floor from the
   local checkpoint (`-checkpoint`) and the pool's signed trusted
   checkpoint, refusing to start with neither, and applies the last-good
-  copy beside the checkpoint (`lastGoodPath`, `main.go:462`); then one
+  copy beside the checkpoint (`lastGoodPath`, `main.go:524`); then one
   `Poll`, whose failure is logged, not fatal. The limiter is over the
-  site's Valkey (`limit.NewValkey`, `-valkey-replica-acks` for WAIT).
+  site's Valkey (`limit.DialValkey`, `-valkey-replica-acks` for WAIT), its
+  client's options from `valkeyOption` (`main.go:245`): `-valkey-tls` for TLS
+  (ElastiCache's in-transit encryption), verified against the system's
+  roots or `-valkey-ca`'s, each dial's certificate checked against that
+  dial's host (no fixed `ServerName`, so a cluster's nodes are each
+  verified by their own name); `-valkey-user` for an ACL user's AUTH, its
+  password from `$VALKEY_PASSWORD` only (a flag would show in the process
+  list and the pod spec). A half-given setting (a CA without TLS, a user
+  without a password, a CA file with no PEM certificate) refuses to start,
+  saying what to add. A
+  Valkey unreachable at the start is not fatal either: the limiter starts
+  in its outage mode (`Limiter.MarkDown`: waivers, increments held) and
+  `Valkey.Connect` retries the dial in the background, backing off to 30
+  seconds; the limiter's `Run` then recovers it (accounting.md §3.4).
 
-`run` (`main.go:99`) builds the parts in dependency order, each a named
-step: telemetry (`setupTelemetry`, `main.go:363`, labelled with the site
+`run` (`main.go:112`) builds the parts in dependency order, each a named
+step: telemetry (`setupTelemetry`, `main.go:422`, labelled with the site
 and pool), the Entra verifier if a tenant is given (`newEntra`,
-`main.go:318`), the limiter over its store (`newLimiter`, `main.go:200`),
+`main.go:377`: its key set, from `-entra-jwks` or Entra's public cloud,
+fetched once; a failure is logged, not fatal, and the verifier's `Run`
+retries, golem keys served meanwhile), the limiter over its store (`newLimiter`, `main.go:216`),
 the holder that hands each snapshot's known spend to the limiter
-(`newHolder`, `main.go:220`), the denylist if one is named (loaded before
-the source, `main.go:142`, so neither a first request nor the last-good
+(`newHolder`, `main.go:277`), the denylist if one is named (loaded before
+the source, `main.go:155`, so neither a first request nor the last-good
 publication is ever compiled without it), the snapshot source
-(`startSource`, `main.go:231`: standalone's directory with the dev key, or
-`poolSource`), and the routes (`newMux`, `main.go:252`) on the server
-(`newServer`, `main.go:337`). Every background loop (the source, the
-denylist, the limiter, Entra's refresh) runs under `bg` in one
+(`startSource`, `main.go:288`: standalone's directory with the dev key, or
+`poolSource`), and the routes (`newMux`, `main.go:309`) on the server
+(`newServer`, `main.go:396`). Every background loop (the source, the
+denylist, the limiter, Valkey's connection retries, Entra's refresh) runs under `bg` in one
 `WaitGroup`. Once the source has started, the state gauges are
 registered over the holder, the bucket source, the limiter and the
-denylist (`telemetry.ObserveState`, `main.go:162`; with any telemetry but
-`off`, and exported only over OTLP). `announce` (`main.go:269`) says what
+denylist (`telemetry.ObserveState`, `main.go:175`; with any telemetry but
+`off`, and exported only over OTLP). `announce` (`main.go:326`) says what
 is served.
 
 Standalone's API handlers are wrapped as `track(localOnly(...))`; pool
 mode's as `track(...)`. `localOnly` (`guard.go:24`) keeps the developer's
 browser out: a loopback `Host` only (DNS rebinding), no cross-origin
 request by the browser's own headers, and a JSON body only (no
-preflight-free page can send one). `track` (`lifecycle.go:36`) counts
+preflight-free page can send one). `track` (`lifecycle.go:42`) counts
 calls in flight under a mutex (`begin`, `end`): not a `WaitGroup`, because
 after `srv.Close` a handler whose connection was already accepted can
-still start while the wait runs. Once `wait` (`lifecycle.go:69`) has begun
-a call that starts is refused with a 503 rather than counted after the
-count was taken. `/readyz` (`lifecycle.go:82`) fails while draining and
-while the holder has no current snapshot or its lease has expired.
+still start while the wait runs. Once `wait` (`lifecycle.go:75`) has begun
+a call that starts is refused rather than counted after the count was
+taken, in its route's dialect (`track` is given it, as `localOnly` is):
+`proxy.Refuse` with `gateway.not_ready`, a 503 with Retry-After, so an SDK
+parses it and retries, reaching another of the pool's gateways. `/readyz` (`lifecycle.go:88`) fails while draining and
+while the holder has no current snapshot or its lease has expired. It
+does not look at the site's Valkey: the limiter fails open by design, so a
+Valkey outage must not take the pool's endpoints away (`golem.limit.down`
+is the signal, operations.md §2.2).
 `TestPoolMode` runs pool mode end to end: golem-control's publisher writes
 a snapshot to a bucket, and the gateway serves a key's call from it, with
 the provider credential from a mounted Secret, its spend in a real Valkey
-and its local checkpoint written.
+and its local checkpoint written. `TestPoolModeValkeyDown` starts the
+same gateway with nothing listening at `-valkey`: it becomes ready and
+serves the call as a waiver.
 
 ### Worked example: shutdown with a stream in flight
 
-SIGTERM ends `sig` (`main.go:128`). The shutdown goroutine
-(`main.go:176`) runs `lifecycle.shutdown` (`lifecycle.go:98`):
+SIGTERM ends `sig` (`main.go:138`). The shutdown goroutine
+(`main.go:189`) runs `lifecycle.shutdown` (`lifecycle.go:104`):
 
 1. `draining` is set, so `/readyz` answers 503, and the gateway sleeps
    `-unready` for the endpoints to stop sending.
 2. `srv.Shutdown` closes the listeners (`ListenAndServe` returns at
-   `main.go:183`) and waits up to `-drain` for calls to finish.
-3. At the deadline `srv.Close` (`lifecycle.go:107`) cuts the remaining
+   `main.go:196`) and waits up to `-drain` for calls to finish.
+3. At the deadline `srv.Close` (`lifecycle.go:113`) cuts the remaining
    connections; the stream's context ends and the proxy accounts it as a
    cancellation, under `context.WithoutCancel`, its row and counter add
    still written.
-4. `shutdown` waits for `lc.wait()` (`lifecycle.go:110`), the last
+4. `shutdown` waits for `lc.wait()` (`lifecycle.go:116`), the last
    counted call's end, up to `cut` (10 seconds); a call that starts now is
-   refused.
+   refused (`gateway.not_ready`, in its dialect).
 
-Only then (`<-drained`, `main.go:188`) does `run` stop the background loops
-(`stopBg`, `wg.Wait`, `main.go:189`; they ran through the drain because
+Only then (`<-drained`, `main.go:201`) does `run` stop the background loops
+(`stopBg`, `wg.Wait`, `main.go:202`; they ran through the drain because
 the limiter's renewals keep calls' slots), let the limiter finish
-(`main.go:192`), close the Valkey client (`closeStore`, deferred) and shut
-telemetry down last (`shutdownTelemetry`, deferred at `main.go:119`),
+(`main.go:205`), close the Valkey client (`closeStore`, deferred) and shut
+telemetry down last (`shutdownTelemetry`, deferred at `main.go:132`),
 delivering the rows the cut calls wrote. `TestShutdownAccounts` checks
 this end to end: the cut stream leaves one row with outcome `cancelled`,
 its cost in the counter. `TestTrackAfterWait` checks the count: a call
@@ -414,14 +456,16 @@ that started before it.
 
 | Invariant | Enforced | Tested |
 |---|---|---|
-| A snapshot below the floor, or not newer than the one held, is never applied | `Holder.Apply` (`holder.go:119`, `:122`); `Bucket.openPointer` (`bucket.go:262`) | `TestHolder`, `TestRaiseFloor`, `TestBucketSource`, `TestPublicationModel` |
+| A snapshot below the floor, or not newer than the one held, is never applied | `Holder.Apply` (`holder.go:119`, `:122`); `Bucket.openPointer` (`bucket.go:315`) | `TestHolder`, `TestRaiseFloor`, `TestBucketSource`, `TestPublicationModel` |
 | A restart with an empty disk takes the trusted checkpoint as its floor; with no floor at all it does not start | `Bucket.Start`, `trustedCheckpoint` | `TestBucketSource` (restarts), `TestPublicationModel` (`restartEmpty`) |
 | Only a correctly signed pointer of this pool, naming an object with its hash and sequence, is applied | `Bucket.openPointer`, `openSnapshot` | `TestBucketSource` |
+| A pointer issued more than the skew in the gateway's future, or a snapshot whose lease runs past the longest lease plus the skew, is refused, from the bucket or from disk | `Bucket.openPointer`, `checkLease` | `TestClockBounds`; `TestPoolModeLeaseBound` (`-max-lease`) |
 | A restart while the bucket is unreachable serves the last publication applied, verified again; an altered copy, one below the floor or past its lease is not served | `Bucket.loadLastGood`, `applyLastGood`, `verify` | `TestLastGood` |
 | The last-good copy is written before the checkpoint, and both durably (file and directory synced) | `Bucket.read`, `writeAtomic` | not directly: the order and the syncs are untested; `TestPoolMode` checks the checkpoint is written |
 | A verified publication that failed to compile is retried while current; a refused one is not | `Holder.Apply` (`applyError`), `Bucket.Poll` | `TestApplyRetried` |
 | A pointer past its `Expires` is reported once, and the gateway serves on | `Bucket.checkOverdue` | `TestOverdue` |
 | The last-good copy served is reported until a bucket publication replaces it | `Bucket.ServingLastGood` | `TestLastGood` |
+| A last-good copy that failed to compile at start is retried from disk every `ApplyRetry`, the bucket unreachable, until something applies | `Bucket.tryLastGood`, `retryLastGood` | `TestLastGoodRetried` |
 | The snapshot's age, lease remaining and the limiter's outage are reported at collection, with nothing on a request | `ObserveState` (observable instruments only) | `TestStateGauges`, `TestStateGaugesBeforeASnapshot`; `BenchmarkHandler*` unchanged |
 | An expired lease serves nothing new | `Holder.Current`, `Holder.Apply` | `TestHolder`, `TestPublicationModel` (`serve`) |
 | A config that does not compile keeps the previous one | `Holder.Apply`, `Dir.Load` | `TestDir` |
@@ -432,24 +476,26 @@ that started before it.
 | The implicit principal exists only for dev, and takes only the local key | `Compile`, `principal` | `TestImplicit`, `TestLocalKey` |
 | A user's token cannot act as a service's principal, or the reverse | `Keys.token` | `TestEntra` |
 | Entra tokens are refused once the key set is too old; a key fetched by a refresh is accepted | `entra.Verifier.Verify`, `Refresh` | `TestStaleKeys`, `TestRefresh` |
+| A gateway starts while Entra is unreachable: golem keys served, Entra tokens refused as `gateway.not_ready` until a retried fetch succeeds | `newEntra`, `Verify` (`errNoKeys`), `Run`'s backoff, `Keys.token` | `TestPoolModeEntraDown`, `TestStartWithoutKeys` (lib/entra), `TestEntraKeysNotYetFetched` |
+| A refresh asked for within a minute of the last is deferred to the minute's end, not dropped | `Verifier.Run` | `TestRefreshDeferred` (lib/entra, `testing/synctest`) |
 | A caller the denylist names is refused whatever the snapshot says; a bad edit keeps the list in force | `Authenticate`, `Denylist.denies`, `DenyFile.Load` | `TestDenylist` |
 | Every ledger row is delivered, dropped or failed, and counted | `LedgerQueue` | `TestLedgerQueue*` (shutdown races, emission during shutdown, flush during shutdown, retries, partial delivery) |
 | Standalone's ledger rows on stdout are written whole or counted as lost | `jsonLogger.Emit` | `TestStdoutCountsLostRows` |
 | A row has golem.spend's columns in order, and the counter's period | `Ledger.row` | `TestRowMatchesLedgerDDL`, `TestRowPeriodIsTheCounters` |
 | OTLP uses TLS unless the collector is a literal loopback address, whatever the environment says | `otlp.PlaintextOK`, `otlp.New` | `TestPlaintextOK`, `TestOTLPIgnoresInsecureEnv` (lib/otlp) |
 | A stream cut at shutdown still leaves its row and counter add | `lifecycle.shutdown`, the order in `run` | `TestShutdownAccounts` |
-| No call starts uncounted once the shutdown's wait has begun | `lifecycle.begin`, `wait` | `TestTrackAfterWait` |
+| No call starts uncounted once the shutdown's wait has begun; one refused then gets its dialect's `gateway.not_ready` with Retry-After | `lifecycle.begin`, `wait`, `track` | `TestTrackAfterWait` (both dialects) |
 | Standalone answers only loopback, same-origin JSON requests | `localOnly` | `TestLocalOnly` |
 | Pool mode needs its inputs, and `-accept-unreleased` until golem#7 | `releaseGate` | `TestReleaseGate` |
 | A pool's published snapshot is served, its credential from a Secret, its spend in Valkey | `poolSource`, `run` | `TestPoolMode` |
+| Valkey is reached over TLS with AUTH when configured; the password never comes from a flag | `valkeyOption` | `TestValkeyOption`, `TestPoolModeValkeyTLS` (a TLS-only server with an ACL user) |
+| A gateway starts, is ready and serves while its Valkey is unreachable | `newLimiter` (`limit.DialValkey`, `MarkDown`), `/readyz` | `TestPoolModeValkeyDown`, `TestStartWithValkeyDown` (gateway/limit) |
 | A source reports a failure once, not every second | `repeat` | `TestRepeat` |
 
 ## Known gaps
 
 - Pool mode runs only with `-accept-unreleased` until golem#7's evidence
   is in.
-- A last-good copy that fails to apply at start (a Secret not yet
-  mounted) is not retried from disk: the gateway waits for the bucket.
 - An overdue pointer is a log line and a metric
   (`golem.snapshot.pointer_overdue`), not a readiness signal: a gateway
   serves its snapshot until the lease ends, by design.
@@ -458,8 +504,9 @@ that started before it.
   left to the collector (its Kubernetes attributes), as for the
   gateway's other metrics. Standalone's stdout telemetry exports no
   metrics.
-- A call refused by `track` once the shutdown's wait has begun gets a
-  plain-text 503 ("shutting down"), not the dialect's error shape.
+- A gateway still without Entra's signing keys reports it in its log only
+  (each failed fetch, and `gateway.not_ready` refusals counted with the
+  others): there is no state gauge for it yet.
 - OTLP's TLS is tested at the decision, not against a collector.
 - Standalone's stdout ledger counts and logs a row it could not write, but
   does not retry it.

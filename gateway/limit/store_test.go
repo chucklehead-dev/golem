@@ -270,7 +270,7 @@ func TestValkeyStore(t *testing.T) {
 		if _, known, _ := st.Admit(ctx, Admission{Slot: Slot{"b", "p2", "s"}, Period: nov, Now: now}); known != 80 {
 			t.Fatalf("known %d with no boundary, want the total, 80", known)
 		}
-		if n, _ := st.c.Do(ctx, st.c.B().Hlen().Key(st.counterKey("s", nov)).Build()).AsInt64(); n > 2+60+1 {
+		if n, _ := st.mustClient().Do(ctx, st.mustClient().B().Hlen().Key(st.counterKey("s", nov)).Build()).AsInt64(); n > 2+60+1 {
 			t.Fatalf("%d fields kept: past a retention and its margin, the old minutes go", n)
 		}
 	})

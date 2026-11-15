@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,7 +45,7 @@ func TestShutdownAccounts(t *testing.T) {
 
 	lc := &lifecycle{drain: 200 * time.Millisecond, cut: 5 * time.Second}
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/chat/completions", lc.track(&proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, ProviderTail: 50 * time.Millisecond,
+	mux.Handle("POST /v1/chat/completions", lc.track(proxy.OpenAIChat, &proxy.Handler{Dialect: proxy.OpenAIChat, Snapshots: holder, ProviderTail: 50 * time.Millisecond,
 		Limiter: lim.Admitter(), MaxBody: 1 << 20, Telemetry: tel}))
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { return nil }))
 	ts := httptest.NewUnstartedServer(mux)
@@ -92,20 +93,51 @@ func TestShutdownAccounts(t *testing.T) {
 }
 
 // TestTrackAfterWait: a call that starts once the wait has begun is
-// refused, not counted after the count was taken; the wait ends with the
-// last call that started before it.
+// refused, not counted after the count was taken, in its dialect's error
+// shape with Retry-After; the wait ends with the last call that started
+// before it.
 func TestTrackAfterWait(t *testing.T) {
 	lc := &lifecycle{}
 	release := make(chan struct{})
 	started := make(chan struct{})
-	h := lc.track(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { close(started); <-release }))
+	h := lc.track(proxy.AnthropicMessages, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { close(started); <-release }))
+	openai := lc.track(proxy.OpenAIChat, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("a call ran after the wait began") }))
 	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/", nil))
 	<-started
 	idle := lc.wait()
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("POST", "/", nil))
-	if w.Code != 503 {
-		t.Fatalf("a call after the wait began: %d, want 503", w.Code)
+	for name, tc := range map[string]struct {
+		h    http.Handler
+		code func(body []byte) (string, error)
+	}{
+		"anthropic": {h, func(b []byte) (string, error) {
+			var e struct {
+				Type  string
+				Error struct{ Type, Message string }
+			}
+			err := json.Unmarshal(b, &e)
+			if e.Type != "error" || e.Error.Message == "" {
+				return "", fmt.Errorf("not Anthropic's error shape")
+			}
+			return e.Error.Type, err
+		}},
+		"openai": {openai, func(b []byte) (string, error) {
+			var e struct {
+				Error struct{ Code, Type, Message string }
+			}
+			err := json.Unmarshal(b, &e)
+			if e.Error.Type != "gateway" || e.Error.Message == "" {
+				return "", fmt.Errorf("not OpenAI's error shape")
+			}
+			return e.Error.Code, err
+		}},
+	} {
+		w := httptest.NewRecorder()
+		tc.h.ServeHTTP(w, httptest.NewRequest("POST", "/", nil))
+		code, err := tc.code(w.Body.Bytes())
+		if w.Code != 503 || w.Header().Get("Retry-After") == "" || w.Header().Get("Content-Type") != "application/json" || err != nil || code != "gateway.not_ready" {
+			t.Errorf("%s: a call after the wait began: %d, Retry-After %q, %s (%v); want 503, Retry-After, gateway.not_ready in the dialect's shape",
+				name, w.Code, w.Header().Get("Retry-After"), w.Body, err)
+		}
 	}
 	select {
 	case <-idle:

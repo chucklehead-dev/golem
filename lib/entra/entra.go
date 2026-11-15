@@ -94,12 +94,19 @@ type entraClaims struct {
 	Idtyp string `json:"idtyp"`
 }
 
-// Error is a token refused: Expired, or invalid for Msg's reason (said
-// so the caller can act on it).
+// Error is a token refused: Expired, Unavailable (it cannot be checked
+// yet: the signing keys have never been fetched), or invalid for Msg's
+// reason (said so the caller can act on it).
 type Error struct {
-	Expired bool
-	Msg     string
+	Expired     bool
+	Unavailable bool
+	Msg         string
 }
+
+// errNoKeys is Verify's refusal before the first key set: not the token's
+// fault, so a caller can answer it as a retryable unavailability rather
+// than an invalid credential.
+var errNoKeys = &Error{Unavailable: true, Msg: "golem cannot check Entra tokens yet: Entra's signing keys not yet fetched (the gateway retries); retry shortly, or call with a golem key"}
 
 // Error implements error.
 func (e *Error) Error() string { return e.Msg }
@@ -117,6 +124,10 @@ func (e *Verifier) Verify(raw string) (Identity, error) {
 	}
 	if len(tok.Headers) != 1 {
 		return invalid("expected one signature")
+	}
+	if e.keys.Load() == nil {
+		e.requestRefresh() // Run is retrying already; this wakes it
+		return Identity{}, errNoKeys
 	}
 	if at := e.keysAt.Load(); at != 0 && e.now().Sub(time.Unix(0, at)) > cmp.Or(e.MaxKeyAge, 24*time.Hour) {
 		return invalid("golem's copy of Entra's signing keys is too old to trust (they have not been refreshed); the platform team is alerted")
@@ -241,26 +252,65 @@ func (e *Verifier) requestRefresh() {
 	}
 }
 
-// Run keeps the key set fresh: hourly, and when a token names an unknown
-// key (at most once a minute).
+// Ready reports whether a key set has been fetched: before it, Verify
+// refuses every token as Unavailable.
+func (e *Verifier) Ready() bool { return e.keys.Load() != nil }
+
+// The refresh schedule (Run).
+const (
+	refreshEvery   = time.Hour       // a key set fetched is refreshed this often
+	refreshSpacing = time.Minute     // a refresh asked for waits this long after the last
+	retryFirst     = time.Second     // a failed refresh is retried this soon,
+	retryMax       = 5 * time.Minute // doubling to this
+)
+
+// Run keeps the key set fresh until ctx ends: at once if none has been
+// fetched (a gateway may start while Entra is unreachable), hourly, and
+// when a token names an unknown key, at most once a minute: a request
+// within the minute after the last refresh is deferred to the minute's
+// end, not dropped, so a key Entra rotated in just after a refresh is
+// fetched then rather than at the next hour. A failed refresh is retried
+// from a second, doubling to five minutes.
 func (e *Verifier) Run(ctx context.Context) {
 	wake := e.wakeup()
-	hourly := time.NewTicker(time.Hour)
-	defer hourly.Stop()
-	var last time.Time
+	var last time.Time // the last refresh tried
+	retry := retryFirst
+	next := e.now()
+	if e.Ready() { // fetched before Run (golem-control fetches at its start)
+		last = time.Unix(0, e.keysAt.Load())
+		next = last.Add(refreshEvery)
+	}
+	timer := time.NewTimer(max(next.Sub(e.now()), 0))
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-hourly.C:
 		case <-wake:
-			if e.now().Sub(last) < time.Minute {
+			if at := last.Add(refreshSpacing); !last.IsZero() && e.now().Before(at) {
+				if at.Before(next) {
+					next = at
+					timer.Reset(at.Sub(e.now()))
+				}
 				continue
 			}
+		case <-timer.C:
 		}
 		last = e.now()
 		if err := e.Refresh(ctx); err != nil {
-			slog.Warn("could not refresh Entra's signing keys; using the cached ones", "err", err)
+			if ctx.Err() != nil {
+				return
+			}
+			if e.Ready() {
+				slog.Warn("could not refresh Entra's signing keys; using the cached ones", "retry_in", retry, "err", err)
+			} else {
+				slog.Error("could not fetch Entra's signing keys; Entra tokens are refused until they are (golem keys work)", "retry_in", retry, "err", err)
+			}
+			next = last.Add(retry)
+			retry = min(2*retry, retryMax)
+		} else {
+			next, retry = last.Add(refreshEvery), retryFirst
 		}
+		timer.Reset(max(next.Sub(e.now()), 0))
 	}
 }

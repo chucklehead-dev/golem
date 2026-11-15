@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,28 @@ func TestStoreOff(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"claude","store":true,"messages":[]}`)))
 	if w.Code != 200 || !strings.Contains(got, `"store":false`) || strings.Contains(got, `"store":true`) {
 		t.Fatalf("%d; the provider got %s: store must be off", w.Code, got)
+	}
+}
+
+// TestStoreNotBoolean: a store that is not a boolean (a string, a number)
+// is refused as request.invalid naming the field, never forwarded as if it
+// asked for no storage.
+func TestStoreNotBoolean(t *testing.T) {
+	rt := roundTrip(func(r *http.Request) (*http.Response, error) {
+		t.Error("a request with a non-boolean store reached the provider")
+		return nil, io.EOF
+	})
+	h := handler(OpenAIChat, rt, nil)
+	for _, v := range []string{`"true"`, `1`} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"claude","store":`+v+`,"messages":[]}`)))
+		var e struct {
+			Error struct{ Code, Message string }
+		}
+		json.Unmarshal(w.Body.Bytes(), &e)
+		if w.Code != 400 || e.Error.Code != "request.invalid" || !strings.Contains(e.Error.Message, `"store"`) {
+			t.Errorf("store %s: %d %s; want 400 request.invalid naming \"store\"", v, w.Code, w.Body)
+		}
 	}
 }
 

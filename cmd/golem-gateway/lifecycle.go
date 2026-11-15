@@ -7,6 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/chucklehead-dev/golem/gateway/proxy"
+	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
 // lifecycle is the gateway's shutdown, in the order that loses no
@@ -32,11 +35,14 @@ type lifecycle struct {
 	unready, drain, cut time.Duration
 }
 
-// track counts h's calls in flight.
-func (lc *lifecycle) track(h http.Handler) http.Handler {
+// track counts h's calls in flight. A call refused once the wait has
+// begun is answered in h's dialect, d, as every refusal is (contracts.md
+// §1): an SDK parses it and retries after its Retry-After, reaching
+// another of the pool's gateways.
+func (lc *lifecycle) track(d proxy.Dialect, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !lc.begin() {
-			http.Error(w, "shutting down", http.StatusServiceUnavailable)
+			proxy.Refuse(w, d, contract.GatewayNotReady, "this gateway is shutting down: retry the call, and another of the pool's gateways will take it")
 			return
 		}
 		defer lc.end()

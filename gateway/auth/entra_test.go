@@ -209,6 +209,26 @@ func TestRefresh(t *testing.T) {
 	}
 }
 
+// TestEntraKeysNotYetFetched: before the verifier has any key set (Entra
+// unreachable as the gateway started), a token is refused as the
+// gateway's unreadiness (retryable, saying the keys are not yet fetched),
+// not as an invalid token; a golem key is served meanwhile.
+func TestEntraKeysNotYetFetched(t *testing.T) {
+	e := &entra.Verifier{Tenant: tenant, Audiences: []string{apiID}, Now: func() time.Time { return now }}
+	good := key.New(key.Live)
+	ents := snapshot.Entitlements{Scopes: []snapshot.Scope{{ID: "team-a", Models: []string{"claude"}}},
+		Users: []snapshot.Member{{ID: "alice", Entra: alice, Scopes: []string{"team-a"}, Default: "team-a"}},
+		Keys:  []snapshot.Key{{Hash: hashOf(good), Principal: "alice", Scope: "team-a"}}}
+	k := Compile(ents, key.Live, func() time.Time { return now }, e)
+	_, r := k.Authenticate(bearer(sign(t, signingKey, "k1", userClaims()), ""))
+	if r == nil || r.Code != contract.GatewayNotReady || !strings.Contains(r.Msg, "not yet fetched") {
+		t.Fatalf("%+v: want gateway.not_ready, saying Entra's keys are not yet fetched", r)
+	}
+	if p, r := k.Authenticate(http.Header{"X-Api-Key": {good}}); r != nil || p.ID != "alice" {
+		t.Fatalf("a golem key without Entra's keys: %+v %+v", p, r)
+	}
+}
+
 // FuzzAuthenticate: no credential, however malformed, panics the chain or
 // authenticates without a valid signature.
 func FuzzAuthenticate(f *testing.F) {

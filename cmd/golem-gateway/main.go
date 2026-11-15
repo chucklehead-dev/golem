@@ -4,7 +4,7 @@
 // mounted Secrets:
 //
 //	golem-gateway -pool internal -bucket s3://golem-state/golem/ -keys /etc/golem/keys \
-//	  -checkpoint /var/lib/golem/checkpoint -valkey valkey:6379 -site eu-west-1 \
+//	  -checkpoint /var/lib/golem/checkpoint -valkey valkey:6379 -valkey-tls -valkey-user golem-gateway -site eu-west-1 \
 //	  -secrets /var/run/golem/secrets -listen :8080 -accept-unreleased
 //
 // or, for a developer's own machine, standalone (ADR 0023):
@@ -19,6 +19,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -52,13 +54,18 @@ import (
 
 // options are the command line.
 type options struct {
-	standalone, listen, tenant, audience, telem, localKeyFile, zoneName, denylist string
-	maxBody                                                                       int64
-	drainFor, unready                                                             time.Duration
+	standalone, listen, tenant, audience, jwks, telem, localKeyFile, zoneName, denylist string
+	maxBody                                                                             int64
+	drainFor, unready                                                                   time.Duration
 	// pool mode
 	pool, bucket, keys, checkpoint, gatewayID, valkeyAddr, site, secrets string
 	replicaAcks                                                          int
 	acceptUnreleased                                                     bool
+	maxSkew, maxLease                                                    time.Duration
+	// the site's Valkey: TLS (with a CA file's roots, else the system's)
+	// and an AUTH user; the password is $VALKEY_PASSWORD's, never a flag
+	valkeyTLS            bool
+	valkeyCA, valkeyUser string
 }
 
 func parse(args []string) (options, error) {
@@ -73,6 +80,7 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.telem, "telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless a literal loopback address: 127.0.0.1:4318, [::1]:4318)")
 	fs.StringVar(&o.localKeyFile, "local-key", "", "standalone: the file holding the local key (generated on first use); default <user config dir>/golem/standalone-key")
 	fs.StringVar(&o.zoneName, "period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
+	fs.StringVar(&o.jwks, "entra-jwks", "", "the tenant's signing key set URL; default Entra's public cloud's, https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys")
 	fs.StringVar(&o.audience, "entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	fs.StringVar(&o.denylist, "denylist", "", "the site's emergency denylist file (a mounted ConfigMap), re-read as it changes; empty: none")
 	fs.StringVar(&o.pool, "pool", "", "pool mode: the gateway pool whose snapshots this gateway serves")
@@ -82,7 +90,12 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.gatewayID, "id", "", "pool mode: this gateway's name, for its status object (default the host name)")
 	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey (host:port) for the limiter")
 	fs.IntVar(&o.replicaAcks, "valkey-replica-acks", 0, "pool mode: replicas each spend add waits for (WAIT), so a failover cannot lose it")
+	fs.BoolVar(&o.valkeyTLS, "valkey-tls", false, "pool mode: connect to Valkey over TLS (ElastiCache's in-transit encryption), verifying its certificate against the system's roots for the address's host name")
+	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "pool mode, with -valkey-tls: a PEM file of the CA certificates to verify Valkey's certificate against, in place of the system's roots")
+	fs.StringVar(&o.valkeyUser, "valkey-user", "", "pool mode: the Valkey user to AUTH as (an ACL user; ElastiCache RBAC); its password in $VALKEY_PASSWORD. Empty with the password set: AUTH as the default user")
 	fs.StringVar(&o.site, "site", "", "pool mode: this gateway's site (its Valkey's keys and ledger rows)")
+	fs.DurationVar(&o.maxSkew, "clock-skew", 2*time.Minute, "pool mode: how far the publisher's clock may run ahead of this gateway's: a pointer issued further in its future is refused")
+	fs.DurationVar(&o.maxLease, "max-lease", 4*time.Hour, "pool mode: the longest authorization lease the pool's publisher grants (golem-control's -lease): a snapshot whose lease runs further ahead, plus -clock-skew, is refused")
 	fs.StringVar(&o.secrets, "secrets", "/var/run/golem/secrets", "pool mode: where provider Secrets are mounted, one directory per Secret")
 	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run although golem#7's deployment evidence is not in (test sites only)")
 	if err := fs.Parse(args); err != nil {
@@ -120,10 +133,7 @@ func run(ctx context.Context, args []string) int {
 	if tel != nil {
 		tel.Ledger.Period = zone
 	}
-	entra, err := newEntra(o.tenant, o.audience)
-	if err != nil {
-		return failed("%v", err)
-	}
+	entra := newEntra(o.tenant, o.audience, o.jwks)
 
 	sig, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -133,11 +143,14 @@ func run(ctx context.Context, args []string) int {
 	defer stopBg() // also on a failed start
 	var wg sync.WaitGroup
 
-	limiter, closeStore, err := newLimiter(o, zone)
+	limiter, connectStore, closeStore, err := newLimiter(o, zone)
 	if err != nil {
 		return failed("%v", err)
 	}
 	defer closeStore()
+	if connectStore != nil {
+		wg.Go(func() { connectStore(bg) })
+	}
 	holder := newHolder(entra, limiter)
 	if o.denylist != "" {
 		// Read before the source loads: a gateway started during an
@@ -195,23 +208,67 @@ func run(ctx context.Context, args []string) int {
 }
 
 // newLimiter is the limiter over its store: in memory standalone (ADR
-// 0023), the site's Valkey in pool mode. The returned func closes the
-// store's client.
-func newLimiter(o options, zone *time.Location) (*limit.Limiter, func(), error) {
+// 0023), the site's Valkey in pool mode. A Valkey unreachable at the start
+// does not stop the gateway: the limiter starts in its outage mode
+// (waivers, increments held) and connect, run in the background, dials
+// until it answers; Run's Recover then brings the limiter back. connect is
+// nil when there is nothing to dial; closeStore closes the store's client.
+func newLimiter(o options, zone *time.Location) (limiter *limit.Limiter, connect func(context.Context), closeStore func(), err error) {
 	var store limit.Store = limit.NewMem()
-	closeStore := func() {}
+	closeStore = func() {}
+	var down error
 	if o.standalone == "" {
-		c, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true})
+		opt, err := valkeyOption(o, os.Getenv)
 		if err != nil {
-			return nil, nil, fmt.Errorf("-valkey %s: %w", o.valkeyAddr, err)
+			return nil, nil, nil, err
 		}
-		v := limit.NewValkey(c, o.site)
+		v, err := limit.DialValkey(o.site, func() (valkey.Client, error) { return valkey.NewClient(opt) })
+		if err != nil {
+			down = fmt.Errorf("-valkey %s: %w", o.valkeyAddr, err)
+			slog.Error("golem-gateway: the site's Valkey is unreachable; starting with the limiter in its outage mode (calls admitted on local counts, recorded as waivers) and retrying the connection",
+				"valkey", o.valkeyAddr, "err", err)
+		}
 		v.ReplicaAcks = o.replicaAcks
-		store, closeStore = v, c.Close
+		store, connect, closeStore = v, v.Connect, v.Close
 	}
-	limiter := limit.New(store)
+	limiter = limit.New(store)
 	limiter.Location = zone
-	return limiter, closeStore, nil
+	if down != nil {
+		limiter.MarkDown(down)
+	}
+	return limiter, connect, closeStore, nil
+}
+
+// valkeyOption is the site's Valkey client's options: its address, TLS and
+// AUTH from the flags, the password from getenv's VALKEY_PASSWORD (a flag
+// would show it in the process list and the pod spec).
+func valkeyOption(o options, getenv func(string) string) (valkey.ClientOption, error) {
+	opt := valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true,
+		Username: o.valkeyUser, Password: getenv("VALKEY_PASSWORD")}
+	if o.valkeyCA != "" && !o.valkeyTLS {
+		return opt, errors.New("-valkey-ca is the CA for -valkey-tls: add -valkey-tls, or drop -valkey-ca")
+	}
+	if o.valkeyUser != "" && opt.Password == "" {
+		return opt, fmt.Errorf("-valkey-user %s needs its password in $VALKEY_PASSWORD", o.valkeyUser)
+	}
+	if !o.valkeyTLS {
+		return opt, nil
+	}
+	// No ServerName: tls.Dialer takes each dial's host, so a cluster's
+	// nodes, discovered at run time, are each verified by their own name.
+	opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	if o.valkeyCA != "" {
+		pem, err := os.ReadFile(o.valkeyCA)
+		if err != nil {
+			return opt, fmt.Errorf("-valkey-ca: %w", err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return opt, fmt.Errorf("-valkey-ca %s holds no PEM certificate: give the CA's certificate, PEM-encoded", o.valkeyCA)
+		}
+		opt.TLSConfig.RootCAs = roots
+	}
+	return opt, nil
 }
 
 // newHolder is the snapshot holder of a live installation (startSource
@@ -256,7 +313,7 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 		if o.standalone != "" {
 			h = localOnly(d, h)
 		}
-		mux.Handle(pattern, lc.track(h))
+		mux.Handle(pattern, lc.track(d, h))
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	// Ready once a snapshot is applied and its authorization holds.
@@ -300,7 +357,7 @@ func poolSource(ctx context.Context, o options, holder *snapshot.Holder) (*snaps
 		}
 	}
 	src := &snapshot.Bucket{Bucket: b, Keys: keys, Pool: o.pool, Holder: holder, Secrets: snapshot.FileSecrets{Root: root},
-		Checkpoint: o.checkpoint, LastGood: lastGoodPath(o.checkpoint), GatewayID: id, Log: slog.Default()}
+		Checkpoint: o.checkpoint, LastGood: lastGoodPath(o.checkpoint), GatewayID: id, MaxSkew: o.maxSkew, MaxLease: o.maxLease, Log: slog.Default()}
 	if err := src.Start(ctx); err != nil {
 		return nil, fmt.Errorf("pool %s: %w", o.pool, err)
 	}
@@ -312,12 +369,14 @@ func poolSource(ctx context.Context, o options, holder *snapshot.Holder) (*snaps
 	return src, nil
 }
 
-// newEntra is the verifier of tenant's Entra tokens, its signing keys
-// fetched before the gateway starts; nil (golem keys only) without a
-// tenant.
-func newEntra(tenant, audiences string) (*entra.Verifier, error) {
+// newEntra is the verifier of tenant's Entra tokens; nil (golem keys only)
+// without a tenant. Its signing keys are fetched once here, but a failure
+// does not stop the gateway: golem keys work meanwhile, Entra tokens are
+// refused as not yet checkable (gateway.not_ready, retryable) and the
+// verifier's Run retries the fetch with backoff.
+func newEntra(tenant, audiences, jwks string) *entra.Verifier {
 	if tenant == "" {
-		return nil, nil
+		return nil
 	}
 	var auds []string
 	for a := range strings.SplitSeq(audiences, ",") {
@@ -325,11 +384,11 @@ func newEntra(tenant, audiences string) (*entra.Verifier, error) {
 			auds = append(auds, a)
 		}
 	}
-	e := &entra.Verifier{Tenant: tenant, Audiences: auds}
+	e := &entra.Verifier{Tenant: tenant, Audiences: auds, JWKS: jwks}
 	if err := e.Refresh(context.Background()); err != nil {
-		return nil, fmt.Errorf("Entra's signing keys: %w", err)
+		slog.Error("golem-gateway: Entra's signing keys not fetched; starting without them (Entra tokens refused until a retry fetches them, golem keys served)", "tenant", tenant, "err", err)
 	}
-	return e, nil
+	return e
 }
 
 // newServer is the API's server, its limits set for long streams over
@@ -416,6 +475,9 @@ func releaseGate(o options) error {
 	if len(missing) > 0 {
 		slices.Sort(missing)
 		return fmt.Errorf("pool mode needs %s", strings.Join(missing, ", "))
+	}
+	if o.maxLease <= 0 || o.maxSkew < 0 {
+		return fmt.Errorf("-max-lease %s and -clock-skew %s: the lease must be positive and the skew not negative", o.maxLease, o.maxSkew)
 	}
 	if !o.acceptUnreleased {
 		return errors.New("pool mode is not released: golem#7's deployment evidence (provider spending limits, OTLP TLS to the real collector, each hop's mTLS owner) is not in; -accept-unreleased runs it on a test site")

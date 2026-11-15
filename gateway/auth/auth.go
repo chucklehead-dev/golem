@@ -289,6 +289,10 @@ func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 		code := contract.AuthTokenInvalid
 		if e, ok := errors.AsType[*entra.Error](err); ok && e.Expired {
 			code = contract.AuthTokenExpired
+		} else if ok && e.Unavailable {
+			// The keys are not fetched yet: the gateway's state, not the
+			// token's fault, and retryable (503 with Retry-After).
+			code = contract.GatewayNotReady
 		}
 		return nil, &Refusal{code, err.Error()}
 	}
