@@ -549,10 +549,10 @@ designs (a cell "breaks in N steps" is its shortest counterexample):
 <!-- gotogether:matrix -->
 | | soft | worst check | no limit | no slot renewal | no dedup | no reconcile |
 |---|---|---|---|---|---|---|
-| safe | holds | holds | breaks in 4 steps | breaks in 5 steps | breaks in 4 steps | breaks in 3 steps |
-| withinBound | holds | holds | breaks in 4 steps | breaks in 5 steps | holds | holds |
-| noDoubleCount | holds | holds | holds | holds | breaks in 4 steps | holds |
-| booksMatch | holds | holds | holds | holds | breaks in 5 steps | breaks in 3 steps |
+| safe | holds to depth 12 | holds to depth 12 | breaks in 4 steps | breaks in 5 steps | breaks in 4 steps | breaks in 3 steps |
+| withinBound | holds to depth 12 | holds to depth 12 | breaks in 4 steps | breaks in 5 steps | holds to depth 12 | holds to depth 12 |
+| noDoubleCount | holds to depth 12 | holds to depth 12 | holds to depth 12 | holds to depth 12 | breaks in 4 steps | holds to depth 12 |
+| booksMatch | holds to depth 12 | holds to depth 12 | holds to depth 12 | holds to depth 12 | breaks in 5 steps | breaks in 3 steps |
 <!-- /gotogether:matrix -->
 
 ```quint accounting.qnt +=
