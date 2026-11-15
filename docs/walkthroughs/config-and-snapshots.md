@@ -360,7 +360,7 @@ Both moved here from the gateway when golem-control came to need them too.
 verifies Entra ID v2 access tokens locally, for one API: the gateway's
 (golem API's registration, scope `golem.access`) or the control API's
 (its own registration, scope `golem.manage`, ADR 0046), so a token for one
-is never accepted by the other. `Verify` (`entra.go:108`) accepts RS256
+is never accepted by the other. `Verify` (`entra.go:115`) accepts RS256
 only (`:114`), a key from the cached set, an expiry, this tenant's v2
 issuer and one of the `Audiences`, then names a user (the scope and an
 `oid`, not an app-only token) or a service (no scope, `idtyp` "app", the
@@ -453,7 +453,7 @@ publishing the last good config.
 | A mistyped or truncated key is refused | `Parse`, `lib/key/key.go:57` | `TestRefused`, `lib/key/key_test.go:23` |
 | Codes and headers match contracts.md | `lib/contract/codes.go` | `lib/contract/contract_test.go:37`, `:73` |
 | Telemetry goes over TLS unless to a literal loopback address, whatever the environment says | `Base`, `lib/otlp/otlp.go:103` | `TestPlaintextOK`, `otlp_test.go:26`; `TestOTLPIgnoresInsecureEnv`, `:41` |
-| An Entra token is accepted only RS256, for its API's audience and scope, with keys not too old | `Verifier.Verify`, `lib/entra/entra.go:108` | `gateway/auth/entra_test.go` (`TestEntra`, `TestStaleKeys`), `control/api/entra_test.go` |
+| An Entra token is accepted only RS256, for its API's audience and scope, with keys not too old | `Verifier.Verify`, `lib/entra/entra.go:115` | `gateway/auth/entra_test.go` (`TestEntra`, `TestStaleKeys`), `control/api/entra_test.go` |
 
 ## Known gaps
 

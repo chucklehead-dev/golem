@@ -31,7 +31,7 @@ retry pointlessly and users wait through backoff before seeing why.
 | Every deployment failed before the first byte | 503 + `Retry-After` | `upstream.unavailable` | yes |
 | Upstream failure after the first byte | an error event in the stream | `upstream.stream_failed` | the client decides |
 | The gateway's authorization lease has expired (ADR 0030) | 503 + `Retry-After` | `gateway.authorization_expired` | yes, once renewed |
-| The gateway has no configuration yet | 503 + `Retry-After` | `gateway.not_ready` | yes |
+| The gateway has no configuration yet, or cannot check Entra tokens yet (their signing keys not yet fetched; golem keys are served) | 503 + `Retry-After` | `gateway.not_ready` | yes |
 | Golem's own fault | 500 | `gateway.internal` | yes |
 
 - The body is the caller's dialect's error shape (OpenAI's `error` object,

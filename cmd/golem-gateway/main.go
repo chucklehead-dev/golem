@@ -54,9 +54,9 @@ import (
 
 // options are the command line.
 type options struct {
-	standalone, listen, tenant, audience, telem, localKeyFile, zoneName, denylist string
-	maxBody                                                                       int64
-	drainFor, unready                                                             time.Duration
+	standalone, listen, tenant, audience, jwks, telem, localKeyFile, zoneName, denylist string
+	maxBody                                                                             int64
+	drainFor, unready                                                                   time.Duration
 	// pool mode
 	pool, bucket, keys, checkpoint, gatewayID, valkeyAddr, site, secrets string
 	replicaAcks                                                          int
@@ -79,6 +79,7 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.telem, "telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless a literal loopback address: 127.0.0.1:4318, [::1]:4318)")
 	fs.StringVar(&o.localKeyFile, "local-key", "", "standalone: the file holding the local key (generated on first use); default <user config dir>/golem/standalone-key")
 	fs.StringVar(&o.zoneName, "period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
+	fs.StringVar(&o.jwks, "entra-jwks", "", "the tenant's signing key set URL; default Entra's public cloud's, https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys")
 	fs.StringVar(&o.audience, "entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
 	fs.StringVar(&o.denylist, "denylist", "", "the site's emergency denylist file (a mounted ConfigMap), re-read as it changes; empty: none")
 	fs.StringVar(&o.pool, "pool", "", "pool mode: the gateway pool whose snapshots this gateway serves")
@@ -129,10 +130,7 @@ func run(ctx context.Context, args []string) int {
 	if tel != nil {
 		tel.Ledger.Period = zone
 	}
-	entra, err := newEntra(o.tenant, o.audience)
-	if err != nil {
-		return failed("%v", err)
-	}
+	entra := newEntra(o.tenant, o.audience, o.jwks)
 
 	sig, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -368,12 +366,14 @@ func poolSource(ctx context.Context, o options, holder *snapshot.Holder) (*snaps
 	return src, nil
 }
 
-// newEntra is the verifier of tenant's Entra tokens, its signing keys
-// fetched before the gateway starts; nil (golem keys only) without a
-// tenant.
-func newEntra(tenant, audiences string) (*entra.Verifier, error) {
+// newEntra is the verifier of tenant's Entra tokens; nil (golem keys only)
+// without a tenant. Its signing keys are fetched once here, but a failure
+// does not stop the gateway: golem keys work meanwhile, Entra tokens are
+// refused as not yet checkable (gateway.not_ready, retryable) and the
+// verifier's Run retries the fetch with backoff.
+func newEntra(tenant, audiences, jwks string) *entra.Verifier {
 	if tenant == "" {
-		return nil, nil
+		return nil
 	}
 	var auds []string
 	for a := range strings.SplitSeq(audiences, ",") {
@@ -381,11 +381,11 @@ func newEntra(tenant, audiences string) (*entra.Verifier, error) {
 			auds = append(auds, a)
 		}
 	}
-	e := &entra.Verifier{Tenant: tenant, Audiences: auds}
+	e := &entra.Verifier{Tenant: tenant, Audiences: auds, JWKS: jwks}
 	if err := e.Refresh(context.Background()); err != nil {
-		return nil, fmt.Errorf("Entra's signing keys: %w", err)
+		slog.Error("golem-gateway: Entra's signing keys not fetched; starting without them (Entra tokens refused until a retry fetches them, golem keys served)", "tenant", tenant, "err", err)
 	}
-	return e, nil
+	return e
 }
 
 // newServer is the API's server, its limits set for long streams over

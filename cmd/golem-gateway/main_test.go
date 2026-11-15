@@ -240,6 +240,36 @@ func TestPoolModeValkeyDown(t *testing.T) {
 	stopped(t, done)
 }
 
+// TestPoolModeEntraDown: a gateway that takes Entra tokens starts while
+// Entra's key set is unreachable, is ready, and serves a golem key's call;
+// an Entra token is refused as retryable (503 with Retry-After), saying
+// the keys are not yet fetched.
+func TestPoolModeEntraDown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f := newPoolFixture(t)
+	jwks := "http://" + freeAddr(t) + "/keys" // nothing listens there
+	base, done := f.start(t, ctx, startValkey(t), "-entra-tenant", "11111111-2222-3333-4444-555555555555", "-entra-jwks", jwks)
+	if code, body := f.call(t, base); code != 200 {
+		t.Fatalf("a golem key's call with Entra down: %d %s", code, body)
+	}
+	req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(`{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.eyJzdWIiOiJ4In0.c2ln")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 503 || resp.Header.Get("Retry-After") == "" || !strings.Contains(string(body), "gateway.not_ready") || !strings.Contains(string(body), "not yet fetched") {
+		t.Fatalf("an Entra token before the keys: %d %q %s", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+	}
+	cancel()
+	stopped(t, done)
+}
+
 func freeAddr(t *testing.T) string {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

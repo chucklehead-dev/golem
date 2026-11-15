@@ -64,7 +64,7 @@ the local key (`RequireLocalKey`).
 `Keys.Authenticate` (`auth.go:207`) is called once per request by
 `proxy.Handler.authenticate` (`gateway/proxy/proxy.go:368`). Its order:
 
-1. `credential` (`auth.go:313`) reads `Authorization: Bearer` and
+1. `credential` (`auth.go:317`) reads `Authorization: Bearer` and
    `x-api-key`. Two different credentials are refused rather than one
    silently preferred (`auth.go:209`, golem#5).
 2. `principal` (`auth.go:231`) finds the snapshot's principal for the
@@ -75,11 +75,11 @@ the local key (`RequireLocalKey`).
      (`auth.go:95`). It admits exactly one credential: the gateway's own
      local key, compared by hash in constant time (`auth.go:237`). Without
      `RequireLocalKey` it admits no one.
-   - An Entra token, recognised by shape (`looksLikeJWS`, `auth.go:331`),
+   - An Entra token, recognised by shape (`looksLikeJWS`, `auth.go:335`),
      goes to `Keys.token` (`auth.go:283`): `entra.Verifier.Verify` proves who
      is calling, the snapshot says in which scope (`golem-scope` header,
      else the default) and with which rights; a user's token cannot act as
-     a service's principal or the reverse (`auth.go:304`).
+     a service's principal or the reverse (`auth.go:308`).
    - A golem key is looked up by hash only if it carries this
      installation's prefix (`glm_live_` or `glm_dev_`, `auth.go:254`): a
      publisher's mistake must not let another installation's key in.
@@ -88,15 +88,22 @@ the local key (`RequireLocalKey`).
    refused, with `auth.denied`, if the site's emergency denylist names its
    key, its principal or its Entra ID.
 
-`Verifier.Verify` (`lib/entra/entra.go:105`) takes RS256 only, refuses
-tokens once the cached key set is older than `MaxKeyAge` (24 hours by
-default, `entra.go:118`), checks issuer, audience, expiry (a minute's
-`Leeway`, `entra.go:62`), tenant and version, and then requires either the
-`golem.access` scope with an oid (a user) or, with no scope at all, the
-`golem.service` role with an azp (a service). An unknown key ID asks `Run`
-for a refresh (`entra.go:123`), which `Run` (`entra.go:243`) grants at most
-once a minute; it also refreshes hourly. The request path never fetches
-keys.
+`Verifier.Verify` (`lib/entra/entra.go:115`) takes RS256 only, refuses
+every token as `Unavailable` while no key set has ever been fetched
+(`entra.go:128`: "Entra's signing keys not yet fetched"; `Keys.token`
+answers it `gateway.not_ready`, a 503 with Retry-After, since it is the
+gateway's state and not the token's fault), refuses tokens once the cached
+key set is older than `MaxKeyAge` (24 hours by default, `entra.go:132`),
+checks issuer, audience, expiry (a minute's `Leeway`, `entra.go:62`),
+tenant and version, and then requires either the `golem.access` scope with
+an oid (a user) or, with no scope at all, the `golem.service` role with an
+azp (a service). An unknown key ID asks `Run` for a refresh
+(`entra.go:137`). `Run` (`entra.go:274`) fetches at once if it has no key
+set, hourly after a fetch, and when asked, at most once a minute: a request
+within the minute after the last refresh is deferred to the minute's end,
+not dropped, so a key Entra rotated in just after a refresh is fetched a
+minute later rather than at the next hour. A failed fetch is retried from
+a second, doubling to five minutes. The request path never fetches keys.
 
 ### The emergency denylist (`deny.go`)
 
@@ -336,7 +343,7 @@ increment, a lease run out).
   starts; provider credentials from the environment;
 - **pool** (`-pool <name>`): `-bucket`, `-keys`, `-valkey` and `-site` are
   required, and until golem#7's deployment evidence is in, so is
-  `-accept-unreleased`. `poolSource` (`main.go:339`) opens the bucket
+  `-accept-unreleased`. `poolSource` (`main.go:337`) opens the bucket
   (`s3bucket.Open`; a directory for tests), loads the trusted publishing
   keys (`sign.LoadKeys`: a directory of PEM public keys, a KMS key's named
   by its `Key-ID` header), opens the Secrets mounted under `-secrets`
@@ -347,7 +354,7 @@ increment, a lease run out).
   copy beside the checkpoint (`lastGoodPath`, `main.go:518`); then one
   `Poll`, whose failure is logged, not fatal. The limiter is over the
   site's Valkey (`limit.DialValkey`, `-valkey-replica-acks` for WAIT), its
-  client's options from `valkeyOption` (`main.go:244`): `-valkey-tls` for TLS
+  client's options from `valkeyOption` (`main.go:242`): `-valkey-tls` for TLS
   (ElastiCache's in-transit encryption), verified against the system's
   roots or `-valkey-ca`'s, each dial's certificate checked against that
   dial's host (no fixed `ServerName`, so a cluster's nodes are each
@@ -361,22 +368,24 @@ increment, a lease run out).
   `Valkey.Connect` retries the dial in the background, backing off to 30
   seconds; the limiter's `Run` then recovers it (accounting.md §3.4).
 
-`run` (`main.go:108`) builds the parts in dependency order, each a named
+`run` (`main.go:109`) builds the parts in dependency order, each a named
 step: telemetry (`setupTelemetry`, `main.go:419`, labelled with the site
 and pool), the Entra verifier if a tenant is given (`newEntra`,
-`main.go:374`), the limiter over its store (`newLimiter`, `main.go:215`),
+`main.go:374`: its key set, from `-entra-jwks` or Entra's public cloud,
+fetched once; a failure is logged, not fatal, and the verifier's `Run`
+retries, golem keys served meanwhile), the limiter over its store (`newLimiter`, `main.go:213`),
 the holder that hands each snapshot's known spend to the limiter
-(`newHolder`, `main.go:276`), the denylist if one is named (loaded before
-the source, `main.go:154`, so neither a first request nor the last-good
+(`newHolder`, `main.go:274`), the denylist if one is named (loaded before
+the source, `main.go:152`, so neither a first request nor the last-good
 publication is ever compiled without it), the snapshot source
-(`startSource`, `main.go:287`: standalone's directory with the dev key, or
-`poolSource`), and the routes (`newMux`, `main.go:308`) on the server
+(`startSource`, `main.go:285`: standalone's directory with the dev key, or
+`poolSource`), and the routes (`newMux`, `main.go:306`) on the server
 (`newServer`, `main.go:393`). Every background loop (the source, the
 denylist, the limiter, Valkey's connection retries, Entra's refresh) runs under `bg` in one
 `WaitGroup`. Once the source has started, the state gauges are
 registered over the holder, the bucket source, the limiter and the
-denylist (`telemetry.ObserveState`, `main.go:174`; with any telemetry but
-`off`, and exported only over OTLP). `announce` (`main.go:325`) says what
+denylist (`telemetry.ObserveState`, `main.go:172`; with any telemetry but
+`off`, and exported only over OTLP). `announce` (`main.go:323`) says what
 is served.
 
 Standalone's API handlers are wrapped as `track(localOnly(...))`; pool
@@ -402,13 +411,13 @@ serves the call as a waiver.
 
 ### Worked example: shutdown with a stream in flight
 
-SIGTERM ends `sig` (`main.go:137`). The shutdown goroutine
-(`main.go:188`) runs `lifecycle.shutdown` (`lifecycle.go:98`):
+SIGTERM ends `sig` (`main.go:135`). The shutdown goroutine
+(`main.go:186`) runs `lifecycle.shutdown` (`lifecycle.go:98`):
 
 1. `draining` is set, so `/readyz` answers 503, and the gateway sleeps
    `-unready` for the endpoints to stop sending.
 2. `srv.Shutdown` closes the listeners (`ListenAndServe` returns at
-   `main.go:195`) and waits up to `-drain` for calls to finish.
+   `main.go:193`) and waits up to `-drain` for calls to finish.
 3. At the deadline `srv.Close` (`lifecycle.go:107`) cuts the remaining
    connections; the stream's context ends and the proxy accounts it as a
    cancellation, under `context.WithoutCancel`, its row and counter add
@@ -417,11 +426,11 @@ SIGTERM ends `sig` (`main.go:137`). The shutdown goroutine
    counted call's end, up to `cut` (10 seconds); a call that starts now is
    refused.
 
-Only then (`<-drained`, `main.go:200`) does `run` stop the background loops
-(`stopBg`, `wg.Wait`, `main.go:201`; they ran through the drain because
+Only then (`<-drained`, `main.go:198`) does `run` stop the background loops
+(`stopBg`, `wg.Wait`, `main.go:199`; they ran through the drain because
 the limiter's renewals keep calls' slots), let the limiter finish
-(`main.go:204`), close the Valkey client (`closeStore`, deferred) and shut
-telemetry down last (`shutdownTelemetry`, deferred at `main.go:128`),
+(`main.go:202`), close the Valkey client (`closeStore`, deferred) and shut
+telemetry down last (`shutdownTelemetry`, deferred at `main.go:129`),
 delivering the rows the cut calls wrote. `TestShutdownAccounts` checks
 this end to end: the cut stream leaves one row with outcome `cancelled`,
 its cost in the counter. `TestTrackAfterWait` checks the count: a call
@@ -450,6 +459,8 @@ that started before it.
 | The implicit principal exists only for dev, and takes only the local key | `Compile`, `principal` | `TestImplicit`, `TestLocalKey` |
 | A user's token cannot act as a service's principal, or the reverse | `Keys.token` | `TestEntra` |
 | Entra tokens are refused once the key set is too old; a key fetched by a refresh is accepted | `entra.Verifier.Verify`, `Refresh` | `TestStaleKeys`, `TestRefresh` |
+| A gateway starts while Entra is unreachable: golem keys served, Entra tokens refused as `gateway.not_ready` until a retried fetch succeeds | `newEntra`, `Verify` (`errNoKeys`), `Run`'s backoff, `Keys.token` | `TestPoolModeEntraDown`, `TestStartWithoutKeys` (lib/entra), `TestEntraKeysNotYetFetched` |
+| A refresh asked for within a minute of the last is deferred to the minute's end, not dropped | `Verifier.Run` | `TestRefreshDeferred` (lib/entra, `testing/synctest`) |
 | A caller the denylist names is refused whatever the snapshot says; a bad edit keeps the list in force | `Authenticate`, `Denylist.denies`, `DenyFile.Load` | `TestDenylist` |
 | Every ledger row is delivered, dropped or failed, and counted | `LedgerQueue` | `TestLedgerQueue*` (shutdown races, emission during shutdown, flush during shutdown, retries, partial delivery) |
 | Standalone's ledger rows on stdout are written whole or counted as lost | `jsonLogger.Emit` | `TestStdoutCountsLostRows` |
@@ -480,6 +491,9 @@ that started before it.
   metrics.
 - A call refused by `track` once the shutdown's wait has begun gets a
   plain-text 503 ("shutting down"), not the dialect's error shape.
+- A gateway still without Entra's signing keys reports it in its log only
+  (each failed fetch, and `gateway.not_ready` refusals counted with the
+  others): there is no state gauge for it yet.
 - OTLP's TLS is tested at the decision, not against a collector.
 - Standalone's stdout ledger counts and logs a row it could not write, but
   does not retry it.

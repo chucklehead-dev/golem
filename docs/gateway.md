@@ -85,7 +85,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    service, scope, key) or an error in the
    caller's dialect. Keys are
    looked up by hash in the entitlements snapshot (no network call); Entra
-   JWTs are verified locally against cached JWKS. Effective rights are
+   JWTs are verified locally against cached JWKS (fetched at start, but
+   not required to start: until the first fetch, tokens are refused as
+   `gateway.not_ready` and golem keys work). Effective rights are
    computed from the snapshot: scope policy ∩ membership ∩ key constraints
    (org model §3).
 4. **Request hooks**, selected by precompiled CEL programs; they may
@@ -259,9 +261,11 @@ from the snapshot, Bearer or x-api-key, each refusal its own code), Entra
 v2 tokens (RS256 only; tenant, audience, expiry with a minute's leeway;
 `golem.access` for users by oid, `golem.service` with `idtyp: app` for
 services by azp; the gateway's audience only, ADR 0046; keys
-cached and refreshed hourly or on an unknown kid, never on the request
-path; the scope from `golem-scope`, else the principal's default, rights
-from the snapshot; `-entra-tenant`), the
+cached and refreshed hourly or on an unknown kid (at most once a minute,
+a request within it deferred, not dropped), never on the request path; a
+gateway started while Entra is unreachable serves golem keys and refuses
+tokens as `gateway.not_ready` until a retried fetch succeeds; the scope from `golem-scope`, else the principal's default, rights
+from the snapshot; `-entra-tenant`, `-entra-jwks`), the
 limiter in the request path (402 budgets, 429 concurrency, cancellation
 holding the slot until the upstream closes), `golemctl config validate`
 and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway
