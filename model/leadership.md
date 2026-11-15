@@ -467,8 +467,15 @@ behaviours checked).
 ## 7. The instances
 
 `small` is the default: the `"fence"` design with every mechanism on and no
-rollback. The check script varies the design, the rollback and one switch
-at a time with `-const`.
+rollback. Its binding's variants (`leadership.small.yaml`) vary the design,
+the rollback, the attacks and one switch at a time, each holding design
+searched to depth 9 (8 under an attack) and each broken one just past its
+counterexample; `gotogether simulate -matrix` writes this table, the
+properties by the designs (a cell "breaks in N steps" is its shortest
+counterexample):
+
+<!-- gotogether:matrix -->
+<!-- /gotogether:matrix -->
 
 ```quint leadership.qnt +=
 
