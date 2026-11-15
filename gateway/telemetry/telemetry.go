@@ -45,6 +45,7 @@ type Call struct {
 	Principal, PrincipalKind, Key string
 	Scope                         string
 	Frontend, Backend             string // dialects
+	Envelope                      string // the deployment's: "" or "bedrock"
 	Alias, Model, Deployment      string
 	Provider, ProviderRequestID   string
 	Started, Ended                time.Time

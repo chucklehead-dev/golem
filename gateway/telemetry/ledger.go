@@ -79,7 +79,7 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		attribute.StringSlice("funding", nil),
 		s("frontend_dialect", c.Frontend),
 		s("backend_dialect", c.Backend),
-		s("envelope", ""),
+		s("envelope", c.Envelope),
 		s("alias", c.Alias),
 		s("model", c.Model),
 		s("deployment", c.Deployment),

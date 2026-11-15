@@ -158,6 +158,24 @@ already knows every cluster; nothing in one cluster reaches another's API server
 (ADR 0008). Remote sites run gateway pools and a Valkey; their config CRDs
 live in the EKS cluster, selected by a `site` label.
 
+## Bedrock: the gateway's AWS role
+
+A bedrock backend's calls are signed with the gateway's credentials, the
+AWS SDK's default chain: in the cluster, the gateway's service account
+bound to an IAM role (IRSA or EKS Pod Identity); elsewhere `AWS_*`
+environment credentials. The role needs:
+
+- `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the
+  foundation models and inference profiles the routes name (an inference
+  profile's ARN, and the foundation models in each region it routes to);
+- nothing else of Bedrock, and no other principal in the dedicated account
+  may invoke it (ADR 0038, 0039: the account's SCP denies invocation to
+  every role but the gateway's).
+
+Without credentials a bedrock call fails with `upstream.unavailable` and
+the gateway logs, at start, that it has none; the snapshot still applies.
+A deployment in another region needs model access granted there too.
+
 ## Spending: what golem controls, and what the provider account must
 
 Golem's budgets are admission and monitoring controls, not spending

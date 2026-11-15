@@ -25,7 +25,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+
 	"github.com/chucklehead-dev/golem/gateway/auth"
+	"github.com/chucklehead-dev/golem/gateway/envelope/bedrock"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
@@ -67,6 +70,10 @@ type Holder struct {
 	// Deny, if set, is the site's emergency denylist, applied over every
 	// snapshot's entitlements (control-plane.md §5).
 	Deny *auth.DenyFile
+	// AWS signs bedrock deployments' requests (the gateway's role: the AWS
+	// SDK's provider chain, IRSA or Pod Identity); nil: a bedrock
+	// deployment's calls fail with what to configure.
+	AWS aws.CredentialsProvider
 
 	mu    sync.Mutex
 	floor uint64
@@ -198,17 +205,24 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 	}
 	targets, used = map[targetKey]*route.Target{}, map[transportKey]bool{}
 	for _, b := range backends {
-		secret, err := secrets.Secret(b.Auth.SecretRef, b.Auth.Env)
-		if err != nil {
-			return nil, nil, fmt.Errorf("backend %s: %w", b.Name, err)
+		var header http.Header // the provider credential; a bedrock backend signs instead
+		if b.Envelope == "" {
+			secret, err := secrets.Secret(b.Auth.SecretRef, b.Auth.Env)
+			if err != nil {
+				return nil, nil, fmt.Errorf("backend %s: %w", b.Name, err)
+			}
+			v := secret
+			if b.Auth.Scheme != "" {
+				v = b.Auth.Scheme + " " + secret
+			}
+			header = http.Header{http.CanonicalHeaderKey(b.Auth.Header): {v}}
 		}
-		v := secret
-		if b.Auth.Scheme != "" {
-			v = b.Auth.Scheme + " " + secret
-		}
-		header := http.Header{http.CanonicalHeaderKey(b.Auth.Header): {v}}
 		for _, d := range b.Deployments {
-			u, err := url.Parse(d.URL)
+			raw := d.URL
+			if b.Envelope == "bedrock" && raw == "" {
+				raw = bedrock.EndpointFor(d.Region).String()
+			}
+			u, err := url.Parse(raw)
 			if err != nil {
 				return nil, nil, fmt.Errorf("backend %s deployment %s: %w", b.Name, d.Name, err)
 			}
@@ -219,8 +233,12 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 				h.transports[id] = t
 			}
 			used[id] = true
+			var rt http.RoundTripper = t
+			if b.Envelope == "bedrock" {
+				rt = &bedrock.Transport{Base: t, Endpoint: u, Region: d.Region, Model: d.Model, Credentials: h.AWS}
+			}
 			targets[targetKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
-				URL: u, Transport: t, Header: header, MaxInFlight: d.MaxInFlight,
+				URL: u, Transport: rt, Header: header, MaxInFlight: d.MaxInFlight, Envelope: b.Envelope,
 				ID: b.Name + "/" + d.Name}
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"maps"
 	"net"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -188,8 +189,16 @@ func compileBackends(srcs []v1.Source[v1.Backend], standalone bool, add adder) (
 			add(obj, "spec.dialect", "%q is not a dialect golem serves (%s)", b.Spec.Dialect, strings.Join(Dialects, ", "))
 		}
 		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect, AllowPrivate: b.Spec.Network.AllowPrivateAddresses,
-			Auth: backendAuth(b.Spec.Auth, standalone, func(path, msg string) { add(obj, path, "%s", msg) })}
-		sb.Deployments = deployments(obj, b.Spec.Deployments, standalone, add)
+			Envelope: b.Spec.Envelope}
+		switch b.Spec.Envelope {
+		case "":
+			sb.Auth = backendAuth(b.Spec.Auth, standalone, func(path, msg string) { add(obj, path, "%s", msg) })
+			sb.Deployments = deployments(obj, b.Spec.Deployments, standalone, add)
+		case EnvelopeBedrock:
+			sb.Deployments = bedrockBackend(obj, b.Spec, standalone, add)
+		default:
+			add(obj, "spec.envelope", "%q is not an envelope golem has (none, or %q)", b.Spec.Envelope, EnvelopeBedrock)
+		}
 		out = append(out, sb)
 		cat.add(sb)
 	}
@@ -204,6 +213,63 @@ func (cat catalog) add(b snapshot.Backend) {
 		cat.models[t] = append(cat.models[t], d.Model)
 	}
 }
+
+// EnvelopeBedrock is Claude on Amazon Bedrock's envelope.
+const EnvelopeBedrock = "bedrock"
+
+// bedrockBackend validates a bedrock Backend: the Messages dialect, no
+// auth (its requests are signed by the gateway's AWS role), and a region
+// for each deployment, its own or the backend's; a deployment's URL is
+// optional (the region's Bedrock runtime by default).
+func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder) []snapshot.Deployment {
+	if spec.Dialect != "anthropic.messages" {
+		add(obj, "spec.dialect", "a bedrock backend speaks anthropic.messages (Claude's Messages API on Bedrock)")
+	}
+	if spec.Auth != (v1.Auth{}) {
+		add(obj, "spec.auth", "a bedrock backend has no auth: the gateway signs its requests with its AWS role (IRSA or Pod Identity)")
+	}
+	region := ""
+	if spec.AWS != nil {
+		region = spec.AWS.Region
+	}
+	if len(spec.Deployments) == 0 {
+		add(obj, "spec.deployments", "a Backend needs at least one deployment")
+	}
+	var out []snapshot.Deployment
+	names := map[string]bool{}
+	for i, d := range spec.Deployments {
+		at := fmt.Sprintf("spec.deployments[%d]", i)
+		switch {
+		case d.Name == "":
+			add(obj, at+".name", "required")
+		case names[d.Name]:
+			add(obj, at+".name", "another deployment of this Backend is named %q", d.Name)
+		}
+		names[d.Name] = true
+		if d.Model == "" {
+			add(obj, at+".model", "required: the Bedrock model ID, inference profile ID or ARN")
+		}
+		r := cmp.Or(d.Region, region)
+		if !regionPattern.MatchString(r) {
+			add(obj, at+".region", "%q: give the deployment's AWS region (here or in spec.aws.region), e.g. us-east-2", r)
+		}
+		if d.URL != "" {
+			if msg := checkURL(d.URL, standalone); msg != "" {
+				add(obj, at+".url", "%s", msg)
+			}
+		}
+		if d.MaxInFlight < 0 {
+			add(obj, at+".maxInFlight", "must not be negative (0: no ceiling)")
+		}
+		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, Region: r, MaxInFlight: max(d.MaxInFlight, 0)})
+	}
+	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
+	return out
+}
+
+// regionPattern is an AWS region's name (us-east-2, eu-central-1,
+// us-gov-west-1): it becomes part of a host name.
+var regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`) // read-only
 
 // deployments validates a Backend's spec.deployments and compiles them,
 // sorted by name. Each is compiled, problems or not, so that the catalog

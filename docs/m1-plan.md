@@ -244,6 +244,22 @@ Done when:
 
 ### 3. Bedrock and SigV4
 
+Status:
+- **Built:** the envelope (`gateway/envelope/bedrock`; gateway.md §4a) and
+  its config (a Backend's `envelope: bedrock`, `aws.region`, a
+  deployment's `region` and optional `url`), signed with the AWS SDK's
+  default credential chain. Tests: the framing (each chunk to its SSE
+  event, one byte a read), a bad CRC and a cut refused as read errors, an
+  exception mapped to its error event, error answers in Anthropic's
+  shape, the signature reproduced by re-signing, and end to end
+  (`TestBedrockEndToEnd`: config, two regions, a throttle failed over, a
+  stub verifying every signature, usage on the row); ablated: unsigned,
+  one region for all, exceptions dropped. Allocations per admitted call
+  unchanged on other envelopes.
+- **Open:** the run against real Bedrock (docs/acceptance/m1-bedrock.md,
+  needing an AWS account with model access), non-streaming calls on real
+  Bedrock, and `count_tokens` (step 4's endpoints).
+
 - The `bedrock` envelope's response side:
   - the AWS event stream (prelude and message CRCs, headers, base64
     `bytes` payloads, exception message types) reframed as SSE;

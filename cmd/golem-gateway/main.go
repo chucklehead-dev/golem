@@ -36,6 +36,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/valkey-io/valkey-go"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
@@ -280,7 +282,7 @@ func valkeyOption(o options, getenv func(string) string) (valkey.ClientOption, e
 // a principal gone from the key's scope or from golem), as soon as it is
 // in force: calls is the gateway's registry of them.
 func newHolder(v *entra.Verifier, limiter *limit.Limiter, calls *proxy.InFlight) *snapshot.Holder {
-	h := &snapshot.Holder{Env: key.Live, Entra: v}
+	h := &snapshot.Holder{Env: key.Live, Entra: v, AWS: awsCredentials()}
 	h.OnApply = func(c *snapshot.Compiled) {
 		for _, s := range c.Snapshot.Entitlements.Scopes {
 			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since})
@@ -294,6 +296,20 @@ func newHolder(v *entra.Verifier, limiter *limit.Limiter, calls *proxy.InFlight)
 		return nil
 	}
 	return h
+}
+
+// awsCredentials signs bedrock deployments' requests: the AWS SDK's
+// default chain (the pod's role through IRSA or Pod Identity, else AWS_*
+// environment credentials), cached and refreshed before they expire. None
+// is fetched until a bedrock call is made; nil if the chain cannot be set
+// up (a bedrock call then fails with what to configure).
+func awsCredentials() aws.CredentialsProvider {
+	cfg, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		slog.Warn("no AWS credentials for bedrock deployments", "err", err)
+		return nil
+	}
+	return cfg.Credentials
 }
 
 // newDenyFile is the site's emergency denylist at path: each change it

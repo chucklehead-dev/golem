@@ -273,6 +273,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for attempt := 1; ; attempt++ {
 		deployment, pr = target.Key(), snap.Prices[target.Model]
 		call.Attempt, call.Model, call.Deployment, call.Provider = attempt, target.Model, deployment, target.Backend
+		call.Envelope = target.Envelope
 		out := getBody()
 		if n := len(body) + len(target.Model) + 64; cap(*out) < n {
 			*out = make([]byte, 0, n)

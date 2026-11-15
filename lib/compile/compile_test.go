@@ -195,3 +195,49 @@ func TestRouteRetries(t *testing.T) {
 		}
 	}
 }
+
+// TestBedrockBackend: a bedrock backend compiles with no auth, each
+// deployment's region its own or the backend's and its URL optional; it is
+// refused with an auth, another dialect, no region or a malformed one, and
+// an envelope golem does not have is named.
+func TestBedrockBackend(t *testing.T) {
+	backend := func(spec string) string {
+		return `apiVersion: golem.dev/v1alpha1
+kind: Backend
+metadata: {name: bedrock}
+spec:
+` + spec + `
+---
+apiVersion: golem.dev/v1alpha1
+kind: ModelRoute
+metadata: {name: claude}
+spec: {alias: claude, pool: [{backend: bedrock, deployment: east}]}
+`
+	}
+	ok := `  dialect: anthropic.messages
+  envelope: bedrock
+  aws: {region: us-east-2}
+  deployments:
+  - {name: east, model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"}
+  - {name: west, region: us-west-2, model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"}`
+	s, err := Compile(objects(t, map[string]string{"golem.yaml": backend(ok)}), published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := s.Backends[0]
+	if b.Envelope != "bedrock" || b.Auth != (snapshot.Auth{}) || b.Deployments[0].Region != "us-east-2" || b.Deployments[1].Region != "us-west-2" {
+		t.Fatalf("%+v", b)
+	}
+	for _, c := range []struct{ name, spec, want string }{
+		{"auth", strings.Replace(ok, "  envelope: bedrock", "  envelope: bedrock\n  auth: {header: x-api-key, secretRef: {name: a, key: b}}", 1), "spec.auth: a bedrock backend has no auth"},
+		{"dialect", strings.Replace(ok, "anthropic.messages", "openai.chat", 1), "a bedrock backend speaks anthropic.messages"},
+		{"no region", strings.Replace(ok, "  aws: {region: us-east-2}\n", "", 1), `spec.deployments[0].region: "": give the deployment's AWS region`},
+		{"bad region", strings.Replace(ok, "us-west-2", "us-west-2.evil.example", 1), `spec.deployments[1].region: "us-west-2.evil.example"`},
+		{"envelope", strings.Replace(ok, "envelope: bedrock", "envelope: vertex", 1), `spec.envelope: "vertex" is not an envelope`},
+	} {
+		_, err := Compile(objects(t, map[string]string{"golem.yaml": backend(c.spec)}), published)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
+	}
+}

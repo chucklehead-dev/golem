@@ -145,8 +145,10 @@ type Source struct {
 // Backend is a backend as compiled: its secrets are references, never values
 // (ADR 0005).
 type Backend struct {
-	Name        string       `json:"name"`
-	Dialect     string       `json:"dialect"`
+	Name    string `json:"name"`
+	Dialect string `json:"dialect"`
+	// Envelope is "" or "bedrock" (lib/api's BackendSpec.Envelope).
+	Envelope    string       `json:"envelope,omitempty"`
 	Auth        Auth         `json:"auth"`
 	Deployments []Deployment `json:"deployments"`
 	// AllowPrivate grants loopback and private addresses (golem#5).
@@ -166,6 +168,8 @@ type Deployment struct {
 	Name  string `json:"name"`
 	URL   string `json:"url"`
 	Model string `json:"model"`
+	// Region is a bedrock deployment's region, its backend's filled in.
+	Region string `json:"region,omitempty"`
 	// MaxInFlight is each gateway's ceiling on the deployment's calls in
 	// flight; 0: none.
 	MaxInFlight int `json:"maxInFlight,omitempty"`

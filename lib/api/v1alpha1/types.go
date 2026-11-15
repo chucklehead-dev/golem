@@ -45,10 +45,22 @@ type Backend struct {
 // BackendSpec is a Backend's desired state.
 type BackendSpec struct {
 	// Dialect is the API the backend speaks: anthropic.messages or openai.chat.
-	Dialect     string       `json:"dialect"`
-	Auth        Auth         `json:"auth"`
+	Dialect string `json:"dialect"`
+	// Envelope is how the dialect's requests reach the provider: "" (the
+	// provider's own API) or "bedrock" (Claude on Amazon Bedrock: the
+	// Messages body to InvokeModel, signed with SigV4 by the gateway's AWS
+	// role; ADR 0001). A bedrock backend has no auth: its region is AWS's.
+	Envelope    string       `json:"envelope,omitempty"`
+	AWS         *AWS         `json:"aws,omitempty"`
+	Auth        Auth         `json:"auth,omitzero"`
 	Deployments []Deployment `json:"deployments"`
 	Network     Network      `json:"network,omitzero"`
+}
+
+// AWS is a bedrock backend's AWS side: the region its deployments are in
+// unless one names its own.
+type AWS struct {
+	Region string `json:"region"`
 }
 
 // Network grants a backend addresses golem otherwise refuses to dial.
@@ -82,10 +94,16 @@ type SecretRef struct {
 type Deployment struct {
 	Name string `json:"name"`
 	// URL is the endpoint golem posts to, e.g.
-	// https://api.anthropic.com/v1/messages.
+	// https://api.anthropic.com/v1/messages. A bedrock deployment's is the
+	// Bedrock runtime's base (default https://bedrock-runtime.<region>.amazonaws.com;
+	// a VPC endpoint's otherwise), and its Model the Bedrock model ID,
+	// inference profile ID or ARN.
 	URL string `json:"url"`
 	// Model is the provider's name for the model.
 	Model string `json:"model"`
+	// Region is a bedrock deployment's region, if not its backend's (a
+	// failover to another region is another deployment).
+	Region string `json:"region,omitempty"`
 	// MaxInFlight is this gateway's ceiling on the deployment's calls in
 	// flight (its share of the provider's quota, or a local box's static
 	// concurrency): an attempt past it is not sent, and the call fails over

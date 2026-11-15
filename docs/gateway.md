@@ -196,6 +196,47 @@ another dialect; envelopes depend on neither. A translated request is
 `encode(backend, decode(frontend, req))` wrapped by the backend's
 envelope, assembled by `proxy`.
 
+## 4a. The bedrock envelope
+
+Built: `gateway/envelope/bedrock`, an `http.RoundTripper` over the
+deployment's transport, so the request path sees an Anthropic provider. A
+Backend says `envelope: bedrock` and `aws: {region: ...}`, with no auth;
+each deployment names a Bedrock model ID, inference profile ID or ARN, and
+may name its own `region` (a failover to another region is another
+deployment) and `url` (a VPC endpoint; else the region's
+`bedrock-runtime` host). Per attempt it:
+
+- moves the Messages body into Bedrock's: `model` and `stream` out (the
+  model is a path segment, escaped as the AWS SDK escapes an ARN; the
+  action is `invoke` or `invoke-with-response-stream`),
+  `anthropic_version: bedrock-2023-05-31` in, the `anthropic-beta`
+  header's values added to the body's `anthropic_beta`; the anthropic-*
+  headers dropped;
+- signs with SigV4 for `bedrock` in the deployment's region, with the
+  gateway's credentials (the AWS SDK's default chain: IRSA or Pod
+  Identity in the cluster, cached and refreshed; nil credentials fail the
+  call with what to configure, before anything is sent);
+- reads a streamed answer's AWS event stream (the SDK's decoder, which
+  checks each message's CRCs) and gives the Messages SSE each chunk
+  carries, `event: <type>` and its JSON; an exception as the dialect's
+  error event (throttling a rate limit, unavailability an overload), so
+  the commit point refuses one that comes first and the call fails over
+  (ADR 0051); a bad CRC or a cut is a read error, the request path's cut;
+- returns a Bedrock error answer in Anthropic's shape, its status kept.
+
+Usage is read from the events as for Anthropic (`message_start`,
+`message_delta`); Bedrock's `amazon-bedrock-invocationMetrics` in
+`message_stop` passes through to the caller. Each ledger row names its
+envelope. Tests: the envelope's (`TestRewrite`, `TestRequest` with the
+signature reproduced by re-signing, `TestReframe`, `TestErrorResponse`,
+`TestNoCredentials`) and proxy's `TestBedrockEndToEnd` (config to SSE
+through two regions, a throttle failed over, a stub that verifies each
+signature); ablated: unsigned, one region for all, exceptions dropped.
+
+The gateway's role needs `bedrock:InvokeModel` and
+`bedrock:InvokeModelWithResponseStream` on the models and inference
+profiles its routes name (operations.md).
+
 ## 5. Go 1.27 facilities used
 
 | Facility | Release | Where |

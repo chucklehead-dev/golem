@@ -21,6 +21,9 @@ type Target struct {
 	// MaxInFlight is this gateway's ceiling on the deployment's calls in
 	// flight; 0: none.
 	MaxInFlight int
+	// Envelope is how its requests reach the provider: "" or "bedrock"
+	// (the ledger's envelope; the transport does the work).
+	Envelope string
 	// ID is "backend/deployment", set when the snapshot is compiled (Key
 	// makes it if not), so the request path does not build it per call.
 	ID string
