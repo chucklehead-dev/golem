@@ -87,7 +87,8 @@ jobs:
       - name: vet with the hegel tag
         run: go vet -tags hegel ./...
       - name: "the gateway against its models (qhegel: Hegel drives, the model judges; planted bugs caught)"
-        run: go test -count=1 -timeout 20m -tags hegel ./gateway/...
+        # The Hegel tests alone: the rest of gateway/... ran in the go job.
+        run: go test -count=1 -timeout 20m -tags hegel -run 'AgainstExposureModel|NoScopeLimitCaught|StaleViewDuringOutage|AgainstPublicationModel|NoFloorCaught|NoExpiryCaught' ./gateway/limit/ ./gateway/snapshot/
         env:
           QUINT_BACKEND: typescript
 
