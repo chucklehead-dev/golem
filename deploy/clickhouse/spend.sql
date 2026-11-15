@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS golem.spend (
     cost_micros           Int64,
     currency              FixedString(3),
     price_version         String,
+    -- completed, cancelled, terminated, failed or uncertain (contracts.md §3)
     outcome               LowCardinality(String),
     error_origin          LowCardinality(String),
     error_code            LowCardinality(String),

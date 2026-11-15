@@ -46,6 +46,9 @@ type Result struct {
 	Cost      int64 // micro-units, from the usage and the snapshot's price
 	// CallerGone: the caller went away mid-response (a cancellation).
 	CallerGone bool
+	// Terminated: the gateway ended the call in flight, its authorization
+	// withdrawn (InFlight.Sweep).
+	Terminated bool
 	Status     int
 	Usage      canon.Usage
 	Err        error // a malformed usage report or a cut stream
@@ -76,6 +79,10 @@ type Handler struct {
 	// 30 s): a client that stops reading would otherwise hold its slot and
 	// its upstream connection for as long as the provider streams.
 	WriteStall time.Duration
+	// InFlight, if set, registers each admitted call, so a revocation or a
+	// denylist entry ends the calls it withdraws (InFlight.Sweep); the
+	// gateway's handlers share one.
+	InFlight *InFlight
 	// Record, if set, is told each call's result (tests).
 	Record func(*http.Request, Result)
 }
@@ -115,7 +122,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: err.Error()})
 		return
 	}
-	snap, principal, no := h.authenticate(r)
+	gen := h.InFlight.generation() // before the keys are read: see InFlight.add
+	var grant auth.Grant
+	snap, principal, no := h.authenticate(r, &grant)
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
@@ -209,13 +218,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	lim := &ex.lim
 	upCtx := lim.bound(ctx, started, rt)
 	defer lim.end()
+	if h.InFlight != nil {
+		// Registered for the call's upstream life, taken off before its
+		// context is released (defers run last in, first out).
+		t := h.InFlight.add(&ex.call, &grant, lim.cancel, reqID[15], gen)
+		defer h.InFlight.remove(&ex.call)
+		if t != nil { // withdrawn as it was admitted: the provider never had it
+			putBody(out)
+			call.Ended, call.Status = time.Now(), t.code.Status
+			call.Outcome, call.ErrorOrigin, call.ErrorCode = outcomeTerminated, string(t.code.Origin), t.code.Name
+			h.Telemetry.Ended(ctx, call)
+			acct.complete(0)
+			Refuse(w, h.Dialect, t.code, t.message())
+			return
+		}
+	}
 	up, ub := upstreamRequest(upCtx, r, target, out, h.Dialect.forwardRequest())
 	resp, err := target.Transport.RoundTrip(up)
 	if err != nil {
 		ub.Close()
 		c, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(upCtx)) // the cause as the call failed
+		ended := terminatedBy(upCtx)
+		if ended != nil && r.Context().Err() == nil { // the headers not yet sent: the dialect's error
+			c, msg = ended.code, ended.message()
+		}
 		call.Ended, call.Status = time.Now(), c.Status
-		cost := chargeUnanswered(&call, err, r.Context().Err() != nil, requestBytes, req, pr)
+		cost := chargeUnanswered(&call, err, r.Context().Err() != nil, ended, requestBytes, req, pr)
 		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
 		if cost == 0 {
 			acct.complete(0) // the provider never had it
@@ -237,6 +265,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// first (the upstream read then fails with its context).
 	res.CallerGone = ex.callerGone || r.Context().Err() != nil
 	_, cut := errors.AsType[errUpstreamCut](res.Err)
+	// A cut of the gateway's own making: a sweep cancelled the upstream
+	// request (its context, not the caller's, so not a caller gone).
+	var ended *errTerminated
+	if cut {
+		ended = terminatedBy(upCtx)
+		res.Terminated = ended != nil && !res.CallerGone
+	}
 	if resp.StatusCode == http.StatusOK { // a provider bills no error response
 		// A cut or unreported response is charged what was produced, counted
 		// from what was seen (ADR 0012), and its row says how much of its
@@ -251,7 +286,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	call.Ended, call.Status, call.Usage, call.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
 	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
-	call.Outcome, call.ErrorOrigin, call.ErrorCode = outcome(res, cut)
+	call.Outcome, call.ErrorOrigin, call.ErrorCode = outcome(res, cut, ended)
 	// The row's end is stamped before the ticket adds the cost to the
 	// counter's minute, so the minute is never before the row's end: a
 	// call that ended after a snapshot's boundary is in the counter's
@@ -261,10 +296,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case ticket == nil: // nothing counted
 	case res.CallerGone || cut:
-		// The response was abandoned or cut: what was seen is charged
-		// (estimated where unreported), and the slot is held for the
-		// provider's tail, which may go on working after the connection
-		// closes (ADR 0041 §7.6; golem#4).
+		// The response was abandoned or cut (by the provider, or by the
+		// gateway ending the call): what was seen is charged (estimated
+		// where unreported), and the slot is held for the provider's tail,
+		// which may go on working after the connection closes (ADR 0041
+		// §7.6; golem#4).
 		resp.Body.Close()
 		acct.cancel(res.Cost)
 	default:
@@ -277,9 +313,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The provider's response ended early. A clean end would read as a
 		// complete (and shorter) answer: a stream gets the contract's error
 		// event, and then the response is aborted (a reset, not an end), so
-		// no client can take it for whole (contracts.md §1).
+		// no client can take it for whole (contracts.md §1). A call the
+		// gateway ended gets the refusal its caller would now get, as
+		// that event (a whole response, already begun, is cut alone).
 		if streamed {
-			w.Write(streamError(h.Dialect, reqIDs))
+			ev := streamError(h.Dialect, reqIDs)
+			if res.Terminated {
+				ev = errorEvent(h.Dialect, ended.code, ended.message(), reqIDs)
+			}
+			w.Write(ev)
 			http.NewResponseController(w).Flush()
 		}
 		panic(http.ErrAbortHandler)
@@ -330,16 +372,22 @@ func (a *settlement) cancel(seen int64) {
 // its row's outcome. Absent response bytes are not absent work (golem#4):
 // only a failure the provider cannot have seen is free. Else the call is
 // charged an estimate, which reconciliation corrects, and its slot is held
-// for the provider's tail.
-func chargeUnanswered(call *telemetry.Call, err error, callerLeft bool, requestBytes int64, req scanned, pr libsnapshot.Price) int64 {
+// for the provider's tail. ended is the sweep that cancelled the call, if
+// one did: it is ended as a caller gone is, and its row says terminated.
+func chargeUnanswered(call *telemetry.Call, err error, callerLeft bool, ended *errTerminated, requestBytes int64, req scanned, pr libsnapshot.Price) int64 {
 	c := contract.UpstreamUnavailable
 	call.Outcome, call.ErrorOrigin, call.ErrorCode = "failed", string(c.Origin), c.Name
+	if ended != nil && !callerLeft {
+		call.Outcome, call.ErrorOrigin, call.ErrorCode = outcomeTerminated, string(ended.code.Origin), ended.code.Name
+	}
 	var cost int64
 	switch {
 	case !reachedProvider(err):
 	case callerLeft: // the caller left first: its input, at least, was read
 		call.Outcome, call.ErrorOrigin, call.ErrorCode = "cancelled", string(contract.OriginClient), ""
 		cost = price.Cost(canon.Usage{Input: requestBytes}, pr) // a token a byte, as Worst bounds it
+	case ended != nil: // the gateway ended it: likewise
+		cost = price.Cost(canon.Usage{Input: requestBytes}, pr)
 	default: // a timeout or a reset after the request went out: the worst it may have cost
 		call.Outcome = "uncertain"
 		var ok bool
@@ -384,7 +432,7 @@ func reachedProvider(err error) bool {
 }
 
 // authenticate takes the request's snapshot and finds its principal.
-func (h *Handler) authenticate(r *http.Request) (*snapshot.Compiled, *auth.Principal, *refusal) {
+func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compiled, *auth.Principal, *refusal) {
 	snap, err := h.Snapshots.Current()
 	switch {
 	case errors.Is(err, snapshot.ErrExpired):
@@ -394,7 +442,7 @@ func (h *Handler) authenticate(r *http.Request) (*snapshot.Compiled, *auth.Princ
 	case snap.Auth == nil:
 		return snap, auth.Anyone, nil
 	}
-	p, no := snap.Auth.Authenticate(r.Header)
+	p, no := snap.Auth.AuthenticateGrant(r.Header, g)
 	if no != nil {
 		return nil, nil, &refusal{code: no.Code, msg: no.Msg}
 	}
@@ -582,12 +630,18 @@ func copyHeaders(dst, src http.Header, names []string) {
 	}
 }
 
+// outcomeTerminated is the ledger outcome of a call the gateway ended in
+// flight, its authorization withdrawn (contracts.md §3).
+const outcomeTerminated = "terminated"
+
 // outcome is a finished call's ledger outcome, and the failure's origin and
 // code (contracts.md §3).
-func outcome(res Result, cut bool) (outcome, origin, code string) {
+func outcome(res Result, cut bool, ended *errTerminated) (outcome, origin, code string) {
 	switch {
 	case res.CallerGone:
 		return "cancelled", string(contract.OriginClient), ""
+	case res.Terminated:
+		return outcomeTerminated, string(ended.code.Origin), ended.code.Name
 	case cut:
 		c := contract.UpstreamStreamFailed
 		return "failed", string(c.Origin), c.Name

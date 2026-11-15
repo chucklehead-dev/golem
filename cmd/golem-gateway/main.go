@@ -151,13 +151,14 @@ func run(ctx context.Context, args []string) int {
 	if connectStore != nil {
 		wg.Go(func() { connectStore(bg) })
 	}
-	holder := newHolder(entra, limiter)
+	calls := &proxy.InFlight{}
+	holder := newHolder(entra, limiter, calls)
 	if o.denylist != "" {
 		// Read before the source loads: a gateway started during an
 		// incident must not admit what the list refuses, even once, and the
 		// last-good publication a pool source applies at its start is
 		// compiled with it.
-		deny := &auth.DenyFile{Path: o.denylist, Log: slog.Default()}
+		deny := newDenyFile(o.denylist, calls)
 		if err := deny.Load(); err != nil {
 			return failed("-denylist: %v", err)
 		}
@@ -183,7 +184,7 @@ func run(ctx context.Context, args []string) int {
 	}
 
 	lc := &lifecycle{unready: o.unready, drain: o.drainFor, cut: 10 * time.Second}
-	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel))
+	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel, calls))
 	lc.srv = srv
 	drained := make(chan struct{})
 	wg.Go(func() {
@@ -274,12 +275,39 @@ func valkeyOption(o options, getenv func(string) string) (valkey.ClientOption, e
 // newHolder is the snapshot holder of a live installation (startSource
 // makes it a dev one standalone), handing each snapshot's known spend to
 // the limiter as it is applied (ADR 0048).
-func newHolder(v *entra.Verifier, limiter *limit.Limiter) *snapshot.Holder {
-	return &snapshot.Holder{Env: key.Live, Entra: v, OnApply: func(c *snapshot.Compiled) {
+// It also ends the calls in flight the snapshot withdraws (a key revoked,
+// a principal gone from the key's scope or from golem), as soon as it is
+// in force: calls is the gateway's registry of them.
+func newHolder(v *entra.Verifier, limiter *limit.Limiter, calls *proxy.InFlight) *snapshot.Holder {
+	h := &snapshot.Holder{Env: key.Live, Entra: v}
+	h.OnApply = func(c *snapshot.Compiled) {
 		for _, s := range c.Snapshot.Entitlements.Scopes {
 			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since})
 		}
-	}}
+		sweep(calls, "snapshot applied", "publish_seq", c.Snapshot.PublishSeq)
+	}
+	calls.Keys = func() *auth.Keys {
+		if c := h.Applied(); c != nil { // its lease expired or not: expiry ends no call
+			return c.Auth
+		}
+		return nil
+	}
+	return h
+}
+
+// newDenyFile is the site's emergency denylist at path: each change it
+// puts in force ends the calls in flight it now denies.
+func newDenyFile(path string, calls *proxy.InFlight) *auth.DenyFile {
+	return &auth.DenyFile{Path: path, Log: slog.Default(),
+		OnApply: func(d *auth.Denylist) { sweep(calls, "denylist applied", "entries", d.Len()) }}
+}
+
+// sweep ends the calls in flight the current keys no longer honour, and
+// logs how many it ended, with why it ran.
+func sweep(calls *proxy.InFlight, why string, args ...any) {
+	if n := calls.Sweep(); n > 0 {
+		slog.Warn("golem-gateway: ended calls in flight whose authorization was withdrawn", append([]any{"after", why, "ended", n}, args...)...)
+	}
 }
 
 // startSource is the holder's snapshot source, loaded once before the
@@ -305,11 +333,12 @@ func startSource(ctx context.Context, o options, holder *snapshot.Holder) (src i
 }
 
 // newMux is the gateway's routes: the two dialects' APIs, each call
-// counted by lc (and, standalone, behind localOnly), and the probes.
-func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry) *http.ServeMux {
+// counted by lc (and, standalone, behind localOnly), and registered in
+// calls while in flight; and the probes.
+func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry, calls *proxy.InFlight) *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
-		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel}
+		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel, InFlight: calls}
 		if o.standalone != "" {
 			h = localOnly(d, h)
 		}

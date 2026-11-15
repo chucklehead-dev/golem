@@ -253,11 +253,17 @@ func appendQuoted(b []byte, s string) []byte {
 // streamError is upstream.stream_failed as an event in a dialect's stream.
 func streamError(d Dialect, reqID string) []byte {
 	const msg = "the provider's response was cut off before it completed; retry the request"
+	return errorEvent(d, contract.UpstreamStreamFailed, msg, reqID)
+}
+
+// errorEvent is a contract code as the error event of a dialect's stream:
+// Anthropic's event: error, OpenAI's data-only error object.
+func errorEvent(d Dialect, c contract.Code, msg, reqID string) []byte {
 	var b []byte
 	if d == AnthropicMessages {
 		b = append(b, "event: error\n"...)
 	}
 	b = append(b, "data: "...)
-	b = appendError(b, d, contract.UpstreamStreamFailed, msg, reqID)
+	b = appendError(b, d, c, msg, reqID)
 	return append(b, "\n\n"...)
 }

@@ -59,6 +59,7 @@ func BenchmarkHandler(b *testing.B) {
 			events := anthropicStream(200)
 			s := &stub{events: events}
 			h := handler(AnthropicMessages, s, nil)
+			h.InFlight = &InFlight{} // registered, as golem-gateway does
 			var br bytes.Reader
 			req := httptest.NewRequest("POST", "/v1/messages", nil)
 			w := &discard{h: http.Header{}}
@@ -311,6 +312,7 @@ metadata: {name: local}
 spec:
   keys: [{key: `+k+`, principal: alice, scope: team-a}]
 `, s)
+	h.InFlight = &InFlight{}
 	var br bytes.Reader
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
 	req.Header.Set("X-Api-Key", k)

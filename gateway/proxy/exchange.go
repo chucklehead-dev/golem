@@ -47,6 +47,8 @@ type exchange struct {
 	noDeadline bool // the writer has none (a test's recorder)
 
 	lim bounds // the route's limits over the upstream call, timers reused
+
+	call inFlightCall // the call's entry in Handler.InFlight, while admitted
 }
 
 // exchanges pools the per-request working memory; New binds the usage
