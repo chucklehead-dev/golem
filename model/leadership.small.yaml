@@ -1,6 +1,138 @@
 # leadership.md's small instance, explored exhaustively to a depth
-# (check-leadership.sh): two replicas, a directory of three values.
+# (check-leadership.sh): two replicas, a directory of three values. Each
+# variant is a design under a rollback or an attack, holding to its depth,
+# or a mechanism removed, searched just past its counterexample (a common
+# depth of 10 would store about 7 GiB of graph). A broken design lists
+# exactly what it breaks: safe is their conjunction.
 spec: leadership.qnt
 module: small
 actions: {}
 invariants: [safe, floorNeverDrops, noStaleSync, epochsUnique, noInflation, forward]
+simulate:
+  holds: [safe, floorNeverDrops, noStaleSync, epochsUnique, noInflation, forward]
+  search: {depth: 9, states: 3000000}
+  variants:
+    - name: lease object, rollback none
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {ROLLBACK: '"none"'}
+    - name: lease object, rollback doc
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {ROLLBACK: '"doc"'}
+    - name: lease object, rollback lead
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {ROLLBACK: '"lead"'}
+    - name: lease object, checkpoint attack, rollback doc
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackLead, restore]
+      constants: {CP_ATTACK: 'true', ROLLBACK: '"doc"'}
+      search: {depth: 8, states: 3000000}
+    - name: lease object, checkpoint attack, rollback lead
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, restore]
+      constants: {CP_ATTACK: 'true', ROLLBACK: '"lead"'}
+      search: {depth: 8, states: 3000000}
+    - name: lease object, restore preserves
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, rollbackLead, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {RESTORE: '"preserve"'}
+      search: {depth: 8, states: 3000000}
+    - name: lease object, lost replies
+      dead: [takeDoc, bump, readLease, rollbackDoc, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {LOST_REPLY: 'true'}
+      search: {depth: 8, states: 3000000}
+    - name: lease object, no jobs
+      constants: {JOBS: '"none"'}
+      search: {depth: 8, states: 3000000}
+      holds: [floorNeverDrops, epochsUnique, noInflation, forward]
+      allows: [safe, noStaleSync]
+    - name: lease object, jobs on the lease read
+      constants: {JOBS: '"readLease"'}
+      holds: [floorNeverDrops, epochsUnique, noInflation, forward]
+      allows: [safe, noStaleSync]
+    - name: lease object, no guard
+      constants: {GUARD: 'false', ROLLBACK: '"doc"'}
+      search: {depth: 6, states: 3000000}
+      holds: [noStaleSync, epochsUnique, noInflation]
+      allows: [safe, floorNeverDrops, forward]
+    - name: lease object, unverified checkpoint
+      constants: {CP_ATTACK: 'true', VERIFY: 'false'}
+      search: {depth: 4, states: 3000000}
+      holds: [floorNeverDrops, noStaleSync, epochsUnique, forward]
+      allows: [safe, noInflation]
+    - name: lease object, both rolled back
+      constants: {ROLLBACK: '"both"'}
+      search: {depth: 8, states: 3000000}
+      holds: [floorNeverDrops, noStaleSync, noInflation, forward]
+      allows: [safe, epochsUnique]
+    - name: lead object, rollback none
+      dead: [takeDoc, claim, claimLost, adopt, publishLost, readLease, rollbackDoc, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {DESIGN: '"object"', ROLLBACK: '"none"'}
+    - name: lead object, rollback doc
+      dead: [takeDoc, claim, claimLost, adopt, publishLost, readLease, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {DESIGN: '"object"', ROLLBACK: '"doc"'}
+    - name: lead object, lead rolled back
+      constants: {DESIGN: '"object"', ROLLBACK: '"lead"'}
+      search: {depth: 5, states: 3000000}
+      holds: [floorNeverDrops, noStaleSync, noInflation, forward]
+      allows: [safe, epochsUnique]
+    - name: lead object, jobs before the claim
+      constants: {DESIGN: '"object"', JOBS_AFTER_CLAIM: 'false'}
+      search: {depth: 8, states: 3000000}
+      holds: [floorNeverDrops, epochsUnique, noInflation, forward]
+      allows: [safe, noStaleSync]
+    - name: hybrid, rollback none
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {DESIGN: '"hybrid"', ROLLBACK: '"none"'}
+    - name: hybrid, rollback doc
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {DESIGN: '"hybrid"', ROLLBACK: '"doc"'}
+    - name: hybrid, rollback lead
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {DESIGN: '"hybrid"', ROLLBACK: '"lead"'}
+    - name: hybrid, checkpoint attack, rollback lead
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, restore]
+      constants: {DESIGN: '"hybrid"', CP_ATTACK: 'true', ROLLBACK: '"lead"'}
+      search: {depth: 8, states: 3000000}
+    - name: hybrid, checkpoint attack, rollback doc
+      dead: [takeDoc, claimLost, adopt, bump, publishLost, readLease, rollbackLead, restore]
+      constants: {DESIGN: '"hybrid"', CP_ATTACK: 'true', ROLLBACK: '"doc"'}
+      search: {depth: 8, states: 3000000}
+    - name: hybrid, lost replies
+      dead: [takeDoc, bump, readLease, rollbackDoc, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {DESIGN: '"hybrid"', LOST_REPLY: 'true'}
+      search: {depth: 8, states: 3000000}
+    - name: hybrid, no jobs
+      constants: {DESIGN: '"hybrid"', JOBS: '"none"'}
+      search: {depth: 8, states: 3000000}
+      holds: [floorNeverDrops, epochsUnique, noInflation, forward]
+      allows: [safe, noStaleSync]
+    - name: hybrid, no guard
+      constants: {DESIGN: '"hybrid"', GUARD: 'false', ROLLBACK: '"lead"'}
+      search: {depth: 6, states: 3000000}
+      holds: [noStaleSync, epochsUnique, noInflation]
+      allows: [safe, floorNeverDrops, forward]
+    - name: hybrid, unverified checkpoint
+      constants: {DESIGN: '"hybrid"', CP_ATTACK: 'true', VERIFY: 'false'}
+      search: {depth: 4, states: 3000000}
+      holds: [floorNeverDrops, noStaleSync, epochsUnique, forward]
+      allows: [safe, noInflation]
+    - name: hybrid, both rolled back
+      constants: {DESIGN: '"hybrid"', ROLLBACK: '"both"'}
+      search: {depth: 8, states: 3000000}
+      holds: [floorNeverDrops, noStaleSync, noInflation, forward]
+      allows: [safe, epochsUnique]
+    - name: today (document)
+      dead: [acquire, claim, claimLost, adopt, bump, publishLost, readLease, rollbackDoc, rollbackLead, restore, forgeCheckpoint, replayCheckpoint, deleteCheckpoint]
+      constants: {DESIGN: '"doc"'}
+    - name: today, no jobs
+      constants: {DESIGN: '"doc"', JOBS: '"none"'}
+      search: {depth: 8, states: 3000000}
+      holds: [floorNeverDrops, epochsUnique, noInflation, forward]
+      allows: [safe, noStaleSync]
+    - name: today, no guard
+      constants: {DESIGN: '"doc"', GUARD: 'false', ROLLBACK: '"doc"'}
+      search: {depth: 6, states: 3000000}
+      holds: [noStaleSync, noInflation]
+      allows: [safe, floorNeverDrops, forward, epochsUnique]
+    - name: today, rolled back
+      constants: {DESIGN: '"doc"', ROLLBACK: '"doc"'}
+      search: {depth: 5, states: 3000000}
+      holds: [floorNeverDrops, noStaleSync, noInflation, forward]
+      allows: [safe, epochsUnique]

@@ -25,9 +25,8 @@ with the mechanism it turns off, what it must hold and exactly what it
 breaks. `simulate -matrix` searches every one and writes the table, the
 properties by the designs, into the model's document (its "The small
 instance" section); CI fails if a committed table is not the model's.
-Leadership still runs one search per design, each in its own process
-(`graph.sh`'s `graph_holds`, `graph_breaks`): in one matrix process a
-variant's search runs while the previous variant's graph is still held,
-and leadership's graphs then pass a runner's memory (gotogether#144).
+Each variant may bound its own search (leadership's broken designs stop a
+step or two past their counterexamples), and a design that breaks nothing
+lists the actions its switches leave dead (`dead:`).
 
 Planned (testing.md §3): approvals and grants.
