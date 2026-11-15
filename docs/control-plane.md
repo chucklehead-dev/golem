@@ -104,7 +104,12 @@ validate` (the snapshot compiler as a library), not by a live API call
   writing the old; release N+1 writes the new. Mixed replicas during a
   rolling upgrade therefore always read what the others write.
 - **History**: bucket versioning in place, replication to a backup
-  account under Object Lock (ADR 0007). A restore writes an old content as
+  account under Object Lock (ADR 0007). Retention: every renewal writes a
+  new version of the document (about 1,440 a day), so the bucket keeps
+  noncurrent versions of `state/` for 30 days, and the backup account
+  keeps one version a day for a year (a daily copy, not every version).
+  The recovery point is therefore any write in the last 30 days, then a
+  day's granularity to a year (operations.md §2, *State history*). A restore writes an old content as
   a new version after preserving all subsequent restrictive security
   changes; missing history requires quarantined recovery and review.
   Built: `state.Restore` and `golem-control restore` (a dry run unless
