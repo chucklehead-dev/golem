@@ -6,9 +6,11 @@
 package route
 
 import (
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -22,6 +24,13 @@ type Target struct {
 	// MaxInFlight is this gateway's ceiling on the deployment's calls in
 	// flight; 0: none.
 	MaxInFlight int
+	// MaxPerPrincipal is this gateway's ceiling on one principal's calls in
+	// flight on the deployment (a shared local box); 0: none.
+	MaxPerPrincipal int
+	// HealthPath, if set, is checked every HealthInterval by a Checker
+	// (lib/api's HealthCheck).
+	HealthPath     string
+	HealthInterval time.Duration
 	// Envelope is how its requests reach the provider: "" or "bedrock"
 	// (the ledger's envelope; the transport does the work).
 	Envelope string
@@ -81,6 +90,17 @@ func (t *Table) Aliases(dialect string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// Targets are the table's deployments, each once, sorted by Key.
+func (t *Table) Targets() []*Target {
+	seen := map[string]*Target{}
+	for _, r := range t.byAlias {
+		for _, d := range r.Pool {
+			seen[d.Key()] = d
+		}
+	}
+	return slices.SortedFunc(maps.Values(seen), func(a, b *Target) int { return strings.Compare(a.Key(), b.Key()) })
 }
 
 // Len is the number of routes.

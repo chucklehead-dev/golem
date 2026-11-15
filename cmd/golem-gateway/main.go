@@ -188,7 +188,20 @@ func run(ctx context.Context, args []string) int {
 	}
 
 	lc := &lifecycle{unready: o.unready, drain: o.drainFor, cut: 10 * time.Second}
-	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel, calls))
+	// One view of the deployments' health and the routes' retry budgets for
+	// every dialect's calls, as they share deployments, kept by the active
+	// checks of those that have one (a local box).
+	health := &route.Health{}
+	checker := &route.Checker{Health: health}
+	wg.Go(func() {
+		checker.Run(bg, func() []*route.Target {
+			if c := holder.Applied(); c != nil {
+				return c.Routes.Targets()
+			}
+			return nil
+		})
+	})
+	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel, calls, health))
 	lc.srv = srv
 	drained := make(chan struct{})
 	wg.Go(func() {
@@ -353,11 +366,8 @@ func startSource(ctx context.Context, o options, holder *snapshot.Holder) (src i
 // newMux is the gateway's routes: the two dialects' APIs, each call
 // counted by lc (and, standalone, behind localOnly), and registered in
 // calls while in flight; and the probes.
-func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry, calls *proxy.InFlight) *http.ServeMux {
+func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry, calls *proxy.InFlight, health *route.Health) *http.ServeMux {
 	mux := http.NewServeMux()
-	// One view of the deployments' health and the routes' retry budgets for
-	// both dialects' calls, as they share deployments.
-	health := &route.Health{}
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat,
 		"POST /v1/responses": proxy.OpenAIResponses} {
 		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health}

@@ -109,6 +109,24 @@ type Deployment struct {
 	// concurrency): an attempt past it is not sent, and the call fails over
 	// to another deployment of its pool. 0: none.
 	MaxInFlight int `json:"maxInFlight,omitempty"`
+	// MaxInFlightPerPrincipal is this gateway's ceiling on one principal's
+	// calls in flight on the deployment: a shared box (a local GPU, ADR
+	// 0017) is not one user's to fill; past it, the call goes on to the
+	// pool's next deployment. 0: none.
+	MaxInFlightPerPrincipal int `json:"maxInFlightPerPrincipal,omitempty"`
+	// HealthCheck, if set, has each gateway check the deployment on its own
+	// (a local box, ADR 0017): a box that is down is ejected before a call
+	// finds it, and one that answers again is readmitted. Not for bedrock.
+	HealthCheck *HealthCheck `json:"healthCheck,omitempty"`
+}
+
+// HealthCheck is a deployment's active check: a GET of Path on its URL's
+// host, with its backend's credential, every IntervalSeconds. A 2xx passes.
+type HealthCheck struct {
+	// Path is the path checked, e.g. /v1/models (vLLM's) or /health.
+	Path string `json:"path"`
+	// IntervalSeconds is the time between checks (default 10).
+	IntervalSeconds int `json:"intervalSeconds,omitempty"`
 }
 
 // ModelRoute maps an alias callers name to a pool of deployments.

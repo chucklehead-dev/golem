@@ -13,6 +13,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/proxy"
+	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/lib/key"
 )
@@ -88,7 +89,7 @@ spec:
 	}
 	o := options{standalone: dir, maxBody: 1 << 20}
 	lc := &lifecycle{drain: time.Second, cut: time.Second}
-	gw := httptest.NewServer(newMux(o, lc, holder, lim, nil, calls))
+	gw := httptest.NewServer(newMux(o, lc, holder, lim, nil, calls, &route.Health{}))
 	defer gw.Close()
 
 	stream := func(k string) *http.Response {

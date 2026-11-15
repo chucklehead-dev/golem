@@ -39,11 +39,14 @@ type Health struct {
 }
 
 type deployment struct {
-	inflight  int
-	fails     int
-	until     time.Time // ejected until; zero: not ejected
-	probing   bool      // the one probe of an ejected deployment is in flight
-	ejections int       // in a row, for the next ejection's length
+	inflight int
+	// byPrincipal counts each principal's leases, for the deployment's
+	// per-principal ceiling (Target.MaxPerPrincipal); nil until one is set.
+	byPrincipal map[string]int
+	fails       int
+	until       time.Time // ejected until; zero: not ejected
+	probing     bool      // the one probe of an ejected deployment is in flight
+	ejections   int       // in a row, for the next ejection's length
 	// admitted counts readmissions: a probe sent before the last one is an
 	// ordinary attempt now (its deployment no longer ejected), so its
 	// verdict is not a probe's.
@@ -74,19 +77,22 @@ func (h *Health) dep(t *Target) *deployment {
 // reports how the attempt went; Release ends its hold when the attempt is
 // over (a committed one's stream ended).
 type Lease struct {
-	h     *Health
-	d     *deployment
-	probe bool
-	epoch int  // d.admitted when the lease was taken
-	done  bool // Commit or Fail has reported
-	freed bool
+	h         *Health
+	d         *deployment
+	probe     bool
+	epoch     int    // d.admitted when the lease was taken
+	principal string // counted in d.byPrincipal, if the deployment has a per-principal ceiling
+	done      bool   // Commit or Fail has reported
+	freed     bool
 }
 
-// Acquire takes a place on t for one attempt, unless t is at its ceiling,
-// or ejected (an ejected deployment past its ejection takes one probe at a
-// time). It reports, when it refuses, when t may take one again (zero:
-// unknown, a ceiling frees when an attempt ends).
-func (h *Health) Acquire(t *Target) (*Lease, time.Time) {
+// Acquire takes a place on t for one attempt of principal's, unless t is
+// at its ceiling or principal at its per-principal one (a shared box, ADR
+// 0017: one principal must not fill it), or t is ejected (an ejected
+// deployment past its ejection takes one probe at a time). It reports,
+// when it refuses, when t may take one again (zero: unknown, a ceiling
+// frees when an attempt ends).
+func (h *Health) Acquire(t *Target, principal string) (*Lease, time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.dep(t)
@@ -103,9 +109,20 @@ func (h *Health) Acquire(t *Target) (*Lease, time.Time) {
 	if t.MaxInFlight > 0 && d.inflight >= t.MaxInFlight {
 		return nil, time.Time{}
 	}
+	l := &Lease{h: h, d: d, probe: probe, epoch: d.admitted}
+	if t.MaxPerPrincipal > 0 {
+		if d.byPrincipal[principal] >= t.MaxPerPrincipal {
+			return nil, time.Time{}
+		}
+		if d.byPrincipal == nil {
+			d.byPrincipal = map[string]int{}
+		}
+		d.byPrincipal[principal]++
+		l.principal = principal
+	}
 	d.inflight++
 	d.probing = d.probing || probe
-	return &Lease{h: h, d: d, probe: probe, epoch: d.admitted}, time.Time{}
+	return l, time.Time{}
 }
 
 // isProbe reports whether the lease is its deployment's probe still: one
@@ -170,6 +187,37 @@ func (l *Lease) release() {
 	if !l.freed {
 		l.freed = true
 		l.d.inflight--
+		if l.d.byPrincipal != nil {
+			if n := l.d.byPrincipal[l.principal] - 1; n > 0 {
+				l.d.byPrincipal[l.principal] = n
+			} else {
+				delete(l.d.byPrincipal, l.principal)
+			}
+		}
+	}
+}
+
+// Checked reports an active check of t (a Checker's): a failed one ejects
+// t, as a failed probe does, unless it is ejected still; a passing one
+// readmits t if its ejection is over, as a probe's commit does. A pass
+// does not cut an ejection short: a box that lists its models may still
+// be refusing calls (a Retry-After), and a pass forgets no failures of
+// calls, which a liveness check cannot speak for.
+func (h *Health) Checked(t *Target, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d, now := h.dep(t), h.now()
+	ejected := !d.until.IsZero()
+	switch {
+	case ok && ejected && !now.Before(d.until):
+		d.admitted++
+		d.fails, d.until, d.ejections, d.probing = 0, time.Time{}, 0, false
+	case !ok && (!ejected || !now.Before(d.until)):
+		e := cmp.Or(h.Ejection, 10*time.Second) << min(d.ejections, 10)
+		e = min(e, cmp.Or(h.MaxEjection, 5*time.Minute))
+		d.until = now.Add(e)
+		d.ejections++
+		d.fails = 0
 	}
 }
 

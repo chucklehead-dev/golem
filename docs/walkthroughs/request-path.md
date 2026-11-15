@@ -179,8 +179,10 @@ then makes up to `Route.MaxAttempts` attempts (default 2) before one
 commits, the design model/attempts.md checks. `pick` (`attempt.go`)
 takes the pool in order, only a deployment the call has not tried (a
 retry is a failover: ADR 0051), each only if `route.Health`
-(`gateway/route/health.go`) gives it a lease: under its `maxInFlight` ceiling, and not ejected (one probe at a
-time once its ejection is over). An attempt the provider never saw (a
+(`gateway/route/health.go`) gives it a lease: under its `maxInFlight` ceiling
+and the principal's `maxInFlightPerPrincipal`, and not ejected (one probe
+at a time once its ejection is over; a deployment with a health check is
+also ejected and readmitted by `route.Checker`, `check.go`). An attempt the provider never saw (a
 dial, DNS or TLS failure), or refused before any output (429, 503, 529,
 or a 200 whose first event is an error), is free: its lease reports
 the failure, its row is written (`Telemetry.Retried`, its own

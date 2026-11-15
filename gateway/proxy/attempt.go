@@ -27,13 +27,13 @@ func (h *Handler) health() *route.Health {
 // is a failover or nothing, and a pool of one makes one attempt. It marks
 // the one it takes in tried. With none, it returns the earliest time one
 // may take an attempt again (zero: unknown).
-func pick(hl *route.Health, rt *route.Route, tried []bool) (*route.Target, *route.Lease, time.Time) {
+func pick(hl *route.Health, rt *route.Route, tried []bool, principal string) (*route.Target, *route.Lease, time.Time) {
 	var earliest time.Time
 	for i, t := range rt.Pool {
 		if tried[i] {
 			continue
 		}
-		l, at := hl.Acquire(t)
+		l, at := hl.Acquire(t, principal)
 		if l != nil {
 			tried[i] = true
 			return t, l, time.Time{}

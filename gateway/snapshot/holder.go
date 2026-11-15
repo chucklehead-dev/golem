@@ -238,7 +238,8 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 				rt = &bedrock.Transport{Base: t, Endpoint: u, Region: d.Region, Model: d.Model, Credentials: h.AWS}
 			}
 			targets[targetKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
-				URL: u, Transport: rt, Header: header, MaxInFlight: d.MaxInFlight, Envelope: b.Envelope,
+				URL: u, Transport: rt, Header: header, MaxInFlight: d.MaxInFlight, MaxPerPrincipal: d.MaxInFlightPerPrincipal, Envelope: b.Envelope,
+				HealthPath: d.HealthPath, HealthInterval: time.Duration(d.HealthIntervalMs) * time.Millisecond,
 				ID: b.Name + "/" + d.Name}
 		}
 	}

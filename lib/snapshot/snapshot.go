@@ -173,6 +173,13 @@ type Deployment struct {
 	// MaxInFlight is each gateway's ceiling on the deployment's calls in
 	// flight; 0: none.
 	MaxInFlight int `json:"maxInFlight,omitempty"`
+	// MaxInFlightPerPrincipal is each gateway's ceiling on one principal's
+	// calls in flight on the deployment; 0: none.
+	MaxInFlightPerPrincipal int `json:"maxInFlightPerPrincipal,omitempty"`
+	// HealthPath and HealthIntervalMs are the deployment's active check
+	// (lib/api's HealthCheck), its default filled in; "": none.
+	HealthPath       string `json:"healthPath,omitempty"`
+	HealthIntervalMs int64  `json:"healthIntervalMs,omitempty"`
 }
 
 // Route is an alias and its pool.

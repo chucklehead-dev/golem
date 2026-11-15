@@ -234,8 +234,36 @@ spec: {alias: claude, pool: [{backend: bedrock, deployment: east}]}
 		{"no region", strings.Replace(ok, "  aws: {region: us-east-2}\n", "", 1), `spec.deployments[0].region: "": give the deployment's AWS region`},
 		{"bad region", strings.Replace(ok, "us-west-2", "us-west-2.evil.example", 1), `spec.deployments[1].region: "us-west-2.evil.example"`},
 		{"envelope", strings.Replace(ok, "envelope: bedrock", "envelope: vertex", 1), `spec.envelope: "vertex" is not an envelope`},
+		{"health check", strings.Replace(ok, "{name: east,", "{name: east, healthCheck: {path: /ping},", 1), "spec.deployments[0].healthCheck: a bedrock deployment has no health check"},
 	} {
 		_, err := Compile(objects(t, map[string]string{"golem.yaml": backend(c.spec)}), published)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
+	}
+}
+
+// TestLocalBox: a shared local box's deployment carries its per-principal
+// ceiling and its health check (the interval defaulted) into the snapshot;
+// a negative ceiling or interval, and a path that is not one, are refused.
+func TestLocalBox(t *testing.T) {
+	box := func(d string) string {
+		return strings.Replace(good, "{name: sonnet, url: \"https://api.anthropic.com/v1/messages\", model: claude-sonnet-4-5}", "{name: sonnet, url: \"https://api.anthropic.com/v1/messages\", model: claude-sonnet-4-5, "+d+"}", 1)
+	}
+	s, err := Compile(objects(t, map[string]string{"golem.yaml": box("maxInFlightPerPrincipal: 2, healthCheck: {path: /v1/models}")}), published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := s.Backends[0].Deployments[0]; d.MaxInFlightPerPrincipal != 2 || d.HealthPath != "/v1/models" || d.HealthIntervalMs != 10000 {
+		t.Fatalf("%+v", d)
+	}
+	for _, c := range []struct{ name, d, want string }{
+		{"ceiling", "maxInFlightPerPrincipal: -1", "spec.deployments[0].maxInFlightPerPrincipal: must not be negative"},
+		{"interval", "healthCheck: {path: /health, intervalSeconds: -5}", "spec.deployments[0].healthCheck.intervalSeconds: must not be negative"},
+		{"path", "healthCheck: {path: v1/models}", `spec.deployments[0].healthCheck.path: "v1/models": give a path`},
+		{"query", "healthCheck: {path: \"/health?x=1\"}", `spec.deployments[0].healthCheck.path: "/health?x=1"`},
+	} {
+		_, err := Compile(objects(t, map[string]string{"golem.yaml": box(c.d)}), published)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", c.name, err, c.want)
 		}

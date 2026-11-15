@@ -227,6 +227,50 @@ envelope, assembled by `proxy`.
   admission, no slot, no ledger row; providers bill no count. Its rate
   limit is step 4's (m1-plan.md).
 
+## 3b. Local boxes (vLLM)
+
+A vLLM box is a backend of the dialect it serves, each box a deployment
+(`spec.network.allowPrivateAddresses` for a private address). Three
+per-deployment fields are for a shared box:
+
+- `maxInFlight`: the box's static concurrency. Past it the attempt is not
+  sent; the call goes to the pool's next deployment.
+- `maxInFlightPerPrincipal`: one principal's share (route.Health counts
+  leases by principal). Past it, the same.
+- `healthCheck: {path, intervalSeconds}`: route.Checker, one per gateway,
+  GETs the path on the deployment's host with the backend's credential
+  (default every 10 s, each check bounded by 5 s). A failure ejects the box
+  as a failed probe does (the ejection doubling); a 2xx after the ejection
+  readmits it, as a probe's commit does. A pass during an ejection does not
+  end it: a box that lists its models may still be refusing calls with a
+  Retry-After, and a liveness check cannot speak for calls.
+
+```yaml
+apiVersion: golem.dev/v1alpha1
+kind: Backend
+metadata: {name: dgx}
+spec:
+  dialect: openai.chat
+  network: {allowPrivateAddresses: true}
+  auth: {header: Authorization, scheme: Bearer, secretRef: {name: dgx, key: api-key}}
+  deployments:
+  - name: dgx-1
+    url: https://dgx-1.lan:8000/v1/chat/completions
+    model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    maxInFlight: 32
+    maxInFlightPerPrincipal: 8
+    healthCheck: {path: /v1/models}
+---
+apiVersion: golem.dev/v1alpha1
+kind: ModelRoute
+metadata: {name: coder}
+spec:
+  alias: coder
+  pool:                       # in order: the box, then the hosted fallback
+  - {backend: dgx, deployment: dgx-1}
+  - {backend: openai, deployment: gpt}
+```
+
 ## 4a. The bedrock envelope
 
 Built: `gateway/envelope/bedrock`, an `http.RoundTripper` over the

@@ -309,6 +309,22 @@ Status:
   previous_response_id, background, a provider file and store true each
   refused before any call; an error first refused before the commit), and
   the dialect's tests; ablated: the stateful refusal, the store rewrite.
+- **Built: vLLM boxes.** A vLLM box is a backend of the dialect it
+  serves (`openai.chat`, or `anthropic.messages` for vLLM's Messages
+  endpoint), each box a deployment (`spec.network.allowPrivateAddresses`
+  for a private address). Per deployment:
+  `maxInFlight` (the box's static concurrency), `maxInFlightPerPrincipal`
+  (one principal cannot fill a shared box), and `healthCheck` (a GET, for
+  vLLM `/v1/models`, with the backend's credential, every
+  `intervalSeconds`): a failed check ejects the box before a call finds it,
+  a pass after its ejection readmits it, and a pass never cuts an ejection
+  short. Overflow is the pool's order: past a ceiling, or ejected, the call
+  goes to the next deployment (a hosted model as the fallback). Tests:
+  `TestPerPrincipalCeiling`, `TestCheckerEjectsAndReadmits`, `TestLocalBox`;
+  ablated: the per-principal refusal, a failed check's ejection, a pass
+  during the ejection. Open: models discovered from the box (they are
+  configured), `/v1/completions` (not used), the run on a real box
+  (docs/acceptance/m1-vllm.md).
 
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.

@@ -128,7 +128,10 @@ The passes, in order:
    the `catalog` (`compile.go:114`, `catalog.add` at `:149`), problems or
    not, so that routes are checked against it rather than reported as
    dangling too: its dialect, and each deployment's provider model and
-   `maxInFlight` (each gateway's ceiling on it; 0 none, never negative).
+   `maxInFlight` and `maxInFlightPerPrincipal` (each gateway's ceilings on
+   it, and on one principal's calls to it; 0 none, never negative), and
+   its `healthCheck` (`healthCheck`: a path, its interval defaulted to
+   10 s; none on a bedrock deployment).
 3. **Routes** (`compileRoutes`, `compile.go:208`): a unique alias; a
    non-empty pool; timeouts by `timeouts` (`compile.go:334`), defaulting
    to `DefaultMaxDuration` (30 minutes) for the whole call, the whole call

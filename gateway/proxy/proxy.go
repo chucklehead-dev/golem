@@ -192,7 +192,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.beforePick != nil {
 		h.beforePick(r)
 	}
-	target, lease, retryAt := pick(hl, rt, tried)
+	target, lease, retryAt := pick(hl, rt, tried, principal.ID)
 	if target == nil {
 		h.fail(ctx, w, &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
 			msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"})
@@ -301,7 +301,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !kept || attempt >= rt.MaxAttempts || r.Context().Err() != nil || terminatedBy(upCtx) != nil {
 				return false
 			}
-			next, nl, _ := pick(hl, rt, tried)
+			next, nl, _ := pick(hl, rt, tried, principal.ID)
 			if next == nil {
 				return false
 			}

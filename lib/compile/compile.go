@@ -249,6 +249,9 @@ func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder)
 		if d.Model == "" {
 			add(obj, at+".model", "required: the Bedrock model ID, inference profile ID or ARN")
 		}
+		if d.HealthCheck != nil {
+			add(obj, at+".healthCheck", "a bedrock deployment has no health check: Bedrock's own failures eject it")
+		}
 		r := cmp.Or(d.Region, region)
 		if !regionPattern.MatchString(r) {
 			add(obj, at+".region", "%q: give the deployment's AWS region (here or in spec.aws.region), e.g. us-east-2", r)
@@ -261,7 +264,11 @@ func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder)
 		if d.MaxInFlight < 0 {
 			add(obj, at+".maxInFlight", "must not be negative (0: no ceiling)")
 		}
-		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, Region: r, MaxInFlight: max(d.MaxInFlight, 0)})
+		if d.MaxInFlightPerPrincipal < 0 {
+			add(obj, at+".maxInFlightPerPrincipal", "must not be negative (0: no ceiling)")
+		}
+		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, Region: r, MaxInFlight: max(d.MaxInFlight, 0),
+			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0)})
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out
@@ -274,6 +281,21 @@ var regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`) // read-only
 // deployments validates a Backend's spec.deployments and compiles them,
 // sorted by name. Each is compiled, problems or not, so that the catalog
 // knows it.
+// healthCheck validates a deployment's active check, giving its path and
+// interval ("", 0 for none).
+func healthCheck(obj, at string, hc *v1.HealthCheck, add adder) (string, int64) {
+	if hc == nil {
+		return "", 0
+	}
+	if !strings.HasPrefix(hc.Path, "/") || strings.ContainsAny(hc.Path, "?# ") {
+		add(obj, at+".healthCheck.path", "%q: give a path on the deployment's host, e.g. /v1/models", hc.Path)
+	}
+	if hc.IntervalSeconds < 0 {
+		add(obj, at+".healthCheck.intervalSeconds", "must not be negative (0: the default, 10)")
+	}
+	return hc.Path, int64(cmp.Or(max(hc.IntervalSeconds, 0), 10)) * 1000
+}
+
 func deployments(obj string, ds []v1.Deployment, standalone bool, add adder) []snapshot.Deployment {
 	if len(ds) == 0 {
 		add(obj, "spec.deployments", "a Backend needs at least one deployment")
@@ -298,7 +320,12 @@ func deployments(obj string, ds []v1.Deployment, standalone bool, add adder) []s
 		if d.MaxInFlight < 0 {
 			add(obj, at+".maxInFlight", "must not be negative (0: no ceiling)")
 		}
-		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, MaxInFlight: max(d.MaxInFlight, 0)})
+		if d.MaxInFlightPerPrincipal < 0 {
+			add(obj, at+".maxInFlightPerPrincipal", "must not be negative (0: no ceiling)")
+		}
+		path, every := healthCheck(obj, at, d.HealthCheck, add)
+		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, MaxInFlight: max(d.MaxInFlight, 0),
+			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), HealthPath: path, HealthIntervalMs: every})
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out

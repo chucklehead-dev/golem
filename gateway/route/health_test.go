@@ -15,42 +15,42 @@ func TestEjection(t *testing.T) {
 	d := &Target{Backend: "b", Deployment: "d"}
 	fail := func(after time.Duration) {
 		t.Helper()
-		l, _ := h.Acquire(d)
+		l, _ := h.Acquire(d, "")
 		if l == nil {
 			t.Fatal("refused while healthy")
 		}
 		l.Fail(after)
 	}
 	fail(0)
-	l, _ := h.Acquire(d)
+	l, _ := h.Acquire(d, "")
 	l.Commit() // forgets the first failure
 	l.Release()
 	fail(0)
-	if l, _ := h.Acquire(d); l == nil {
+	if l, _ := h.Acquire(d, ""); l == nil {
 		t.Fatal("ejected after one failure since a commit")
 	} else {
 		l.Fail(0)
 	}
-	if l, until := h.Acquire(d); l != nil || !until.Equal(now.Add(10*time.Second)) {
+	if l, until := h.Acquire(d, ""); l != nil || !until.Equal(now.Add(10*time.Second)) {
 		t.Fatalf("lease %v until %v: two failures in a row eject for 10 s", l, until)
 	}
 	now = now.Add(10 * time.Second)
-	probe, _ := h.Acquire(d)
+	probe, _ := h.Acquire(d, "")
 	if probe == nil {
 		t.Fatal("no probe after the ejection")
 	}
-	if l, _ := h.Acquire(d); l != nil {
+	if l, _ := h.Acquire(d, ""); l != nil {
 		t.Fatal("a second attempt while the probe is in flight")
 	}
 	probe.Fail(0)
-	if _, until := h.Acquire(d); !until.Equal(now.Add(20 * time.Second)) {
+	if _, until := h.Acquire(d, ""); !until.Equal(now.Add(20 * time.Second)) {
 		t.Fatalf("until %v: a failed probe ejects again, twice as long", until)
 	}
 	now = now.Add(20 * time.Second)
-	probe, _ = h.Acquire(d)
+	probe, _ = h.Acquire(d, "")
 	probe.Commit()
 	probe.Release()
-	if l, _ := h.Acquire(d); l == nil {
+	if l, _ := h.Acquire(d, ""); l == nil {
 		t.Fatal("a committed probe did not readmit the deployment")
 	} else {
 		l.Release()
@@ -58,7 +58,7 @@ func TestEjection(t *testing.T) {
 	// A provider's Retry-After longer than the ejection is taken.
 	fail(time.Minute)
 	fail(time.Minute)
-	if _, until := h.Acquire(d); !until.Equal(now.Add(time.Minute)) {
+	if _, until := h.Acquire(d, ""); !until.Equal(now.Add(time.Minute)) {
 		t.Fatalf("until %v: the provider's Retry-After of a minute", until)
 	}
 }
@@ -70,12 +70,12 @@ func TestProbeAbandoned(t *testing.T) {
 	now := time.Unix(1000, 0)
 	h := &Health{EjectAfter: 1, Ejection: time.Second, Now: func() time.Time { return now }}
 	d := &Target{Backend: "b", Deployment: "d"}
-	l, _ := h.Acquire(d)
+	l, _ := h.Acquire(d, "")
 	l.Fail(0)
 	now = now.Add(time.Second)
-	probe, _ := h.Acquire(d)
+	probe, _ := h.Acquire(d, "")
 	probe.Release()
-	if l, _ := h.Acquire(d); l == nil {
+	if l, _ := h.Acquire(d, ""); l == nil {
 		t.Fatal("an abandoned probe kept the deployment unprobeable")
 	}
 }
@@ -85,18 +85,18 @@ func TestProbeAbandoned(t *testing.T) {
 func TestCeiling(t *testing.T) {
 	h := &Health{}
 	d := &Target{Backend: "b", Deployment: "d", MaxInFlight: 1}
-	l, _ := h.Acquire(d)
-	if x, _ := h.Acquire(d); x != nil {
+	l, _ := h.Acquire(d, "")
+	if x, _ := h.Acquire(d, ""); x != nil {
 		t.Fatal("past the ceiling")
 	}
 	l.Commit()
 	l.Release()
 	l.Release()
-	a, _ := h.Acquire(d)
+	a, _ := h.Acquire(d, "")
 	if a == nil {
 		t.Fatal("the release made no room")
 	}
-	if x, _ := h.Acquire(d); x != nil {
+	if x, _ := h.Acquire(d, ""); x != nil {
 		t.Fatal("a double release freed two places")
 	}
 }
@@ -127,13 +127,13 @@ func TestReadmissionEndsProbes(t *testing.T) {
 	now := time.Unix(1000, 0)
 	h := &Health{EjectAfter: 2, Ejection: time.Second, Now: func() time.Time { return now }}
 	d := &Target{Backend: "b", Deployment: "d"}
-	early, _ := h.Acquire(d) // sent before the ejection
-	f1, _ := h.Acquire(d)
+	early, _ := h.Acquire(d, "") // sent before the ejection
+	f1, _ := h.Acquire(d, "")
 	f1.Fail(0)
-	f2, _ := h.Acquire(d)
+	f2, _ := h.Acquire(d, "")
 	f2.Fail(0) // two in a row: ejected
 	now = now.Add(time.Second)
-	probe, _ := h.Acquire(d)
+	probe, _ := h.Acquire(d, "")
 	if probe == nil || !h.Deployment(d).Probing {
 		t.Fatal("no probe after the ejection")
 	}
@@ -144,5 +144,30 @@ func TestReadmissionEndsProbes(t *testing.T) {
 	probe.Fail(0)
 	if dh := h.Deployment(d); dh.Ejected {
 		t.Fatalf("%+v: the old probe's failure is one failure, not a failed probe's ejection", dh)
+	}
+}
+
+// TestPerPrincipalCeiling: a deployment's per-principal ceiling holds one
+// principal to its share of a shared box while others still get in, and
+// a release makes that principal's room again.
+func TestPerPrincipalCeiling(t *testing.T) {
+	h := &Health{}
+	d := &Target{Backend: "b", Deployment: "box", MaxInFlight: 4, MaxPerPrincipal: 2}
+	a1, _ := h.Acquire(d, "alice")
+	a2, _ := h.Acquire(d, "alice")
+	if x, _ := h.Acquire(d, "alice"); x != nil {
+		t.Fatal("alice past her ceiling")
+	}
+	if b, _ := h.Acquire(d, "bob"); b == nil {
+		t.Fatal("bob kept out by alice's calls")
+	}
+	a1.Commit()
+	a1.Release()
+	if a3, _ := h.Acquire(d, "alice"); a3 == nil {
+		t.Fatal("a release made alice no room")
+	}
+	a2.Fail(0)
+	if h.Deployment(d).InFlight != 2 {
+		t.Fatalf("in flight %d: bob's and alice's third", h.Deployment(d).InFlight)
 	}
 }
