@@ -42,7 +42,8 @@ The API that writes the document (`control/service`, `control/api`) is
 Everything golem-control knows is one JSON document, `state/document.json`
 in the bucket (`DocumentKey`, `control/state/state.go:35`). `Document`
 (`state.go:54`) holds the fence (`Fence`, `state.go:48`: who leads, at
-which epoch), the write ID of the update that wrote it (`Write`), each
+which epoch), the write IDs of the updates that wrote its last 32
+versions (`Writes`, newest last; `RecentWrites`), each
 pool's publication record (`Publications`, a `Record` of epoch, sequence
 and source state version, `state.go:40`), the entitlements (`Principals`,
 `Scopes`, `Keys`, `Revocations`, `Roles`; `entitlements.go`) and the audit
@@ -98,12 +99,17 @@ retry:
    the new audit events, check the invariants against the document it
    started from. A `change` error or a broken invariant ends the update;
    nothing is written.
-3. Increment `stateVersion`, stamp a fresh write ID (`Write`,
-   `state.go:284`) and `Put` with `If-Match: <tag>` (`state.go:289`).
-4. On `ErrPrecondition`, `Load`. If the document there carries this
-   attempt's write ID, the put landed and only its reply was lost (a
-   retried conditional put fails its own condition): the update succeeded
-   (`state.go:297`). Otherwise another writer won: go round again, running
+3. Increment `stateVersion`, add a fresh write ID to `Writes` (`wrote`,
+   which keeps the last `RecentWrites`) and `Put` with `If-Match: <tag>`.
+4. On `ErrPrecondition`, `Load`. If the document there has this
+   attempt's write ID among its `Writes`, the put landed and only its
+   reply was lost (a retried conditional put fails its own condition):
+   the update succeeded, and returns the current document without
+   applying the change again, even if other writers have written since.
+   Before the ring, only the latest write's ID was kept, so a landed
+   write that another overtook before the re-read was applied twice (two
+   audit events; a removal that landed answered `NotFound`);
+   `TestLostReplyOvertaken`. Otherwise another writer won: go round again, running
    `change` afresh on the winner's document. After `Attempts` (default 8)
    losses it returns `ErrContended`, which the API reports as `Aborted`
    (retry).
@@ -146,6 +152,7 @@ compare-and-swap as the change and a retried change is numbered afresh.
 | No pool's publication record is removed or goes back in sequence, epoch or source | `checkPublications`, `state.go:395` | `TestInvariants` |
 | A store that has read nothing starts from an empty document only where golem-control has not run (no `Installed` object), else `ErrMissing`; only `Bootstrap` creates one then | `refresh`, `installed`, `state.go:207` | `TestMissingDocument`, `TestBootstrapCommand` |
 | No pool is published from a record below what the bucket proves (its verified checkpoint or pointer): the document went back, `ErrRegressed` | `prepare` and `below`, `control/publish/publish.go:203` | `TestGuard` |
+| A write whose reply was lost is applied once: recognised by its ID among the document's last 32 (`Writes`), even after others wrote over it | `Update`, `wrote`, `state.go` | `TestLostReplyOvertaken`, `TestLostClaim` |
 | A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:316` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced` |
 
 Every refusal wraps `ErrInvariant`, which the API maps to Connect's

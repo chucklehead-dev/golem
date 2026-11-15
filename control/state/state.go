@@ -59,10 +59,11 @@ type Document struct {
 	// its own (control/lead); a replica leads once it has claimed the fence
 	// here, and every leader-only write checks it (FencedUpdate).
 	Fence *Fence `json:"fence,omitempty"`
-	// Write names the update that wrote this version, so a writer whose
-	// compare-and-swap reply was lost can tell its own write from
-	// another's (Update).
-	Write        string            `json:"write,omitempty"`
+	// Writes names the updates that wrote the last RecentWrites versions,
+	// newest last, so a writer whose compare-and-swap reply was lost can
+	// tell its own write from another's even after others have written
+	// over it (Update).
+	Writes       []string          `json:"writes,omitempty"`
 	Publications map[string]Record `json:"publications,omitempty"`
 
 	Principals  map[string]Principal `json:"principals,omitempty"` // by principal ID
@@ -74,6 +75,20 @@ type Document struct {
 	// ships them and trims only what is durably archived.
 	Audit    []AuditEvent `json:"audit,omitempty"`
 	AuditSeq uint64       `json:"auditSeq,omitempty"` // the last event's number
+}
+
+// RecentWrites is how many write IDs a document keeps (Writes): a writer
+// whose reply was lost recognises its write while fewer than this many
+// others have landed since, far more than land in the few round trips its
+// retry takes.
+const RecentWrites = 32
+
+// wrote records write id as the newest of d's Writes, keeping the last
+// RecentWrites. The slice is new: d's may be shared with the document it
+// was cloned from.
+func (d *Document) wrote(id string) {
+	keep := d.Writes[max(0, len(d.Writes)-(RecentWrites-1)):]
+	d.Writes = append(append(make([]string, 0, len(keep)+1), keep...), id)
 }
 
 // number gives each new audit event (Seq 0) the next number.
@@ -281,7 +296,8 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 			return nil, err
 		}
 		next.Schema, next.StateVersion = Schema, base.StateVersion+1
-		next.Write = rand.Text()
+		id := rand.Text()
+		next.wrote(id)
 		body, err := next.Encode()
 		if err != nil {
 			return nil, err
@@ -290,11 +306,14 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 		if errors.Is(err, bucket.ErrPrecondition) {
 			// Another writer won, or this one did and its reply was lost (a
 			// retried conditional put fails its own condition): read what
-			// is there, and if it is this write, it succeeded.
+			// is there, and if this write is among its recent ones, it
+			// succeeded, whether or not others have written since. Applying
+			// the change again would apply it twice (a second audit event;
+			// a removal that landed answered NotFound).
 			if err := s.Load(ctx); err != nil {
 				return nil, err
 			}
-			if cur := s.Current(); cur.Write == next.Write {
+			if cur := s.Current(); slices.Contains(cur.Writes, id) {
 				return cur, nil
 			}
 			continue

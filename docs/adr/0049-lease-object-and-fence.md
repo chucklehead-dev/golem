@@ -44,8 +44,9 @@ record lowered the trusted floor.
   stops publication (`ErrTampered`) for a person to look at.
 - **Lost replies**: a write that lands but whose reply is lost is
   recognised by the write ID it carries (the store re-reads after a
-  failed condition); a claim whose reply was lost is adopted at the next
-  try.
+  failed condition), kept among the document's last 32 write IDs so it is
+  recognised even after other writers have written over it; a claim
+  whose reply was lost is adopted at the next try.
 - **Restore** (`golemctl state restore`, when built) carries the fence and
   the records forward, as it does revocations.
 
