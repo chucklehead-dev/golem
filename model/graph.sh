@@ -1,20 +1,24 @@
 # Exhaustive checks of a model's small instance (<model>.small.yaml) with
 # gotogether's state-graph search: every run up to a depth, not a sample.
 # Sourced by the check scripts, which set fail=0 first. Results are read
-# from the report's JSON (gotogether.report/2: simulate -json), with jq.
+# from the report's JSON (gotogether.report/2: simulate -json), with jq,
+# counterexamples included.
 GOTOGETHER=${GOTOGETHER:-gotogether}
 STATES=${STATES:-300000}
-# MiB for the stored graph (gotogether stops at 256 by default). It bounds
-# the graph alone, not the process: a search at 6000 has peaked at 7.1 GiB
-# resident, so keep it well under the machine's memory.
+# MiB for the stored graph (gotogether stops at 256 by default): an
+# estimate of the graph alone.
 MEMORY=${MEMORY:-6000}
+# MiB for the whole process (-process-memory), set from the machine's
+# memory: a search past it ends with a bounded result (cut: memory), not
+# a killed runner. 5500 leaves a 7 GB runner room for quint and the rest.
+PROCESS_MEMORY=${PROCESS_MEMORY:-5500}
 
 # graph_run MODEL DEPTH [CONST]: the report's JSON in $graph_json, the exit
 # status in $graph_rc (0 pass, 1 fail, 2 incomplete).
 graph_run() {
   # The scripts run under set -e: keep a failing search from ending them.
   graph_rc=0
-  graph_json=$("$GOTOGETHER" simulate -json -binding "$1.small.yaml" -graph -depth "$2" -states "$STATES" -memory "$MEMORY" ${3:+-const "$3"} 2>/dev/null) || graph_rc=$?
+  graph_json=$("$GOTOGETHER" simulate -json -binding "$1.small.yaml" -graph -depth "$2" -states "$STATES" -memory "$MEMORY" -process-memory "$PROCESS_MEMORY" ${3:+-const "$3"} 2>/dev/null) || graph_rc=$?
 }
 
 # graph_field JQ: a field of the last report.
@@ -48,9 +52,8 @@ graph_breaks() {
   local failed
   failed=$(jq -r --arg inv "$4" '.checks[] | select(.name == $inv and .verdict == "fail") | .name' <<<"$graph_json" || true)
   if [[ $graph_rc == 1 && -n $failed ]]; then
-    # The counterexample's replay is in the report's prose notes only (no
-    # JSON field carries it): the line after this invariant's FAIL.
-    local r; r=$(graph_field '.notes[]?' | awk -v inv="$4" '$1=="FAIL" && $2==inv":" {f=1} f && /^    replay:/ {print; exit}' || true)
+    # The shortest counterexample's replay, init.then(...).then(...).
+    local r; r=$(jq -r --arg inv "$4" '.checks[] | select(.name == $inv) | .counterexample.replay // ""' <<<"$graph_json")
     r=${r#*run r = }; r=${r#init.}; r=${r#all \{*\}.}
     echo "$3 breaks $4 within $2 steps: $(sed -E 's/^.*\}\)\.then/then/' <<<"$r" | cut -c1-150)"
   else
