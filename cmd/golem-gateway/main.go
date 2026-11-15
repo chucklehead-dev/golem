@@ -310,7 +310,7 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 		if o.standalone != "" {
 			h = localOnly(d, h)
 		}
-		mux.Handle(pattern, lc.track(h))
+		mux.Handle(pattern, lc.track(d, h))
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	// Ready once a snapshot is applied and its authorization holds.

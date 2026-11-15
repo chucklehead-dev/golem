@@ -24,7 +24,7 @@ Crossplane for cloud resources, and a few golem-control jobs.
 |---|---|
 | **Upgrade** | A chart version bump in the GitOps repository; Argo CD syncs in waves: golem-control first (rolling; reads the state document's n−1 schema), then gateway pools. Stored formats change by the two-release rule (PRD §9.14). |
 | **Gateway rollout and canary** | Argo Rollouts: a canary step (one replica or a traffic share) with an analysis on golem's `error.origin = gateway` rate and latency, promoted when they hold, aborted otherwise. New pods become ready only with a valid snapshot. |
-| **Drain** | `preStop` turns readiness off and waits for in-flight streams up to the drain grace (default 10 minutes for agent streams), then ends them with a dialect error event; `terminationGracePeriodSeconds` follows it. |
+| **Drain** | `preStop` turns readiness off and waits for in-flight streams up to the drain grace (default 10 minutes for agent streams), then ends them with a dialect error event; a call arriving once the drain's wait has begun is refused in its dialect (`gateway.not_ready`, 503 with Retry-After), so the SDK retries it on another gateway; `terminationGracePeriodSeconds` follows it. |
 | **Provider credential rotation** | Update the Secret; kubelet refreshes the mounted file; the gateway re-reads it. Workload identity needs none. |
 | **Backend maintenance** | Planned: `Backend.spec.disabled` or `weight: 0` in GitOps. Unplanned: an expiring override (`golemctl overrides create --disable deployment/... --for 2h --reason ...`). |
 | **Incident freeze** | A freeze override stops publication to a pool; gateways keep their snapshot until the lease runs out (ADR 0032). |

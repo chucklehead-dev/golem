@@ -392,12 +392,14 @@ Standalone's API handlers are wrapped as `track(localOnly(...))`; pool
 mode's as `track(...)`. `localOnly` (`guard.go:24`) keeps the developer's
 browser out: a loopback `Host` only (DNS rebinding), no cross-origin
 request by the browser's own headers, and a JSON body only (no
-preflight-free page can send one). `track` (`lifecycle.go:36`) counts
+preflight-free page can send one). `track` (`lifecycle.go:42`) counts
 calls in flight under a mutex (`begin`, `end`): not a `WaitGroup`, because
 after `srv.Close` a handler whose connection was already accepted can
-still start while the wait runs. Once `wait` (`lifecycle.go:69`) has begun
-a call that starts is refused with a 503 rather than counted after the
-count was taken. `/readyz` (`lifecycle.go:82`) fails while draining and
+still start while the wait runs. Once `wait` (`lifecycle.go:75`) has begun
+a call that starts is refused rather than counted after the count was
+taken, in its route's dialect (`track` is given it, as `localOnly` is):
+`proxy.Refuse` with `gateway.not_ready`, a 503 with Retry-After, so an SDK
+parses it and retries, reaching another of the pool's gateways. `/readyz` (`lifecycle.go:88`) fails while draining and
 while the holder has no current snapshot or its lease has expired. It
 does not look at the site's Valkey: the limiter fails open by design, so a
 Valkey outage must not take the pool's endpoints away (`golem.limit.down`
@@ -412,19 +414,19 @@ serves the call as a waiver.
 ### Worked example: shutdown with a stream in flight
 
 SIGTERM ends `sig` (`main.go:135`). The shutdown goroutine
-(`main.go:186`) runs `lifecycle.shutdown` (`lifecycle.go:98`):
+(`main.go:186`) runs `lifecycle.shutdown` (`lifecycle.go:104`):
 
 1. `draining` is set, so `/readyz` answers 503, and the gateway sleeps
    `-unready` for the endpoints to stop sending.
 2. `srv.Shutdown` closes the listeners (`ListenAndServe` returns at
    `main.go:193`) and waits up to `-drain` for calls to finish.
-3. At the deadline `srv.Close` (`lifecycle.go:107`) cuts the remaining
+3. At the deadline `srv.Close` (`lifecycle.go:113`) cuts the remaining
    connections; the stream's context ends and the proxy accounts it as a
    cancellation, under `context.WithoutCancel`, its row and counter add
    still written.
-4. `shutdown` waits for `lc.wait()` (`lifecycle.go:110`), the last
+4. `shutdown` waits for `lc.wait()` (`lifecycle.go:116`), the last
    counted call's end, up to `cut` (10 seconds); a call that starts now is
-   refused.
+   refused (`gateway.not_ready`, in its dialect).
 
 Only then (`<-drained`, `main.go:198`) does `run` stop the background loops
 (`stopBg`, `wg.Wait`, `main.go:199`; they ran through the drain because
@@ -467,7 +469,7 @@ that started before it.
 | A row has golem.spend's columns in order, and the counter's period | `Ledger.row` | `TestRowMatchesLedgerDDL`, `TestRowPeriodIsTheCounters` |
 | OTLP uses TLS unless the collector is a literal loopback address, whatever the environment says | `otlp.PlaintextOK`, `otlp.New` | `TestPlaintextOK`, `TestOTLPIgnoresInsecureEnv` (lib/otlp) |
 | A stream cut at shutdown still leaves its row and counter add | `lifecycle.shutdown`, the order in `run` | `TestShutdownAccounts` |
-| No call starts uncounted once the shutdown's wait has begun | `lifecycle.begin`, `wait` | `TestTrackAfterWait` |
+| No call starts uncounted once the shutdown's wait has begun; one refused then gets its dialect's `gateway.not_ready` with Retry-After | `lifecycle.begin`, `wait`, `track` | `TestTrackAfterWait` (both dialects) |
 | Standalone answers only loopback, same-origin JSON requests | `localOnly` | `TestLocalOnly` |
 | Pool mode needs its inputs, and `-accept-unreleased` until golem#7 | `releaseGate` | `TestReleaseGate` |
 | A pool's published snapshot is served, its credential from a Secret, its spend in Valkey | `poolSource`, `run` | `TestPoolMode` |
@@ -489,8 +491,6 @@ that started before it.
   left to the collector (its Kubernetes attributes), as for the
   gateway's other metrics. Standalone's stdout telemetry exports no
   metrics.
-- A call refused by `track` once the shutdown's wait has begun gets a
-  plain-text 503 ("shutting down"), not the dialect's error shape.
 - A gateway still without Entra's signing keys reports it in its log only
   (each failed fetch, and `gateway.not_ready` refusals counted with the
   others): there is no state gauge for it yet.
