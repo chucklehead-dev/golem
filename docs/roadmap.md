@@ -55,7 +55,8 @@ fast-path budget.
 
 ## Phase 2 (M1): first team in production (8–10 weeks)
 
-The platform team's own apps and coding agents, us-east-2, EKS.
+The platform team's own apps and coding agents, us-east-2, EKS. What is
+built, the order of the rest and each item's evidence: [m1-plan.md](m1-plan.md).
 
 - **Gateway**: Chat, Responses, Messages, Embeddings, models list; three
   backends with no translation (ADR 0001): Claude on Bedrock (the Messages
