@@ -85,8 +85,9 @@ type Limiter struct {
 
 	// down is read on every request, so without the lock; it is written
 	// under mu with the state it goes with.
-	down    atomic.Bool
-	periods atomic.Pointer[periodName] // the latest month's, for period
+	down       atomic.Bool
+	periods    atomic.Pointer[periodName] // the latest month's, for period
+	openLogged atomic.Int64               // when a rate limit last failed open, logged (Unix ns)
 
 	mu          sync.Mutex
 	known       map[string]Known        // by account, from the snapshot

@@ -140,6 +140,29 @@ type Over struct {
 	Known, Limit int64
 }
 
+// Rate is a per-minute allowance: requests and tokens a minute, each
+// refilled continuously, as providers meter them; 0 in either is no limit
+// on it.
+type Rate struct {
+	RequestsPerMinute, TokensPerMinute int64
+}
+
+// Quotas meters a deployment's share of its provider account's quota
+// (PRD §9.2, ADR 0012), shared by a site's gateways: each attempt takes
+// one request and its estimated tokens, and the estimate is corrected once
+// the attempt's usage is known. Checked per attempt (model/attempts.md's
+// QUOTA_PER_ATTEMPT): a failover must not land on a deployment at its
+// quota.
+type Quotas interface {
+	// TakeQuota takes an attempt's request and tokens from deployment's
+	// share, or reports how long until it can; an unreachable store admits
+	// (rate limits fail open, PRD §5.5).
+	TakeQuota(ctx context.Context, deployment string, r Rate, tokens int64) (ok bool, wait time.Duration)
+	// AdjustQuota gives back tokens (or, negative, takes more): the
+	// estimate's error, or a refused attempt's whole estimate.
+	AdjustQuota(ctx context.Context, deployment string, r Rate, tokens int64)
+}
+
 // Refusal is a call admission turned away: rendered with its code, and a
 // Retry-After when RetryAfter is set.
 type Refusal struct {

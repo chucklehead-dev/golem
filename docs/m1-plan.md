@@ -355,6 +355,14 @@ Status:
   the currency): `TestCaps` (service: who may, the bounds, removal with
   the membership), `TestGolemctl`, `TestAmounts`. Open: team pools
   (grants).
+- **Built: provider quota shares** (gateway.md §3 step 6). Per deployment,
+  requests and tokens a minute, a bucket shared by the site's gateways in
+  Valkey, charged per attempt (an estimate corrected to usage), a full
+  deployment passed over, every one full `limit.provider_quota` with a
+  Retry-After, failing open with Valkey down. Tests: `TestQuotaFailover`,
+  `TestQuotaTokens`, the store suite's rate buckets on Mem and Valkey,
+  `TestQuotaFailsOpen`; ablated: the per-attempt check, the correction.
+  Open: per-member and per-scope rate limits; `x-ratelimit-*` headers.
 
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.

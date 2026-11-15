@@ -126,9 +126,25 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    key, member, scope, the first reached refusing (`budget.key_cap`,
    `budget.member_cap`, `budget.pool_exhausted`), under the scope's
    budget mode (org-model.md §4.2). Refusals are 402 (budgets and caps)
-   or 429 (limits). *Planned, not built:* rate limits and the deployment's
-   provider quota share, in the same round trip (the call carries the
-   alias, deployment and model they key on).
+   or 429 (limits). *Planned, not built:* rate limits per member and
+   scope, in the same round trip.
+
+   Each **attempt** is charged its deployment's share of the provider's
+   quota (a Deployment's `quota: {requestsPerMinute, tokensPerMinute}`,
+   the site's share, PRD §9.2): a bucket per deployment in Valkey, shared
+   by the site's gateways, refilled continuously and holding a minute's
+   worth. An attempt takes a request and an estimate of its tokens (the
+   input's bytes over four, plus `max_tokens`), admitted while the bucket
+   is not in debt, so a large request is never starved and the next waits
+   for its debt; the estimate is corrected to the attempt's usage
+   (uncached input, cache writes and output) when it ends, and given back
+   whole for one refused before any output. A deployment at its share is
+   passed over as one at its ceiling is (model/attempts.md's
+   `QUOTA_PER_ATTEMPT`); a call that finds every deployment at its share is
+   refused `limit.provider_quota` with the earliest Retry-After. One more
+   Valkey round trip per attempt on a deployment with a quota; with Valkey
+   unreachable the check fails open (PRD §5.5), logged once a minute, the
+   provider's own 429 the backstop.
 
    The proxy sees admission only as `gateway/admission`: `Admitter.Admit`
    returns a `Ticket`, ended exactly once by `Complete` (the cost) or

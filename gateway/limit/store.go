@@ -156,6 +156,11 @@ type Store interface {
 	// Since returns an account's spend for the period in the minutes from
 	// since's on (for reports; admission computes it inside Admit).
 	Since(ctx context.Context, account, period string, since time.Time) (int64, error)
+	// Take takes a request and tokens from a rate bucket (rate.go), or
+	// reports the wait until it can; Adjust gives tokens back (negative:
+	// takes more).
+	Take(ctx context.Context, key string, r Rate, tokens int64) (ok bool, wait time.Duration, err error)
+	Adjust(ctx context.Context, key string, r Rate, tokens int64) error
 }
 
 // Mem is an in-memory Store: the standalone gateway's, and the tests'. Its
@@ -172,6 +177,8 @@ type Mem struct {
 	// ingestion allowance (ADR 0048: six hours). Now is its clock.
 	Retain time.Duration
 	Now    func() time.Time
+
+	buckets map[string]*rateBucket // rate buckets (rate.go)
 }
 
 // memCounter is a scope's counter for a period: its minutes, and its

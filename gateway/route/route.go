@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/chucklehead-dev/golem/gateway/admission"
 )
 
 // Target is one deployment as the request path uses it.
@@ -31,6 +33,9 @@ type Target struct {
 	// (lib/api's HealthCheck).
 	HealthPath     string
 	HealthInterval time.Duration
+	// Quota is the site's share of the provider's quota (lib/api's); the
+	// zero value is none.
+	Quota admission.Rate
 	// Envelope is how its requests reach the provider: "" or "bedrock"
 	// (the ledger's envelope; the transport does the work).
 	Envelope string

@@ -90,6 +90,9 @@ type Handler struct {
 	// Health is the deployments' health and the routes' retry budgets the
 	// gateway's handlers share (route.Health); nil: the handler's own.
 	Health *route.Health
+	// Quotas meters each deployment's share of its provider's quota per
+	// attempt (gateway/limit's Limiter); nil: none.
+	Quotas admission.Quotas
 	// Guard is the floor before authentication the gateway's handlers
 	// share (a source's requests and failed authentications); nil: none.
 	Guard *guard.Guard
@@ -196,13 +199,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.beforePick != nil {
 		h.beforePick(r)
 	}
-	target, lease, retryAt := pick(hl, rt, tried, principal.ID)
+	// Each attempt is charged its deployment's quota share (PRD §9.2): its
+	// request, and its tokens as estimated here, corrected when it ends.
+	qh := &quotaHold{q: h.Quotas, ctx: context.WithoutCancel(ctx), tokens: int64(len(body))/4 + req.maxTokens*max(req.n, 1)}
+	target, lease, retryAt := pick(hl, rt, tried, principal.ID, qh)
 	if target == nil {
+		if qh.full {
+			h.fail(ctx, w, &refusal{code: contract.LimitProviderQuota, retryAfter: time.Until(retryAt),
+				msg: "every deployment of this route is at its share of the provider's quota for this minute; retry after the Retry-After"})
+			return
+		}
 		h.fail(ctx, w, &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
 			msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"})
 		return
 	}
 	defer func() { lease.Release() }() // the last attempt's: when the call is over
+	defer qh.done()                    // after the call's usage is final
 	deployment := target.Key()
 	pr := snap.Prices[target.Model]
 	var deadline time.Time // the call's end at the latest: renewals stop there
@@ -246,6 +258,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call := telemetry.Call{RequestID: reqIDs, Principal: principal.ID, PrincipalKind: principal.Kind, Key: principal.Key,
 		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Started: started,
 		Currency: snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived()}
+	qh.usage = &call.Usage
 	if ticket != nil {
 		call.Period = ticket.Period() // the counter's: one period per call
 		call.OverBudget = h.overBudget(w, principal, ticket)
@@ -305,7 +318,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !kept || attempt >= rt.MaxAttempts || r.Context().Err() != nil || terminatedBy(upCtx) != nil {
 				return false
 			}
-			next, nl, _ := pick(hl, rt, tried, principal.ID)
+			qh.refund() // the failed attempt's tokens: the provider served none
+			next, nl, _ := pick(hl, rt, tried, principal.ID, qh)
 			if next == nil {
 				return false
 			}

@@ -161,6 +161,46 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatalf("%d slots: a refused admission takes none", got)
 		}
 	})
+	t.Run("rate buckets", func(t *testing.T) {
+		// A minute's worth to start; a request past the requests waits
+		// about the refill of one; tokens may go into debt by one large
+		// request, which the next then waits for; a correction repays it.
+		ctx, st := t.Context(), newStore(t)
+		take := func(key string, r Rate, tokens int64) (bool, time.Duration) {
+			t.Helper()
+			ok, wait, err := st.Take(ctx, key, r, tokens)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ok, wait
+		}
+		rpm := Rate{RequestsPerMinute: 2}
+		if a, _ := take("r", rpm, 0); !a {
+			t.Fatal("the first request")
+		}
+		if b, _ := take("r", rpm, 0); !b {
+			t.Fatal("the second request, within the minute's two")
+		}
+		if ok, wait := take("r", rpm, 0); ok || wait <= 25*time.Second || wait > 30*time.Second {
+			t.Fatalf("a third: %v, wait %v; want refused for about half a minute", ok, wait)
+		}
+		tpm := Rate{TokensPerMinute: 100}
+		if ok, _ := take("t", tpm, 150); !ok {
+			t.Fatal("a request larger than the minute's tokens: admitted, into debt")
+		}
+		if ok, wait := take("t", tpm, 1); ok || wait <= 25*time.Second || wait > 31*time.Second {
+			t.Fatalf("after the debt: %v, wait %v; want refused for about the debt's 30 seconds", ok, wait)
+		}
+		if err := st.Adjust(ctx, "t", tpm, 100); err != nil {
+			t.Fatal(err)
+		}
+		if ok, _ := take("t", tpm, 1); !ok {
+			t.Fatal("the debt repaid by a correction: admitted")
+		}
+		if ok, _ := take("other", tpm, 1); !ok {
+			t.Fatal("another bucket is its own")
+		}
+	})
 	t.Run("counter", func(t *testing.T) {
 		ctx, st := t.Context(), newStore(t)
 		st.Add(ctx, inc("e1", 3, 0))

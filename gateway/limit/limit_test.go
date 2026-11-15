@@ -737,3 +737,23 @@ func sumOf(m map[int64]int64) (n int64) {
 	}
 	return n
 }
+
+// TestQuotaFailsOpen: a deployment's quota share is taken and refused
+// through the store; with the store unreachable an attempt is admitted
+// (rate limits fail open) and the limiter is down.
+func TestQuotaFailsOpen(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	r := Rate{RequestsPerMinute: 1}
+	if ok, _ := l.TakeQuota(ctx, "anthropic/a", r, 0); !ok {
+		t.Fatal("the first request of the minute")
+	}
+	if ok, wait := l.TakeQuota(ctx, "anthropic/a", r, 0); ok || wait <= 0 {
+		t.Fatalf("the second: %v %v, want refused with a wait", ok, wait)
+	}
+	st.SetDown(true)
+	if ok, _ := l.TakeQuota(ctx, "anthropic/a", r, 0); !ok || !l.Down() {
+		t.Fatalf("the store unreachable: %v, down %v; want admitted, and the limiter down", ok, l.Down())
+	}
+}

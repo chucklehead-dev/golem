@@ -118,6 +118,21 @@ type Deployment struct {
 	// (a local box, ADR 0017): a box that is down is ejected before a call
 	// finds it, and one that answers again is readmitted. Not for bedrock.
 	HealthCheck *HealthCheck `json:"healthCheck,omitempty"`
+	// Quota is this site's share of the provider account's quota for the
+	// deployment (PRD §9.2, ADR 0012: each site's share set here, split
+	// statically), shared by the site's gateways in Valkey: an attempt past
+	// it goes to the pool's next deployment, and a call that finds every
+	// one at its quota is refused limit.provider_quota with a Retry-After.
+	Quota *Quota `json:"quota,omitempty"`
+}
+
+// Quota is a per-minute allowance: requests, and tokens (uncached input,
+// cache writes and output; an attempt is charged its input's bytes over
+// four and its max_tokens, corrected to its usage when it ends). 0 in
+// either: no limit on it.
+type Quota struct {
+	RequestsPerMinute int64 `json:"requestsPerMinute,omitempty"`
+	TokensPerMinute   int64 `json:"tokensPerMinute,omitempty"`
 }
 
 // HealthCheck is a deployment's active check: a GET of Path on its URL's
