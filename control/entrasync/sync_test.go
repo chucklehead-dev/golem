@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,9 +19,34 @@ import (
 )
 
 // dir is a directory in memory: users by group; a group absent is gone.
+// An account is as accounts has it, else as a group lists it, else live
+// and enabled (a user in no group).
 type dir struct {
-	groups map[string][]User
-	fail   error
+	groups   map[string][]User
+	accounts map[string]User
+	fail     error
+	lookups  int
+}
+
+func (d *dir) User(_ context.Context, id string) (User, error) {
+	d.lookups++
+	if d.fail != nil {
+		return User{}, d.fail
+	}
+	if u, ok := d.accounts[id]; ok {
+		if u == (User{}) {
+			return User{}, ErrNoUser
+		}
+		return u, nil
+	}
+	for _, us := range d.groups {
+		for _, u := range us {
+			if u.ID == id {
+				return u, nil
+			}
+		}
+	}
+	return User{ID: id, Enabled: true}, nil
 }
 
 func (d *dir) Members(_ context.Context, g string) ([]User, error) {
@@ -179,6 +206,123 @@ func TestSyncSafety(t *testing.T) {
 	}
 }
 
+// TestSyncOffboarding: the removal guard holds back bulk removals of users
+// still active, never offboarding: 60 users disabled at once, or deleted
+// at once (gone from their groups, in the deleted items), lose every
+// synced membership and key despite the guard of 50; 60 active users
+// dropped from a group trip it and nothing is written; in a step that
+// trips it, only the offboarding is written; and an account whose state
+// the directory does not report is not taken for offboarding.
+func TestSyncOffboarding(t *testing.T) {
+	cohort := func(name string, n int) []User {
+		var us []User
+		for i := range n {
+			id := fmt.Sprintf("oid-%s-%02d", name, i)
+			us = append(us, User{ID: id, UPN: fmt.Sprintf("%s%02d@example.com", name, i), Enabled: true})
+		}
+		return us
+	}
+	active, disabled, deleted, few := cohort("a", 60), cohort("b", 60), cohort("c", 60), cohort("d", 5)
+	d := &dir{groups: map[string][]User{"g-a": {}, "g-nested": {},
+		"g-b": slices.Concat(active, disabled, deleted, few)}, accounts: map[string]User{}}
+	s := setup(t, d)
+	if r, err := s.Step(t.Context(), lead1); err != nil || r.Created != 185 {
+		t.Fatalf("first sync: %+v %v", r, err)
+	}
+	// Each user gets a key in team-b.
+	if _, err := s.State.Update(t.Context(), func(doc *state.Document) error {
+		for _, u := range d.groups["g-b"] {
+			doc.Keys["k-"+u.ID] = state.Key{Owner: u.UPN, Scope: "team-b"}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	set := func(us []User) {
+		var keep []User
+		for _, u := range d.groups["g-b"] {
+			if !slices.ContainsFunc(us, func(x User) bool { return x.ID == u.ID }) {
+				keep = append(keep, u)
+			}
+		}
+		d.groups["g-b"] = keep
+	}
+	offboarded := func(us []User) bool {
+		doc := s.State.Current()
+		for _, u := range us {
+			if p := doc.Principals[u.UPN]; len(p.Synced) != 0 || alive(doc, "k-"+u.ID) {
+				return false
+			}
+		}
+		return true
+	}
+	untouched := func(us []User) bool {
+		doc := s.State.Current()
+		for _, u := range us {
+			if p := doc.Principals[u.UPN]; strings.Join(p.Synced, ",") != "team-b" || !alive(doc, "k-"+u.ID) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// 60 active users dropped from the group: the guard trips, nothing is
+	// written.
+	set(active)
+	before := s.State.Current().StateVersion
+	if _, err := s.Step(t.Context(), lead1); !errors.Is(err, ErrTooManyRemovals) || s.State.Current().StateVersion != before {
+		t.Fatalf("60 active users dropped: %v, written %v; want the guard, nothing written", err, s.State.Current().StateVersion != before)
+	}
+	d.groups["g-b"] = append(d.groups["g-b"], active...)
+
+	// 60 disabled at once, still in the group: all offboarded.
+	for i, u := range d.groups["g-b"] {
+		if slices.ContainsFunc(disabled, func(x User) bool { return x.ID == u.ID }) {
+			d.groups["g-b"][i].Enabled, d.groups["g-b"][i].Disabled = false, true
+		}
+	}
+	if r, err := s.Step(t.Context(), lead1); err != nil || r.Offboarded != 60 || r.Removed != 60 || r.Revoked != 60 || !offboarded(disabled) {
+		t.Fatalf("60 disabled: %+v %v; want all offboarded despite the guard", r, err)
+	}
+
+	// 60 deleted at once: Entra drops them from the group; their accounts
+	// are in the deleted items.
+	set(deleted)
+	for _, u := range deleted {
+		d.accounts[u.ID] = User{ID: u.ID, Deleted: true}
+	}
+	if r, err := s.Step(t.Context(), lead1); err != nil || r.Offboarded != 60 || !offboarded(deleted) {
+		t.Fatalf("60 deleted: %+v %v; want all offboarded despite the guard", r, err)
+	}
+
+	// A step that trips the guard still offboards: 60 active users dropped
+	// and five deleted.
+	set(active)
+	set(few)
+	for _, u := range few {
+		d.accounts[u.ID] = User{ID: u.ID, Deleted: true}
+	}
+	r, err := s.Step(t.Context(), lead1)
+	if !errors.Is(err, ErrTooManyRemovals) || r.Offboarded != 5 || !offboarded(few) || !untouched(active) {
+		t.Fatalf("mixed: %+v %v; want the guard, the five offboarded and the 60 untouched", r, err)
+	}
+	if !strings.Contains(err.Error(), "only the offboarding of 5") {
+		t.Fatalf("the guard's error does not say what was written: %v", err)
+	}
+
+	// Accounts whose state the directory does not report (neither enabled
+	// nor disabled, nor deleted) are removals the guard counts.
+	d.groups["g-b"] = nil
+	for _, u := range active {
+		d.accounts[u.ID] = User{ID: u.ID}
+		d.groups["g-b"] = append(d.groups["g-b"], User{ID: u.ID, UPN: u.UPN})
+	}
+	before = s.State.Current().StateVersion
+	if _, err := s.Step(t.Context(), lead1); !errors.Is(err, ErrTooManyRemovals) || s.State.Current().StateVersion != before {
+		t.Fatalf("60 accounts of unreported state: %v; want the guard, nothing written", err)
+	}
+}
+
 // TestSyncNames: a new user's ID is their sign-in name, unless taken or
 // reserved; a principal granted in golem is never taken over by name.
 func TestSyncNames(t *testing.T) {
@@ -225,6 +369,12 @@ func TestGraph(t *testing.T) {
 			http.NotFound(w, r)
 		case strings.HasPrefix(r.URL.Path, "/v1.0/groups/evil/"):
 			json.NewEncoder(w).Encode(map[string]any{"value": []any{}, "@odata.nextLink": "https://elsewhere.example/steal"})
+		case r.URL.Path == "/v1.0/users/live" && r.URL.Query().Get("$select") == "id,userPrincipalName,accountEnabled":
+			json.NewEncoder(w).Encode(map[string]any{"id": "live", "userPrincipalName": "l@x", "accountEnabled": false})
+		case r.URL.Path == "/v1.0/directory/deletedItems/deleted":
+			json.NewEncoder(w).Encode(map[string]any{"id": "deleted", "userPrincipalName": "deleteddeleted@x"})
+		case strings.HasPrefix(r.URL.Path, "/v1.0/users/"), strings.HasPrefix(r.URL.Path, "/v1.0/directory/deletedItems/"):
+			http.NotFound(w, r)
 		case r.URL.Query().Get("page") == "2":
 			json.NewEncoder(w).Encode(map[string]any{"value": []any{map[string]any{"id": "o2", "userPrincipalName": "b@x", "accountEnabled": false}}})
 		default:
@@ -239,8 +389,20 @@ func TestGraph(t *testing.T) {
 	defer srv.Close()
 	g := &Graph{Base: srv.URL + "/v1.0", Token: func(context.Context) (string, error) { return "tok", nil }}
 	us, err := g.Members(t.Context(), "g1")
-	if err != nil || len(us) != 3 || us[0] != (User{"o1", "a@x", true}) || us[1].Enabled || us[2] != (User{"o2", "b@x", false}) {
-		t.Fatalf("%+v %v", us, err)
+	if err != nil || len(us) != 3 || us[0] != (User{ID: "o1", UPN: "a@x", Enabled: true}) ||
+		us[1] != (User{ID: "o3", UPN: "c@x"}) || us[2] != (User{ID: "o2", UPN: "b@x", Disabled: true}) {
+		t.Fatalf("%+v %v: want enabled, unreported (neither) and disabled", us, err)
+	}
+	// An account: live (disabled here), deleted (in the deleted items), or
+	// neither (a 404 from both is not taken for a deletion).
+	if u, err := g.User(t.Context(), "live"); err != nil || u != (User{ID: "live", UPN: "l@x", Disabled: true}) {
+		t.Fatalf("a live account: %+v %v", u, err)
+	}
+	if u, err := g.User(t.Context(), "deleted"); err != nil || !u.Deleted || u.ID != "deleted" {
+		t.Fatalf("a deleted account: %+v %v", u, err)
+	}
+	if _, err := g.User(t.Context(), "purged"); !errors.Is(err, ErrNoUser) {
+		t.Fatalf("an account in neither: %v, want ErrNoUser", err)
 	}
 	if _, err := g.Members(t.Context(), "gone"); !errors.Is(err, ErrNoGroup) {
 		t.Fatalf("a missing group: %v", err)

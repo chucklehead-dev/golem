@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -159,6 +160,76 @@ func TestChangeError(t *testing.T) {
 	}
 	if s.Current().StateVersion != 0 {
 		t.Fatal("written anyway")
+	}
+}
+
+// overtaken lands the document's next put, then lets another writer write
+// over it before reporting the put's reply lost, as a retry of it would:
+// failing its own condition.
+type overtaken struct {
+	bucket.Bucket
+	then func() // another writer's write; nil once used
+}
+
+func (o *overtaken) Put(ctx context.Context, key string, body []byte, ifMatch string) (string, error) {
+	if o.then == nil || key != DocumentKey {
+		return o.Bucket.Put(ctx, key, body, ifMatch)
+	}
+	if _, err := o.Bucket.Put(ctx, key, body, ifMatch); err != nil {
+		return "", err
+	}
+	then := o.then
+	o.then = nil
+	then()
+	return "", bucket.ErrPrecondition
+}
+
+// TestLostReplyOvertaken: a write whose reply is lost and which another
+// writer then writes over is still recognised as landed (its ID among the
+// document's recent writes), not applied again: one audit event, and a
+// removal that landed is not answered "not found".
+func TestLostReplyOvertaken(t *testing.T) {
+	b := open(t)
+	other := &Store{Bucket: b}
+	if _, err := other.Update(t.Context(), func(d *Document) error {
+		d.Scopes = map[string]Scope{"team-a": {}, "team-b": {}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o := &overtaken{Bucket: b, then: func() {
+		if _, err := other.Update(t.Context(), put("internal", 1)); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	s := &Store{Bucket: o}
+	applied := 0
+	errGone := errors.New("not found: team-a")
+	d, err := s.Update(t.Context(), func(d *Document) error {
+		applied++
+		if _, ok := d.Scopes["team-a"]; !ok {
+			return errGone // a RemoveMember's NotFound
+		}
+		delete(d.Scopes, "team-a")
+		d.Audit = append(d.Audit, AuditEvent{Actor: "root", Action: "scope.delete", Target: "team-a"})
+		return nil
+	})
+	if err != nil || applied != 1 {
+		t.Fatalf("a landed write overtaken by another: applied %d times, %v; want once and success", applied, err)
+	}
+	if d.StateVersion != 3 || len(d.Audit) != 1 || d.Publications["internal"].Seq != 1 {
+		t.Fatalf("the document returned: version %d, %d audit events, publications %v; want the current one, the change once", d.StateVersion, len(d.Audit), d.Publications)
+	}
+
+	// The ring keeps the last RecentWrites write IDs, newest last.
+	var last *Document
+	for i := range RecentWrites + 8 {
+		if last, err = s.Update(t.Context(), put("internal", uint64(i+2))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(last.Writes) != RecentWrites || len(slices.Compact(slices.Sorted(slices.Values(last.Writes)))) != RecentWrites {
+		t.Fatalf("%d write IDs kept, want the last %d, distinct", len(last.Writes), RecentWrites)
 	}
 }
 

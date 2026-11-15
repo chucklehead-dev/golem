@@ -47,8 +47,62 @@ func newWorld(t *testing.T, events int) *world {
 	w := &world{state: &state.Store{Bucket: sb}, archive: ab, logs: &recorder{}}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(w.logs)))
 	w.ship = &Shipper{State: w.state, Archive: ab, Logger: lp.Logger("golem-control")}
+	if _, err := w.state.Update(t.Context(), func(d *state.Document) error {
+		d.Fence = &lead1
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	w.add(t, events)
 	return w
+}
+
+// lead1 is the leadership the tests' shippers run under.
+var lead1 = state.Fence{Holder: "r1", Epoch: 1}
+
+// TestDeposedTrim: a shipper deposed while it archived (another replica
+// claimed the fence) trims nothing: the trim is a leader-only write. The
+// new leader finds the events archived as they are, and trims them.
+func TestDeposedTrim(t *testing.T) {
+	w := newWorld(t, 2)
+	other := &state.Store{Bucket: w.state.Bucket}
+	lead2 := state.Fence{Holder: "r2", Epoch: 2}
+	w.ship.Archive = &deposing{Bucket: w.archive, deposed: func() {
+		if _, err := other.Update(t.Context(), func(d *state.Document) error {
+			d.Fence = &lead2
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if _, err := w.ship.Step(t.Context(), lead1); !errors.Is(err, state.ErrFenced) {
+		t.Fatalf("a deposed shipper's trim: %v, want state.ErrFenced", err)
+	}
+	if err := other.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if out := other.Current().Audit; len(out) != 2 {
+		t.Fatalf("outbox %v: the deposed shipper trimmed it", out)
+	}
+	w.ship.Archive = w.archive
+	if n, err := w.ship.Step(t.Context(), lead2); err != nil || n != 2 || len(w.state.Current().Audit) != 0 {
+		t.Fatalf("the new leader's step: %d %v, outbox %v", n, err, w.state.Current().Audit)
+	}
+}
+
+// deposing is an archive during whose first write another replica takes
+// the fence.
+type deposing struct {
+	bucket.Bucket
+	deposed func() // nil once run
+}
+
+func (d *deposing) Put(ctx context.Context, key string, body []byte, ifMatch string) (string, error) {
+	if d.deposed != nil {
+		d.deposed()
+		d.deposed = nil
+	}
+	return d.Bucket.Put(ctx, key, body, ifMatch)
 }
 
 // add writes n audited changes, as the services do.
@@ -69,7 +123,7 @@ func (w *world) add(t *testing.T, n int) {
 // attributes, then trimmed from the outbox.
 func TestShip(t *testing.T) {
 	w := newWorld(t, 3)
-	if n, err := w.ship.Step(t.Context()); err != nil || n != 3 {
+	if n, err := w.ship.Step(t.Context(), lead1); err != nil || n != 3 {
 		t.Fatalf("step: %d %v", n, err)
 	}
 	if out := w.state.Current().Audit; len(out) != 0 {
@@ -88,7 +142,7 @@ func TestShip(t *testing.T) {
 	if seen["golem.audit.seq"] != "3" || seen["golem.audit.target"] != "s2" || seen["golem.audit.detail.n"] != "2" {
 		t.Fatalf("attributes %v", seen)
 	}
-	if n, err := w.ship.Step(t.Context()); err != nil || n != 0 {
+	if n, err := w.ship.Step(t.Context(), lead1); err != nil || n != 0 {
 		t.Fatalf("an empty outbox: %d %v", n, err)
 	}
 }
@@ -98,13 +152,13 @@ func TestShip(t *testing.T) {
 func TestRetryAfterCrash(t *testing.T) {
 	w := newWorld(t, 2)
 	broken := &Shipper{State: &state.Store{Bucket: noWrites{w.state.Bucket}}, Archive: w.archive}
-	if _, err := broken.Step(t.Context()); err == nil {
+	if _, err := broken.Step(t.Context(), lead1); err == nil {
 		t.Fatal("the trim cannot have succeeded")
 	}
 	if len(w.state.Current().Audit) != 2 {
 		t.Fatal("the outbox lost events with its trim failing")
 	}
-	if n, err := w.ship.Step(t.Context()); err != nil || n != 2 || len(w.state.Current().Audit) != 0 {
+	if n, err := w.ship.Step(t.Context(), lead1); err != nil || n != 2 || len(w.state.Current().Audit) != 0 {
 		t.Fatalf("the retry: %d %v, outbox %v", n, err, w.state.Current().Audit)
 	}
 }
@@ -114,7 +168,7 @@ func TestRetryAfterCrash(t *testing.T) {
 func TestMismatch(t *testing.T) {
 	w := newWorld(t, 2)
 	w.archive.Put(t.Context(), Key(2), []byte(`{"seq":2,"action":"something else"}`), "")
-	if _, err := w.ship.Step(t.Context()); !errors.Is(err, ErrMismatch) {
+	if _, err := w.ship.Step(t.Context(), lead1); !errors.Is(err, ErrMismatch) {
 		t.Fatalf("%v, want ErrMismatch", err)
 	}
 	if len(w.state.Current().Audit) != 2 || len(w.logs.rs) != 0 {
@@ -127,11 +181,11 @@ func TestMismatch(t *testing.T) {
 func TestBatchesAndNewEvents(t *testing.T) {
 	w := newWorld(t, 5)
 	w.ship.Batch = 3
-	if n, _ := w.ship.Step(t.Context()); n != 3 {
+	if n, _ := w.ship.Step(t.Context(), lead1); n != 3 {
 		t.Fatalf("first step %d", n)
 	}
 	w.add(t, 2)
-	if n, _ := w.ship.Step(t.Context()); n != 3 {
+	if n, _ := w.ship.Step(t.Context(), lead1); n != 3 {
 		t.Fatalf("second step %d", n)
 	}
 	if out := w.state.Current().Audit; len(out) != 1 || out[0].Seq != 7 {

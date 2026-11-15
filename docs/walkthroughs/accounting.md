@@ -24,7 +24,7 @@ spend by a time boundary and minute counters).
 | `gateway/limit/valkey.go` | `Valkey`, the production store: one Lua script per operation |
 | `control/spend/spend.go` | the known-spend job: `Job`, the `Ledger` it reads (and `Ingestion`, each site's latest row), and `ClickHouse`, the ledger's queries |
 | `deploy/clickhouse/spend.sql` | the ledger (`golem.spend`), its deduplicated view, `golem.spend_by_event`, which the job sums, and `golem.ingest_by_site`, each site's latest row |
-| `control/controller/controller.go:281` | where each publication runs the job and stamps every scope with its result |
+| `control/controller/controller.go:343` | where each publication runs the job and stamps every scope with its result |
 | `cmd/golem-gateway/main.go:147` | `OnApply`: each applied snapshot's known spend handed to the limiter |
 | `gateway/proxy/proxy.go:291` | the request path: `settlement` ends each ticket once (`complete`, `cancel`) |
 | `model/exposure.md`, `model/accounting.md` | the Quint models the design is checked against |
@@ -353,7 +353,7 @@ The job (`control/spend`):
 - `Job.Current` is what a publication carries. The controller runs `Step`
   whenever a publication is due and stamps every scope of the
   entitlements with the result's period, B and spend
-  (`controller.go:281-133`; TestKnownSpend). With no result (no
+  (`controller.go:343, :529`; TestKnownSpend). With no result (no
   `-clickhouse`, or a failure in a new period) a snapshot carries none,
   and gateways count their counter's whole total for the period.
 
@@ -422,7 +422,7 @@ spend 0 (nothing ended before 11:55).
    places B at 12:01 (12:06 minus five minutes) and asks ClickHouse for
    the spend of 2026-11's rows that ended before 12:01:00.000: a's 3. The
    controller stamps `team-a` with period 2026-11, B 12:01, spend 3
-   (`controller.go:288-133`).
+   (`controller.go:529`).
 10. **g1 applies the new snapshot S2; g2 is still on S1.**
     `OnApply` → `ApplySnapshot` replaces g1's `Known` for the scope and
     leaves the counter alone. g1's known spend: 3 + the minutes from 12:01

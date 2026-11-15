@@ -87,7 +87,8 @@ func (s *Store) create(ctx context.Context, floors map[string]uint64, actor stri
 	if err != nil {
 		return nil, err
 	}
-	next.StateVersion, next.Write = 1, rand.Text()
+	next.StateVersion = 1
+	next.wrote(rand.Text())
 	body, err := next.Encode()
 	if err != nil {
 		return nil, err

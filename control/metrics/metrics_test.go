@@ -218,7 +218,7 @@ func TestMetrics(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(r.c.Dir, "broken.yaml"), []byte(broken), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		r.clock = r.clock.Add(time.Second)
+		r.clock = r.clock.Add(2 * time.Second) // the tampered pool's first retry (at most two seconds on)
 		r.lead()
 		r.c.Step(t.Context())
 		got := r.collect()

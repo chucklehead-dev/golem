@@ -33,7 +33,8 @@ record lowered the trusted floor.
   epoch is below that. A replica leads only once it has claimed.
 - **Every leader-only document write checks the fence in its own
   compare-and-swap** (`state.FencedUpdate`): publication, the group
-  sync, and the period and expiry jobs as they come. Checking the lease
+  sync, the audit outbox's trim, and the period and expiry jobs as they
+  come. Checking the lease
   object first and then writing the document is not enough (the model's
   `readLease` counterexample): no transaction spans two objects.
 - **Publication** wins every pool's record in one fenced update per
@@ -44,8 +45,9 @@ record lowered the trusted floor.
   stops publication (`ErrTampered`) for a person to look at.
 - **Lost replies**: a write that lands but whose reply is lost is
   recognised by the write ID it carries (the store re-reads after a
-  failed condition); a claim whose reply was lost is adopted at the next
-  try.
+  failed condition), kept among the document's last 32 write IDs so it is
+  recognised even after other writers have written over it; a claim
+  whose reply was lost is adopted at the next try.
 - **Restore** (`golemctl state restore`, when built) carries the fence and
   the records forward, as it does revocations.
 

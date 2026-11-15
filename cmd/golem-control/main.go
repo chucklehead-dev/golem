@@ -220,6 +220,7 @@ type options struct {
 	authLease                             time.Duration
 	counterRetention                      time.Duration
 	listen                                string
+	drain                                 time.Duration
 	archive, telemetry                    string
 	tenant, audience                      string
 	syncClient                            string
@@ -242,13 +243,14 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.id, "id", "", "this replica's name (default: the host name)")
 	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
 	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
+	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut and the lease is given up")
 	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
 	flag.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for golem-control's metrics and, with -audit-archive, the audit's log records (TLS unless a literal loopback address)")
 	flag.StringVar(&o.tenant, "entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
 	flag.StringVar(&o.audience, "entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
 	flag.StringVar(&o.syncClient, "entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
 	flag.DurationVar(&o.syncEvery, "entra-sync-every", 5*time.Minute, "how often the group sync runs")
-	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
+	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships of still-active users one sync may end; a step over it writes only its offboarding of disabled or deleted users (raise it for one run when intended)")
 	flag.StringVar(&o.clickhouse, "clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
 	flag.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
 	flag.DurationVar(&o.counterRetention, "counter-retention", 6*time.Hour, "how long the gateways' site counters keep a minute (their stores' Retain): a known-spend result older than this less the lease is reported stale")
@@ -263,9 +265,10 @@ func parseFlags() (options, error) {
 
 // run is golem-control: set up, then run until SIGTERM or a component
 // fails. Shutdown is in order: the publishing loop stops (no publication
-// left half-done), the lease is given up so another replica publishes at
-// once rather than after the lease lapses, the API drains, and the audit's
-// log records are flushed, then the metrics' last collection is exported.
+// left half-done) while the API drains (its calls in flight finish, up to
+// -drain), then the lease is given up so another replica publishes at
+// once rather than after the lease lapses, and the audit's log records
+// are flushed, then the metrics' last collection is exported.
 // Errors are returned, never an exit from a goroutine, so every deferred
 // step runs.
 func run() error {
@@ -314,23 +317,19 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("-listen: %w", err)
 		}
+		// Drained when the context ends; serveAPI returns only once the
+		// calls in flight have finished (or -drain passed), so the wait
+		// below, and the lease's release after it, follow the drain.
 		wg.Go(func() {
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := serveAPI(ctx, srv, srv.ListenAndServe, o.drain); err != nil {
 				failed = fmt.Errorf("the control API: %w", err) // read after wg.Wait
 				cancel()
 			}
 		})
 		slog.Info("golem-control: the control API is listening", "addr", o.listen)
-		// Drained when the context ends, so ListenAndServe returns and the
-		// wait below ends.
-		context.AfterFunc(ctx, func() {
-			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			srv.Shutdown(sctx)
-		})
 	}
 	c.Run(ctx) // until SIGTERM, or another component cancels
-	wg.Wait()
+	wg.Wait()  // the state's loop, and the API drained
 	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rcancel()
 	if err := c.Elector.Release(rctx); err != nil {
@@ -424,6 +423,34 @@ func apiServer(ctx context.Context, listen, tenant, audience string, svc *servic
 	return &http.Server{Addr: listen, Handler: h, Protocols: &protocols, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: time.Minute,
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, nil
+}
+
+// serveAPI runs serve (srv's ListenAndServe, or Serve on a listener) until
+// ctx ends, then shuts srv down and returns only once that has: the calls
+// in flight have finished, or drain has passed and they are cut (logged,
+// with what to do). Serve returns ErrServerClosed as soon as Shutdown
+// starts, so waiting on serve alone would release the lease while calls
+// were in flight: a MintKey whose write landed, cut before the key reached
+// its caller. It returns serve's error if serving fails before ctx ends.
+func serveAPI(ctx context.Context, srv *http.Server, serve func() error, drain time.Duration) error {
+	served := make(chan error, 1)
+	go func() { served <- serve() }() //qenv:ok ended by Shutdown below, and waited for
+	select {
+	case err := <-served:
+		return err // not ErrServerClosed: nothing has shut it down
+	case <-ctx.Done():
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), drain)
+	defer cancel()
+	if err := srv.Shutdown(sctx); err != nil {
+		slog.Warn("golem-control: the control API's calls in flight did not finish within -drain and were cut; their callers see an error and may retry (raise -drain if calls take longer)",
+			"drain", drain, "err", err)
+		srv.Close()
+	}
+	if err := <-served; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // audiences splits a comma-separated list, dropping spaces and empty

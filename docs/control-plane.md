@@ -96,7 +96,9 @@ validate` (the snapshot compiler as a library), not by a live API call
   it archived and goes on; an archived object that differs stops shipping,
   untrimmed), then emitted as a `golem.audit` log record (at least once:
   ClickHouse keeps one row per seq, and fills a gap from the archive),
-  then trimmed from the outbox up to the last event shipped.
+  then trimmed from the outbox up to the last event shipped, under the
+  leader's fence like every leader-only write (`state.FencedUpdate`): a
+  shipper deposed meanwhile trims nothing.
 - **Schema evolution**: additive protobuf changes need nothing. A breaking
   change takes two releases: release N reads the new schema and keeps
   writing the old; release N+1 writes the new. Mixed replicas during a
@@ -227,7 +229,11 @@ control plane.
     and reported, never stopping the publication; the control API refuses
     to create one. Every pool gets the same snapshot, its
     entitlements the state document's, republished at the next step when
-    they change; pool selectors and the CRD watch come later. Its
+    they change; pool selectors and the CRD watch come later. Each pool
+    is due on its own: one that fails (a tampered checkpoint, a regressed
+    record) is retried with backoff, from two seconds doubling to the
+    renewal interval, jittered, and at once on a change to publish, while
+    the others publish at their own cadence. Its
     end-to-end test runs two replicas and a gateway source over one
     bucket: a change reaches the gateway, a renewal extends its lease, a
     broken edit renews the last good config, a new leader publishes and a
@@ -237,8 +243,8 @@ control plane.
     the fence in the state document. A taker judges a lease lapsed by its
     own clock on an unchanged object, acquires it at one above the higher
     of the lease's and the fence's epochs, and leads once it has claimed
-    the fence; every leader-only write (publication, the group sync) is
-    fenced in its own write (`state.FencedUpdate`);
+    the fence; every leader-only write (publication, the group sync, the
+    audit trim) is fenced in its own write (`state.FencedUpdate`);
   - slice 2: `lib/bucket/s3bucket` (S3, with its conditional requests:
     If-None-Match on GetObject, If-Match and If-None-Match: * on
     PutObject; 304, 404, 412 and 409 mapped to the bucket's errors; reads
@@ -272,8 +278,10 @@ control plane.
   ID may begin with `entra:`. A user unknown to the snapshot cannot use
   the gateway yet (up to the sync interval after joining a bound group).
   **Built:** `control/entrasync` (Graph's transitive members by workload
-  identity, a step reads every group before writing, a removal guard,
-  synced memberships kept apart from granted ones), run by the leader
+  identity, a step reads every group before writing, a removal guard
+  over the memberships of still-active users that never holds back the
+  offboarding of users Entra reports disabled or deleted, synced
+  memberships kept apart from granted ones), run by the leader
   (`-entra-sync-client-id`); `golemctl groups bind|unbind`.
 - **Coding agents**: `golemctl token` prints a cached Entra access token for
   agents with a credential helper (ADR 0009), for the gateway only: the
@@ -314,7 +322,7 @@ Run by the leader; each an idempotent scan.
 
 | Job | Schedule | Notes |
 |---|---|---|
-| Entra group sync | every 5 min; change notifications in M2 | Bound groups' members as synced memberships, in one state update; revokes keys outside them and all of a disabled user's; refuses a step ending over 50 memberships (ADR 0047) |
+| Entra group sync | every 5 min; change notifications in M2 | Bound groups' members as synced memberships, in one state update; revokes keys outside them and all of a disabled or deleted user's; a step that would end over 50 memberships of still-active users writes only its offboarding (ADR 0047) |
 | Period rollover | at each period boundary in the period time zone | Creates the next period's pools from recurring grants and caps |
 | Known spend | with every authorization renewal | Per scope and period: a boundary a minute-aligned ingestion allowance back, and `golem.spend_dedup`'s spend of the calls that ended before it, into the snapshot (ADR 0048). **Built:** `control/spend` (`-clickhouse`, `-spend-allowance`, `-period-zone`; the password in `$CLICKHOUSE_PASSWORD`): one query a publication over ClickHouse's HTTP interface, values bound as parameters; a failure keeps the last result for its own period, reported stale (`Job.Stale`) once its boundary is older than the gateways' retention less the lease and a margin (`Job.MaxAge`), and a period starts from nothing; each site's ingestion lag (now less its latest ingested `ended_at`, from `golem.ingest_by_site`) is reported, behind once past the allowance (`Job.Lags`), with B unmoved |
 | Audit shipping | every few seconds | Archive before outbox trim; ClickHouse is a query projection |
