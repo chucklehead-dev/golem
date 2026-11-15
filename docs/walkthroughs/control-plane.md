@@ -574,9 +574,15 @@ state's refresh loop, the API (if `-listen`) and the controller until
 SIGTERM or a component fails. With `-telemetry`, `openMetrics` registers
 the controller's instruments (§4.2) on a meter provider over `lib/otlp`
 (`otlp.MeterProvider`), its resource naming the replica
-(`service.instance.id`). Shutdown is in order: the publishing loop stops,
-the lease is released, the API drains, the audit's log records are
-flushed, and the metrics' last collection is exported.
+(`service.instance.id`). Shutdown is in order: the publishing loop stops
+while the API drains, then the lease is released, the audit's log records
+are flushed, and the metrics' last collection is exported. The API is
+served by `serveAPI`, which returns only once `Shutdown` has: the calls in
+flight have finished, or `-drain` (10 s) has passed and they are cut,
+logged with the fix. `ListenAndServe` returns `ErrServerClosed` the
+moment `Shutdown` begins, so before this the lease was released and `run`
+returned while calls were still in flight: a `MintKey` whose write had
+landed was cut before the key reached its caller. `TestAPIDrains`.
 
 | Flag | Meaning |
 | --- | --- |
@@ -588,6 +594,7 @@ flushed, and the metrics' last collection is exported.
 | `-id` | this replica's name (default the host name): the lease holder |
 | `-lease` | the snapshots' authorization lease (default 4h) |
 | `-listen` | serve the control API here; needs `-entra-tenant` |
+| `-drain` | at shutdown, how long the API's calls in flight may take before they are cut and the lease given up (10s) |
 | `-entra-tenant`, `-entra-audience` | the Entra tenant, and the control API registration's audiences (default `api://golem-control`, ADR 0046) |
 | `-audit-archive` | the audit archive bucket; empty: the outbox is not shipped and grows |
 | `-telemetry` | `off`, or an OTLP/HTTP collector: golem-control's metrics (§4.2) and, with `-audit-archive`, the audit's log records |
@@ -691,7 +698,7 @@ path with a real gateway source over one bucket.
   leadership's end (`TestMetrics`); the outbox's length (`TestOutbox`).
   `control/controller`'s `TestStatus` (the jobs' last successes, the
   guard tripping) and `TestFailureReason`.
-- `cmd/golem-control`: `TestKeygen`, `TestOpenSigner`, `TestAPINeedsTenant`,
+- `cmd/golem-control`: `TestKeygen`, `TestOpenSigner`, `TestAPINeedsTenant`, `TestAPIDrains`,
   `TestPubkey`, `TestRestoreCommand`, `TestTrustedKeys`,
   `TestBootstrapCommand`.
 - `model/check-leadership.sh`: the lease and fence placements compared by
