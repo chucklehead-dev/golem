@@ -308,6 +308,65 @@ func TestApplyRetried(t *testing.T) {
 	}
 }
 
+// TestLastGoodRetried: a last-good copy that fails to apply at Start for a
+// reason that may pass (its Secret not yet mounted) is tried again from
+// disk every ApplyRetry, the bucket unreachable all along; once a
+// publication from the bucket has applied, it is not.
+func TestLastGoodRetried(t *testing.T) {
+	p := newPublished(t)
+	path := filepath.Join(p.dir, "last-good.json")
+	gw := p.gateway(t)
+	gw.LastGood, gw.Secrets = path, fixed{"a/key": "sk"}
+	if _, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+		return snap(seq, time.Now().Add(time.Hour)), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Poll(t.Context()); err != nil || applied(gw) != 1 {
+		t.Fatalf("poll %v, applied %d", err, applied(gw))
+	}
+	now := time.Now()
+	restart := func(src bucket.Bucket, mounted *atomic.Bool) *Bucket {
+		b := &Bucket{Bucket: src, Keys: p.keys, Pool: "internal", Holder: &Holder{Now: func() time.Time { return now }},
+			Secrets: mounting{mounted}, ApplyRetry: 30 * time.Second, Checkpoint: filepath.Join(p.dir, "checkpoint"), LastGood: path}
+		if err := b.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	var mounted atomic.Bool
+	b := restart(unreachable{p.bucket}, &mounted)
+	if applied(b) != 0 {
+		t.Fatalf("applied %d with the Secret not mounted", applied(b))
+	}
+	if err := b.Poll(t.Context()); err == nil || applied(b) != 0 {
+		t.Fatalf("poll with the bucket down: %v, applied %d", err, applied(b))
+	}
+	mounted.Store(true)
+	if b.Poll(t.Context()); applied(b) != 0 {
+		t.Fatalf("applied %d within ApplyRetry: want the retry to wait", applied(b))
+	}
+	now = now.Add(31 * time.Second)
+	if b.Poll(t.Context()); applied(b) != 1 || !b.ServingLastGood() {
+		t.Fatalf("after ApplyRetry: applied %d, from disk %v; want the last-good 1 from disk", applied(b), b.ServingLastGood())
+	}
+
+	// A publication from the bucket applied first: the copy on disk is not
+	// retried over it.
+	mounted.Store(false)
+	now = time.Now()
+	b = restart(p.bucket, &mounted)
+	mounted.Store(true)
+	if err := b.Poll(t.Context()); err != nil || applied(b) != 1 || b.ServingLastGood() {
+		t.Fatalf("poll %v: applied %d, from disk %v; want 1 from the bucket", err, applied(b), b.ServingLastGood())
+	}
+	now = now.Add(31 * time.Second)
+	if b.Poll(t.Context()); b.ServingLastGood() || b.pending != nil {
+		t.Fatal("the last-good copy was retried after the bucket's publication applied")
+	}
+}
+
 // unreachable is a bucket that answers nothing.
 type unreachable struct{ bucket.Bucket }
 

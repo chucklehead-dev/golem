@@ -54,9 +54,15 @@ type Bucket struct {
 	ApplyRetry time.Duration
 	Log        *slog.Logger
 
-	tag     string    // the entity tag of the last pointer judged (Poll)
-	retry   time.Time // when to read a pointer whose publication failed to apply again
-	expires time.Time // the last verified pointer's Expires
+	tag   string    // the entity tag of the last pointer judged (Poll)
+	retry time.Time // when to read a pointer whose publication failed to apply again
+	// pending is the last-good file as Start read it, while it failed to
+	// apply for a reason that may pass (an applyError: a Secret not yet
+	// mounted) and nothing has applied since; Poll tries it again at
+	// pendingRetry, every ApplyRetry, whether or not the bucket answers.
+	pending      []byte
+	pendingRetry time.Time
+	expires      time.Time // the last verified pointer's Expires
 	// overdue is reported, until a pointer that is not overdue; written by
 	// Poll's goroutine, read by a metric's collection.
 	overdue atomic.Bool
@@ -99,7 +105,8 @@ type lastGood struct {
 // loadLastGood applies the last-good publication, if there is one that
 // verifies, is at or above the floor and whose lease has not ended. One
 // that does not is reported and left: the bucket's next publication
-// replaces it.
+// replaces it. One that verifies but does not compile yet (a Secret not
+// yet mounted) is retried by Poll (tryLastGood).
 func (b *Bucket) loadLastGood() {
 	if b.LastGood == "" {
 		return
@@ -108,9 +115,24 @@ func (b *Bucket) loadLastGood() {
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	var ptr snapshot.Pointer
-	if err == nil {
-		ptr, err = b.applyLastGood(raw)
+	if err != nil {
+		b.log().Warn("the last-good snapshot on disk was not read; waiting for the bucket", "path", b.LastGood, "err", err)
+		return
+	}
+	b.tryLastGood(raw)
+}
+
+// tryLastGood applies a last-good file. One that failed for a reason that
+// may pass (an applyError) is kept for retryLastGood; any other failure is
+// final: the bucket's next publication replaces it.
+func (b *Bucket) tryLastGood(raw []byte) {
+	ptr, err := b.applyLastGood(raw)
+	b.pending = nil
+	if _, again := errors.AsType[applyError](err); again {
+		b.pending, b.pendingRetry = raw, b.Holder.now().Add(b.applyRetry())
+		b.log().Warn("the last-good snapshot on disk did not apply; retrying it every ApplyRetry until it does or the bucket's publication applies",
+			"path", b.LastGood, "retry", b.applyRetry(), "err", err)
+		return
 	}
 	if err != nil {
 		b.log().Warn("the last-good snapshot on disk was not applied; waiting for the bucket", "path", b.LastGood, "err", err)
@@ -119,6 +141,24 @@ func (b *Bucket) loadLastGood() {
 	b.fromDisk.Store(true)
 	b.log().Info("the last-good snapshot applied from disk", "pool", b.Pool, "seq", ptr.PublishSeq, "hash", ptr.Hash[:12])
 }
+
+// retryLastGood tries the last-good file again once its retry is due, and
+// only while nothing has applied since Start: a publication from the
+// bucket supersedes it (read clears it), and one already applied makes it
+// refused as not newer.
+func (b *Bucket) retryLastGood() {
+	if b.pending == nil || b.Holder.now().Before(b.pendingRetry) {
+		return
+	}
+	if b.Holder.cur.Load() != nil {
+		b.pending = nil
+		return
+	}
+	b.tryLastGood(b.pending)
+}
+
+// applyRetry is ApplyRetry or its default.
+func (b *Bucket) applyRetry() time.Duration { return cmp.Or(b.ApplyRetry, 30*time.Second) }
 
 // applyLastGood decodes a last-good file, verifies it as a publication
 // read from the bucket would be, and applies it.
@@ -188,6 +228,7 @@ func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
 // Poll reads the pointer and applies a newer publication. An unchanged
 // pointer costs one conditional get.
 func (b *Bucket) Poll(ctx context.Context) error {
+	b.retryLastGood() // first: the bucket may be unreachable
 	if !b.retry.IsZero() && !b.Holder.now().Before(b.retry) {
 		b.tag, b.retry = "", time.Time{} // read it again, though unchanged
 	}
@@ -208,7 +249,7 @@ func (b *Bucket) Poll(ctx context.Context) error {
 		b.tag = tag
 	}
 	if _, failed := errors.AsType[applyError](err); failed {
-		b.retry = b.Holder.now().Add(cmp.Or(b.ApplyRetry, 30*time.Second))
+		b.retry = b.Holder.now().Add(b.applyRetry())
 	}
 	b.checkOverdue()
 	return err
@@ -315,6 +356,7 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 		return err // an applyError if it may apply later
 	}
 	b.fromDisk.Store(false)
+	b.pending = nil // superseded
 	// The last-good copy before the checkpoint: a crash between leaves a
 	// copy at or above the floor, never one below it.
 	if err := b.saveLastGood(raw, body); err != nil {

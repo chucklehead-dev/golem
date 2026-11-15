@@ -278,7 +278,9 @@ listed owner of its kind in its scope. Pool mode reads the bucket source,
 writes status objects, applies the emergency denylist, and keeps the last
 publication applied on disk beside its checkpoint (`last-good.json`):
 restarted while the bucket is unreachable, it serves that copy, verified
-as a publication from the bucket is, until its lease ends.
+as a publication from the bucket is, until its lease ends (a copy that
+does not compile yet, its Secret not yet mounted, is retried from disk
+every 30 seconds until it does or the bucket's publication applies).
 
 `golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop
 from the same CRD YAML as the GitOps repository, compiled in-process by

@@ -250,7 +250,7 @@ copy one back) is refused. It is signed and also under a prefix only
 golem-control's role may write (control-plane.md §3): a bucket policy
 mistake alone does not let anyone lower it. golem-control writes it after
 the publication record and before the pointer. At start
-(`Bucket.Start`, `gateway/snapshot/bucket.go:75`) a gateway takes the
+(`Bucket.Start`, `gateway/snapshot/bucket.go:81`) a gateway takes the
 higher of its local checkpoint and the pool's trusted one; a missing
 checkpoint is floor zero only while the pool has no pointer either
 (`trustedCheckpoint`, `:149`), and a published pool's missing or
@@ -261,7 +261,7 @@ after issue unless `Publisher.PointerTTL` says otherwise, ten renewals at
 the default one-minute renew) is TUF's timestamp role as a signal, not a
 refusal: a gateway that sees nothing newer than an expired pointer reports
 it overdue (`Bucket.Overdue`, logged once by `checkOverdue`,
-`gateway/snapshot/bucket.go:209`) and goes on serving until its snapshot's
+`gateway/snapshot/bucket.go:261`) and goes on serving until its snapshot's
 `ValidUntil`, which is what bounds a frozen or replayed bucket (ADR 0030).
 
 ## 5. The bucket (`lib/bucket`)
@@ -420,12 +420,12 @@ deployment under one alias, and a ConfigMap.
    ADR 0049); then `finish` (`publish.go:208`) signs and writes the
    checkpoint (`SignCheckpoint`, `pointer.go:85`), then signs the pointer
    with its `Expires` (`SignPointer`, `pointer.go:73`) and writes it.
-5. **Verify.** A gateway's `Poll` (`gateway/snapshot/bucket.go:179`) does
-   a conditional GET of the pointer; it changed, so `read` (`:284`) calls
-   `openPointer` (`:241`), which calls `OpenPointer` with its `sign.Keys`
+5. **Verify.** A gateway's `Poll` (`gateway/snapshot/bucket.go:230`) does
+   a conditional GET of the pointer; it changed, so `read` (`:336`) calls
+   `openPointer` (`:293`), which calls `OpenPointer` with its `sign.Keys`
    (`pointer.go:79`) and refuses another pool's pointer or one below its
    floor. It notes the pointer's `Expires`, fetches the object, and
-   `openSnapshot` (`:246`) checks `snapshot.Hash(body) == ptr.Hash`,
+   `openSnapshot` (`:310`) checks `snapshot.Hash(body) == ptr.Hash`,
    `Decode`s it strictly and checks the snapshot's `PublishSeq` against
    the pointer's. The holder applies it, and the gateway saves its
    last-good copy and its local checkpoint.
