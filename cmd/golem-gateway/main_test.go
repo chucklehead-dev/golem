@@ -34,13 +34,15 @@ import (
 // TestReleaseGate: standalone listens on loopback only; pool mode needs its
 // inputs, and -accept-unreleased until golem#7's evidence is in.
 func TestReleaseGate(t *testing.T) {
-	full := options{pool: "internal", bucket: "s3://b/p", keys: "/k", valkeyAddr: "v:6379", site: "eu", listen: ":8080"}
+	full := options{pool: "internal", bucket: "s3://b/p", keys: "/k", valkeyAddr: "v:6379", site: "eu", listen: ":8080", maxSkew: 2 * time.Minute, maxLease: 4 * time.Hour}
 	accepted := full
 	accepted.acceptUnreleased = true
 	missing := accepted
 	missing.valkeyAddr = ""
 	both := accepted
 	both.standalone = "./config"
+	noLease := accepted
+	noLease.maxLease = 0
 	for name, tc := range map[string]struct {
 		o    options
 		want string // "" ok, else a word of the refusal
@@ -56,6 +58,7 @@ func TestReleaseGate(t *testing.T) {
 		"pool, accepted":            {accepted, ""},
 		"pool, no Valkey":           {missing, "-valkey"},
 		"both modes":                {both, "not both"},
+		"pool, no lease":            {noLease, "-max-lease"},
 	} {
 		err := releaseGate(tc.o)
 		if (err == nil) != (tc.want == "") || err != nil && !strings.Contains(err.Error(), tc.want) {
@@ -268,6 +271,40 @@ func TestPoolModeEntraDown(t *testing.T) {
 	}
 	cancel()
 	stopped(t, done)
+}
+
+// TestPoolModeLeaseBound: -max-lease reaches the bucket source: a
+// publication whose lease (an hour) is longer than the gateway allows is
+// refused, and the gateway is not ready.
+func TestPoolModeLeaseBound(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f := newPoolFixture(t)
+	listen := freeAddr(t)
+	done := make(chan int, 1)
+	go func() {
+		done <- run(ctx, []string{"-pool", "internal", "-bucket", filepath.Join(f.root, "bucket"), "-keys", filepath.Join(f.root, "keys"),
+			"-valkey", startValkey(t), "-site", "test", "-secrets", filepath.Join(f.root, "secrets"), "-max-lease", "30m",
+			"-listen", listen, "-telemetry", "off", "-drain", "1s", "-accept-unreleased"})
+	}()
+	// The first poll runs before the server listens: its first answer is
+	// the source's verdict.
+	for range 200 {
+		r, err := http.Get("http://" + listen + "/readyz")
+		if err != nil {
+			time.Sleep(25 * time.Millisecond) // the gateway starting: another goroutine's server
+			continue
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		if r.StatusCode != 503 {
+			t.Fatalf("readyz %d %s: a publication past -max-lease was applied", r.StatusCode, body)
+		}
+		cancel()
+		stopped(t, done)
+		return
+	}
+	t.Fatal("the gateway never listened")
 }
 
 func freeAddr(t *testing.T) string {

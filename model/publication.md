@@ -760,7 +760,11 @@ The model ends here:
 
 - **Clock skew.** One clock for everyone. In production the bound is
   `LEASE` plus the allowed skew; the gateway also rejects pointers issued
-  in its future.
+  more than the skew in its future (`-clock-skew`, two minutes) and
+  snapshots whose `validUntil` is further ahead than the longest lease plus
+  the skew (`-max-lease`), so a publisher's clock running ahead cannot
+  stretch the lease (`Bucket.openPointer`, `checkLease`;
+  `TestClockBounds`).
 - **Forged signatures.** Out of scope: the signing key never leaves KMS.
   The attacker can only replay what was genuinely signed.
 - **Old publication records.** Replaying an old *record* lowers a

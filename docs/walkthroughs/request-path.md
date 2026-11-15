@@ -71,7 +71,7 @@ path reads only what those decisions need and forwards bytes unchanged:
 | `gateway/canon` | `Usage`, the one canonical type the path needs so far |
 
 `proxy` is imported only by the binary (`internal/archtest` checks it).
-The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:308`),
+The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:311`),
 each wrapped by the lifecycle's drain tracking and, in standalone mode
 only, by `localOnly` (`cmd/golem-gateway/guard.go:24`), which refuses
 non-loopback hosts, cross-origin browser requests and non-JSON bodies.

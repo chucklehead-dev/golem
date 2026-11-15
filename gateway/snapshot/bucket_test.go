@@ -367,6 +367,74 @@ func TestLastGoodRetried(t *testing.T) {
 	}
 }
 
+// TestClockBounds: a pointer issued more than the skew in the gateway's
+// future is refused, as is a snapshot whose lease runs further ahead than
+// the longest lease plus the skew (a publisher's clock a day ahead must
+// not grant a day-long lease), from the bucket or from the last-good copy;
+// within the bounds both apply.
+func TestClockBounds(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	publishAt := func(p *published, at time.Time, lease time.Duration) {
+		t.Helper()
+		p.pub.Now = func() time.Time { return at }
+		if _, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+			return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, IssuedAt: at, ValidUntil: at.Add(lease)}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gatewayAt := func(p *published) *Bucket {
+		gw := p.gateway(t)
+		gw.Holder.Now = func() time.Time { return now }
+		gw.MaxSkew, gw.MaxLease = 2*time.Minute, 4*time.Hour
+		return gw
+	}
+	for name, tc := range map[string]struct {
+		ahead, lease time.Duration
+		want         string // "" applies, else a word of the refusal
+	}{
+		"in step":                      {0, 4 * time.Hour, ""},
+		"ahead within the skew":        {time.Minute, 4 * time.Hour, ""},
+		"issued in the future":         {3 * time.Minute, time.Hour, "future"},
+		"a day ahead":                  {24 * time.Hour, 4 * time.Hour, "future"},
+		"a lease past the longest":     {0, 4*time.Hour + 3*time.Minute, "longest lease"},
+		"a lease at the longest+skew":  {0, 4*time.Hour + 2*time.Minute, ""},
+		"ahead, a lease past the skew": {90 * time.Second, 4*time.Hour + time.Minute, "longest lease"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newPublished(t)
+			gw := gatewayAt(p)
+			publishAt(p, now.Add(tc.ahead), tc.lease)
+			err := gw.Poll(t.Context())
+			switch {
+			case tc.want == "" && (err != nil || applied(gw) != 1):
+				t.Fatalf("poll %v, applied %d: want it applied", err, applied(gw))
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want) || applied(gw) != 0):
+				t.Fatalf("poll %v, applied %d: want a refusal naming %q", err, applied(gw), tc.want)
+			}
+		})
+	}
+
+	// The last-good copy is held to the same bounds: written by a gateway
+	// whose clock agreed, read back by one whose clock is a day behind.
+	p := newPublished(t)
+	path := filepath.Join(p.dir, "last-good.json")
+	gw := gatewayAt(p)
+	gw.LastGood = path
+	publishAt(p, now, 4*time.Hour)
+	if err := gw.Poll(t.Context()); err != nil || applied(gw) != 1 {
+		t.Fatalf("poll %v, applied %d", err, applied(gw))
+	}
+	b := &Bucket{Bucket: unreachable{p.bucket}, Keys: p.keys, Pool: "internal", Holder: &Holder{Now: func() time.Time { return now.Add(-24 * time.Hour) }},
+		Checkpoint: filepath.Join(p.dir, "checkpoint"), LastGood: path}
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if applied(b) != 0 {
+		t.Fatal("a last-good copy issued a day in the gateway's future was applied")
+	}
+}
+
 // unreachable is a bucket that answers nothing.
 type unreachable struct{ bucket.Bucket }
 

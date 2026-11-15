@@ -52,7 +52,19 @@ type Bucket struct {
 	// ApplyRetry is how often a verified publication that failed to apply
 	// is tried again while it is current (default 30 seconds).
 	ApplyRetry time.Duration
-	Log        *slog.Logger
+	// MaxSkew is how far the publisher's clock may run ahead of this
+	// gateway's (default 2 minutes): a pointer issued further in the
+	// gateway's future is refused (security-and-correctness.md §3).
+	MaxSkew time.Duration
+	// MaxLease is the longest authorization lease the pool's publisher
+	// grants (default 4 hours, golem-control's -lease default and an
+	// internal pool's maximum, ADR 0032). A snapshot whose ValidUntil is
+	// more than MaxLease plus MaxSkew ahead is refused, not clamped: a
+	// publisher's clock a day ahead must not grant a day-long lease, and a
+	// lease the gateway cannot trust is no lease at all (it fails closed:
+	// the gateway keeps what it holds, until that expires).
+	MaxLease time.Duration
+	Log      *slog.Logger
 
 	tag   string    // the entity tag of the last pointer judged (Poll)
 	retry time.Time // when to read a pointer whose publication failed to apply again
@@ -303,8 +315,28 @@ func (b *Bucket) openPointer(raw []byte) (snapshot.Pointer, error) {
 	if floor := b.Holder.Floor(); ptr.PublishSeq < floor {
 		return ptr, fmt.Errorf("pointer %d is below the floor %d: refused (a replayed pointer, or a stale publisher)", ptr.PublishSeq, floor)
 	}
+	if now, skew := b.Holder.now(), b.maxSkew(); ptr.IssuedAt.After(now.Add(skew)) {
+		return ptr, fmt.Errorf("pointer %d was issued at %s, %s in this gateway's future (more than the %s allowed skew): refused; check the publisher's and this gateway's clocks (NTP)",
+			ptr.PublishSeq, ptr.IssuedAt.UTC().Format(time.RFC3339), ptr.IssuedAt.Sub(now).Round(time.Second), skew)
+	}
 	return ptr, nil
 }
+
+// checkLease refuses a snapshot whose lease runs further ahead than the
+// longest a publisher grants, plus the skew.
+func (b *Bucket) checkLease(s *snapshot.Snapshot) error {
+	if s.ValidUntil.IsZero() {
+		return nil
+	}
+	now, bound := b.Holder.now(), cmp.Or(b.MaxLease, 4*time.Hour)+b.maxSkew()
+	if left := s.ValidUntil.Sub(now); left > bound {
+		return fmt.Errorf("snapshot %d's lease runs to %s, %s from now, longer than the longest lease (%s) plus the skew: refused; check the publisher's clock, or raise -max-lease to the pool's approved maximum",
+			s.PublishSeq, s.ValidUntil.UTC().Format(time.RFC3339), left.Round(time.Second), cmp.Or(b.MaxLease, 4*time.Hour))
+	}
+	return nil
+}
+
+func (b *Bucket) maxSkew() time.Duration { return cmp.Or(b.MaxSkew, 2*time.Minute) }
 
 // openSnapshot checks a snapshot object is the one its pointer signed.
 func openSnapshot(ptr snapshot.Pointer, body []byte) (*snapshot.Snapshot, error) {
@@ -328,6 +360,9 @@ func (b *Bucket) verify(rawPtr, body []byte) (snapshot.Pointer, *snapshot.Snapsh
 		return ptr, nil, err
 	}
 	s, err := openSnapshot(ptr, body)
+	if err == nil {
+		err = b.checkLease(s)
+	}
 	return ptr, s, err
 }
 
@@ -350,6 +385,9 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 	}
 	s, err := openSnapshot(ptr, body)
 	if err != nil {
+		return err
+	}
+	if err := b.checkLease(s); err != nil {
 		return err
 	}
 	if err := b.Holder.Apply(s, ptr.Hash, b.Secrets); err != nil {

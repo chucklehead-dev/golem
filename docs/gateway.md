@@ -237,7 +237,11 @@ except OTel's API.
   holds (the trusted publisher checkpoint and atomically persisted local
   checkpoint; status is diagnostic and cannot set the trusted floor), then fetches the snapshot by hash and verifies its signature and
   hash (ADR 0007). Anything unsigned, wrongly signed or older is ignored and
-  alarmed. Once the signed authorization lease has expired (five minutes
+  alarmed, as is a pointer issued more than `-clock-skew` (two minutes) in
+  the gateway's future, or a snapshot whose lease runs further ahead than
+  `-max-lease` (four hours, the publisher's `-lease`) plus that skew:
+  refused rather than clamped, failing closed, so a publisher's clock a day
+  ahead cannot grant a day-long lease. Once the signed authorization lease has expired (five minutes
   by default, ADR 0030) the gateway refuses new model requests.
 - An **emergency denylist** (a ConfigMap mounted as a file, read with
   `os.Root`) is applied over every snapshot: a site admin's way to revoke a

@@ -61,6 +61,7 @@ type options struct {
 	pool, bucket, keys, checkpoint, gatewayID, valkeyAddr, site, secrets string
 	replicaAcks                                                          int
 	acceptUnreleased                                                     bool
+	maxSkew, maxLease                                                    time.Duration
 	// the site's Valkey: TLS (with a CA file's roots, else the system's)
 	// and an AUTH user; the password is $VALKEY_PASSWORD's, never a flag
 	valkeyTLS            bool
@@ -93,6 +94,8 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "pool mode, with -valkey-tls: a PEM file of the CA certificates to verify Valkey's certificate against, in place of the system's roots")
 	fs.StringVar(&o.valkeyUser, "valkey-user", "", "pool mode: the Valkey user to AUTH as (an ACL user; ElastiCache RBAC); its password in $VALKEY_PASSWORD. Empty with the password set: AUTH as the default user")
 	fs.StringVar(&o.site, "site", "", "pool mode: this gateway's site (its Valkey's keys and ledger rows)")
+	fs.DurationVar(&o.maxSkew, "clock-skew", 2*time.Minute, "pool mode: how far the publisher's clock may run ahead of this gateway's: a pointer issued further in its future is refused")
+	fs.DurationVar(&o.maxLease, "max-lease", 4*time.Hour, "pool mode: the longest authorization lease the pool's publisher grants (golem-control's -lease): a snapshot whose lease runs further ahead, plus -clock-skew, is refused")
 	fs.StringVar(&o.secrets, "secrets", "/var/run/golem/secrets", "pool mode: where provider Secrets are mounted, one directory per Secret")
 	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run although golem#7's deployment evidence is not in (test sites only)")
 	if err := fs.Parse(args); err != nil {
@@ -354,7 +357,7 @@ func poolSource(ctx context.Context, o options, holder *snapshot.Holder) (*snaps
 		}
 	}
 	src := &snapshot.Bucket{Bucket: b, Keys: keys, Pool: o.pool, Holder: holder, Secrets: snapshot.FileSecrets{Root: root},
-		Checkpoint: o.checkpoint, LastGood: lastGoodPath(o.checkpoint), GatewayID: id, Log: slog.Default()}
+		Checkpoint: o.checkpoint, LastGood: lastGoodPath(o.checkpoint), GatewayID: id, MaxSkew: o.maxSkew, MaxLease: o.maxLease, Log: slog.Default()}
 	if err := src.Start(ctx); err != nil {
 		return nil, fmt.Errorf("pool %s: %w", o.pool, err)
 	}
@@ -472,6 +475,9 @@ func releaseGate(o options) error {
 	if len(missing) > 0 {
 		slices.Sort(missing)
 		return fmt.Errorf("pool mode needs %s", strings.Join(missing, ", "))
+	}
+	if o.maxLease <= 0 || o.maxSkew < 0 {
+		return fmt.Errorf("-max-lease %s and -clock-skew %s: the lease must be positive and the skew not negative", o.maxLease, o.maxSkew)
 	}
 	if !o.acceptUnreleased {
 		return errors.New("pool mode is not released: golem#7's deployment evidence (provider spending limits, OTLP TLS to the real collector, each hop's mTLS owner) is not in; -accept-unreleased runs it on a test site")
