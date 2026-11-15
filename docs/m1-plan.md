@@ -325,6 +325,16 @@ Status:
   during the ejection. Open: models discovered from the box (they are
   configured), `/v1/completions` (not used), the run on a real box
   (docs/acceptance/m1-vllm.md).
+- **Built: limits before authentication** (gateway.md §3 step 1).
+  Connections (`-max-conns`, `-max-conns-per-source`), each source's
+  requests (`-source-rate`) and failed authentications (`-auth-failures`;
+  past them `limit.source`, before the credential or body is read), the
+  source the connection's address or `-source-header`'s; request JSON
+  nested past 128 refused. SSE events were bounded already (`sse.MaxEvent`,
+  1 MiB). Tests: `TestInvalidKeyFlood`, the guard's and the listener's,
+  `TestRequestDepth`, `TestRefusals`; ablated: failures not recorded, the
+  depth check, escaped quotes. Behind a sidecar the source is the pod's
+  until the mesh sets a header.
 
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.

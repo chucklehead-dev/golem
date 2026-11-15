@@ -67,7 +67,7 @@ var fileID = []byte(`"file_id"`)
 func (r *Request) Scan(body []byte) error {
 	*r = Request{Model: r.Model[:0]}
 	hasModel := false
-	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
+	err := jsonscan.Request(body, func(name []byte, d *jsonscan.Decoder) error {
 		n := string(name)
 		if !known[n] {
 			r.Unknown++

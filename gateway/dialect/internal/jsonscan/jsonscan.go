@@ -18,6 +18,15 @@ var ErrNotObject = errors.New("jsonscan: the request body must be one JSON objec
 // ErrNotArray is a value that should be an array and is not.
 var ErrNotArray = errors.New("jsonscan: expected a JSON array")
 
+// MaxDepth is the deepest nesting of objects and arrays a request body may
+// have. A provider's parser may refuse or misread what golem's accepted
+// (Python's json recursion, a vLLM box's), and nothing a model is sent needs
+// more: an agent's deepest, a tool's input schema, is a few dozen levels.
+const MaxDepth = 128
+
+// ErrTooDeep is a request body nested past MaxDepth.
+var ErrTooDeep = errors.New("jsonscan: the request body nests objects and arrays deeper than 128 levels; flatten it (a tool's input schema is the usual cause)")
+
 // Span is a value's position in the body: body[Start:End] is its raw JSON.
 type Span struct{ Start, End int }
 
@@ -113,6 +122,50 @@ func Object(body []byte, visit Visitor) error {
 		return err
 	}
 	return nil
+}
+
+// Request is Object for a request body, refusing one nested past MaxDepth
+// first.
+func Request(body []byte, visit Visitor) error {
+	if !shallow(body, MaxDepth) {
+		return ErrTooDeep
+	}
+	return Object(body, visit)
+}
+
+// shallow reports whether body's objects and arrays nest at most max deep.
+// It counts brackets outside strings only; the syntax is Object's to check.
+func shallow(body []byte, max int) bool {
+	depth := 0
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '{', '[':
+			if depth++; depth > max {
+				return false
+			}
+		case '}', ']':
+			depth--
+		case '"':
+			// Skip the string, to the first quote not escaped (an odd run
+			// of backslashes before it escapes it): IndexByte is the fast
+			// path through a long text.
+			for {
+				j := bytes.IndexByte(body[i+1:], '"')
+				if j < 0 {
+					return true
+				}
+				i += j + 1
+				k := i - 1
+				for body[k] == '\\' {
+					k--
+				}
+				if (i-1-k)%2 == 0 {
+					break
+				}
+			}
+		}
+	}
+	return true
 }
 
 // String unquotes a JSON string value, without allocating when it has no

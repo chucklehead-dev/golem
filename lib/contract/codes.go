@@ -34,6 +34,9 @@ var (
 	LimitRate          = Code{"limit.rate", 429, OriginPolicy}
 	LimitConcurrency   = Code{"limit.concurrency", 429, OriginPolicy}
 	LimitProviderQuota = Code{"limit.provider_quota", 429, OriginPolicy}
+	// LimitSource is the floor before authentication (gateway/guard): too
+	// many requests, or failed authentications, from one address.
+	LimitSource = Code{"limit.source", 429, OriginPolicy}
 
 	BudgetPoolExhausted = Code{"budget.pool_exhausted", 402, OriginPolicy}
 	BudgetMemberCap     = Code{"budget.member_cap", 402, OriginPolicy}
@@ -74,7 +77,7 @@ var (
 
 // Codes is every code (read-only).
 var Codes = []Code{
-	LimitRate, LimitConcurrency, LimitProviderQuota,
+	LimitRate, LimitConcurrency, LimitProviderQuota, LimitSource,
 	BudgetPoolExhausted, BudgetMemberCap, BudgetKeyCap,
 	AuthMissing, AuthKeyUnknown, AuthKeyExpired, AuthKeyRevoked, AuthKeyWrongInstallation, AuthTokenInvalid, AuthTokenExpired, AuthDenied,
 	AuthzModelNotAllowed, AuthzScopeNotMember, AuthzProviderStorageForbidden, AuthzOriginForbidden, AuthzFeatureForbidden,

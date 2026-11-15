@@ -26,6 +26,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/envelope"
+	"github.com/chucklehead-dev/golem/gateway/guard"
 	"github.com/chucklehead-dev/golem/gateway/price"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
@@ -89,6 +90,9 @@ type Handler struct {
 	// Health is the deployments' health and the routes' retry budgets the
 	// gateway's handlers share (route.Health); nil: the handler's own.
 	Health *route.Health
+	// Guard is the floor before authentication the gateway's handlers
+	// share (a source's requests and failed authentications); nil: none.
+	Guard *guard.Guard
 	// MaxKept bounds the request bodies the handler keeps for retries
 	// until their calls commit (default 256 MiB); a call past it makes one
 	// attempt.
@@ -572,6 +576,12 @@ func reachedProvider(err error) bool {
 
 // authenticate takes the request's snapshot and finds its principal.
 func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compiled, *auth.Principal, *refusal) {
+	// The floor before anything is checked (gateway/guard): a source's
+	// requests, and its failed authentications, bounded.
+	src := h.Guard.Source(r)
+	if no := h.Guard.Admit(src); no != nil {
+		return nil, nil, &refusal{code: contract.LimitSource, msg: no.Msg, retryAfter: no.RetryAfter}
+	}
 	snap, err := h.Snapshots.Current()
 	switch {
 	case errors.Is(err, snapshot.ErrExpired):
@@ -583,6 +593,7 @@ func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compil
 	}
 	p, no := snap.Auth.AuthenticateGrant(r.Header, g)
 	if no != nil {
+		h.Guard.Failed(src)
 		return nil, nil, &refusal{code: no.Code, msg: no.Msg}
 	}
 	return snap, p, nil

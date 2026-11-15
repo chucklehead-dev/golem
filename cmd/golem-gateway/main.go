@@ -41,6 +41,7 @@ import (
 	"github.com/valkey-io/valkey-go"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
+	"github.com/chucklehead-dev/golem/gateway/guard"
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/proxy"
 	"github.com/chucklehead-dev/golem/gateway/route"
@@ -70,6 +71,10 @@ type options struct {
 	// and an AUTH user; the password is $VALKEY_PASSWORD's, never a flag
 	valkeyTLS            bool
 	valkeyCA, valkeyUser string
+	// the floor before authentication (gateway/guard)
+	sourceHeader                                         string
+	sourceRate, sourceBurst, authFailRate, authFailBurst float64
+	maxConns, maxConnsPerSource                          int
 }
 
 func parse(args []string) (options, error) {
@@ -102,6 +107,13 @@ func parse(args []string) (options, error) {
 	fs.DurationVar(&o.maxLease, "max-lease", 4*time.Hour, "pool mode: the longest authorization lease the pool's publisher grants (golem-control's -lease): a snapshot whose lease runs further ahead, plus -clock-skew, is refused")
 	fs.StringVar(&o.secrets, "secrets", "/var/run/golem/secrets", "pool mode: where provider Secrets are mounted, one directory per Secret")
 	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run although golem#7's deployment evidence is not in (test sites only)")
+	fs.StringVar(&o.sourceHeader, "source-header", "", "the header the proxy in front sets to the caller's address (its last value is taken, e.g. X-Forwarded-For); empty: the connection's address, which behind a sidecar is the sidecar's, so the per-source limits are the pod's")
+	fs.Float64Var(&o.sourceRate, "source-rate", 0, "requests a second each source may make before authentication; 0: no limit (authenticated callers' limits are the policy's)")
+	fs.Float64Var(&o.sourceBurst, "source-burst", 0, "the requests a quiet source may make at once (default -source-rate)")
+	fs.Float64Var(&o.authFailRate, "auth-failures", 20, "failed authentications a second each source may make; past them (and the burst) its requests are refused until it slows; 0: no limit")
+	fs.Float64Var(&o.authFailBurst, "auth-failure-burst", 200, "the failed authentications a source may make at once")
+	fs.IntVar(&o.maxConns, "max-conns", 8192, "connections open at once; past it new ones wait in the listen backlog; 0: no limit")
+	fs.IntVar(&o.maxConnsPerSource, "max-conns-per-source", 0, "connections open at once from one remote address (for a gateway reached directly, not behind a sidecar); 0: no limit")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -211,7 +223,7 @@ func run(ctx context.Context, args []string) int {
 	})
 	announce(o, holder, keyPath)
 	code := 0
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { // returns as the shutdown begins
+	if err := serve(srv, o); err != nil && !errors.Is(err, http.ErrServerClosed) { // returns as the shutdown begins
 		slog.Error("golem-gateway", "err", err)
 		code = 1
 	}
@@ -368,9 +380,10 @@ func startSource(ctx context.Context, o options, holder *snapshot.Holder) (src i
 // calls while in flight; and the probes.
 func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry, calls *proxy.InFlight, health *route.Health) *http.ServeMux {
 	mux := http.NewServeMux()
+	guard := newGuard(o)
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat,
 		"POST /v1/responses": proxy.OpenAIResponses} {
-		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health}
+		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health, Guard: guard}
 		if o.standalone != "" {
 			h = localOnly(d, h)
 		}
@@ -378,7 +391,7 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 	}
 	// The models list, either dialect's shape (ServeModels picks it): the
 	// Messages handler serves it, with the same snapshots and identity.
-	var models http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder}).ServeModels)
+	var models http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, Guard: guard}).ServeModels)
 	if o.standalone != "" {
 		models = loopbackOnly(proxy.AnthropicMessages, models)
 	}
@@ -392,7 +405,7 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 			"golem serves stateless responses only: no response is stored to retrieve, delete or cancel")
 	})
 	// Anthropic's token count: free, no admission, no ledger row.
-	var count http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody}).ServeCountTokens)
+	var count http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody, Guard: guard}).ServeCountTokens)
 	if o.standalone != "" {
 		count = localOnly(proxy.AnthropicMessages, count)
 	}
@@ -475,6 +488,26 @@ func newEntra(tenant, audiences, jwks string) *entra.Verifier {
 
 // newServer is the API's server, its limits set for long streams over
 // HTTP/1.1 and h2c.
+// serve listens on srv's address, its connections bounded by -max-conns and
+// -max-conns-per-source, and serves until the shutdown.
+func serve(srv *http.Server, o options) error {
+	l, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
+	return srv.Serve(&guard.Listener{Listener: l, Max: o.maxConns, PerSource: o.maxConnsPerSource})
+}
+
+// newGuard is the floor before authentication the handlers share, from the
+// flags; nil when every limit is off.
+func newGuard(o options) *guard.Guard {
+	if o.sourceRate <= 0 && o.authFailRate <= 0 {
+		return nil
+	}
+	return &guard.Guard{SourceHeader: o.sourceHeader, Rate: max(o.sourceRate, 0), Burst: o.sourceBurst,
+		FailRate: max(o.authFailRate, 0), FailBurst: o.authFailBurst}
+}
+
 func newServer(addr string, h http.Handler) *http.Server {
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)

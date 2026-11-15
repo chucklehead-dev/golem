@@ -73,11 +73,30 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    set before it and cleared after, as nginx's `send_timeout`), so a client
    that stops reading is a caller gone, and no deadline is armed while the
    provider is silent (under HTTP/2 an armed one resets the stream).
+   Connections are bounded by `gateway/guard.Listener`: `-max-conns`
+   (8192) open at once, past which new ones wait in the backlog, and
+   `-max-conns-per-source` (off) from one address, for a gateway reached
+   directly.
+   Before anything else is checked, `guard.Guard` takes the request from
+   its source's budgets: `-source-rate` requests a second (off: an
+   authenticated caller's are the policy's), and `-auth-failures` failed
+   authentications a second (20, burst 200). A source past its failures
+   has every request refused, `limit.source` with a Retry-After, before
+   its credential is checked or its body read: its flood cannot be told
+   from its valid calls, and each failure (a token's signature) costs more
+   than a refusal. The source is the connection's address, or with
+   `-source-header` the last value of a header the proxy in front sets
+   (X-Forwarded-For). Behind a sidecar every connection is the sidecar's,
+   so the budgets are the pod's; set `-source-header` where the mesh sets
+   one. At most 65,536 sources are kept; past them, refilled ones are
+   forgotten, and new ones share one budget.
 2. **Frontend.** `ServeMux` method-and-path patterns select the dialect
    (`POST /v1/chat/completions`, `POST /v1/messages`, ...). The body is read
    into a pooled buffer with a size cap (`http.MaxBytesReader`). A
    `jsontext.Decoder` scan extracts the routing fields; it scans the complete
-   document and rejects duplicate members before forwarding; unknown fields
+   document and rejects duplicate members, and nesting deeper than 128
+   (`jsonscan.MaxDepth`: a provider's parser, Python's on a vLLM box, may
+   refuse or misread it), before forwarding; unknown fields
    are forwarded and logged by name, policy-relevant ones enforced
    (ADR 0037). Hook rewrites
    trigger policy and capability revalidation.

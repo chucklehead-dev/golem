@@ -72,7 +72,7 @@ var (
 func (r *Request) Scan(body []byte) error {
 	*r = Request{Model: r.Model[:0], N: 1}
 	hasModel, hasCompletionTokens := false, false
-	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
+	err := jsonscan.Request(body, func(name []byte, d *jsonscan.Decoder) error {
 		switch string(name) {
 		case "model":
 			v, span, err := d.ReadValue()

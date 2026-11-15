@@ -21,6 +21,7 @@ retry pointlessly and users wait through backoff before seeing why.
 | Situation | Status | Golem code (examples) | Retryable |
 |---|---|---|---|
 | Rate or concurrency limit; provider quota share full | 429 + `Retry-After` | `limit.rate`, `limit.concurrency`, `limit.provider_quota` | yes, after the delay |
+| Too many requests, or failed authentications, from one address (before authentication) | 429 + `Retry-After` | `limit.source` | yes, after the delay (a failed key or token: fix it first) |
 | Budget or cap reached by known spend (in `enforce` mode) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
 | Not authenticated (missing, unknown, expired, revoked key or token; a key of the other installation) | 401 | `auth.missing`, `auth.key_unknown`, `auth.key_expired`, `auth.key_revoked`, `auth.key_wrong_installation`, `auth.token_invalid`, `auth.token_expired` | no |
 | Authenticated, not allowed (model, scope, dialect, capture policy, provider storage); a standalone gateway reached from a web page or by a non-loopback host name | 403 | `authz.model_not_allowed`, `authz.scope_not_member`, `authz.provider_storage_forbidden`, `authz.origin_forbidden`, `authz.feature_forbidden` | no |

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -98,6 +99,46 @@ func FuzzObject(f *testing.F) {
 			if _, ok := m[n]; !ok {
 				t.Fatalf("Object saw %q, which encoding/json does not", n)
 			}
+		}
+	})
+}
+
+// TestRequestDepth: a request body nested MaxDepth deep is scanned, one
+// level more is refused, and brackets inside strings (escaped quotes too)
+// are not nesting.
+func TestRequestDepth(t *testing.T) {
+	nest := func(n int) []byte {
+		return []byte(`{"model":"m","x":` + strings.Repeat("[", n-1) + strings.Repeat("]", n-1) + `}`)
+	}
+	skip := func(_ []byte, d *Decoder) error { return d.SkipValue() }
+	if err := Request(nest(MaxDepth), skip); err != nil {
+		t.Fatalf("at MaxDepth: %v", err)
+	}
+	if err := Request(nest(MaxDepth+1), skip); err != ErrTooDeep {
+		t.Fatalf("past MaxDepth: %v", err)
+	}
+	inString := []byte(`{"model":"m","x":"` + strings.Repeat(`[{\"`, 500) + `"}`)
+	if err := Request(inString, skip); err != nil {
+		t.Fatalf("brackets in a string: %v", err)
+	}
+	// A string ending in an escaped backslash ends there: what follows nests.
+	after := []byte(`{"model":"m\\\\","x":` + strings.Repeat("[", MaxDepth) + strings.Repeat("]", MaxDepth) + `}`)
+	if err := Request(after, skip); err != ErrTooDeep {
+		t.Fatalf("nesting after an escaped backslash: %v", err)
+	}
+}
+
+func BenchmarkRequestDepth(b *testing.B) {
+	body := []byte(`{"model":"m","messages":[` + strings.Repeat(`{"role":"user","content":[{"type":"text","text":"hello [world] {x} \"quoted\""}]},`, 2000) + `{}]}`)
+	b.SetBytes(int64(len(body)))
+	b.Run("depth", func(b *testing.B) {
+		for b.Loop() {
+			shallow(body, MaxDepth)
+		}
+	})
+	b.Run("object", func(b *testing.B) {
+		for b.Loop() {
+			_ = Object(body, func(_ []byte, d *Decoder) error { return d.SkipValue() })
 		}
 	})
 }

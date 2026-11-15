@@ -175,6 +175,7 @@ func TestRefusals(t *testing.T) {
 		{"too large", `{"model":"claude","pad":"` + strings.Repeat("x", 100) + `"}`, 64, 413, "request.too_large"},
 		{"zero is the default cap, not none", `{"model":"gpt-9"}`, 0, 404, "route.unknown_model"},
 		{"over the default cap", `{"model":"claude","pad":"` + strings.Repeat("x", 32<<20) + `"}`, 0, 413, "request.too_large"},
+		{"nested too deep", `{"model":"claude","x":` + strings.Repeat("[", 200) + strings.Repeat("]", 200) + `}`, 1 << 20, 400, "request.invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := handler(AnthropicMessages, &stub{}, nil)
