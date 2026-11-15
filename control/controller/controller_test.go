@@ -220,8 +220,9 @@ func TestEntitlements(t *testing.T) {
 	alice := key.New(key.Live)
 	h := key.Hash(alice)
 	hash := hex.EncodeToString(h[:])
+	w.policy("team-a", "{models: [claude]}")
 	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
-		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude", "gone"}}}
+		d.Scopes = map[string]state.Scope{"team-a": {}}
 		d.Principals = map[string]state.Principal{"alice": {Kind: "user", Scopes: []string{"team-a"}}}
 		d.Keys = map[string]state.Key{hash: {Display: key.Display(alice), Owner: "alice", Scope: "team-a"}}
 		return nil
@@ -247,7 +248,7 @@ func TestEntitlements(t *testing.T) {
 		t.Fatalf("the gateway: %q, refused %q; want alice in team-a", who, refused)
 	}
 	if c, _ := w.gateway.Holder.Current(); strings.Join(c.Snapshot.Entitlements.Scopes[0].Models, ",") != "claude" {
-		t.Fatalf("scope models %v: a route that does not exist is dropped", c.Snapshot.Entitlements.Scopes[0].Models)
+		t.Fatalf("scope models %v: want its ScopePolicy's", c.Snapshot.Entitlements.Scopes[0].Models)
 	}
 
 	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
@@ -282,8 +283,9 @@ func TestGroupSync(t *testing.T) {
 	w.lead("r1")
 	g := &groupDir{users: []entrasync.User{{ID: "oid-alice", UPN: "alice@example.com", Enabled: true}}}
 	r1.Sync = &entrasync.Sync{State: r1.Elector.State, Directory: g, Now: r1.Now}
+	w.policy("team-a", "{models: [claude]}")
 	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
-		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude"}, Groups: []string{"g1"}}}
+		d.Scopes = map[string]state.Scope{"team-a": {Groups: []string{"g1"}}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -327,8 +329,10 @@ func TestKnownSpend(t *testing.T) {
 	r1 := w.replicas["r1"]
 	w.lead("r1")
 	r1.Spend = &spend.Job{Ledger: spendLedger{"team-a": 1_250_000}, Now: r1.Now}
+	w.policy("team-a", "{models: [claude]}")
+	w.policy("team-b", "{models: [claude]}")
 	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
-		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude"}}, "team-b": {Models: []string{"claude"}}}
+		d.Scopes = map[string]state.Scope{"team-a": {}, "team-b": {}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

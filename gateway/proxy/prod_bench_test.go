@@ -39,10 +39,14 @@ func BenchmarkProduction(b *testing.B) {
 			events := anthropicStream(200)
 			s := &stub{events: events}
 			h, _ := standaloneHandler(b, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude]}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes: [{name: team-a, models: [claude]}]
   keys: [{key: `+k+`, principal: alice, scope: team-a}]
 `, s)
 			var p telemetry.Providers

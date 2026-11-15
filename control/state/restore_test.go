@@ -18,7 +18,7 @@ func TestRestore(t *testing.T) {
 	ctx := t.Context()
 	if _, err := s.Update(ctx, func(d *Document) error {
 		d.Fence = &Fence{Holder: "r1", Epoch: 1}
-		d.Scopes["a"] = Scope{Models: []string{"claude"}, BudgetMicros: 5_000_000}
+		d.Scopes["a"] = Scope{Groups: []string{"g1"}}
 		d.Roles = []RoleBinding{{"alice", "manager", "a"}}
 		return put("p", 1)(d)
 	}); err != nil {
@@ -31,9 +31,9 @@ func TestRestore(t *testing.T) {
 		if err := put("p", 2)(d); err != nil {
 			return err
 		}
-		// Widened since the backup: a model, a higher budget, a new key, a
-		// new principal with a role.
-		d.Scopes["a"] = Scope{Models: []string{"claude", "gpt"}, BudgetMicros: 9_000_000}
+		// Widened since the backup: a group bound, a new key, a new
+		// principal with a role.
+		d.Scopes["a"] = Scope{Groups: []string{"g1", "g2"}}
 		d.Principals["eve"] = Principal{Kind: "user", Scopes: []string{"a"}}
 		d.Roles = append(d.Roles, RoleBinding{"eve", "manager", "a"})
 		d.Keys["h3"] = Key{Display: "glm_live_3", Owner: "eve", Scope: "a"}
@@ -58,8 +58,8 @@ func TestRestore(t *testing.T) {
 	switch {
 	case *d.Fence != (Fence{Holder: "r2", Epoch: 2}) || d.Publications["p"].Seq != 2:
 		t.Fatalf("fence %+v, record %+v: a restore keeps the current ones", d.Fence, d.Publications["p"])
-	case !slices.Equal(d.Scopes["a"].Models, []string{"claude"}) || d.Scopes["a"].BudgetMicros != 5_000_000:
-		t.Fatalf("scope a %+v: the model and budget added since are rolled back", d.Scopes["a"])
+	case !slices.Equal(d.Scopes["a"].Groups, []string{"g1"}):
+		t.Fatalf("scope a %+v: the group bound since is unbound", d.Scopes["a"])
 	case d.Keys["h2"].RevokedAt.IsZero() || d.Keys["h3"].RevokedAt.IsZero() || d.Keys["h4"].RevokedAt.IsZero():
 		t.Fatalf("keys %+v: one revoked since stays revoked, those minted since are revoked", d.Keys)
 	case !d.Keys["h1"].RevokedAt.IsZero():
@@ -71,8 +71,9 @@ func TestRestore(t *testing.T) {
 	case !slices.Equal(d.Revocations[:len(before.Revocations)], before.Revocations):
 		t.Fatal("the revocations were not kept")
 	}
-	if !contains(report.Withheld, "principal alice's membership of b") || !contains(report.Removed, "key glm_live_3") {
-		t.Fatalf("report %+v: want alice's membership of b withheld and the new key named", report)
+	if !contains(report.Withheld, "principal alice's membership of b") || !contains(report.Removed, "key glm_live_3") ||
+		!contains(report.Removed, "scope a's group g2 (added since the backup)") {
+		t.Fatalf("report %+v: want alice's membership of b withheld, and the new key and group named", report)
 	}
 	last := d.Audit[len(d.Audit)-1]
 	if last.Action != "state.restore" || last.Actor != "admin:ops" {
@@ -96,10 +97,11 @@ func contains(lines []string, sub string) bool {
 
 // TestRestoreNeverWidens: over random pairs of valid documents, a
 // restore's result passes every invariant against the current document and
-// grants nothing the current one does not: no membership, role, model,
-// storage or feature mode it lacks, no higher limit, no live key it does
-// not have live, no later expiry; and its fence and records are the
-// current ones.
+// grants nothing the current one does not: no scope, bound group,
+// membership or role it lacks, no live key it does not have live, no key
+// model it lacks, no later expiry; and its fence and records are the
+// current ones. (A scope's policy is config, not state: a restore cannot
+// touch it.)
 func TestRestoreNeverWidens(t *testing.T) {
 	for seed := range uint64(2000) {
 		r := rand.New(rand.NewPCG(seed, 1))
@@ -132,31 +134,13 @@ func narrower(cur, next *Document) error {
 	if next.Fence != cur.Fence && (next.Fence == nil || cur.Fence == nil || *next.Fence != *cur.Fence) || !maps.Equal(next.Publications, cur.Publications) {
 		return fmt.Errorf("the fence or records changed")
 	}
-	limit := func(v, def int64) int64 {
-		if v == 0 {
-			if def == 0 {
-				return 1 << 62
-			}
-			return def
-		}
-		return v
-	}
 	for id, s := range next.Scopes {
 		c, ok := cur.Scopes[id]
 		switch {
 		case !ok:
 			return fmt.Errorf("scope %s is not the current document's", id)
-		case !subset(s.Models, c.Models) || !subset(s.Groups, c.Groups):
-			return fmt.Errorf("scope %s: models or groups widened", id)
-		case limit(s.BudgetMicros, 0) > limit(c.BudgetMicros, 0),
-			limit(int64(s.PrincipalInFlight), DefaultPrincipalInFlight) > limit(int64(c.PrincipalInFlight), DefaultPrincipalInFlight),
-			limit(int64(s.ScopeInFlight), DefaultScopeInFlight) > limit(int64(c.ScopeInFlight), DefaultScopeInFlight),
-			limit(s.MaxOutputTokens, 0) > limit(c.MaxOutputTokens, 0), limit(s.MaxInputBytes, 0) > limit(c.MaxInputBytes, 0):
-			return fmt.Errorf("scope %s: a limit raised: %+v, now %+v", id, s, c)
-		case s.StorageAllowed && !c.StorageAllowed, !s.DeclaredWorstCaseCheck && c.DeclaredWorstCaseCheck:
-			return fmt.Errorf("scope %s: storage or the worst-case check widened", id)
-		case s.Features == "compatible" && c.Features != "compatible", s.Features == "" && c.Features == "restricted":
-			return fmt.Errorf("scope %s: feature mode %q, now %q", id, s.Features, c.Features)
+		case !subset(s.Groups, c.Groups):
+			return fmt.Errorf("scope %s: groups widened", id)
 		}
 	}
 	for id, p := range next.Principals {
@@ -213,14 +197,10 @@ func randomDoc(r *rand.Rand) *Document {
 		}
 		return out
 	}
-	limit := func() int64 { return []int64{0, 1, 4, 100}[r.IntN(4)] }
-	features := []string{"", "restricted", "compatible"}
 	d := &Document{Schema: Schema, Scopes: map[string]Scope{}, Principals: map[string]Principal{}, Keys: map[string]Key{},
 		Fence: &Fence{Holder: "r", Epoch: uint64(r.IntN(3) + 1)}, Publications: map[string]Record{"p": {Seq: uint64(r.IntN(5) + 1)}}}
 	for _, s := range pick([]string{"a", "b", "c"}) {
-		d.Scopes[s] = Scope{Groups: pick([]string{"g1", "g2"}), Models: pick([]string{"m1", "m2", "m3"}), BudgetMicros: limit(),
-			DeclaredWorstCaseCheck: r.IntN(2) == 0, PrincipalInFlight: int(limit()), ScopeInFlight: int(limit()),
-			StorageAllowed: r.IntN(2) == 0, MaxOutputTokens: limit(), MaxInputBytes: limit(), Features: features[r.IntN(3)]}
+		d.Scopes[s] = Scope{Groups: pick([]string{"g1", "g2"})}
 	}
 	scopes := slices.Sorted(maps.Keys(d.Scopes))
 	entra := []string{"", "oid-u", "oid-v"}

@@ -77,12 +77,13 @@ type Options struct {
 type Service struct {
 	State *state.Store
 	Now   func() time.Time
-	// Priced, if set, refuses scope id of d, the document as the change
-	// would write it, if its budget can reach a model the config prices
-	// not (golem-control's controller.CheckScope). A scope with a budget is
-	// charged by price, so one created over an unpriced model is refused
-	// here rather than published failing closed. nil: not checked.
-	Priced func(d *state.Document, id string) error
+	// ScopeModels, if set, is the route aliases scope's policy allows (its
+	// ScopePolicy's, in the config: golem-control's
+	// controller.ScopeModels), for refusing a key that names others: a key
+	// can only narrow its scope. ok false: the config cannot tell (none
+	// read yet), and nothing is checked; the gateway still intersects a
+	// key's models with its scope's. nil: not checked.
+	ScopeModels func(scope string) (models []string, ok bool)
 }
 
 func (s *Service) now() time.Time {
@@ -130,7 +131,7 @@ func sees(d *state.Document, c Caller, scope string) bool {
 	return manages(d, c, scope) || d.Principals[c.Principal].MemberOf(scope)
 }
 
-// visibleScope is scope's policy if it exists and c sees it. Otherwise it
+// visibleScope is scope's record if it exists and c sees it. Otherwise it
 // is not found, never denied: a scope's existence is not an outsider's to
 // learn.
 func visibleScope(d *state.Document, c Caller, scope string) (state.Scope, error) {
@@ -154,9 +155,11 @@ func requireManager(d *state.Document, c Caller, scope, what string) error {
 	return nil
 }
 
-// CreateScope creates a scope with its policy: admins only (a top-level
-// team; sub-teams and projects come with the scope tree).
-func (s *Service) CreateScope(ctx context.Context, c Caller, o Options, id string, policy state.Scope) error {
+// CreateScope creates a scope: admins only (a top-level team; sub-teams
+// and projects come with the scope tree). Its policy (models, budget,
+// limits) is its ScopePolicy's, in the config (ADR 0050): until one is
+// published the scope can call nothing.
+func (s *Service) CreateScope(ctx context.Context, c Caller, o Options, id string) error {
 	if !c.Admin {
 		return denied("only admins create top-level scopes")
 	}
@@ -170,12 +173,7 @@ func (s *Service) CreateScope(ctx context.Context, c Caller, o Options, id strin
 		if d.Scopes == nil {
 			d.Scopes = map[string]state.Scope{}
 		}
-		d.Scopes[id] = policy
-		if s.Priced != nil && policy.BudgetMicros != 0 {
-			if err := s.Priced(d, id); err != nil {
-				return invalid("scope.policy.models", "%v", err)
-			}
-		}
+		d.Scopes[id] = state.Scope{}
 		return nil
 	})
 }
@@ -377,8 +375,7 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 	h := key.Hash(plain)
 	m := Minted{Key: plain, Hash: hex.EncodeToString(h[:]), Display: key.Display(plain)}
 	err := s.apply(ctx, c, o, "key.mint", m.Display, map[string]string{"owner": r.Owner, "scope": r.Scope}, func(d *state.Document) error {
-		sc, err := visibleScope(d, c, r.Scope)
-		if err != nil {
+		if _, err := visibleScope(d, c, r.Scope); err != nil {
 			return err
 		}
 		owner, ok := d.Principals[r.Owner]
@@ -391,10 +388,8 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 		if !mayMint(d, c, r, owner) {
 			return denied("a member mints its own keys; a scope's managers mint its services' keys")
 		}
-		for i, model := range r.Models {
-			if !slices.Contains(sc.Models, model) {
-				return invalid(fmt.Sprintf("key.models[%d]", i), "scope %s does not allow %q: a key can only narrow its scope", r.Scope, model)
-			}
+		if err := s.narrows(r); err != nil {
+			return err
 		}
 		expires, err := keyExpiry(owner, r.Expires, s.now())
 		if err != nil {
@@ -411,6 +406,24 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 		return Minted{}, err
 	}
 	return m, nil
+}
+
+// narrows refuses r if it names a model its scope's policy does not
+// allow, when the config can tell.
+func (s *Service) narrows(r KeyRequest) error {
+	if s.ScopeModels == nil || len(r.Models) == 0 {
+		return nil
+	}
+	allowed, ok := s.ScopeModels(r.Scope)
+	if !ok {
+		return nil
+	}
+	for i, model := range r.Models {
+		if !slices.Contains(allowed, model) {
+			return invalid(fmt.Sprintf("key.models[%d]", i), "scope %s does not allow %q: a key can only narrow its scope's models, its ScopePolicy's spec.models in the config", r.Scope, model)
+		}
+	}
+	return nil
 }
 
 // mayMint reports whether c may mint r for owner: admins any key, a
@@ -489,10 +502,11 @@ func (s *Service) Whoami(ctx context.Context, c Caller) (Me, error) {
 	return me, nil
 }
 
-// ScopeView is a scope as its members see it.
+// ScopeView is a scope as its members see it: its policy is its
+// ScopePolicy's, read in the config.
 type ScopeView struct {
 	ID       string
-	Policy   state.Scope
+	Groups   []string // the Entra groups bound to it
 	Members  []string
 	Managers []string
 }
@@ -512,8 +526,8 @@ func (s *Service) ListScopes(ctx context.Context, c Caller) ([]string, error) {
 	return ids, nil
 }
 
-// GetScope is a scope's policy, members and managers: for its members,
-// its managers and admins.
+// GetScope is a scope's bound groups, members and managers: for its
+// members, its managers and admins.
 func (s *Service) GetScope(ctx context.Context, c Caller, id string) (ScopeView, error) {
 	d, err := s.read(ctx)
 	if err != nil {
@@ -523,7 +537,7 @@ func (s *Service) GetScope(ctx context.Context, c Caller, id string) (ScopeView,
 	if err != nil {
 		return ScopeView{}, err
 	}
-	v := ScopeView{ID: id, Policy: sc}
+	v := ScopeView{ID: id, Groups: sc.Groups}
 	for _, pid := range slices.Sorted(maps.Keys(d.Principals)) {
 		if d.Principals[pid].MemberOf(id) {
 			v.Members = append(v.Members, pid)

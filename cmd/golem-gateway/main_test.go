@@ -105,7 +105,7 @@ func newPoolFixture(t *testing.T) *poolFixture {
 	st := &state.Store{Bucket: bkt}
 	if _, err := st.Update(ctx, func(d *state.Document) error {
 		d.Fence = &state.Fence{Holder: "r1", Epoch: 1}
-		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude"}}}
+		d.Scopes = map[string]state.Scope{"team-a": {}}
 		d.Principals = map[string]state.Principal{"alice": {Kind: "user", Scopes: []string{"team-a"}}}
 		d.Keys = map[string]state.Key{hex.EncodeToString(h[:]): {Display: key.Display(alice), Owner: "alice", Scope: "team-a"}}
 		return nil
@@ -127,6 +127,11 @@ spec:
 kind: ModelRoute
 metadata: {name: claude}
 spec: {alias: claude, pool: [{backend: anthropic, deployment: sonnet}]}
+`), 0o600)
+	os.WriteFile(filepath.Join(cfg, "team-a.yaml"), []byte(`apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude]}
 `), 0o600)
 	fsRoot, _ := os.OpenRoot(cfg)
 	objs, err := v1.DecodeFS(fsRoot.FS())

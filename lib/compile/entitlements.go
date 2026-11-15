@@ -19,13 +19,19 @@ const (
 	DefaultScopeInFlight     = 16
 )
 
-// entitlements compiles a LocalIdentity (standalone only). Without one, a
-// standalone snapshot is implicit: one local principal, every route. A
-// published snapshot's entitlements come from the state document, so here
-// they are empty and any LocalIdentity is refused.
-func entitlements(objs v1.Objects, o Options, aliases map[string]string, add adder) snapshot.Entitlements {
+// entitlements compiles a LocalIdentity (standalone only), its scopes the
+// config's ScopePolicies: with no state document, a scope exists by its
+// policy. Without a LocalIdentity, a standalone snapshot is implicit: one
+// local principal, every route, and a ScopePolicy would apply to no one,
+// so it is refused. A published snapshot's entitlements come from the
+// state document, so here they are empty and any LocalIdentity is refused.
+func entitlements(objs v1.Objects, o Options, policies map[string]compiledPolicy, add adder) snapshot.Entitlements {
 	var e snapshot.Entitlements
 	switch {
+	case len(objs.Identities) == 0 && o.Standalone && len(objs.Policies) > 0:
+		add(policyName(objs.Policies[0]), "kind",
+			"a standalone config's ScopePolicies are the scopes of a LocalIdentity's keys and members, and there is no LocalIdentity: add one, or remove the ScopePolicies to run as the implicit local principal (ADR 0023)")
+		return e
 	case len(objs.Identities) == 0:
 		e.Implicit = o.Standalone
 		return e
@@ -44,7 +50,11 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 	src := objs.Identities[0]
 	obj := identityName(src)
 	spec := src.Object.Spec
-	scopes := localScopes(obj, spec.Scopes, aliases, add)
+	scopes := map[string]*snapshot.Scope{}
+	for id, p := range policies {
+		sc := p.scope
+		scopes[id] = &sc
+	}
 	e.Keys, e.KeyOwners = localKeys(obj, spec.Keys, scopes, add)
 	// One namespace for users and services: gateway/auth finds both by
 	// their Entra ID, so the same ID twice would shadow one of them.
@@ -61,32 +71,6 @@ func entitlements(objs v1.Objects, o Options, aliases map[string]string, add add
 // identityName names a LocalIdentity in a problem.
 func identityName(src v1.Source[v1.LocalIdentity]) string {
 	return objectName("LocalIdentity", src.Object.Metadata.Name, src.Where())
-}
-
-// localScopes validates a LocalIdentity's scopes, by name: a scope's name,
-// its policy (scopePolicy, every problem) and any alias no route has.
-func localScopes(obj string, in []v1.LocalScope, aliases map[string]string, add adder) map[string]*snapshot.Scope {
-	scopes := map[string]*snapshot.Scope{}
-	for i, sc := range in {
-		at := fmt.Sprintf("spec.scopes[%d]", i)
-		switch {
-		case sc.Name == "":
-			add(obj, at+".name", "required")
-			continue
-		case scopes[sc.Name] != nil:
-			add(obj, at+".name", "another scope is named %q", sc.Name)
-			continue
-		}
-		for j, m := range sc.Models {
-			if _, ok := aliases[m]; !ok {
-				add(obj, fmt.Sprintf("%s.models[%d]", at, j), "no ModelRoute has alias %q", m)
-			}
-		}
-		scope := scopePolicy(obj, at, localPolicy(sc), add)
-		scope.ID, scope.Models = sc.Name, slices.Sorted(slices.Values(sc.Models))
-		scopes[sc.Name] = &scope
-	}
-	return scopes
 }
 
 // localKeys validates a LocalIdentity's dev keys and compiles them to
@@ -112,7 +96,7 @@ func localKeys(obj string, in []v1.LocalKey, scopes map[string]*snapshot.Scope, 
 		}
 		sc := scopes[k.Scope]
 		if sc == nil {
-			add(obj, at+".scope", "no scope named %q", k.Scope)
+			add(obj, at+".scope", "no scope named %q: a standalone scope is a ScopePolicy of that name", k.Scope)
 			continue
 		}
 		for j, m := range k.Models {
@@ -171,7 +155,7 @@ func localMembers(obj, kind string, ms []v1.LocalMember, scopes map[string]*snap
 		seen[m.Entra] = true
 		for j, sc := range m.Scopes {
 			if scopes[sc] == nil {
-				add(obj, fmt.Sprintf("%s.scopes[%d]", at, j), "no scope named %q", sc)
+				add(obj, fmt.Sprintf("%s.scopes[%d]", at, j), "no scope named %q: a standalone scope is a ScopePolicy of that name", sc)
 			}
 		}
 		def := cmp.Or(m.Default, m.Scopes[0])

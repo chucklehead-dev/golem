@@ -23,10 +23,14 @@ import (
 func TestUncertainUpstream(t *testing.T) {
 	alice := key.New(key.Dev)
 	cfg := `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude], inFlight: {principal: 4}}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes: [{name: team-a, models: [claude], inFlight: {principal: 4}}]
   keys: [{key: ` + alice + `, principal: alice, scope: team-a}]
 `
 	body := `{"model":"claude","max_tokens":100,"stream":true,"messages":[]}`

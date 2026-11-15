@@ -69,10 +69,14 @@ func (t *account) Waived() bool   { return false }
 func TestAdmitterContract(t *testing.T) {
 	alice := key.New(key.Dev)
 	cfg := `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude]}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes: [{name: team-a, models: [claude]}]
   keys: [{key: ` + alice + `, principal: alice, scope: team-a}]
 `
 	type served struct {

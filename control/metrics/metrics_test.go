@@ -201,8 +201,8 @@ func TestMetrics(t *testing.T) {
 			t.Errorf("%s{%s} = %v, want %v", IngestionBehind, c.site, v, c.behind)
 		}
 	}
-	if v := value(t, got, Unpriced); v != 0 {
-		t.Errorf("%s = %v", Unpriced, v)
+	if v := value(t, got, Unmatched); v != 0 {
+		t.Errorf("%s = %v", Unmatched, v)
 	}
 	if v := value(t, got, ConfigRenewing); v != 0 {
 		t.Errorf("%s = %v", ConfigRenewing, v)

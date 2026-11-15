@@ -6,7 +6,6 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/chucklehead-dev/golem/control/service"
-	"github.com/chucklehead-dev/golem/control/state"
 	orgv1 "github.com/chucklehead-dev/golem/gen/golem/org/v1"
 )
 
@@ -15,7 +14,7 @@ type org struct{ *Server }
 
 func (o org) CreateScope(ctx context.Context, r *connect.Request[orgv1.CreateScopeRequest]) (*connect.Response[orgv1.CreateScopeResponse], error) {
 	m := r.Msg
-	err := o.Service.CreateScope(ctx, caller(ctx), options(m.ValidateOnly), m.Id, policyToState(m.Policy))
+	err := o.Service.CreateScope(ctx, caller(ctx), options(m.ValidateOnly), m.Id)
 	return reply(o.Server, &orgv1.CreateScopeResponse{}, err)
 }
 
@@ -63,37 +62,5 @@ func (o org) ListScopes(ctx context.Context, _ *connect.Request[orgv1.ListScopes
 
 func (o org) GetScope(ctx context.Context, r *connect.Request[orgv1.GetScopeRequest]) (*connect.Response[orgv1.GetScopeResponse], error) {
 	v, err := o.Service.GetScope(ctx, caller(ctx), r.Msg.Id)
-	return reply(o.Server, &orgv1.GetScopeResponse{Id: v.ID, Policy: policyFromState(v.Policy),
-		Members: v.Members, Managers: v.Managers, Groups: v.Policy.Groups}, err)
-}
-
-// policyToState is a scope's policy as the state stores it; a request
-// with no policy is the zero policy.
-func policyToState(p *orgv1.ScopePolicy) state.Scope {
-	return state.Scope{
-		Models:                 p.GetModels(),
-		BudgetMicros:           p.GetBudgetMicros(),
-		DeclaredWorstCaseCheck: p.GetDeclaredWorstCaseCheck(),
-		PrincipalInFlight:      int(p.GetPrincipalInFlight()),
-		ScopeInFlight:          int(p.GetScopeInFlight()),
-		StorageAllowed:         p.GetStorageAllowed(),
-		MaxOutputTokens:        p.GetMaxOutputTokens(),
-		MaxInputBytes:          p.GetMaxInputBytes(),
-		Features:               p.GetFeatures(),
-	}
-}
-
-// policyFromState is the stored policy as the API shows it.
-func policyFromState(p state.Scope) *orgv1.ScopePolicy {
-	return &orgv1.ScopePolicy{
-		Models:                 p.Models,
-		BudgetMicros:           p.BudgetMicros,
-		DeclaredWorstCaseCheck: p.DeclaredWorstCaseCheck,
-		PrincipalInFlight:      int32(p.PrincipalInFlight),
-		ScopeInFlight:          int32(p.ScopeInFlight),
-		StorageAllowed:         p.StorageAllowed,
-		MaxOutputTokens:        p.MaxOutputTokens,
-		MaxInputBytes:          p.MaxInputBytes,
-		Features:               p.Features,
-	}
+	return reply(o.Server, &orgv1.GetScopeResponse{Id: v.ID, Members: v.Members, Managers: v.Managers, Groups: v.Groups}, err)
 }

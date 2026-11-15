@@ -18,13 +18,24 @@ func TestPolicy(t *testing.T) {
 	checked, open, capped := key.New(key.Dev), key.New(key.Dev), key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)}
 	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: checked}
+spec: {models: [claude], declaredWorstCaseCheck: true, budgetMicros: 1000000000000}
+---
+apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: open}
+spec: {models: [claude], providerStorage: allowed}
+---
+apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: capped}
+spec: {models: [claude], maxOutputTokens: 1000, maxInputBytes: 300}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes:
-  - {name: checked, models: [claude], declaredWorstCaseCheck: true, budgetMicros: 1000000000000}
-  - {name: open, models: [claude], providerStorage: allowed}
-  - {name: capped, models: [claude], maxOutputTokens: 1000, maxInputBytes: 300}
   keys:
   - {key: `+checked+`, principal: alice, scope: checked}
   - {key: `+open+`, principal: bob, scope: open}

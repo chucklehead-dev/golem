@@ -72,7 +72,7 @@ func TestFailingPoolBacksOff(t *testing.T) {
 	// A change to publish tries the failing pool at once, whatever its wait.
 	before := attempts()
 	if _, err := st.Update(t.Context(), func(d *state.Document) error {
-		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude"}}}
+		d.Scopes = map[string]state.Scope{"team-a": {Groups: []string{"g1"}}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

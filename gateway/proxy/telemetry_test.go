@@ -21,10 +21,14 @@ func TestLedgerRows(t *testing.T) {
 	alice := key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)}
 	h, lim := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude], budgetMicros: 100000000}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes: [{name: team-a, models: [claude], budgetMicros: 100000000}]
   keys: [{key: `+alice+`, principal: alice, scope: team-a}]
 `, s)
 	var rows bytes.Buffer
@@ -70,10 +74,14 @@ func TestPeriodIsTheStart(t *testing.T) {
 	alice := key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)}
 	h, lim := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude]}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes: [{name: team-a, models: [claude]}]
   keys: [{key: `+alice+`, principal: alice, scope: team-a}]
 `, s)
 	lim.Now = func() time.Time { return time.Now().AddDate(0, 1, 0) }

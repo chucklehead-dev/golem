@@ -33,19 +33,19 @@ type Options struct {
 	Now        time.Time     // the snapshot's IssuedAt, and its lease's start
 	Lease      time.Duration // zero: no lease (standalone only)
 	// Entitlements gives a published snapshot's entitlements (the state
-	// document's, control/state), told the route aliases that exist; nil:
-	// none, a snapshot that authorizes no one.
+	// document's, control/state), told the route aliases that exist: its
+	// scopes are IDs (and known spend), which the compile joins with the
+	// config's ScopePolicies by name. nil: none, a snapshot that authorizes
+	// no one, and the ScopePolicies are only checked (golemctl config
+	// validate, which has no state).
 	Entitlements func(aliases []string) snapshot.Entitlements
-	// Unpriced, if set, is told of each alias that a scope from
-	// Entitlements, one with a budget, can reach though no PriceList prices
-	// a model it routes to; the scope is published without that alias
-	// rather than the compile failing. The scope fails closed: its members
-	// cannot call what it could not be charged for, and every other scope
-	// and pool is published as usual. A problem in the state's entitlements
-	// is not the config's, so it must not stop every pool's publication
-	// (and with it every gateway's authorization). nil: such a scope is a
-	// problem, as a LocalIdentity's always is.
-	Unpriced func(Problem)
+	// Unmatched, if set, is told of each scope of Entitlements' that no
+	// ScopePolicy names (published as DefaultScope: it can call nothing),
+	// and of each ScopePolicy whose scope the state has not (left out). The
+	// publication goes on: the state and the config change apart, so a
+	// mismatch is reported, not fatal to every pool's publication (and with
+	// it every gateway's authorization). nil: not reported.
+	Unmatched func(Problem)
 }
 
 // Problem is one validation failure.
@@ -89,19 +89,16 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 	}
 	backends, cat := compileBackends(objs.Backends, o.Standalone, add)
 	routes, aliases := compileRoutes(objs.Routes, cat, add)
+	policies := compilePolicies(objs.Policies, aliases, add)
 	// entitlements also refuses a LocalIdentity outside standalone mode, so
 	// it runs even when the state document's entitlements replace its own.
-	ents := entitlements(objs, o, aliases, add)
-	fromState := !o.Standalone && o.Entitlements != nil
-	if fromState {
+	ents := entitlements(objs, o, policies, add)
+	if !o.Standalone && o.Entitlements != nil {
 		ents = o.Entitlements(slices.Sorted(maps.Keys(aliases)))
+		ents.Scopes = join(ents.Scopes, policies, o.unmatched)
 	}
 	currency, prices := priceList(objs, add)
-	if fromState && o.Unpriced != nil {
-		ents.Scopes = withoutUnpriced(ents.Scopes, routes, cat, prices, o.Unpriced)
-	} else {
-		checkPriced(ents.Scopes, routes, cat, prices, add)
-	}
+	checkPriced(policies, routes, cat, prices, add)
 	if len(ps) > 0 {
 		return nil, ps
 	}
@@ -118,13 +115,14 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 }
 
 // Renew is a published snapshot rebuilt as a new publication: its config
-// part (backends, routes, currency and prices, which Compile built from
-// the config alone) kept as published, and o's sequence, time, lease and
-// entitlements, checked for unpriced scopes as Compile checks them. A
-// published snapshot's entitlements are the state's alone (Compile refuses
-// a LocalIdentity outside standalone mode), so nothing of the config is
-// lost: this is what golem-control renews from when no config in its
-// directory has compiled since it started (a restart over a broken edit).
+// part (backends, routes, currency and prices, and its scopes' policies,
+// which Compile built from the config) kept as published, and o's
+// sequence, time, lease and entitlements, the state's scopes joined with
+// those policies as Compile joins them with the ScopePolicies. A scope the
+// state has created since is DefaultScope's (the snapshot keeps no
+// policy it did not publish). This is what golem-control renews from when
+// no config in its directory has compiled since it started (a restart
+// over a broken edit).
 func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
 	var ps Problems
 	add := func(obj, path, msg string, args ...any) {
@@ -136,10 +134,6 @@ func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
 	if prev.Entitlements.Implicit || prev.ValidUntil.IsZero() {
 		add("snapshot", "entitlements", "publication %d is a standalone snapshot, not one golem-control published", prev.PublishSeq)
 	}
-	cat := catalog{dialect: map[string]string{}, models: map[target][]string{}}
-	for _, b := range prev.Backends {
-		cat.add(b)
-	}
 	var aliases []string
 	for _, r := range prev.Routes {
 		aliases = append(aliases, r.Alias)
@@ -148,11 +142,7 @@ func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
 	var ents snapshot.Entitlements
 	if o.Entitlements != nil {
 		ents = o.Entitlements(aliases)
-	}
-	if o.Unpriced != nil {
-		ents.Scopes = withoutUnpriced(ents.Scopes, prev.Routes, cat, prev.Prices, o.Unpriced)
-	} else {
-		checkPriced(ents.Scopes, prev.Routes, cat, prev.Prices, add)
+		ents.Scopes = join(ents.Scopes, policiesOf(prev.Entitlements.Scopes), o.unmatched)
 	}
 	if len(ps) > 0 {
 		return nil, ps
@@ -322,49 +312,19 @@ func pool(obj string, members []v1.PoolMember, cat catalog, add adder) (dialect 
 	return dialect, out
 }
 
-// checkPriced refuses a scope with a budget that can reach an unpriced
-// model: a scope with a budget is charged by price, so every model it can
-// reach needs one, or its budget could never be spent (contracts.md §4).
-func checkPriced(scopes []snapshot.Scope, routes []snapshot.Route, cat catalog, prices []snapshot.Price, add adder) {
-	unpriced(scopes, routes, cat, prices, func(sc snapshot.Scope, alias, model string) {
-		add("scope "+sc.ID, "models", "%s", unpricedMsg(alias, model))
-	})
-}
-
-func unpricedMsg(alias, model string) string {
-	return fmt.Sprintf("alias %q reaches model %q, which no PriceList prices: the scope's budget could not be charged", alias, model)
-}
-
-// withoutUnpriced is scopes with each alias that checkPriced would refuse
-// taken out of its scope's models, report told of each once. A key that
-// narrows its scope to such an alias is left as it is: the gateway
-// intersects a key's models with its scope's, so it can call nothing.
-func withoutUnpriced(scopes []snapshot.Scope, routes []snapshot.Route, cat catalog, prices []snapshot.Price, report func(Problem)) []snapshot.Scope {
-	drop := map[string]map[string]bool{} // scope to aliases
-	unpriced(scopes, routes, cat, prices, func(sc snapshot.Scope, alias, model string) {
-		if drop[sc.ID] == nil {
-			drop[sc.ID] = map[string]bool{}
-		}
-		if !drop[sc.ID][alias] {
-			report(Problem{Object: "scope " + sc.ID, Path: "models", Msg: unpricedMsg(alias, model)})
-		}
-		drop[sc.ID][alias] = true
-	})
-	if len(drop) == 0 {
-		return scopes
+// unmatched reports p to o.Unmatched, if set.
+func (o Options) unmatched(p Problem) {
+	if o.Unmatched != nil {
+		o.Unmatched(p)
 	}
-	out := slices.Clone(scopes)
-	for i, sc := range out {
-		if d := drop[sc.ID]; d != nil {
-			out[i].Models = slices.DeleteFunc(slices.Clone(sc.Models), func(a string) bool { return d[a] })
-		}
-	}
-	return out
 }
 
-// unpriced calls bad with each alias of a scope with a budget that reaches
-// a model no PriceList prices, and that model.
-func unpriced(scopes []snapshot.Scope, routes []snapshot.Route, cat catalog, prices []snapshot.Price, bad func(sc snapshot.Scope, alias, model string)) {
+// checkPriced refuses a ScopePolicy with a budget that can reach an
+// unpriced model: a scope with a budget is charged by price, so every
+// model it can reach needs one, or its budget could never be spent
+// (contracts.md §4). Both are config, so this is the config's problem,
+// found by golemctl config validate before it is merged.
+func checkPriced(policies map[string]compiledPolicy, routes []snapshot.Route, cat catalog, prices []snapshot.Price, add adder) {
 	priced := map[string]bool{}
 	for _, p := range prices {
 		priced[p.Model] = true
@@ -375,14 +335,15 @@ func unpriced(scopes []snapshot.Scope, routes []snapshot.Route, cat catalog, pri
 			modelsOf[r.Alias] = append(modelsOf[r.Alias], cat.models[target{m.Backend, m.Deployment}]...)
 		}
 	}
-	for _, sc := range scopes {
-		if sc.BudgetMicros == 0 {
+	for _, id := range slices.Sorted(maps.Keys(policies)) {
+		p := policies[id]
+		if p.scope.BudgetMicros == 0 {
 			continue
 		}
-		for _, a := range sc.Models {
+		for _, a := range p.scope.Models {
 			for _, m := range modelsOf[a] {
 				if !priced[m] {
-					bad(sc, a, m)
+					add(p.obj, "spec.models", "alias %q reaches model %q, which no PriceList prices: the scope's budget could not be charged; price the model in a PriceList, or remove the alias", a, m)
 				}
 			}
 		}

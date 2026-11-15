@@ -131,10 +131,14 @@ metadata: {name: gpt}
 spec: {alias: gpt, pool: [{backend: openai, deployment: gpt}]}
 ---
 apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude, gpt]}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes: [{name: team-a, models: [claude, gpt]}]
   keys: [{key: KEY, principal: alice, scope: team-a}]
 `, "URL", providerURL)
 	cfg = strings.ReplaceAll(cfg, "KEY", testKey)

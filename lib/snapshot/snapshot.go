@@ -83,12 +83,18 @@ type Member struct {
 
 // Scope is a scope's rights and limits for the period.
 type Scope struct {
-	ID                     string   `json:"id"`
-	Models                 []string `json:"models"` // aliases its members may call
-	BudgetMicros           int64    `json:"budgetMicros,omitempty"`
-	DeclaredWorstCaseCheck bool     `json:"declaredWorstCaseCheck,omitempty"` // ADR 0044
-	PrincipalInFlight      int      `json:"principalInFlight"`
-	ScopeInFlight          int      `json:"scopeInFlight"`
+	ID           string   `json:"id"`
+	Models       []string `json:"models"` // aliases its members may call
+	BudgetMicros int64    `json:"budgetMicros,omitempty"`
+	// BudgetMode is what the budget does at admission (PRD §9.1, ADR 0050):
+	// "observe" (admitted, the ledger row marked over budget), "warn"
+	// (admitted and marked, with a golem-warning header) or "enforce"
+	// (refused). The compiler sets it for every scope with a budget; a
+	// gateway reads any other value as enforce, failing closed.
+	BudgetMode             string `json:"budgetMode,omitempty"`
+	DeclaredWorstCaseCheck bool   `json:"declaredWorstCaseCheck,omitempty"` // ADR 0044
+	PrincipalInFlight      int    `json:"principalInFlight"`
+	ScopeInFlight          int    `json:"scopeInFlight"`
 	// The scope's request policy: provider-side storage allowed (ADR 0027),
 	// and ceilings on output tokens asked for and on input size (ADR 0038;
 	// zero is none).

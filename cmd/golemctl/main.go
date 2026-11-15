@@ -4,7 +4,7 @@
 //
 //	golemctl config validate [--standalone] ./config
 //	golemctl login --tenant <id> --client-id <id> --api https://golem-control.example
-//	golemctl scopes create team-a --models claude,gpt
+//	golemctl scopes create team-a
 //	golemctl members add team-a alice --kind user --entra <oid>
 //	golemctl keys create --scope team-a --expires 30d
 //
@@ -42,7 +42,9 @@ const usage = `usage:
   golemctl scopes list
   golemctl scopes get <id>
   golemctl keys list [--scope <scope>]
-  golemctl scopes create <id> --models a,b [--budget-micros n] [--dry-run]
+  golemctl scopes create <id> [--dry-run]
+      Creates a scope; its policy (models, budget, limits) is its ScopePolicy,
+      changed by a pull request to the config repository.
   golemctl members add <scope> <principal> --kind user|service [--entra <id>] [--dry-run]
   golemctl members remove <scope> <principal> [--dry-run]
   golemctl groups bind <scope> <entra-group-id> [--dry-run]

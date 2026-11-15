@@ -3,7 +3,9 @@
 // Source: golem/org/v1/org.proto
 
 // The org API (architecture.md §3): scopes, memberships and role
-// bindings. Authorization is the service layer's (org-model.md §2).
+// bindings. Authorization is the service layer's (org-model.md §2). A
+// scope's policy (models, budget, limits) is not here: it is config, a
+// ScopePolicy CRD changed by a GitOps pull request (ADR 0050).
 package orgv1connect
 
 import (
@@ -57,7 +59,8 @@ const (
 
 // OrgServiceClient is a client for the golem.org.v1.OrgService service.
 type OrgServiceClient interface {
-	// Creates a top-level scope: admins.
+	// Creates a top-level scope: admins. It can call nothing until its
+	// ScopePolicy, named by its ID, is in the config.
 	CreateScope(context.Context, *connect.Request[v1.CreateScopeRequest]) (*connect.Response[v1.CreateScopeResponse], error)
 	// Adds a member: the scope's managers, or admins. A manager adds a
 	// principal that exists or creates a service that uses keys; only an
@@ -80,8 +83,8 @@ type OrgServiceClient interface {
 	// The scopes the caller may read: its own and those it manages; every
 	// scope for admins.
 	ListScopes(context.Context, *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error)
-	// A scope's policy, members and managers: for its members, its managers
-	// and admins; not found for anyone else.
+	// A scope's members, managers and bound groups: for its members, its
+	// managers and admins; not found for anyone else.
 	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
 }
 
@@ -213,7 +216,8 @@ func (c *orgServiceClient) GetScope(ctx context.Context, req *connect.Request[v1
 
 // OrgServiceHandler is an implementation of the golem.org.v1.OrgService service.
 type OrgServiceHandler interface {
-	// Creates a top-level scope: admins.
+	// Creates a top-level scope: admins. It can call nothing until its
+	// ScopePolicy, named by its ID, is in the config.
 	CreateScope(context.Context, *connect.Request[v1.CreateScopeRequest]) (*connect.Response[v1.CreateScopeResponse], error)
 	// Adds a member: the scope's managers, or admins. A manager adds a
 	// principal that exists or creates a service that uses keys; only an
@@ -236,8 +240,8 @@ type OrgServiceHandler interface {
 	// The scopes the caller may read: its own and those it manages; every
 	// scope for admins.
 	ListScopes(context.Context, *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error)
-	// A scope's policy, members and managers: for its members, its managers
-	// and admins; not found for anyone else.
+	// A scope's members, managers and bound groups: for its members, its
+	// managers and admins; not found for anyone else.
 	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
 }
 

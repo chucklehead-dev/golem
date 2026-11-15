@@ -87,7 +87,7 @@ func TestPubkey(t *testing.T) {
 }
 
 // TestRestoreCommand: a dry run shows what a restore would do and writes
-// nothing; -apply writes it, and a scope's model added since the backup
+// nothing; -apply writes it, and a group bound to a scope since the backup
 // is gone.
 func TestRestoreCommand(t *testing.T) {
 	dir := t.TempDir()
@@ -98,7 +98,7 @@ func TestRestoreCommand(t *testing.T) {
 	st := &state.Store{Bucket: b}
 	ctx := t.Context()
 	if _, err := st.Update(ctx, func(d *state.Document) error {
-		d.Scopes = map[string]state.Scope{"a": {Models: []string{"claude"}}}
+		d.Scopes = map[string]state.Scope{"a": {Groups: []string{"g1"}}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestRestoreCommand(t *testing.T) {
 	backup := filepath.Join(t.TempDir(), "backup.json")
 	os.WriteFile(backup, raw, 0o600)
 	if _, err := st.Update(ctx, func(d *state.Document) error {
-		d.Scopes["a"] = state.Scope{Models: []string{"claude", "gpt"}}
+		d.Scopes["a"] = state.Scope{Groups: []string{"g1", "g2"}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -126,15 +126,15 @@ func TestRestoreCommand(t *testing.T) {
 	if err := restore(ctx, &out, []string{"-bucket", dir, "-from", backup, "-actor", "ops"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "scope a's model gpt") || !strings.Contains(out.String(), "nothing written") || len(read().Scopes["a"].Models) != 2 {
+	if !strings.Contains(out.String(), "scope a's group g2") || !strings.Contains(out.String(), "nothing written") || len(read().Scopes["a"].Groups) != 2 {
 		t.Fatalf("dry run:\n%s", out.String())
 	}
 	out.Reset()
 	if err := restore(ctx, &out, []string{"-bucket", dir, "-from", backup, "-actor", "ops", "-apply"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := read().Scopes["a"].Models; len(got) != 1 {
-		t.Fatalf("after -apply, scope a's models %v:\n%s", got, out.String())
+	if got := read().Scopes["a"].Groups; len(got) != 1 {
+		t.Fatalf("after -apply, scope a's groups %v:\n%s", got, out.String())
 	}
 	if err := restore(ctx, &out, []string{"-bucket", dir, "-from", backup}); err == nil {
 		t.Fatal("a restore with no actor")
