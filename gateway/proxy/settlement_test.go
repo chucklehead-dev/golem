@@ -13,6 +13,7 @@ func (*untilTicket) Complete(context.Context, int64)                  {}
 func (t *untilTicket) Cancel(_ context.Context, _ int64, u time.Time) { t.until = u }
 func (*untilTicket) Period() string                                   { return "" }
 func (*untilTicket) Waived() bool                                     { return false }
+func (*untilTicket) OverBudget() (bool, int64)                        { return false, 0 }
 
 // TestTailClampedToDeadline: a cancelled call's slot is held for the
 // provider's tail, but never past the call's own deadline (the provider

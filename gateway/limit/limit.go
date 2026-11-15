@@ -135,8 +135,10 @@ type Ticket struct {
 	call   Call
 	period string
 	waived bool
-	ended  bool // Complete or Cancel has run (under l.mu)
-	freed  bool // its slot is freed (under l.mu)
+	over   bool  // admitted over the budget, in a mode that admits one
+	known  int64 // the known spend admission checked
+	ended  bool  // Complete or Cancel has run (under l.mu)
+	freed  bool  // its slot is freed (under l.mu)
 }
 
 // claimEnd claims the ticket's one end: false if Complete or Cancel has
@@ -158,6 +160,11 @@ func (t *Ticket) Waived() bool { return t.waived }
 
 // Period is the budget period the call is counted in: its ledger row's.
 func (t *Ticket) Period() string { return t.period }
+
+// OverBudget reports whether the call was admitted over its scope's
+// budget, in a mode that admits one (warn, observe): what enforce would
+// have refused. known is the known spend admission checked.
+func (t *Ticket) OverBudget() (over bool, known int64) { return t.over, t.known }
 
 func (l *Limiter) now() time.Time {
 	if l.Now != nil {
@@ -194,12 +201,17 @@ func (l *Limiter) snapshotFor(scope, period string) Known {
 // budget, then the slots. While it is not, this gateway's own counts and its
 // last known spend decide, and the call is a waiver of the bound (ADR 0041
 // §7.3).
+//
+// Only an enforced budget refuses (c.BudgetMode): under warn or observe
+// the store checks the slots alone, and the known spend it returns is
+// checked against the budget here, the ticket saying whether the call is
+// over it.
 func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	period := l.period(cmp.Or(c.Started, l.now()))
 	if !l.Down() {
 		k := l.snapshotFor(c.Scope, period)
 		a := Admission{Slot: slotOf(c), Period: period, Since: k.Since, Spend: k.Spend, Now: l.now(),
-			Budget: c.Budget, DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
+			Budget: refusing(c), DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
 			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit}
 		sctx, cancel := l.storeContext(ctx)
 		o, known, err := l.store.Admit(sctx, a)
@@ -213,6 +225,15 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 		l.markDown(err) // and fall through to the local check
 	}
 	return l.admitLocally(c, period)
+}
+
+// refusing is the budget a call is refused over: its own if enforced, else
+// none.
+func refusing(c Call) int64 {
+	if c.BudgetMode != admission.Enforce {
+		return 0
+	}
+	return c.Budget
 }
 
 // admitted takes the store's answer to an admission: the known spend it
@@ -229,7 +250,7 @@ func (l *Limiter) admitted(c Call, period string, o Outcome, known int64) (*Tick
 		return nil, ErrConcurrency
 	}
 	// In grace, peers may still hold calls Valkey lacks.
-	return l.track(c, period, l.now().Before(l.graceUntil)), nil
+	return l.track(c, period, l.now().Before(l.graceUntil), known), nil
 }
 
 // admitLocally is the outage's check: the last known spend and this
@@ -238,13 +259,14 @@ func (l *Limiter) admitted(c Call, period string, o Outcome, known int64) (*Tick
 func (l *Limiter) admitLocally(c Call, period string) (*Ticket, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if overBudget(l.last[keyOf{c.Scope, period}], c.Budget, c.DeclaredWorstCaseCheck, c.Worst) {
+	known := l.last[keyOf{c.Scope, period}]
+	if overBudget(known, refusing(c), c.DeclaredWorstCaseCheck, c.Worst) {
 		return nil, ErrBudget
 	}
 	if atLimit(l.byPrincipal[c.Principal], c.PrincipalLimit) || atLimit(l.byScope[c.Scope], c.ScopeLimit) {
 		return nil, ErrConcurrency
 	}
-	return l.track(c, period, true), nil
+	return l.track(c, period, true, known), nil
 }
 
 // storeContext bounds a store call: Valkey answers a site's gateways in a
@@ -282,9 +304,10 @@ func (l *Limiter) MarkDown(err error) { l.markDown(err) }
 // anything (Valkey's PING).
 type pinger interface{ Ping(context.Context) error }
 
-// track records a running call; mu is held.
-func (l *Limiter) track(c Call, period string, waived bool) *Ticket {
-	t := &Ticket{l: l, call: c, period: period, waived: waived}
+// track records a running call admitted at known spend; mu is held.
+func (l *Limiter) track(c Call, period string, waived bool, known int64) *Ticket {
+	t := &Ticket{l: l, call: c, period: period, waived: waived, known: known,
+		over: overBudget(known, c.Budget, c.DeclaredWorstCaseCheck, c.Worst)}
 	if waived {
 		l.Waived.Add(1)
 	}

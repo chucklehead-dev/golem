@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/lib/contract"
 	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
@@ -35,6 +36,7 @@ type Principal struct {
 // Limits are the scope's, for the limiter.
 type Limits struct {
 	BudgetMicros           int64
+	BudgetMode             admission.BudgetMode // the snapshot's; an unknown one is enforce
 	DeclaredWorstCaseCheck bool
 	PrincipalInFlight      int
 	ScopeInFlight          int
@@ -117,7 +119,7 @@ func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, v *entr
 func compileScopes(ss []snapshot.Scope) map[string]*rights {
 	scopes := make(map[string]*rights, len(ss))
 	for _, s := range ss {
-		r := &rights{models: make(map[string]bool, len(s.Models)), limits: Limits{BudgetMicros: s.BudgetMicros, DeclaredWorstCaseCheck: s.DeclaredWorstCaseCheck,
+		r := &rights{models: make(map[string]bool, len(s.Models)), limits: Limits{BudgetMicros: s.BudgetMicros, BudgetMode: admission.ModeOf(s.BudgetMode), DeclaredWorstCaseCheck: s.DeclaredWorstCaseCheck,
 			PrincipalInFlight: s.PrincipalInFlight, ScopeInFlight: s.ScopeInFlight, StorageAllowed: s.StorageAllowed,
 			MaxOutputTokens: s.MaxOutputTokens, MaxInputBytes: s.MaxInputBytes, Features: s.Features}}
 		for _, a := range s.Models {

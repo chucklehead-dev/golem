@@ -61,6 +61,9 @@ type Call struct {
 	// Waived: admitted outside the budget's bound, while the site store was
 	// unreachable or in the grace after a recovery (ADR 0041 §7.3).
 	Waived bool
+	// OverBudget: admitted over its scope's budget in observe or warn mode,
+	// a call enforce would have refused (PRD §9.1, ADR 0050).
+	OverBudget bool
 }
 
 // Telemetry records calls. Its methods are safe for concurrent use, and on
@@ -201,6 +204,7 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 		attribute.Int64("golem.cost_micros", c.Cost),
 		attribute.Bool("golem.usage_estimated", c.EstimatedFraction > 0),
 		attribute.Bool("golem.waived", c.Waived),
+		attribute.Bool("golem.over_budget", c.OverBudget),
 		attribute.Int("http.response.status_code", c.Status),
 	)
 	if c.ErrorOrigin != "" {

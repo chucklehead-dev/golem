@@ -93,6 +93,7 @@ prevent double counting.
 | `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away), `failed`, or `uncertain` (the call failed after the provider may have received it: charged its worst case as an estimate until reconciliation, golem#4); the failure's §2 origin and §1 code |
 | `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), each side is charged by rules chosen to err high, not an average: output every byte of the response received a token (whatever its fields or framing), at most the request's `max_tokens × n`; input, if not reported, every byte of the request a token (as the declared worst case; an estimate, not a bound on real spend: ADR 0044). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
+| `over_budget` | Bool | admitted over its scope's budget because the scope's budget mode is `observe` or `warn` (§1, ADR 0050): a call `enforce` would have refused |
 
 - Known spend (ADR 0048): a snapshot carries, per scope and period, a
   boundary B (a minute, an ingestion allowance before the snapshot's

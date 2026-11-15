@@ -88,7 +88,7 @@ func TestAuthAndLimits(t *testing.T) {
 	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
 metadata: {name: team-a}
-spec: {models: [claude, haiku], budgetMicros: 100000000, inFlight: {principal: 1}}
+spec: {models: [claude, haiku], budgetMicros: 100000000, budgetMode: enforce, inFlight: {principal: 1}}
 ---
 apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
