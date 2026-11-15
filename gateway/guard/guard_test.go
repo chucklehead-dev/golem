@@ -184,4 +184,3 @@ func TestListenerMax(t *testing.T) {
 		t.Fatal("Accept after Close")
 	}
 }
-
