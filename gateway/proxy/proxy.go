@@ -83,8 +83,8 @@ type Handler struct {
 	// denylist entry ends the calls it withdraws (InFlight.Sweep); the
 	// gateway's handlers share one.
 	InFlight *InFlight
-	// Record, if set, is told each call's result (tests).
-	Record func(*http.Request, Result)
+	// record, if set, is told each call's result (tests).
+	record func(*http.Request, Result)
 }
 
 // Response headers returned to the caller (contracts.md §5: golem's own
@@ -306,8 +306,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		acct.complete(res.Cost)
 	}
-	if h.Record != nil {
-		h.Record(r, res)
+	if h.record != nil {
+		h.record(r, res)
 	}
 	if cut && !res.CallerGone {
 		// The provider's response ended early. A clean end would read as a

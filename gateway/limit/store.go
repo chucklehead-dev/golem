@@ -130,7 +130,7 @@ type Store interface {
 
 // Mem is an in-memory Store: the standalone gateway's, and the tests'. Its
 // faults model Valkey's: SetDown makes it unreachable (and, as an outage
-// longer than the slots' TTL would, loses every slot); Failover loses a
+// longer than the slots' TTL would, loses every slot); failover loses a
 // minute.
 type Mem struct {
 	mu      sync.Mutex
@@ -324,9 +324,9 @@ func (m *Mem) SetDown(down bool) {
 	}
 }
 
-// Failover loses a minute of a scope's counter for a period: an
+// failover loses a minute of a scope's counter for a period: an
 // asynchronous replica promoted without the latest writes.
-func (m *Mem) Failover(scope, period string, minute int64) {
+func (m *Mem) failover(scope, period string, minute int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if c := m.counter[keyOf{scope, period}]; c != nil {

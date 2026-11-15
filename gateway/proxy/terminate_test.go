@@ -160,7 +160,7 @@ func newTGW(t *testing.T, d Dialect, whole bool) *tgw {
 	}
 	hd := &Handler{Dialect: d, Snapshots: h, Limiter: recAdmitter{lim.Admitter(), &g.ends}, MaxBody: 1 << 20,
 		Telemetry: tel, InFlight: g.calls, ProviderTail: time.Minute,
-		Record: func(_ *http.Request, r Result) { g.results <- r }}
+		record: func(_ *http.Request, r Result) { g.results <- r }}
 	g.srv = httptest.NewServer(hd)
 	t.Cleanup(func() {
 		select {

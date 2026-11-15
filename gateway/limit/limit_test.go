@@ -74,13 +74,13 @@ func TestOutage(t *testing.T) {
 		t.Fatalf("%v %v: both admitted and both waivers", err1, err2)
 	}
 	a.Complete(ctx, 3)
-	if p := g1.Pending("s"); len(p) != 1 || len(st.Buckets("s", g1.period(g1.now()))) != 0 {
+	if p := g1.pendingIn("s"); len(p) != 1 || len(st.Buckets("s", g1.period(g1.now()))) != 0 {
 		t.Fatalf("pending %v: the increment is held, the counter without it", p)
 	}
 	st.SetDown(false)
 	g1.Recover(ctx)
 	g2.Recover(ctx)
-	if g1.Known(ctx, "s") != 3 || len(st.Slots()) != 1 || len(g1.Pending("s")) != 0 {
+	if g1.Known(ctx, "s") != 3 || len(st.Slots()) != 1 || len(g1.pendingIn("s")) != 0 {
 		t.Fatalf("known %d, slots %v: the increment replayed, b's slot re-acquired", g1.Known(ctx, "s"), st.Slots())
 	}
 }
@@ -294,8 +294,8 @@ func TestRecoverBatches(t *testing.T) {
 		}
 		tk.Complete(ctx, 1)
 	}
-	if len(l.Pending("s")) != 600 || l.Dropped.Load() != 100 {
-		t.Fatalf("pending %d, dropped %d: past MaxPending the oldest are dropped, and counted", len(l.Pending("s")), l.Dropped.Load())
+	if len(l.pendingIn("s")) != 600 || l.Dropped.Load() != 100 {
+		t.Fatalf("pending %d, dropped %d: past MaxPending the oldest are dropped, and counted", len(l.pendingIn("s")), l.Dropped.Load())
 	}
 	st.SetDown(false)
 	if err := l.Recover(ctx); err != nil {
@@ -351,7 +351,7 @@ func TestRecoverUnderLoad(t *testing.T) {
 	if err := l.Recover(ctx); err != nil || l.Down() {
 		t.Fatalf("Recover = %v, down %v: it must converge under load", err, l.Down())
 	}
-	if held, known := len(l.Pending("s")), l.Known(ctx, "s"); held != 0 || known != int64(1+st.n) {
+	if held, known := len(l.pendingIn("s")), l.Known(ctx, "s"); held != 0 || known != int64(1+st.n) {
 		t.Fatalf("held %d, known %d: want all %d completions counted", held, known, 1+st.n)
 	}
 }
@@ -377,7 +377,7 @@ func TestCompletionRacingRecovery(t *testing.T) {
 		}
 	}
 	tk.Complete(ctx, 4)
-	if held, known := len(l.Pending("s")), l.Known(ctx, "s"); !ran || l.Down() || held != 0 || known != 4 {
+	if held, known := len(l.pendingIn("s")), l.Known(ctx, "s"); !ran || l.Down() || held != 0 || known != 4 {
 		t.Fatalf("ran %v, down %v, held %d, known %d: the increment must reach the counter", ran, l.Down(), held, known)
 	}
 }
@@ -537,7 +537,7 @@ type overlapping struct {
 func (o *overlapping) Add(ctx context.Context, in Increment) error {
 	if !o.once {
 		o.once = true
-		if _, _, err := o.l.ReplayOne(ctx); err != nil {
+		if _, _, err := o.l.replayOne(ctx); err != nil {
 			return err
 		}
 	}
@@ -545,7 +545,7 @@ func (o *overlapping) Add(ctx context.Context, in Increment) error {
 }
 
 // TestOverlappingReplays: two replays of the same held increment (a
-// ReplayOne racing another) take it off once: the later finds it gone and
+// replayOne racing another) take it off once: the later finds it gone and
 // leaves the next one held, rather than dropping an increment no replay
 // has sent.
 func TestOverlappingReplays(t *testing.T) {
@@ -564,10 +564,10 @@ func TestOverlappingReplays(t *testing.T) {
 		tk.Complete(ctx, 1)
 	}
 	st.SetDown(false)
-	if _, ok, err := l.ReplayOne(ctx); !ok || err != nil {
+	if _, ok, err := l.replayOne(ctx); !ok || err != nil {
 		t.Fatalf("replay: %v, %v", ok, err)
 	}
-	if p := l.Pending("s"); len(p) != 1 || p[0].Call != "b" {
+	if p := l.pendingIn("s"); len(p) != 1 || p[0].Call != "b" {
 		t.Fatalf("held %+v after two replays of a: want b still held", p)
 	}
 }
@@ -663,7 +663,7 @@ func TestRecoverAtTheCap(t *testing.T) {
 				}
 			}
 			completed := int64(300 + st.n)
-			held, known := len(l.Pending("s")), l.Known(ctx, "s")
+			held, known := len(l.pendingIn("s")), l.Known(ctx, "s")
 			if twice > 0 || held != 0 || known != int64(len(st.counted)) || known > completed {
 				t.Fatalf("held %d, known %d, %d calls counted (%d more than once), of %d completed (%d dropped): each must be counted at most once",
 					held, known, len(st.counted), twice, completed, l.Dropped.Load())

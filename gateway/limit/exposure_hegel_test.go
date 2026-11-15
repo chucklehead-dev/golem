@@ -240,7 +240,7 @@ func (m *limMachine) RuleRecover(tc hegel.TestCase) {
 		return
 	}
 	for {
-		in, ok, err := m.gws[g].ReplayOne(m.ctx)
+		in, ok, err := m.gws[g].replayOne(m.ctx)
 		if err != nil {
 			tc.Errorf("replay at %s: %v", g, err) // aborts the case (Hegel)
 		}
@@ -263,7 +263,7 @@ func (m *limMachine) RuleGraceEnds(tc hegel.TestCase) {
 	if !m.graced[g] || slices.ContainsFunc(limitGws, func(h string) bool { return !m.recovered[h] }) {
 		return
 	}
-	m.gws[g].EndGrace()
+	m.gws[g].endGrace()
 	m.graced[g] = false
 	qobs.Record(m.ctx, "graceEnds", nil, "gateway", g)
 }
@@ -275,7 +275,7 @@ func (m *limMachine) RuleFailover(tc hegel.TestCase) {
 		return
 	}
 	minute := hegel.Draw(tc, hegel.SampledFrom(minutes))
-	m.store.Failover(scope, period, minute)
+	m.store.failover(scope, period, minute)
 	qobs.Record(m.ctx, "failover", nil, "t", minute-inPeriod.Unix()/60)
 }
 

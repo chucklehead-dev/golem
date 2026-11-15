@@ -90,9 +90,9 @@ func (f *valkeyFaults) SetDown(down bool) {
 	f.down.Store(down)
 }
 
-// Failover loses a minute of the counter, and its share of the total, as a
+// failover loses a minute of the counter, and its share of the total, as a
 // replica missing those writes would.
-func (f *valkeyFaults) Failover(sc, period string, minute int64) {
+func (f *valkeyFaults) failover(sc, period string, minute int64) {
 	ctx := context.Background()
 	k, field := f.counterKey(sc, period), strconv.FormatInt(minute, 10)
 	lost, _ := f.mustClient().Do(ctx, f.mustClient().B().Hget().Key(k).Field(field).Build()).AsInt64()

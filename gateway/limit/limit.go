@@ -630,7 +630,7 @@ func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
 // held by seq last. A batch is the oldest held when it was sent, so those
 // still held are at the front; those gone meanwhile were taken by another
 // replay, or dropped at MaxPending (and counted in Dropped). Only Recover
-// and ReplayOne take from the front; holds append.
+// and replayOne take from the front; holds append.
 func (l *Limiter) dropReplayed(last uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -645,9 +645,9 @@ func (l *Limiter) dropReplayed(last uint64) {
 // (addChunk), so a batch is added whole or not at all.
 const replayBatchSize = addChunk
 
-// ReplayOne replays the oldest increment held during an outage and reports
+// replayOne replays the oldest increment held during an outage and reports
 // it; Recover replays them all. ok is false when none is held.
-func (l *Limiter) ReplayOne(ctx context.Context) (in Increment, ok bool, err error) {
+func (l *Limiter) replayOne(ctx context.Context) (in Increment, ok bool, err error) {
 	l.mu.Lock()
 	if len(l.pending) == 0 {
 		l.mu.Unlock()
@@ -678,9 +678,10 @@ func (l *Limiter) Abandon() int {
 	return n
 }
 
-// EndGrace ends the grace after a recovery at once: for an operator who
-// knows every gateway has recovered, and for tests (the model's graceEnds).
-func (l *Limiter) EndGrace() {
+// endGrace ends the grace after a recovery at once, as the model's
+// graceEnds does once every gateway has recovered: for tests (no operator
+// path calls it).
+func (l *Limiter) endGrace() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.graceUntil = time.Time{}
@@ -711,8 +712,8 @@ func (l *Limiter) Known(ctx context.Context, scope string) int64 {
 	return l.last[keyOf{scope, period}]
 }
 
-// Pending lists the increments held for replay, for a scope.
-func (l *Limiter) Pending(scope string) []Increment {
+// pendingIn lists the increments held for replay, for a scope.
+func (l *Limiter) pendingIn(scope string) []Increment {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var out []Increment
@@ -724,7 +725,7 @@ func (l *Limiter) Pending(scope string) []Increment {
 	return out
 }
 
-// Held is the number of increments held for replay (Pending, every scope).
+// Held is the number of increments held for replay (pendingIn, every scope).
 func (l *Limiter) Held() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

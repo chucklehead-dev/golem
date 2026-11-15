@@ -246,7 +246,7 @@ left it held whenever a hold at the cap dropped the oldest meanwhile: it
 was sent again every round, and under steady traffic the replay never
 ended (TestRecoverAtTheCap). An increment is an amount: a batch sent again
 after a lost reply is counted twice, erring high. Two replays of the same
-increment (`ReplayOne` racing another) both send it, but it is taken off
+increment (`replayOne`, the tests' single step, racing another) both send it, but it is taken off
 the held list once: the later finds it gone and leaves the next held
 increment alone (TestOverlappingReplays).
 
@@ -265,8 +265,8 @@ Valkey was still down (TestStartWithValkeyDown).
 
 Recovery is per gateway. A recovered gateway cannot know which peers have
 not recovered, whose running calls Valkey still lacks, so for `Grace`
-(two renewal intervals) its admissions are waivers too. `EndGrace` ends it
-at once.
+(two renewal intervals) its admissions are waivers too. Only a test ends
+it early (`endGrace`, the model's graceEnds).
 
 At shutdown `Finish` (`limit.go:746`) stops the tail timers (their slots
 expire by TTL), tries one `Recover` if down, and abandons what is still
@@ -282,7 +282,7 @@ One mutex makes each method atomic. The counter (`memCounter`) is a map of
 minute to spend per scope and period, plus the total; minutes past
 `Retain` (six hours) go as it adds. `Mem.since` (`store.go:281`) reads the
 window the Valkey script reads (below), so the two answer alike. `SetDown`
-and `Failover` fake Valkey's faults: going down loses every slot (an
+and `failover` (the tests') fake Valkey's faults: going down loses every slot (an
 outage longer than the TTL), and a failover loses a minute.
 
 **Valkey** (`valkey.go:41`) keeps every key under the hash tag
