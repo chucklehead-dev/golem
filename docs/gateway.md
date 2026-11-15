@@ -120,10 +120,15 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    declared-worst-case check (bounded by the scope's `max_tokens` and
    input-size ceilings, input tokens by byte count: ADR 0038); and
    concurrency slots for the principal and the scope, renewed every 30
-   seconds while the call is in flight. Refusals are 402 (budgets) or 429
-   (limits). *Planned, not built:* key and member caps, rate limits and the
-   deployment's provider quota share, in the same round trip (the call
-   carries the alias, deployment and model they key on).
+   seconds while the call is in flight. The key's cap and the member's
+   (its own, or the scope's default) are accounts beside the scope's, in
+   the same round trip: each a counter at the site, checked in the order
+   key, member, scope, the first reached refusing (`budget.key_cap`,
+   `budget.member_cap`, `budget.pool_exhausted`), under the scope's
+   budget mode (org-model.md §4.2). Refusals are 402 (budgets and caps)
+   or 429 (limits). *Planned, not built:* rate limits and the deployment's
+   provider quota share, in the same round trip (the call carries the
+   alias, deployment and model they key on).
 
    The proxy sees admission only as `gateway/admission`: `Admitter.Admit`
    returns a `Ticket`, ended exactly once by `Complete` (the cost) or

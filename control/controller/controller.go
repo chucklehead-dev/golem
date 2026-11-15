@@ -534,13 +534,42 @@ func (c *Controller) entitlements(doc *state.Document) func(aliases []string) sn
 		e := doc.Entitlements(aliases)
 		if c.Spend != nil {
 			if k, ok := c.Spend.Current(); ok {
-				for i := range e.Scopes {
-					e.Scopes[i].Period, e.Scopes[i].Since = k.Period, k.Since
-					e.Scopes[i].KnownSpend = k.Spend[e.Scopes[i].ID]
-				}
+				withKnownSpend(&e, k)
 			}
 		}
 		return e
+	}
+}
+
+// withKnownSpend gives e's scopes, their members and their capped keys
+// the period's known spend: every member who has spent is listed (a
+// scope's default cap, the config's, applies to all of them), with its own
+// cap if the state gives one; a key's spend is published only with its
+// cap, the one use the gateway has for it.
+func withKnownSpend(e *snapshot.Entitlements, k spend.Known) {
+	spent := map[string][]string{} // by scope: the principals with spend
+	for m := range k.Members {
+		spent[m.Scope] = append(spent[m.Scope], m.Principal)
+	}
+	for i := range e.Scopes {
+		sc := &e.Scopes[i]
+		sc.Period, sc.Since, sc.KnownSpend = k.Period, k.Since, k.Spend[sc.ID]
+		listed := map[string]bool{}
+		for j := range sc.Members {
+			m := &sc.Members[j]
+			m.KnownSpend, listed[m.Principal] = k.Members[spend.Member{Scope: sc.ID, Principal: m.Principal}], true
+		}
+		for _, p := range spent[sc.ID] {
+			if !listed[p] {
+				sc.Members = append(sc.Members, snapshot.MemberAccount{Principal: p, KnownSpend: k.Members[spend.Member{Scope: sc.ID, Principal: p}]})
+			}
+		}
+		slices.SortFunc(sc.Members, func(a, b snapshot.MemberAccount) int { return cmp.Compare(a.Principal, b.Principal) })
+	}
+	for i := range e.Keys {
+		if e.Keys[i].CapMicros > 0 {
+			e.Keys[i].KnownSpend = k.Keys[e.Keys[i].Display]
+		}
 	}
 }
 

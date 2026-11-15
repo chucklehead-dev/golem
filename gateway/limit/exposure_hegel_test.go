@@ -275,7 +275,7 @@ func (m *limMachine) RuleFailover(tc hegel.TestCase) {
 		return
 	}
 	minute := hegel.Draw(tc, hegel.SampledFrom(minutes))
-	m.store.failover(scope, period, minute)
+	m.store.failover(period, minute)
 	qobs.Record(m.ctx, "failover", nil, "t", minute-inPeriod.Unix()/60)
 }
 

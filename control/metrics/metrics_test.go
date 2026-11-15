@@ -40,7 +40,9 @@ spec: {alias: claude, pool: [{backend: anthropic, deployment: sonnet}]}
 
 type ledger map[string]int64
 
-func (l ledger) Spend(context.Context, string, time.Time) (map[string]int64, error) { return l, nil }
+func (l ledger) Spend(context.Context, string, time.Time) (spend.Totals, error) {
+	return spend.Totals{Scopes: l}, nil
+}
 
 // Latest: site eu's rows are two minutes behind the rig's start, us's
 // ten (past the five-minute allowance).

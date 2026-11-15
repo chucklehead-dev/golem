@@ -86,10 +86,16 @@ type Scope struct {
 	ID           string   `json:"id"`
 	Models       []string `json:"models"` // aliases its members may call
 	BudgetMicros int64    `json:"budgetMicros,omitempty"`
+	// DefaultMemberCapMicros is a member's cap without one of its own
+	// (lib/api's); Members are the members with a cap of their own or
+	// spend this period, each with its cap and known spend (org-model.md
+	// §4.2). Zero is none.
+	DefaultMemberCapMicros int64           `json:"defaultMemberCapMicros,omitempty"`
+	Members                []MemberAccount `json:"members,omitempty"`
 	// BudgetMode is what the budget does at admission (PRD §9.1, ADR 0050):
 	// "observe" (admitted, the ledger row marked over budget), "warn"
 	// (admitted and marked, with a golem-warning header) or "enforce"
-	// (refused). The compiler sets it for every scope with a budget; a
+	// (refused). The compiler sets it for every scope (its caps follow it); a
 	// gateway reads any other value as enforce, failing closed.
 	BudgetMode             string `json:"budgetMode,omitempty"`
 	DeclaredWorstCaseCheck bool   `json:"declaredWorstCaseCheck,omitempty"` // ADR 0044
@@ -114,6 +120,26 @@ type Scope struct {
 	Since      time.Time `json:"since,omitzero"`
 }
 
+// MemberAccount is a member's account in a scope: its own cap (0: the
+// scope's default) and its known spend this period, in the scope's Period
+// and from its Since, as the scope's KnownSpend is.
+type MemberAccount struct {
+	Principal  string `json:"principal"`
+	CapMicros  int64  `json:"capMicros,omitempty"`
+	KnownSpend int64  `json:"knownSpend,omitempty"`
+}
+
+// MemberCap is principal's cap in s: its own, else the scope's default; 0
+// is none.
+func (s *Scope) MemberCap(principal string) int64 {
+	for _, m := range s.Members {
+		if m.Principal == principal && m.CapMicros > 0 {
+			return m.CapMicros
+		}
+	}
+	return s.DefaultMemberCapMicros
+}
+
 // Key is a key's entitlement: by hash, never the key itself.
 type Key struct {
 	Hash          string    `json:"hash"`    // hex SHA-256
@@ -124,6 +150,10 @@ type Key struct {
 	Models        []string  `json:"models,omitempty"` // narrows the scope's
 	ExpiresAt     time.Time `json:"expiresAt,omitzero"`
 	Revoked       bool      `json:"revoked,omitempty"`
+	// CapMicros is the key's spend cap for the period (0: none), and
+	// KnownSpend its known spend, in its scope's Period and from its Since.
+	CapMicros  int64 `json:"capMicros,omitempty"`
+	KnownSpend int64 `json:"knownSpend,omitempty"`
 }
 
 // Price is a model's rates in micro-units per million tokens.

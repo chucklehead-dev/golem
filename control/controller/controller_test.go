@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/sign"
+	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 const backend = `apiVersion: golem.dev/v1alpha1
@@ -318,8 +320,8 @@ func TestGroupSync(t *testing.T) {
 // spendLedger is a ledger with fixed spend.
 type spendLedger map[string]int64
 
-func (s spendLedger) Spend(context.Context, string, time.Time) (map[string]int64, error) {
-	return s, nil
+func (s spendLedger) Spend(context.Context, string, time.Time) (spend.Totals, error) {
+	return spend.Totals{Scopes: s}, nil
 }
 
 // TestKnownSpend: each publication carries every scope's spend this period
@@ -350,5 +352,34 @@ func TestKnownSpend(t *testing.T) {
 		if s.Period != "2026-11" || !s.Since.Equal(want) || s.KnownSpend != spent {
 			t.Fatalf("scope %s: period %q since %v spend %d; want 2026-11, %v, %d", s.ID, s.Period, s.Since, s.KnownSpend, want, spent)
 		}
+	}
+}
+
+// TestWithKnownSpend: each scope's, member's and capped key's known spend
+// goes into the entitlements; every member who has spent is listed (a
+// default cap applies to it), its own cap kept; an uncapped key's spend is
+// not published.
+func TestWithKnownSpend(t *testing.T) {
+	since := time.Date(2026, 11, 14, 9, 55, 0, 0, time.UTC)
+	e := snapshot.Entitlements{
+		Scopes: []snapshot.Scope{{ID: "team-a", Members: []snapshot.MemberAccount{{Principal: "carol", CapMicros: 9}}}, {ID: "team-b"}},
+		Keys:   []snapshot.Key{{Display: "glm_live_k1", Scope: "team-a", CapMicros: 5}, {Display: "glm_live_k2", Scope: "team-a"}},
+	}
+	withKnownSpend(&e, spend.Known{Period: "2026-11", Since: since,
+		Spend:   map[string]int64{"team-a": 10, "team-b": 1},
+		Members: map[spend.Member]int64{{Scope: "team-a", Principal: "bob"}: 6, {Scope: "team-a", Principal: "alice"}: 4, {Scope: "team-b", Principal: "bob"}: 1},
+		Keys:    map[string]int64{"glm_live_k1": 4, "glm_live_k2": 6}})
+	a := e.Scopes[0]
+	if a.Period != "2026-11" || !a.Since.Equal(since) || a.KnownSpend != 10 {
+		t.Fatalf("team-a %+v", a)
+	}
+	if want := []snapshot.MemberAccount{{Principal: "alice", KnownSpend: 4}, {Principal: "bob", KnownSpend: 6}, {Principal: "carol", CapMicros: 9}}; !slices.Equal(a.Members, want) {
+		t.Fatalf("team-a's members %+v, want %+v", a.Members, want)
+	}
+	if want := []snapshot.MemberAccount{{Principal: "bob", KnownSpend: 1}}; !slices.Equal(e.Scopes[1].Members, want) {
+		t.Fatalf("team-b's members %+v", e.Scopes[1].Members)
+	}
+	if e.Keys[0].KnownSpend != 4 || e.Keys[1].KnownSpend != 0 {
+		t.Fatalf("keys %+v: the capped key's 4, none for the uncapped", e.Keys)
 	}
 }

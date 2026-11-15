@@ -27,7 +27,7 @@ func BenchmarkAdmitComplete(b *testing.B) {
 			period := l.period(now)
 			var incs []Increment
 			for m := range 360 {
-				incs = append(incs, Increment{Scope: "s", Period: period, Cost: 1, At: now.Add(-time.Duration(m) * time.Minute)})
+				incs = append(incs, Increment{Accounts: []string{"s"}, Period: period, Cost: 1, At: now.Add(-time.Duration(m) * time.Minute)})
 			}
 			if err := st.AddAll(context.Background(), incs); err != nil {
 				b.Fatal(err)

@@ -104,6 +104,9 @@ func localKeys(obj string, in []v1.LocalKey, scopes map[string]*snapshot.Scope, 
 				add(obj, fmt.Sprintf("%s.models[%d]", at, j), "scope %q does not allow %q: a key can only narrow its scope", k.Scope, m)
 			}
 		}
+		if k.CapMicros < 0 || k.CapMicros > snapshot.MaxMicros {
+			add(obj, at+".capMicros", "0 (no cap) to %d, not %d", int64(snapshot.MaxMicros), k.CapMicros)
+		}
 		h := key.Hash(k.Key)
 		hx := hex.EncodeToString(h[:])
 		if hashes[hx] {
@@ -112,7 +115,7 @@ func localKeys(obj string, in []v1.LocalKey, scopes map[string]*snapshot.Scope, 
 		}
 		hashes[hx] = true
 		sk := snapshot.Key{Hash: hx, Display: key.Display(k.Key), Principal: k.Principal, PrincipalKind: "user",
-			Scope: k.Scope, Models: slices.Sorted(slices.Values(k.Models)), Revoked: k.Revoked}
+			Scope: k.Scope, Models: slices.Sorted(slices.Values(k.Models)), Revoked: k.Revoked, CapMicros: max(k.CapMicros, 0)}
 		if k.Expires != "" {
 			t, err := time.Parse(time.RFC3339, k.Expires)
 			if err != nil {

@@ -28,16 +28,29 @@ type Slot struct {
 // ErrUnavailable is a store that cannot be reached.
 var ErrUnavailable = errors.New("limit: the site store is unreachable")
 
-// Increment is a call's cost for its scope's counter in its budget period,
+// Increment is a call's cost for its accounts' counters in its budget
+// period (its scope's, and its member's and key's where they are capped),
 // added to the minute the call ended in (At): the minute its ledger row
 // names, so a snapshot's boundary puts the call on one side only. The
-// counter keeps amounts, not events; Call is for logs and tests.
+// counters keep amounts, not events; Call is for logs and tests. One
+// increment is one write: every account's counter or none.
 type Increment struct {
-	Scope, Period string
-	Call          string
-	Cost          int64
-	At            time.Time
+	Accounts []string // Account.ID's; the scope's first
+	Period   string
+	Call     string
+	Cost     int64
+	At       time.Time
 }
+
+// MaxAccounts is the most accounts a call is charged to: its key, its
+// member and its scope (org-model.md §4.2).
+const MaxAccounts = 3
+
+// MemberAccount and KeyAccount are the IDs of a member's account in a
+// scope and of a key's (by its display ID, the ledger's key_id). A scope's
+// account is its ID, which has no colon.
+func MemberAccount(scope, principal string) string { return "m:" + scope + "/" + principal }
+func KeyAccount(display string) string             { return "k:" + display }
 
 // minuteOf is a time's minute: the counter's grain.
 func minuteOf(t time.Time) int64 { return t.Unix() / 60 }
@@ -54,16 +67,24 @@ func fromMinute(since time.Time) int64 {
 	return minuteOf(since)
 }
 
-// Admission is one admission's check, done atomically by the store: known
-// spend (the snapshot's plus the counter's minutes from its boundary)
-// against the budget, then the slots.
+// Account is one account a call is charged to, as an admission checks it:
+// its known spend (the snapshot's plus the counter's minutes from its
+// boundary) against its limit.
+type Account struct {
+	ID    string
+	Since time.Time // the snapshot's boundary, for this period (zero if it is of another)
+	Spend int64     // the snapshot's known spend for this period
+	Limit int64     // the budget or cap refused over; 0: none
+}
+
+// Admission is one admission's check, done atomically by the store: each
+// account's known spend against its limit, in order (the first over its
+// limit refuses), then the slots.
 type Admission struct {
 	Slot
 	Period                 string    // the budget period, e.g. "2026-11": counters are per period
-	Since                  time.Time // the snapshot's boundary, for this period (zero if it is of another)
-	Spend                  int64     // the snapshot's known spend for this period
 	Now                    time.Time // the gateway's clock: the read's last minute (zero: the store's)
-	Budget                 int64     // 0: none
+	Accounts               []Account // at most MaxAccounts; the scope's first
 	DeclaredWorstCaseCheck bool
 	Worst                  int64
 	PrincipalLimit         int // 0: none
@@ -74,10 +95,19 @@ type Admission struct {
 type Outcome int
 
 const (
-	Admitted Outcome = iota
-	OverBudget
+	Admitted   Outcome = iota
+	OverBudget         // an account's limit: Result.Over says which
 	OverConcurrency
 )
+
+// Result is an admission's outcome, the account it was refused over
+// (OverBudget), and each account's known spend as the store computed it,
+// in Admission.Accounts' order.
+type Result struct {
+	Outcome Outcome
+	Over    int
+	Known   [MaxAccounts]int64
+}
 
 // overBudget is admission's budget check, as Mem and an outage's local
 // check make it (the admit script makes the same in Lua). Under the
@@ -104,8 +134,8 @@ func atLimit(n, limit int) bool { return limit > 0 && n >= limit }
 // operation and one round trip (one Valkey script).
 type Store interface {
 	// Admit checks known spend and the limits and, if both allow, takes
-	// the slot. It returns the outcome and the known spend it computed.
-	Admit(ctx context.Context, a Admission) (o Outcome, known int64, err error)
+	// the slot. It returns the outcome and the known spends it computed.
+	Admit(ctx context.Context, a Admission) (Result, error)
 	// Complete adds a call's increment and frees its slot: Add and Release
 	// in one step.
 	Complete(ctx context.Context, in Increment, s Slot) error
@@ -123,9 +153,9 @@ type Store interface {
 	// twice (a replay whose reply was lost, sent again) is counted twice,
 	// erring high.
 	AddAll(ctx context.Context, incs []Increment) error
-	// Since returns the period's spend in the minutes from since's on (for
-	// reports; admission computes it inside Admit).
-	Since(ctx context.Context, scope, period string, since time.Time) (int64, error)
+	// Since returns an account's spend for the period in the minutes from
+	// since's on (for reports; admission computes it inside Admit).
+	Since(ctx context.Context, account, period string, since time.Time) (int64, error)
 }
 
 // Mem is an in-memory Store: the standalone gateway's, and the tests'. Its
@@ -157,20 +187,26 @@ func NewMem() *Mem {
 	return &Mem{slots: map[string]Slot{}, counter: map[keyOf]*memCounter{}, Retain: 6 * time.Hour, Now: time.Now}
 }
 
-func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, int64, error) {
+func (m *Mem) Admit(_ context.Context, a Admission) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
-		return 0, 0, ErrUnavailable
+		return Result{}, ErrUnavailable
 	}
-	known := m.known(a.Scope, a.Period, a.Spend, a.Since)
-	if overBudget(known, a.Budget, a.DeclaredWorstCaseCheck, a.Worst) {
-		return OverBudget, known, nil
+	var r Result
+	for i, acc := range a.Accounts {
+		r.Known[i] = m.known(acc.ID, a.Period, acc.Spend, acc.Since)
+	}
+	for i, acc := range a.Accounts {
+		if overBudget(r.Known[i], acc.Limit, a.DeclaredWorstCaseCheck, a.Worst) {
+			r.Outcome, r.Over = OverBudget, i
+			return r, nil
+		}
 	}
 	if !m.acquire(a.Slot, a.PrincipalLimit, a.ScopeLimit) {
-		return OverConcurrency, known, nil
+		r.Outcome = OverConcurrency
 	}
-	return Admitted, known, nil
+	return r, nil
 }
 
 // acquire takes a slot if the principal's and the scope's limits allow;
@@ -250,36 +286,39 @@ func (m *Mem) AddAll(_ context.Context, incs []Increment) error {
 	return nil
 }
 
-// add counts an increment in its minute and the total; mu is held.
+// add counts an increment in its minute and the total of each of its
+// accounts; mu is held.
 func (m *Mem) add(in Increment) {
-	k := keyOf{in.Scope, in.Period}
-	c := m.counter[k]
-	if c == nil {
-		c = &memCounter{minutes: map[int64]int64{}}
-		m.counter[k] = c
-	}
-	c.minutes[minuteOf(in.At)] += in.Cost
-	c.total += in.Cost
-	// Minutes past retention go, as Valkey's do.
 	cutoff := minuteOf(m.Now().Add(-m.Retain))
-	maps.DeleteFunc(c.minutes, func(minute, _ int64) bool { return minute < cutoff })
+	for _, acc := range in.Accounts {
+		k := keyOf{acc, in.Period}
+		c := m.counter[k]
+		if c == nil {
+			c = &memCounter{minutes: map[int64]int64{}}
+			m.counter[k] = c
+		}
+		c.minutes[minuteOf(in.At)] += in.Cost
+		c.total += in.Cost
+		// Minutes past retention go, as Valkey's do.
+		maps.DeleteFunc(c.minutes, func(minute, _ int64) bool { return minute < cutoff })
+	}
 }
 
-func (m *Mem) Since(_ context.Context, scope, period string, since time.Time) (int64, error) {
+func (m *Mem) Since(_ context.Context, account, period string, since time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
 		return 0, ErrUnavailable
 	}
-	return m.since(scope, period, since), nil
+	return m.since(account, period, since), nil
 }
 
 // since is the counter's spend from since's minute on, in the window the
 // Valkey script's since reads: no further back than the retention (a
 // minute past it may not be trimmed yet) and no further ahead than a
 // peer's clock skew. No boundary reads the whole total.
-func (m *Mem) since(scope, period string, since time.Time) int64 {
-	c := m.counter[keyOf{scope, period}]
+func (m *Mem) since(account, period string, since time.Time) int64 {
+	c := m.counter[keyOf{account, period}]
 	switch from := fromMinute(since); {
 	case c == nil:
 		return 0
@@ -298,16 +337,16 @@ func (m *Mem) since(scope, period string, since time.Time) int64 {
 	}
 }
 
-// known is a scope's known spend for a snapshot's spend and boundary: the
+// known is an account's known spend for a snapshot's spend and boundary: the
 // spend plus the counter's minutes from the boundary on, and never less
 // than the counter's whole total for the period (the admit script's). A
 // boundary older than the retention reads only the minutes retained, so
 // the spend between it and the retention's start would be lost (a
 // known-spend job that cannot read the ledger for hours keeps publishing
 // its last boundary); the site's own total still counts. mu is held.
-func (m *Mem) known(scope, period string, spend int64, since time.Time) int64 {
-	known := spend + m.since(scope, period, since)
-	if c := m.counter[keyOf{scope, period}]; c != nil {
+func (m *Mem) known(account, period string, spend int64, since time.Time) int64 {
+	known := spend + m.since(account, period, since)
+	if c := m.counter[keyOf{account, period}]; c != nil {
 		known = max(known, c.total)
 	}
 	return known
@@ -324,22 +363,25 @@ func (m *Mem) SetDown(down bool) {
 	}
 }
 
-// failover loses a minute of a scope's counter for a period: an
-// asynchronous replica promoted without the latest writes.
-func (m *Mem) failover(scope, period string, minute int64) {
+// failover loses a minute of every counter for a period: an asynchronous
+// replica promoted without the latest writes, which a call's increment
+// reaches every account of at once.
+func (m *Mem) failover(period string, minute int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if c := m.counter[keyOf{scope, period}]; c != nil {
-		c.total -= c.minutes[minute]
-		delete(c.minutes, minute)
+	for k, c := range m.counter {
+		if k.period == period {
+			c.total -= c.minutes[minute]
+			delete(c.minutes, minute)
+		}
 	}
 }
 
-// Buckets is a scope's counter for a period, minute to spend (tests).
-func (m *Mem) Buckets(scope, period string) map[int64]int64 {
+// Buckets is an account's counter for a period, minute to spend (tests).
+func (m *Mem) Buckets(account, period string) map[int64]int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if c := m.counter[keyOf{scope, period}]; c != nil {
+	if c := m.counter[keyOf{account, period}]; c != nil {
 		return maps.Clone(c.minutes)
 	}
 	return nil

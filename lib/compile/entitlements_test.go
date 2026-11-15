@@ -92,7 +92,7 @@ func TestEntitlementProblems(t *testing.T) {
 		{"negative ceiling", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, maxInputBytes: -1", 1), standalone, "spec.maxInputBytes: must not be negative"},
 		{"unknown feature mode", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, features: loose", 1), standalone, `spec.features: restricted or compatible, not "loose"`},
 		{"unknown budget mode", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMicros: 5000000, budgetMode: strict", 1), standalone, `spec.budgetMode: observe (the default), warn or enforce, not "strict"`},
-		{"budget mode without a budget", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMode: enforce", 1), standalone, "spec.budgetMode: enforce, but there is no budget: set budgetMicros, or remove budgetMode"},
+		{"budget mode without a budget", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMode: enforce", 1), standalone, "spec.budgetMode: enforce, but there is no budget: set budgetMicros (or defaultMemberCapMicros), or remove budgetMode"},
 		{"two policies for a scope", identity("") + "---\napiVersion: golem.dev/v1alpha1\nkind: ScopePolicy\nmetadata: {name: team-a}\nspec: {}\n", standalone, `ScopePolicy/team-a (golem.yaml#7): metadata.name: ScopePolicy/team-a (golem.yaml#5) is also scope "team-a"'s policy`},
 		{"policies with no LocalIdentity", strings.SplitN(identity(""), "---\napiVersion: golem.dev/v1alpha1\nkind: LocalIdentity", 2)[0], standalone, "there is no LocalIdentity: add one, or remove the ScopePolicies"},
 		{"outside standalone", identity(""), published, "for standalone mode only"},

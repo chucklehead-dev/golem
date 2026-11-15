@@ -23,7 +23,11 @@ func TestScopePolicyCheck(t *testing.T) {
 		want []string // path: message prefix, in order
 		sc   snapshot.Scope
 	}{
-		{"unset", Policy{}, nil, snapshot.Scope{PrincipalInFlight: DefaultPrincipalInFlight, ScopeInFlight: DefaultScopeInFlight}},
+		{"unset", Policy{}, nil, snapshot.Scope{BudgetMode: BudgetObserve, PrincipalInFlight: DefaultPrincipalInFlight, ScopeInFlight: DefaultScopeInFlight}},
+		{"a default member cap, enforced, no budget", Policy{DefaultMemberCapMicros: 7, BudgetMode: BudgetEnforce}, nil,
+			snapshot.Scope{DefaultMemberCapMicros: 7, BudgetMode: BudgetEnforce, PrincipalInFlight: DefaultPrincipalInFlight, ScopeInFlight: DefaultScopeInFlight}},
+		{"negative default member cap", Policy{DefaultMemberCapMicros: -1}, []string{"s.defaultMemberCapMicros: must not be negative (is -1); 0 is no cap"}, snapshot.Scope{}},
+		{"default member cap past exact sums", Policy{DefaultMemberCapMicros: snapshot.MaxMicros + 1}, []string{"s.defaultMemberCapMicros: at most 1125899906842624"}, snapshot.Scope{}},
 		{"every field valid", Policy{BudgetMicros: snapshot.MaxMicros, DeclaredWorstCaseCheck: true, InFlight: v1.InFlight{Principal: 1, Scope: 2},
 			MaxOutputTokens: 3, MaxInputBytes: 4, Features: "compatible", ProviderStorage: "allowed"}, nil,
 			snapshot.Scope{BudgetMicros: snapshot.MaxMicros, BudgetMode: BudgetObserve, DeclaredWorstCaseCheck: true, PrincipalInFlight: 1, ScopeInFlight: 2,
@@ -33,7 +37,7 @@ func TestScopePolicyCheck(t *testing.T) {
 		{"enforce", Policy{BudgetMicros: 1, BudgetMode: BudgetEnforce}, nil, snapshot.Scope{BudgetMicros: 1, BudgetMode: BudgetEnforce,
 			PrincipalInFlight: DefaultPrincipalInFlight, ScopeInFlight: DefaultScopeInFlight}},
 		{"unknown budget mode", Policy{BudgetMicros: 1, BudgetMode: "strict"}, []string{`s.budgetMode: observe (the default), warn or enforce, not "strict"`}, snapshot.Scope{}},
-		{"budget mode without a budget", Policy{BudgetMode: BudgetEnforce}, []string{"s.budgetMode: enforce, but there is no budget: set budgetMicros, or remove budgetMode"}, snapshot.Scope{}},
+		{"budget mode without a budget", Policy{BudgetMode: BudgetEnforce}, []string{"s.budgetMode: enforce, but there is no budget: set budgetMicros (or defaultMemberCapMicros), or remove budgetMode"}, snapshot.Scope{}},
 		{"negative budget", Policy{BudgetMicros: -1}, []string{"s.budgetMicros: must not be negative (is -1); 0 is no budget"}, snapshot.Scope{}},
 		{"budget past exact sums", Policy{BudgetMicros: snapshot.MaxMicros + 1}, []string{"s.budgetMicros: at most 1125899906842624"}, snapshot.Scope{}},
 		{"negative principal limit", Policy{InFlight: v1.InFlight{Principal: -1}}, []string{"s.inFlight.principal: must not be negative (is -1); 0 or unset is the default, 4"}, snapshot.Scope{}},

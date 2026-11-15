@@ -65,8 +65,8 @@ func TestClickHouseLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["team-a"] != 100 || got["team-b"] != 7 || len(got) != 2 {
-		t.Fatalf("known spend %v; want team-a 100 (the duplicate once, the boundary's row excluded, October's excluded), team-b 7", got)
+	if got.Scopes["team-a"] != 100 || got.Scopes["team-b"] != 7 || len(got.Scopes) != 2 {
+		t.Fatalf("known spend %v; want team-a 100 (the duplicate once, the boundary's row excluded, October's excluded), team-b 7", got.Scopes)
 	}
 	// The same sum from the readers' view.
 	out, err := ch.query(t.Context(), "SELECT scope_id, sum(cost_micros) FROM "+db+".spend_dedup WHERE period = '2026-11-01' AND ended_at < '2026-11-14 09:55:00.000' GROUP BY scope_id ORDER BY scope_id FORMAT TSV")

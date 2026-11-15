@@ -335,6 +335,22 @@ Status:
   `TestRequestDepth`, `TestRefusals`; ablated: failures not recorded, the
   depth check, escaped quotes. Behind a sidecar the source is the pod's
   until the mesh sets a header.
+- **Built: member and key caps** (org-model.md §4.2). A call is charged to
+  up to three accounts: its key's cap (state, or a LocalIdentity key's
+  `capMicros`), its member's (state, else the ScopePolicy's
+  `defaultMemberCapMicros`), and the scope's budget, checked in that order
+  in the one admission script and added to by the one completion write;
+  the first reached refuses (`budget.key_cap`, `budget.member_cap`,
+  `budget.pool_exhausted`) under the scope's mode, and observe and warn
+  name the level. Known spend per member and per key comes from the
+  ledger (spend_by_event gains principal and key) into the snapshot.
+  Model: exposure.md's member accounts (`memberCaps` holds everything to
+  depth 7; `memberSnapshotOnly`, a member seen through snapshots alone,
+  breaks `memberWithinBound` in 4 steps). Tests: `TestCaps` (limiter and
+  auth), the store suite's `accounts` on Mem and Valkey, `TestCapModes`,
+  `TestWithKnownSpend`, `TestEntitlementsCaps`; ablated: no member
+  account, the Lua checking the scope alone. Open: setting caps through
+  the control API and golemctl; team pools (grants).
 
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.

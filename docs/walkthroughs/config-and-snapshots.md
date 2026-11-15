@@ -53,8 +53,9 @@ function too, since those move more often.
   micro-units per million tokens ([contracts.md §4](../contracts.md#4-the-price-model-adr-0025);
   this version has the per-token rates only).
 - **ScopePolicy**: a scope's policy, named by the scope's ID (ADR 0050):
-  `models` (route aliases), `budgetMicros` and `budgetMode` (observe,
-  the default, warn or enforce), `declaredWorstCaseCheck`, `inFlight`
+  `models` (route aliases), `budgetMicros`, `defaultMemberCapMicros` and
+  `budgetMode` (observe, the default, warn or enforce; set on every
+  scope, as its caps follow it), `declaredWorstCaseCheck`, `inFlight`
   (`principal`, `scope`), `maxOutputTokens`, `maxInputBytes`,
   `providerStorage` and `features`. The scope itself exists in the state
   document (created through the control API); in standalone mode, where

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/chucklehead-dev/golem/gateway/admission"
 	"testing"
 	"time"
 )
@@ -125,9 +126,9 @@ func TestBoundary(t *testing.T) {
 // blocking is a store whose calls wait for their context.
 type blocking struct{ Store }
 
-func (blocking) Admit(ctx context.Context, _ Admission) (Outcome, int64, error) {
+func (blocking) Admit(ctx context.Context, _ Admission) (Result, error) {
 	<-ctx.Done()
-	return 0, 0, ctx.Err()
+	return Result{}, ctx.Err()
 }
 
 // TestCallerCancelIsNoOutage: a caller going away mid-admission returns
@@ -673,4 +674,66 @@ func TestRecoverAtTheCap(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCaps: a call is refused over its key's cap, then its member's, then
+// its scope's budget, each with its own refusal, the counters of each
+// account kept by the calls that reach them; under observe, a call over a
+// cap is admitted and its ticket names the level. An uncapped member has
+// no account of its own.
+func TestCaps(t *testing.T) {
+	ctx := t.Context()
+	st := NewMem()
+	l := New(st)
+	call := func(id, principal, key string, keyCap, memberCap int64) Call {
+		c := scopeCall(id, principal)
+		c.PrincipalLimit, c.Budget = 0, 100
+		c.Key, c.KeyCap, c.MemberCap = key, keyCap, memberCap
+		return c
+	}
+	spend := func(c Call, cost int64) {
+		t.Helper()
+		tk, err := l.Admit(ctx, c)
+		if err != nil {
+			t.Fatalf("%s: %v", c.ID, err)
+		}
+		tk.Complete(ctx, cost)
+	}
+	spend(call("a", "p1", "k1", 5, 8), 5)
+	if _, err := l.Admit(ctx, call("b", "p1", "k1", 5, 8)); !errors.Is(err, ErrKeyCap) {
+		t.Fatalf("k1 at its cap: %v, want ErrKeyCap", err)
+	}
+	spend(call("c", "p1", "k2", 5, 8), 3) // p1's other key: 8 for p1
+	if _, err := l.Admit(ctx, call("d", "p1", "k3", 5, 8)); !errors.Is(err, ErrMemberCap) {
+		t.Fatalf("p1 at its cap: %v, want ErrMemberCap", err)
+	}
+	if _, err := l.Admit(ctx, call("e", "p2", "k4", 0, 8)); err != nil {
+		t.Fatalf("p2, under its own cap: %v", err)
+	}
+	if got := st.Buckets(MemberAccount("s", "p1"), l.period(l.now())); sumOf(got) != 8 {
+		t.Fatalf("p1's account holds %d, want 8", sumOf(got))
+	}
+	spend(call("f", "p3", "", 0, 0), 4) // uncapped: no account but the scope's
+	if got := st.Buckets(MemberAccount("s", "p3"), l.period(l.now())); got != nil {
+		t.Fatalf("an uncapped member's account: %v", got)
+	}
+	if got := sumOf(st.Buckets("s", l.period(l.now()))); got != 12 {
+		t.Fatalf("the scope holds %d, want every call's 12", got)
+	}
+	c := call("g", "p1", "k1", 5, 8)
+	c.BudgetMode = admission.Observe
+	tk, err := l.Admit(ctx, c)
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if o := tk.OverBudget(); o.Level != admission.KeyLevel || o.Known != 5 || o.Limit != 5 {
+		t.Fatalf("observe: over %+v, want the key's at 5", o)
+	}
+}
+
+func sumOf(m map[int64]int64) (n int64) {
+	for _, v := range m {
+		n += v
+	}
+	return n
 }

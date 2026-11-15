@@ -27,9 +27,9 @@ type valkeyFaults struct {
 	down atomic.Bool
 }
 
-func (f *valkeyFaults) Admit(ctx context.Context, a Admission) (Outcome, int64, error) {
+func (f *valkeyFaults) Admit(ctx context.Context, a Admission) (Result, error) {
 	if f.down.Load() {
-		return 0, 0, ErrUnavailable
+		return Result{}, ErrUnavailable
 	}
 	return f.Valkey.Admit(ctx, a)
 }
@@ -69,11 +69,11 @@ func (f *valkeyFaults) AddAll(ctx context.Context, incs []Increment) error {
 	return f.Valkey.AddAll(ctx, incs)
 }
 
-func (f *valkeyFaults) Since(ctx context.Context, scope, period string, since time.Time) (int64, error) {
+func (f *valkeyFaults) Since(ctx context.Context, account, period string, since time.Time) (int64, error) {
 	if f.down.Load() {
 		return 0, ErrUnavailable
 	}
-	return f.Valkey.Since(ctx, scope, period, since)
+	return f.Valkey.Since(ctx, account, period, since)
 }
 
 // SetDown: going down, every slot lapses (the outage outlasts the TTL).
@@ -90,14 +90,18 @@ func (f *valkeyFaults) SetDown(down bool) {
 	f.down.Store(down)
 }
 
-// failover loses a minute of the counter, and its share of the total, as a
-// replica missing those writes would.
-func (f *valkeyFaults) failover(sc, period string, minute int64) {
+// failover loses a minute of every account's counter, and its share of
+// each total, as a replica missing those writes would (a call's
+// increment reaches all its accounts in one write).
+func (f *valkeyFaults) failover(period string, minute int64) {
 	ctx := context.Background()
-	k, field := f.counterKey(sc, period), strconv.FormatInt(minute, 10)
-	lost, _ := f.mustClient().Do(ctx, f.mustClient().B().Hget().Key(k).Field(field).Build()).AsInt64()
-	f.mustClient().Do(ctx, f.mustClient().B().Hdel().Key(k).Field(field).Build())
-	f.mustClient().Do(ctx, f.mustClient().B().Hincrby().Key(k).Field("total").Increment(-lost).Build())
+	field := strconv.FormatInt(minute, 10)
+	keys, _ := f.mustClient().Do(ctx, f.mustClient().B().Keys().Pattern(f.prefix+"spend:*:"+period).Build()).AsStrSlice()
+	for _, k := range keys {
+		lost, _ := f.mustClient().Do(ctx, f.mustClient().B().Hget().Key(k).Field(field).Build()).AsInt64()
+		f.mustClient().Do(ctx, f.mustClient().B().Hdel().Key(k).Field(field).Build())
+		f.mustClient().Do(ctx, f.mustClient().B().Hincrby().Key(k).Field("total").Increment(-lost).Build())
+	}
 }
 
 // Buckets is the counter, minute to spend.

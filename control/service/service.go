@@ -371,10 +371,30 @@ func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 	if r.Owner == "" {
 		r.Owner = c.Principal // the caller's own key
 	}
+	// A key's display ID names its spend account and its ledger rows: a
+	// new key whose ID another key has (about one in 10^4 at 50,000 keys)
+	// is minted again.
+	for range 4 {
+		m, err := s.mintKey(ctx, c, o, r)
+		if !errors.Is(err, errDisplayTaken) {
+			return m, err
+		}
+	}
+	return Minted{}, errors.New("four keys minted in a row had display IDs other keys have: report this")
+}
+
+var errDisplayTaken = errors.New("service: the new key's display ID is taken")
+
+func (s *Service) mintKey(ctx context.Context, c Caller, o Options, r KeyRequest) (Minted, error) {
 	plain := key.New(key.Live)
 	h := key.Hash(plain)
 	m := Minted{Key: plain, Hash: hex.EncodeToString(h[:]), Display: key.Display(plain)}
 	err := s.apply(ctx, c, o, "key.mint", m.Display, map[string]string{"owner": r.Owner, "scope": r.Scope}, func(d *state.Document) error {
+		for _, k := range d.Keys {
+			if k.Display == m.Display {
+				return errDisplayTaken
+			}
+		}
 		if _, err := visibleScope(d, c, r.Scope); err != nil {
 			return err
 		}

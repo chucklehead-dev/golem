@@ -37,6 +37,13 @@ type Call struct {
 	// known spend below the budget.
 	DeclaredWorstCaseCheck bool
 	Worst                  int64
+	// Key is the display ID of the key that authenticated the call ("" for
+	// a token). KeyCap and MemberCap are the accounts below the scope's
+	// (org-model.md §4.2): the key's spend cap, and its member's cap in
+	// the scope (the member's own, or the scope's default), each checked
+	// before the scope's budget and under its BudgetMode; 0: none.
+	Key               string
+	KeyCap, MemberCap int64
 	// Started is when the call began (the request's arrival): it fixes the
 	// budget period. Deadline is when it must have ended (the route's
 	// maximum duration); zero: none.
@@ -97,10 +104,40 @@ type Ticket interface {
 	Period() string
 	// Waived reports an admission outside the bound (the store was down).
 	Waived() bool
-	// OverBudget reports a call admitted over its scope's budget, in a mode
-	// that admits one (Warn, Observe), and the known spend admission
-	// checked: what Enforce would have refused.
-	OverBudget() (over bool, known int64)
+	// OverBudget reports a call admitted over one of its accounts' limits,
+	// in a mode that admits one (Warn, Observe): what Enforce would have
+	// refused.
+	OverBudget() Over
+}
+
+// Level is one of a call's accounts (org-model.md §4.2), in the order
+// admission checks them.
+type Level uint8
+
+// The levels; NoLevel is none.
+const (
+	NoLevel Level = iota
+	KeyLevel
+	MemberLevel
+	ScopeLevel
+)
+
+// Code is the refusal of a call over the level's limit.
+func (l Level) Code() contract.Code {
+	switch l {
+	case KeyLevel:
+		return contract.BudgetKeyCap
+	case MemberLevel:
+		return contract.BudgetMemberCap
+	}
+	return contract.BudgetPoolExhausted
+}
+
+// Over is the account an admitted call is over the limit of: its level
+// (NoLevel: none), its known spend as admission checked it, and its limit.
+type Over struct {
+	Level        Level
+	Known, Limit int64
 }
 
 // Refusal is a call admission turned away: rendered with its code, and a

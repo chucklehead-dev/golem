@@ -205,6 +205,12 @@ type ScopePolicySpec struct {
 	// BudgetMicros is the period's budget in micro-units of the currency;
 	// zero is no budget.
 	BudgetMicros int64 `json:"budgetMicros,omitempty"`
+	// DefaultMemberCapMicros is each member's cap in the scope for the
+	// period, for a member with no cap of its own (org-model.md §4.1-4.2;
+	// a member's own is state, set by the scope's managers): a member past
+	// it is refused budget.member_cap, under the budget's mode. Zero is
+	// none.
+	DefaultMemberCapMicros int64 `json:"defaultMemberCapMicros,omitempty"`
 	// BudgetMode is what the budget does at admission (PRD §9.1): observe
 	// (the default: calls over it are admitted and their ledger rows
 	// marked), warn (admitted, marked, and the response carries a
@@ -271,6 +277,9 @@ type LocalKey struct {
 	Models    []string `json:"models,omitempty"`  // narrows the scope's
 	Expires   string   `json:"expires,omitempty"` // RFC 3339
 	Revoked   bool     `json:"revoked,omitempty"`
+	// CapMicros is the key's spend cap for each period (org-model.md §4.2);
+	// 0: none.
+	CapMicros int64 `json:"capMicros,omitempty"`
 }
 
 // PriceList prices models (contracts.md §4). This first version has the

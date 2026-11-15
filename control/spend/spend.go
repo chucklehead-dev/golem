@@ -24,19 +24,32 @@ import (
 	budget "github.com/chucklehead-dev/golem/lib/period"
 )
 
-// Known is the ledger's spend for one period, by scope, of the calls that
-// ended before Since.
+// Known is the ledger's spend for one period of the calls that ended
+// before Since, by account (org-model.md §4.2): micro-units by scope ID,
+// by member in a scope, and by key (its display ID, the ledger's key_id).
 type Known struct {
-	Period string           // "2026-11"
-	Since  time.Time        // B: a whole minute
-	Spend  map[string]int64 // micro-units, by scope ID
+	Period  string    // "2026-11"
+	Since   time.Time // B: a whole minute
+	Spend   map[string]int64
+	Members map[Member]int64
+	Keys    map[string]int64
+}
+
+// Member is a principal in a scope: a member's account.
+type Member struct{ Scope, Principal string }
+
+// Totals is a ledger read's spend by account, as Known holds it.
+type Totals struct {
+	Scopes  map[string]int64
+	Members map[Member]int64
+	Keys    map[string]int64
 }
 
 // Ledger reads the deduplicated ledger.
 type Ledger interface {
-	// Spend sums each scope's cost in period over the calls that ended
+	// Spend sums each account's cost in period over the calls that ended
 	// before before.
-	Spend(ctx context.Context, period string, before time.Time) (map[string]int64, error)
+	Spend(ctx context.Context, period string, before time.Time) (Totals, error)
 }
 
 // Ingestion is a Ledger that also says how far each site's rows have
@@ -200,7 +213,7 @@ func (j *Job) stepSpend(ctx context.Context) error {
 	// A boundary still in the previous period counts nothing of this one:
 	// this period starts from nothing until B passes its start.
 	if budget.Of(since, loc) != period {
-		j.set(&Known{Period: period, Since: since, Spend: map[string]int64{}})
+		j.set(&Known{Period: period, Since: since, Spend: map[string]int64{}, Members: map[Member]int64{}, Keys: map[string]int64{}})
 		return nil
 	}
 	s, err := j.Ledger.Spend(ctx, period, since)
@@ -212,7 +225,7 @@ func (j *Job) stepSpend(ctx context.Context) error {
 		}
 		return fmt.Errorf("known spend for %s: %w (the last result is kept)", period, err)
 	}
-	j.set(&Known{Period: period, Since: since, Spend: s})
+	j.set(&Known{Period: period, Since: since, Spend: s.Scopes, Members: s.Members, Keys: s.Keys})
 	return nil
 }
 
@@ -283,20 +296,21 @@ type ClickHouse struct {
 // spendQuery sums the period's events that ended before the boundary, one
 // row per event_id (deploy/clickhouse/spend.sql: golem.spend_by_event,
 // deduplicated by its engine; FINAL makes that exact at read time, within
-// the one partition the period names).
-const spendQuery = `SELECT scope_id, toString(sum(cost_micros)) AS spend
+// the one partition the period names), by scope, principal and key:
+// readSpend sums those into each account.
+const spendQuery = `SELECT scope_id, principal_id, key_id, toString(sum(cost_micros)) AS spend
 FROM {db}.spend_by_event FINAL
 WHERE period = {period:Date} AND ended_at < {before:DateTime64(3, 'UTC')}
-GROUP BY scope_id
+GROUP BY scope_id, principal_id, key_id
 FORMAT JSONEachRow`
 
 // Spend runs the query.
-func (c ClickHouse) Spend(ctx context.Context, period string, before time.Time) (map[string]int64, error) {
+func (c ClickHouse) Spend(ctx context.Context, period string, before time.Time) (Totals, error) {
 	q := url.Values{
 		"param_period": {budget.FirstDay(period)},
 		"param_before": {before.UTC().Format("2006-01-02 15:04:05.000")},
 	}
-	var out map[string]int64
+	var out Totals
 	err := c.query(ctx, spendQuery, q, func(r io.Reader) (err error) { out, err = readSpend(r); return err })
 	return out, err
 }
@@ -371,29 +385,38 @@ func readLatest(r io.Reader) (map[string]time.Time, error) {
 	return out, nil
 }
 
-// readSpend reads the query's JSONEachRow rows: scope to spend.
-func readSpend(r io.Reader) (map[string]int64, error) {
-	out := map[string]int64{}
+// readSpend reads the query's JSONEachRow rows, each a scope's, a
+// principal's and a key's spend, into each account's sum.
+func readSpend(r io.Reader) (Totals, error) {
+	out := Totals{Scopes: map[string]int64{}, Members: map[Member]int64{}, Keys: map[string]int64{}}
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		if len(strings.TrimSpace(sc.Text())) == 0 {
 			continue
 		}
 		var row struct {
-			Scope string `json:"scope_id"`
-			Spend string `json:"spend"` // a string: Int64 sums are quoted in JSON by default
+			Scope     string `json:"scope_id"`
+			Principal string `json:"principal_id"`
+			Key       string `json:"key_id"`
+			Spend     string `json:"spend"` // a string: Int64 sums are quoted in JSON by default
 		}
 		if err := json.Unmarshal(sc.Bytes(), &row); err != nil {
-			return nil, fmt.Errorf("ClickHouse row %q: %w", sc.Text(), err)
+			return Totals{}, fmt.Errorf("ClickHouse row %q: %w", sc.Text(), err)
 		}
 		n, err := strconv.ParseInt(row.Spend, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("ClickHouse row %q: %w", sc.Text(), err)
+			return Totals{}, fmt.Errorf("ClickHouse row %q: %w", sc.Text(), err)
 		}
-		out[row.Scope] = n
+		out.Scopes[row.Scope] += n
+		if row.Principal != "" {
+			out.Members[Member{row.Scope, row.Principal}] += n
+		}
+		if row.Key != "" {
+			out.Keys[row.Key] += n
+		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return Totals{}, err
 	}
 	return out, nil
 }

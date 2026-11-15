@@ -52,6 +52,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/sign"
+	gsnapshot "github.com/chucklehead-dev/golem/lib/snapshot"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -307,12 +308,33 @@ func valkeyOption(o options, getenv func(string) string) (valkey.ClientOption, e
 // It also ends the calls in flight the snapshot withdraws (a key revoked,
 // a principal gone from the key's scope or from golem), as soon as it is
 // in force: calls is the gateway's registry of them.
+// applyKnown hands the limiter each account's known spend: every scope's,
+// its members' and its capped keys' (org-model.md §4.2), in the scope's
+// period and from its boundary.
+func applyKnown(l *limit.Limiter, e *gsnapshot.Entitlements) {
+	ctx := context.Background()
+	period := map[string]limit.Known{}
+	for _, s := range e.Scopes {
+		k := limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since}
+		period[s.ID] = k
+		l.ApplySnapshot(ctx, s.ID, k)
+		for _, m := range s.Members {
+			k.Spend = m.KnownSpend
+			l.ApplySnapshot(ctx, limit.MemberAccount(s.ID, m.Principal), k)
+		}
+	}
+	for _, key := range e.Keys {
+		if k, ok := period[key.Scope]; ok && key.CapMicros > 0 {
+			k.Spend = key.KnownSpend
+			l.ApplySnapshot(ctx, limit.KeyAccount(key.Display), k)
+		}
+	}
+}
+
 func newHolder(v *entra.Verifier, limiter *limit.Limiter, calls *proxy.InFlight) *snapshot.Holder {
 	h := &snapshot.Holder{Env: key.Live, Entra: v, AWS: awsCredentials()}
 	h.OnApply = func(c *snapshot.Compiled) {
-		for _, s := range c.Snapshot.Entitlements.Scopes {
-			limiter.ApplySnapshot(context.Background(), s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since})
-		}
+		applyKnown(limiter, &c.Snapshot.Entitlements)
 		sweep(calls, "snapshot applied", "publish_seq", c.Snapshot.PublishSeq)
 	}
 	calls.Keys = func() *auth.Keys {

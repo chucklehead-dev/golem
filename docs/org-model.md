@@ -73,7 +73,8 @@ metadata: {name: team-a}        # the scope's ID
 spec:
   models: [chat, coder]          # route aliases
   budgetMicros: 500000000        # this period's budget, micro-units
-  budgetMode: observe            # observe (default) | warn | enforce
+  defaultMemberCapMicros: 0      # a member's cap without its own; 0: none
+  budgetMode: observe            # observe (default) | warn | enforce; caps follow it
   declaredWorstCaseCheck: false
   inFlight: {principal: 4, scope: 16}
   maxOutputTokens: 32000
@@ -167,7 +168,11 @@ Caps on members do not move money; they are limits within the pool (a
 key's spend cap is the same kind of object, on a key).
 Their sum may exceed the pool (oversubscription, on, since few members
 use all of theirs). A member without a cap draws from the pool up to the
-scope's **default member cap** (possibly zero).
+scope's **default member cap** (its ScopePolicy's
+`defaultMemberCapMicros`). A cap of zero is none, as a budget of zero is:
+to stop a member, remove its membership. A member's own cap, and a key's,
+are state, set by the scope's managers (the control API, golemctl); the
+default is config, with the scope's budget (ADR 0050).
 
 ### 4.2 Enforcement
 
@@ -179,6 +184,16 @@ plus the site's counter since) at each level, and fails with a 402 (not
 1. the key's own cap (if any);
 2. the member's cap in the scope (or the default member cap);
 3. the scope pool's `available`.
+
+Each level is an account with its own known spend: the snapshot's (the
+ledger's, by scope, by principal in the scope, by key) plus the site's
+counter for it since the snapshot's boundary, all checked in the one
+admission round trip and all added to by the one completion write
+(model/exposure.md's member accounts: a member counted from snapshots
+alone would be blind to its calls within a publication's lag). Only a
+capped member or key has an account at the site; a cap set mid-period
+counts from the ledger's spend at the next snapshot, missing at most the
+calls between that snapshot's boundary and the cap's publication.
 
 Budgets are soft and eventually consistent (ADR 0031): calls already in
 flight can take spend past a limit: by about the principal's in-flight

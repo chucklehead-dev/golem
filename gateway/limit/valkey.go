@@ -293,34 +293,44 @@ local function add(counter, minute, cost, life, retain)
 end
 `
 
-// admitScript is one admission: the budget check and the slots in one
-// atomic step, so two gateways cannot both pass the check and then both
-// take the last slot or the last of the budget. The check is overBudget's;
-// known spend is Mem.known's, never below the counter's total (a boundary
-// older than the retention reads only the minutes retained).
+// admitScript is one admission: every account's check and the slots in
+// one atomic step, so two gateways cannot both pass the check and then
+// both take the last slot or the last of a budget. The check is
+// overBudget's, each account's in order (the first over its limit
+// refuses); known spend is Mem.known's, never below the counter's total (a
+// boundary older than the retention reads only the minutes retained).
 //
-//	KEYS: principal slots, scope slots, counter
-//	ARGV: call, principal limit, scope limit, TTL (ms), from minute,
-//	      the snapshot's spend, budget, worst-case check ("1" or "0"),
-//	      worst, retention (minutes), the gateway's minute
+//	KEYS: principal slots, scope slots, then a counter per account
+//	ARGV: call, principal limit, scope limit, TTL (ms), worst-case check
+//	      ("1" or "0"), worst, retention (minutes), the gateway's minute,
+//	      then per account: from minute, the snapshot's spend, limit
 //
-// It returns {outcome, known}, outcome an Outcome.
+// It returns {outcome, the account refused over (from 0), the known spend
+// of each}, outcome an Outcome.
 var admitScript = valkey.NewLuaScript(nowMillis + slotsTake + sinceOf + `
-local principalSlots, scopeSlots, counter = KEYS[1], KEYS[2], KEYS[3]
+local principalSlots, scopeSlots = KEYS[1], KEYS[2]
 local call, principalLimit, scopeLimit, ttl = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
-local from, spend, budget = tonumber(ARGV[5]), tonumber(ARGV[6]), tonumber(ARGV[7])
-local worstCaseCheck, worst = ARGV[8] == '1', tonumber(ARGV[9])
-local retain, minute = tonumber(ARGV[10]), tonumber(ARGV[11])
+local worstCaseCheck, worst = ARGV[5] == '1', tonumber(ARGV[6])
+local retain, minute = tonumber(ARGV[7]), tonumber(ARGV[8])
 
-local known = spend + since(counter, from, minute, retain)
-if from ~= 0 then known = math.max(known, tonumber(redis.call('HGET', counter, 'total') or '0')) end
-if budget ~= 0 then -- 0 is none; a negative one refuses, as overBudget does
-  local over
-  if worstCaseCheck then over = known + worst > budget else over = known >= budget end
-  if over then return {1, known} end
+local out = {0, 0}
+for i = 3, #KEYS do
+  local j = 9 + 3 * (i - 3)
+  local counter, from, spend = KEYS[i], tonumber(ARGV[j]), tonumber(ARGV[j+1])
+  local known = spend + since(counter, from, minute, retain)
+  if from ~= 0 then known = math.max(known, tonumber(redis.call('HGET', counter, 'total') or '0')) end
+  out[#out+1] = known
 end
-if not take(principalSlots, scopeSlots, call, principalLimit, scopeLimit, ttl) then return {2, known} end
-return {0, known}`)
+for i = 3, #KEYS do
+  local limit, known = tonumber(ARGV[9 + 3 * (i - 3) + 2]), out[i]
+  if limit ~= 0 then -- 0 is none; a negative one refuses, as overBudget does
+    local over
+    if worstCaseCheck then over = known + worst > limit else over = known >= limit end
+    if over then out[1], out[2] = 1, i - 3; return out end
+  end
+end
+if not take(principalSlots, scopeSlots, call, principalLimit, scopeLimit, ttl) then out[1] = 2 end
+return out`)
 
 // registerScript registers (or renews) slots without checking limits.
 //
@@ -341,9 +351,9 @@ return 1`)
 // addScript adds increments in one script, so a batch is added whole or
 // not at all.
 //
-//	KEYS: the counter, per increment
+//	KEYS: a counter, per increment's account
 //	ARGV: the counters' life (ms), retention (minutes), then minute and
-//	      cost per increment
+//	      cost per key
 var addScript = newScript(addTo + `
 local life, retain = ARGV[1], tonumber(ARGV[2])
 for i = 1, #KEYS do
@@ -351,14 +361,15 @@ for i = 1, #KEYS do
 end
 return 1`)
 
-// completeScript is a completion: the add, then the slot freed.
+// completeScript is a completion: the add to each account's counter, then
+// the slot freed.
 //
-//	KEYS: counter, principal slots, scope slots
-//	ARGV: the counter's life (ms), minute, cost, call, retention (minutes)
+//	KEYS: principal slots, scope slots, then a counter per account
+//	ARGV: the counters' life (ms), minute, cost, call, retention (minutes)
 var completeScript = newScript(addTo + `
-local counter, principalSlots, scopeSlots = KEYS[1], KEYS[2], KEYS[3]
+local principalSlots, scopeSlots = KEYS[1], KEYS[2]
 local life, minute, cost, call, retain = ARGV[1], ARGV[2], ARGV[3], ARGV[4], tonumber(ARGV[5])
-add(counter, minute, cost, life, retain)
+for i = 3, #KEYS do add(KEYS[i], minute, cost, life, retain) end
 redis.call('ZREM', principalSlots, call)
 redis.call('ZREM', scopeSlots, call)
 return 1`)
@@ -370,9 +381,11 @@ return 1`)
 var sinceScript = valkey.NewLuaScript(sinceOf + `
 return since(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]))`)
 
-func (v *Valkey) principalKey(p string) string           { return v.prefix + "slots:p:" + p }
-func (v *Valkey) scopeKey(s string) string               { return v.prefix + "slots:s:" + s }
-func (v *Valkey) counterKey(scope, period string) string { return v.keysOf(scope, period).counter }
+func (v *Valkey) principalKey(p string) string { return v.prefix + "slots:p:" + p }
+func (v *Valkey) scopeKey(s string) string     { return v.prefix + "slots:s:" + s }
+func (v *Valkey) counterKey(account, period string) string {
+	return v.keysOf(account, period).counter
+}
 
 func (v *Valkey) now() time.Time {
 	if v.Now != nil {
@@ -385,32 +398,44 @@ func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10)
 
 func i64(n int64) string { return strconv.FormatInt(n, 10) }
 
-func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, error) {
+func (v *Valkey) Admit(ctx context.Context, a Admission) (Result, error) {
+	if len(a.Accounts) > MaxAccounts {
+		return Result{}, fmt.Errorf("limit: an admission names %d accounts (at most %d)", len(a.Accounts), MaxAccounts)
+	}
 	check := "0"
 	if a.DeclaredWorstCaseCheck {
 		check = "1"
 	}
-	d, ks := v.durations(), v.keysOf(a.Scope, a.Period)
-	keys := []string{v.principalKey(a.Principal), ks.slots, ks.counter}
-	args := []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), d.ttlMs,
-		i64(fromMinute(a.Since)), i64(a.Spend), i64(a.Budget), check, i64(a.Worst), d.retainMinutes, i64(minuteOf(cmp.Or(a.Now, v.now())))}
+	d := v.durations()
+	keys := append(make([]string, 0, 2+MaxAccounts), v.principalKey(a.Principal), v.scopeKey(a.Scope))
+	args := append(make([]string, 0, 8+3*MaxAccounts), a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), d.ttlMs,
+		check, i64(a.Worst), d.retainMinutes, i64(minuteOf(cmp.Or(a.Now, v.now()))))
+	for _, acc := range a.Accounts {
+		keys = append(keys, v.counterKey(acc.ID, a.Period))
+		args = append(args, i64(fromMinute(acc.Since)), i64(acc.Spend), i64(acc.Limit))
+	}
 	c, err := v.client()
 	if err != nil {
-		return 0, 0, err
+		return Result{}, err
 	}
 	r, err := admitScript.Exec(ctx, c, keys, args).AsIntSlice()
 	if err != nil {
-		return 0, 0, wrap(err)
+		return Result{}, wrap(err)
 	}
-	if len(r) != 2 {
-		return 0, 0, fmt.Errorf("limit: the admit script returned %d values", len(r))
+	if len(r) != 2+len(a.Accounts) {
+		return Result{}, fmt.Errorf("limit: the admit script returned %d values for %d accounts", len(r), len(a.Accounts))
 	}
-	return Outcome(r[0]), r[1], nil
+	res := Result{Outcome: Outcome(r[0]), Over: int(r[1])}
+	copy(res.Known[:], r[2:])
+	return res, nil
 }
 
 func (v *Valkey) Complete(ctx context.Context, in Increment, s Slot) error {
-	d, ks := v.durations(), v.keysOf(in.Scope, in.Period)
-	keys := []string{ks.counter, v.principalKey(s.Principal), v.scopeKey(s.Scope)}
+	d := v.durations()
+	keys := append(make([]string, 0, 2+len(in.Accounts)), v.principalKey(s.Principal), v.scopeKey(s.Scope))
+	for _, acc := range in.Accounts {
+		keys = append(keys, v.counterKey(acc, in.Period))
+	}
 	return v.write(ctx, completeScript, keys, []string{d.lifeMs, i64(minuteOf(in.At)), i64(in.Cost), s.Call, d.retainMinutes}, 1)
 }
 
@@ -521,8 +546,11 @@ func (v *Valkey) AddAll(ctx context.Context, incs []Increment) error {
 		keys := make([]string, 0, len(chunk))
 		args := append(make([]string, 0, 2+2*len(chunk)), d.lifeMs, d.retainMinutes)
 		for _, in := range chunk {
-			keys = append(keys, v.counterKey(in.Scope, in.Period))
-			args = append(args, i64(minuteOf(in.At)), i64(in.Cost))
+			minute, cost := i64(minuteOf(in.At)), i64(in.Cost)
+			for _, acc := range in.Accounts {
+				keys = append(keys, v.counterKey(acc, in.Period))
+				args = append(args, minute, cost)
+			}
 		}
 		if err := v.write(ctx, addScript, keys, args, int64(len(chunk))); err != nil {
 			return err
@@ -535,12 +563,12 @@ func (v *Valkey) AddAll(ctx context.Context, incs []Increment) error {
 // by the limiter in chunks no larger.
 const addChunk = 256
 
-func (v *Valkey) Since(ctx context.Context, scope, period string, since time.Time) (int64, error) {
+func (v *Valkey) Since(ctx context.Context, account, period string, since time.Time) (int64, error) {
 	c, err := v.client()
 	if err != nil {
 		return 0, err
 	}
-	n, err := sinceScript.Exec(ctx, c, []string{v.counterKey(scope, period)},
+	n, err := sinceScript.Exec(ctx, c, []string{v.counterKey(account, period)},
 		[]string{i64(fromMinute(since)), i64(minuteOf(v.now())), v.durations().retainMinutes}).AsInt64()
 	return n, wrap(err)
 }

@@ -21,12 +21,27 @@ var (
 		Msg: "the scope's budget for this period is spent; its managers or a budget manager can add to it"}
 	ErrConcurrency = &admission.Refusal{Code: contract.LimitConcurrency,
 		Msg: "too many calls in flight for this key's principal or scope; retry when one finishes"}
+	ErrMemberCap = &admission.Refusal{Code: contract.BudgetMemberCap,
+		Msg: "your cap in this scope for this period is spent; the scope's managers can raise it"}
+	ErrKeyCap = &admission.Refusal{Code: contract.BudgetKeyCap,
+		Msg: "this key's spend cap for this period is spent; its owner or the scope's managers can raise it, or use another key"}
 )
+
+// refusalAt is the refusal of a call over a level's limit.
+func refusalAt(l admission.Level) *admission.Refusal {
+	switch l {
+	case admission.KeyLevel:
+		return ErrKeyCap
+	case admission.MemberLevel:
+		return ErrMemberCap
+	}
+	return ErrBudget
+}
 
 // Call is the call the limiter admits: admission's.
 type Call = admission.Call
 
-// Known is a snapshot's known spend for one scope (ADR 0048), for one
+// Known is a snapshot's known spend for one account (ADR 0048), for one
 // budget period: the ledger's spend of the calls that ended before Since,
 // a boundary golem-control places an ingestion allowance behind the
 // snapshot's time. The site counter's minutes from Since on are added to
@@ -74,7 +89,7 @@ type Limiter struct {
 	periods atomic.Pointer[periodName] // the latest month's, for period
 
 	mu          sync.Mutex
-	known       map[string]Known        // by scope, from the snapshot
+	known       map[string]Known        // by account, from the snapshot
 	last        map[keyOf]int64         // known spend as last computed: all an outage leaves
 	running     map[string]*Ticket      // this gateway's calls the provider may still be working on
 	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer
@@ -103,8 +118,46 @@ type held struct {
 	Increment
 }
 
-// keyOf is a scope in a budget period.
-type keyOf struct{ scope, period string }
+// keyOf is an account in a budget period.
+type keyOf struct{ account, period string }
+
+// charged is a call's accounts (org-model.md §4.2), in the order admission
+// checks them: its key's and its member's where they are capped, then its
+// scope's. An uncapped key or member has no account: its spend is its
+// scope's, and the site keeps no counter for it.
+type charged struct {
+	n      int
+	ids    [MaxAccounts]string
+	levels [MaxAccounts]admission.Level
+	limits [MaxAccounts]int64 // each account's own: its cap, or the scope's budget
+}
+
+func chargedOf(c Call) charged {
+	var ch charged
+	add := func(id string, lv admission.Level, limit int64) {
+		ch.ids[ch.n], ch.levels[ch.n], ch.limits[ch.n] = id, lv, limit
+		ch.n++
+	}
+	if c.KeyCap > 0 && c.Key != "" {
+		add(KeyAccount(c.Key), admission.KeyLevel, c.KeyCap)
+	}
+	if c.MemberCap > 0 {
+		add(MemberAccount(c.Scope, c.Principal), admission.MemberLevel, c.MemberCap)
+	}
+	add(c.Scope, admission.ScopeLevel, c.Budget)
+	return ch
+}
+
+// over is the first account a call admitted at known is over the limit
+// of, or none.
+func (ch *charged) over(c Call, known *[MaxAccounts]int64) admission.Over {
+	for i := range ch.n {
+		if overBudget(known[i], ch.limits[i], c.DeclaredWorstCaseCheck, c.Worst) {
+			return admission.Over{Level: ch.levels[i], Known: known[i], Limit: ch.limits[i]}
+		}
+	}
+	return admission.Over{}
+}
 
 // periodName is a month's period name, formatted once for the month.
 type periodName struct {
@@ -135,10 +188,10 @@ type Ticket struct {
 	call   Call
 	period string
 	waived bool
-	over   bool  // admitted over the budget, in a mode that admits one
-	known  int64 // the known spend admission checked
-	ended  bool  // Complete or Cancel has run (under l.mu)
-	freed  bool  // its slot is freed (under l.mu)
+	ch     charged
+	over   admission.Over // the account admitted over its limit, in a mode that admits one
+	ended  bool           // Complete or Cancel has run (under l.mu)
+	freed  bool           // its slot is freed (under l.mu)
 }
 
 // claimEnd claims the ticket's one end: false if Complete or Cancel has
@@ -161,10 +214,10 @@ func (t *Ticket) Waived() bool { return t.waived }
 // Period is the budget period the call is counted in: its ledger row's.
 func (t *Ticket) Period() string { return t.period }
 
-// OverBudget reports whether the call was admitted over its scope's
-// budget, in a mode that admits one (warn, observe): what enforce would
-// have refused. known is the known spend admission checked.
-func (t *Ticket) OverBudget() (over bool, known int64) { return t.over, t.known }
+// OverBudget reports the account the call was admitted over the limit of,
+// in a mode that admits one (warn, observe): what enforce would have
+// refused.
+func (t *Ticket) OverBudget() admission.Over { return t.over }
 
 func (l *Limiter) now() time.Time {
 	if l.Now != nil {
@@ -187,86 +240,107 @@ func (l *Limiter) period(t time.Time) string {
 
 // snapshotFor is the snapshot's known spend for a scope in a period: none
 // if the snapshot is of another period (a new month starts from nothing).
-func (l *Limiter) snapshotFor(scope, period string) Known {
+func (l *Limiter) snapshotFor(account, period string) Known {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if k := l.known[scope]; k.Period == period {
+	return l.snapshotLocked(account, period)
+}
+
+// snapshotLocked is snapshotFor with mu held.
+func (l *Limiter) snapshotLocked(account, period string) Known {
+	if k := l.known[account]; k.Period == period {
 		return k
 	}
 	return Known{Period: period}
 }
 
 // Admit checks a call and takes its slots. While the store is reachable it
-// is one atomic step at the store, one round trip: known spend against the
-// budget, then the slots. While it is not, this gateway's own counts and its
+// is one atomic step at the store, one round trip: each account's known
+// spend against its limit (the key's cap, the member's, the scope's
+// budget), then the slots. While it is not, this gateway's own counts and its
 // last known spend decide, and the call is a waiver of the bound (ADR 0041
 // §7.3).
 //
-// Only an enforced budget refuses (c.BudgetMode): under warn or observe
-// the store checks the slots alone, and the known spend it returns is
-// checked against the budget here, the ticket saying whether the call is
-// over it.
+// Only an enforced budget refuses (c.BudgetMode, the scope's, for every
+// level): under warn or observe the store checks the slots alone, and the
+// known spends it returns are checked against the limits here, the ticket
+// saying which account the call is over.
 func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	period := l.period(cmp.Or(c.Started, l.now()))
+	ch := chargedOf(c)
 	if !l.Down() {
-		k := l.snapshotFor(c.Scope, period)
-		a := Admission{Slot: slotOf(c), Period: period, Since: k.Since, Spend: k.Spend, Now: l.now(),
-			Budget: refusing(c), DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
+		var accts [MaxAccounts]Account
+		l.mu.Lock()
+		for i := range ch.n {
+			k := l.snapshotLocked(ch.ids[i], period)
+			accts[i] = Account{ID: ch.ids[i], Since: k.Since, Spend: k.Spend, Limit: refusing(c, ch.limits[i])}
+		}
+		l.mu.Unlock()
+		a := Admission{Slot: slotOf(c), Period: period, Now: l.now(), Accounts: accts[:ch.n],
+			DeclaredWorstCaseCheck: c.DeclaredWorstCaseCheck, Worst: c.Worst,
 			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit}
 		sctx, cancel := l.storeContext(ctx)
-		o, known, err := l.store.Admit(sctx, a)
+		r, err := l.store.Admit(sctx, a)
 		cancel()
 		switch {
 		case err == nil:
-			return l.admitted(c, period, o, known)
+			return l.admitted(c, &ch, period, r)
 		case ctx.Err() != nil:
 			return nil, ctx.Err() // the caller went away: no outage
 		}
 		l.markDown(err) // and fall through to the local check
 	}
-	return l.admitLocally(c, period)
+	return l.admitLocally(c, &ch, period)
 }
 
-// refusing is the budget a call is refused over: its own if enforced, else
-// none.
-func refusing(c Call) int64 {
+// refusing is the limit a call is refused over: the account's own if the
+// scope enforces, else none.
+func refusing(c Call, limit int64) int64 {
 	if c.BudgetMode != admission.Enforce {
 		return 0
 	}
-	return c.Budget
+	return limit
 }
 
-// admitted takes the store's answer to an admission: the known spend it
-// computed becomes the one an outage would fall back on, and an admitted
+// admitted takes the store's answer to an admission: the known spends it
+// computed become the ones an outage would fall back on, and an admitted
 // call is tracked.
-func (l *Limiter) admitted(c Call, period string, o Outcome, known int64) (*Ticket, error) {
+func (l *Limiter) admitted(c Call, ch *charged, period string, r Result) (*Ticket, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.last[keyOf{c.Scope, period}] = known
-	switch o {
+	for i := range ch.n {
+		l.last[keyOf{ch.ids[i], period}] = r.Known[i]
+	}
+	switch r.Outcome {
 	case OverBudget:
-		return nil, ErrBudget
+		if r.Over < 0 || r.Over >= ch.n {
+			return nil, ErrBudget // a store's garbled answer: the scope's refusal
+		}
+		return nil, refusalAt(ch.levels[r.Over])
 	case OverConcurrency:
 		return nil, ErrConcurrency
 	}
 	// In grace, peers may still hold calls Valkey lacks.
-	return l.track(c, period, l.now().Before(l.graceUntil), known), nil
+	return l.track(c, ch, period, l.now().Before(l.graceUntil), &r.Known), nil
 }
 
-// admitLocally is the outage's check: the last known spend and this
+// admitLocally is the outage's check: the last known spends and this
 // gateway's own running calls decide, and the call is a waiver. The check
 // and the tracking are one step under the lock.
-func (l *Limiter) admitLocally(c Call, period string) (*Ticket, error) {
+func (l *Limiter) admitLocally(c Call, ch *charged, period string) (*Ticket, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	known := l.last[keyOf{c.Scope, period}]
-	if overBudget(known, refusing(c), c.DeclaredWorstCaseCheck, c.Worst) {
-		return nil, ErrBudget
+	var known [MaxAccounts]int64
+	for i := range ch.n {
+		known[i] = l.last[keyOf{ch.ids[i], period}]
+		if overBudget(known[i], refusing(c, ch.limits[i]), c.DeclaredWorstCaseCheck, c.Worst) {
+			return nil, refusalAt(ch.levels[i])
+		}
 	}
 	if atLimit(l.byPrincipal[c.Principal], c.PrincipalLimit) || atLimit(l.byScope[c.Scope], c.ScopeLimit) {
 		return nil, ErrConcurrency
 	}
-	return l.track(c, period, true, known), nil
+	return l.track(c, ch, period, true, &known), nil
 }
 
 // storeContext bounds a store call: Valkey answers a site's gateways in a
@@ -304,10 +378,10 @@ func (l *Limiter) MarkDown(err error) { l.markDown(err) }
 // anything (Valkey's PING).
 type pinger interface{ Ping(context.Context) error }
 
-// track records a running call admitted at known spend; mu is held.
-func (l *Limiter) track(c Call, period string, waived bool, known int64) *Ticket {
-	t := &Ticket{l: l, call: c, period: period, waived: waived, known: known,
-		over: overBudget(known, c.Budget, c.DeclaredWorstCaseCheck, c.Worst)}
+// track records a running call admitted at its accounts' known spends; mu
+// is held.
+func (l *Limiter) track(c Call, ch *charged, period string, waived bool, known *[MaxAccounts]int64) *Ticket {
+	t := &Ticket{l: l, call: c, period: period, waived: waived, ch: *ch, over: ch.over(c, known)}
 	if waived {
 		l.Waived.Add(1)
 	}
@@ -375,7 +449,7 @@ func (t *Ticket) cancel(ctx context.Context, seen int64) bool {
 	return true
 }
 
-// account adds a ticket's cost to its scope's counter, in the minute it
+// account adds a ticket's cost to its accounts' counters, in the minute it
 // ends, and with release frees its slot in the same step (Store.Complete);
 // otherwise the slot stays (Store.Add). While the store is down, or if
 // this call to it fails (an outage: accounting runs detached from the
@@ -387,7 +461,7 @@ func (l *Limiter) account(ctx context.Context, t *Ticket, cost int64, release bo
 	// A cost is never negative (it would take spend back) nor past
 	// MaxMicros (Valkey's sums would no longer be exact): only a garbled
 	// usage report gives one, and it is counted as the bound.
-	in := Increment{Scope: t.call.Scope, Period: t.period, Call: t.call.ID, Cost: min(max(cost, 0), snapshot.MaxMicros), At: l.now()}
+	in := Increment{Accounts: t.ch.ids[:t.ch.n], Period: t.period, Call: t.call.ID, Cost: min(max(cost, 0), snapshot.MaxMicros), At: l.now()}
 	for {
 		if !l.Down() {
 			err := l.send(ctx, in, t, release)
@@ -465,13 +539,14 @@ func (l *Limiter) hold(in Increment) bool {
 	return true
 }
 
-// ApplySnapshot takes a snapshot's known spend for a scope. The counter is
+// ApplySnapshot takes a snapshot's known spend for an account (a scope's
+// ID, MemberAccount or KeyAccount). The counter is
 // left as it is: a gateway still on an older snapshot needs the minutes
 // from its own boundary (ADR 0048), which retention trims.
-func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
+func (l *Limiter) ApplySnapshot(_ context.Context, account string, k Known) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.known[scope] = k
+	l.known[account] = k
 }
 
 // Renew re-registers the slots of this gateway's running calls; the
@@ -687,20 +762,20 @@ func (l *Limiter) endGrace() {
 	l.graceUntil = time.Time{}
 }
 
-// Known is a scope's known spend now, for the current period, read afresh
+// Known is an account's known spend now, for the current period, read afresh
 // when the store answers (else the last computed): as admission computes
 // it, never below the counter's whole total. It does not change what
 // admission decides from: only an admission's own read does, as in
 // model/exposure.md.
-func (l *Limiter) Known(ctx context.Context, scope string) int64 {
+func (l *Limiter) Known(ctx context.Context, account string) int64 {
 	period := l.period(l.now())
 	if !l.Down() {
-		k := l.snapshotFor(scope, period)
+		k := l.snapshotFor(account, period)
 		sctx, cancel := l.storeContext(ctx)
-		since, err := l.store.Since(sctx, scope, period, k.Since)
+		since, err := l.store.Since(sctx, account, period, k.Since)
 		total := since
 		if err == nil && !k.Since.IsZero() {
-			total, err = l.store.Since(sctx, scope, period, time.Time{})
+			total, err = l.store.Since(sctx, account, period, time.Time{})
 		}
 		cancel()
 		if err == nil {
@@ -709,16 +784,16 @@ func (l *Limiter) Known(ctx context.Context, scope string) int64 {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.last[keyOf{scope, period}]
+	return l.last[keyOf{account, period}]
 }
 
-// pendingIn lists the increments held for replay, for a scope.
-func (l *Limiter) pendingIn(scope string) []Increment {
+// pendingIn lists the increments held for replay, for an account.
+func (l *Limiter) pendingIn(account string) []Increment {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var out []Increment
 	for _, h := range l.pending {
-		if h.Scope == scope {
+		if slices.Contains(h.Accounts, account) {
 			out = append(out, h.Increment)
 		}
 	}

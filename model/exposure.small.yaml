@@ -1,37 +1,46 @@
 # exposure.md's small instance, explored exhaustively (check-exposure.sh):
 # two principals (p1 with two calls, p2 with one), two gateways, costs 1 or
-# 3, a budget of 2, one call in flight per principal and per scope.
+# 3, a budget of 2, one call in flight per principal and per scope; members
+# uncapped except in the member variants (capped at 1, the budget out of
+# the way).
 spec: exposure.qnt
 module: small
 actions: {}
-invariants: [safe, limitsHonoured, withinBound, knownNeverOver, noLostIncrements]
+invariants: [safe, limitsHonoured, withinBound, knownNeverOver, noLostIncrements, memberWithinBound, memberKnownNeverOver]
 simulate:
-  holds: [safe, limitsHonoured, withinBound, knownNeverOver, noLostIncrements]
+  holds: [safe, limitsHonoured, withinBound, knownNeverOver, noLostIncrements, memberWithinBound, memberKnownNeverOver]
   search: {depth: 7, states: 600000}
   variants:
     - name: design
       dead: []
     - name: no scope limit
       constants: {SCOPE_LIMIT_ON: 'false'}
-      holds: [knownNeverOver, noLostIncrements]
+      holds: [knownNeverOver, noLostIncrements, memberWithinBound, memberKnownNeverOver]
       allows: [safe, limitsHonoured, withinBound]
     - name: reset at apply
       constants: {HANDOFF: '"resetAtApply"'}
-      holds: [limitsHonoured, knownNeverOver]
+      holds: [limitsHonoured, knownNeverOver, memberWithinBound, memberKnownNeverOver]
       allows: [safe, withinBound, noLostIncrements]
     - name: sum
       constants: {HANDOFF: '"sum"'}
-      holds: [limitsHonoured, withinBound, noLostIncrements]
-      allows: [safe, knownNeverOver]
+      holds: [limitsHonoured, withinBound, noLostIncrements, memberWithinBound]
+      allows: [safe, knownNeverOver, memberKnownNeverOver]
     - name: no allowance
       constants: {HANDOFF: '"noAllowance"'}
-      holds: [limitsHonoured, knownNeverOver]
+      holds: [limitsHonoured, knownNeverOver, memberWithinBound, memberKnownNeverOver]
       allows: [safe, withinBound, noLostIncrements]
     - name: no hold on cancel
       constants: {HOLD_ON_CANCEL: 'false'}
-      holds: [withinBound, knownNeverOver, noLostIncrements]
+      holds: [withinBound, knownNeverOver, noLostIncrements, memberWithinBound, memberKnownNeverOver]
       allows: [safe, limitsHonoured]
     - name: no reacquire
       constants: {REACQUIRE: 'false'}
-      holds: [withinBound, knownNeverOver, noLostIncrements]
+      holds: [withinBound, knownNeverOver, noLostIncrements, memberWithinBound, memberKnownNeverOver]
       allows: [safe, limitsHonoured]
+    - name: member caps
+      constants: {MEMBER_CAP: '1', BUDGET: '100'}
+      dead: []
+    - name: member snapshot only
+      constants: {MEMBER_CAP: '1', BUDGET: '100', MEMBER_KNOWN: '"snapshotOnly"'}
+      holds: [limitsHonoured, withinBound, knownNeverOver, noLostIncrements, memberKnownNeverOver]
+      allows: [safe, memberWithinBound]

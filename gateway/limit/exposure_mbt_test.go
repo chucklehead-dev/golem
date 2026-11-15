@@ -54,7 +54,7 @@ type event struct {
 type faultyStore interface {
 	Store
 	SetDown(bool)
-	failover(scope, period string, minute int64)
+	failover(period string, minute int64)
 	Buckets(scope, period string) map[int64]int64
 	Slots() []Slot
 }
@@ -157,7 +157,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 		"recover":   func(*connect.Step) error { return d.gws[gw()].Recover(ctx) },
 		"graceEnds": func(*connect.Step) error { d.gws[gw()].endGrace(); return nil },
 		"failover": func(s *connect.Step) error {
-			d.store.failover(scope, period, minuteOf(inPeriod)+connect.MustPick[int64](s, "t"))
+			d.store.failover(period, minuteOf(inPeriod)+connect.MustPick[int64](s, "t"))
 			return nil
 		},
 	}.Step(s)

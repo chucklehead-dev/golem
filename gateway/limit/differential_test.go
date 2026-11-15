@@ -72,8 +72,9 @@ func (u byReads) Observe() (any, error) {
 		ob.State.Counter[b] = n
 		// A budget below zero refuses whatever the known spend, so the
 		// probe takes no slot; it still reports what it computed.
-		_, k, err := u.d.store.Admit(u.d.t.Context(), Admission{Slot: Slot{"probe", "probe", scope}, Period: period,
-			Since: since, Spend: 1, Now: u.d.now(), Budget: -1})
+		r, err := u.d.store.Admit(u.d.t.Context(), Admission{Slot: Slot{"probe", "probe", scope}, Period: period,
+			Accounts: []Account{{ID: scope, Since: since, Spend: 1, Limit: -1}}, Now: u.d.now()})
+		k := r.Known[0]
 		if err != nil {
 			k = -1
 		}

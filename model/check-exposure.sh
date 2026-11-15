@@ -15,17 +15,21 @@ fail=0
 "$QUINT" typecheck "$SPEC"
 
 echo "== the design holds (simulation of $SAMPLES runs, not a proof)"
-r=$(run --main=exposureDesign --invariant=safe); echo "exposureDesign safe: $r"
-[[ $r == "[ok]"* ]] || fail=1
+for m in exposureDesign memberCaps; do
+  r=$(run --main=$m --invariant=safe); echo "$m safe: $r"
+  [[ $r == "[ok]"* ]] || fail=1
+done
 
 echo "== the design can reach every scenario"
 for v in overshoots waiverExceedsLimit cancelledBilledMore handoffInFlight snapshotSkew; do
   r=$(run --main=exposureDesign --invariant="not($v)"); echo "$v: $r"
   [[ $r == "[violation]"* ]] || { echo "  scenario not reached by simulation"; fail=1; }
 done
+r=$(run --main=memberCaps --invariant="not(memberOvershoots)"); echo "memberOvershoots in memberCaps: $r"
+[[ $r == "[violation]"* ]] || { echo "  scenario not reached by simulation"; fail=1; }
 
 echo "== each broken design is caught"
-for pair in noScopeLimit:limitsHonoured resetAtApply:noLostIncrements sumHandoff:knownNeverOver noAllowance:noLostIncrements releaseOnCancel:limitsHonoured noReacquire:limitsHonoured; do
+for pair in noScopeLimit:limitsHonoured resetAtApply:noLostIncrements sumHandoff:knownNeverOver noAllowance:noLostIncrements releaseOnCancel:limitsHonoured noReacquire:limitsHonoured memberSnapshotOnly:memberWithinBound; do
   m=${pair%%:*}; i=${pair##*:}
   r=$(run --main="$m" --invariant="$i"); echo "$m breaks $i: $r"
   [[ $r == "[violation]"* ]] || { echo "  not caught by simulation"; fail=1; }
@@ -50,6 +54,8 @@ expect noAllowance noAllowanceTest pass
 expect exposureDesign noAllowanceTest fail
 expect exposureDesign skewTest pass
 expect exposureDesign waiverTest pass
+expect memberSnapshotOnly memberCapTest pass
+expect memberCaps memberCapTest fail
 
 
 echo "== exhaustive: exposure.small.yaml, every run up to a depth (not a sample)"

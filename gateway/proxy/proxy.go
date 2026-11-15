@@ -719,8 +719,9 @@ func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c a
 	if lim.DeclaredWorstCaseCheck && !req.hasMax {
 		return nil, &refusal{code: contract.RequestInvalid, msg: "this scope checks each call's declared worst case: set max_tokens, so it can be checked against the budget"}
 	}
-	c.Principal, c.Scope = p.ID, p.Scope
+	c.Principal, c.Scope, c.Key = p.ID, p.Scope, p.Key
 	c.Budget, c.BudgetMode, c.PrincipalLimit, c.ScopeLimit = lim.BudgetMicros, lim.BudgetMode, lim.PrincipalInFlight, lim.ScopeInFlight
+	c.MemberCap, c.KeyCap = lim.MemberCapMicros, lim.KeyCapMicros
 	c.DeclaredWorstCaseCheck = lim.DeclaredWorstCaseCheck
 	t, err := h.Limiter.Admit(ctx, c)
 	if no, ok := errors.AsType[*admission.Refusal](err); ok {
@@ -735,31 +736,33 @@ func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c a
 	return t, nil
 }
 
-// overBudget reports whether an admitted call is over its scope's budget
-// (its scope observes or warns rather than enforcing), for its ledger row;
-// in warn mode the response says so in golem-warning, with the share of
-// the budget known spend has reached (contracts.md §1). It is set before
-// the provider's headers are copied, which never include golem's.
+// overBudget reports whether an admitted call is over one of its
+// accounts' limits (its scope observes or warns rather than enforcing):
+// its key's cap, its member's, or the scope's budget, for its ledger row;
+// in warn mode the response says so in golem-warning, with the refusal's
+// code and the share of the limit known spend has reached (contracts.md
+// §1). It is set before the provider's headers are copied, which never
+// include golem's.
 func (h *Handler) overBudget(w http.ResponseWriter, p *auth.Principal, t admission.Ticket) bool {
-	over, known := t.OverBudget()
-	if over && p.Limits.BudgetMode == admission.Warn {
-		w.Header()[contract.HeaderWarning] = []string{budgetWarning(known, p.Limits.BudgetMicros)}
+	o := t.OverBudget()
+	if o.Level != admission.NoLevel && p.Limits.BudgetMode == admission.Warn {
+		w.Header()[contract.HeaderWarning] = []string{budgetWarning(o)}
 	}
-	return over
+	return o.Level != admission.NoLevel
 }
 
 // budgetWarning is warn mode's golem-warning: the refusal's code, and the
-// share of the budget known spend has reached, rounded down.
-func budgetWarning(known, budget int64) string {
+// share of the limit known spend has reached, rounded down.
+func budgetWarning(o admission.Over) string {
 	var pct int64
-	switch {
-	case budget <= 0:
-	case known > math.MaxInt64/100: // past any budget: not worth exactness
-		pct = known / budget * 100
+	switch known, limit := o.Known, o.Limit; {
+	case limit <= 0:
+	case known > math.MaxInt64/100: // past any limit: not worth exactness
+		pct = known / limit * 100
 	default:
-		pct = known * 100 / budget
+		pct = known * 100 / limit
 	}
-	return contract.BudgetPoolExhausted.Name + " " + strconv.FormatInt(pct, 10) + "%"
+	return o.Level.Code().Name + " " + strconv.FormatInt(pct, 10) + "%"
 }
 
 // upstreamRequest is the provider's request: the rewritten body, the

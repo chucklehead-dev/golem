@@ -37,8 +37,8 @@ func TestBudgetModes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if over, known := first.OverBudget(); over || known != 0 {
-					t.Fatalf("mode %d: a call within the budget: over %v at %d", mode, over, known)
+				if o := first.OverBudget(); o.Level != admission.NoLevel {
+					t.Fatalf("mode %d: a call within the budget: over %+v", mode, o)
 				}
 				first.Complete(ctx, 10) // the budget, spent
 				if tc.outage {
@@ -57,8 +57,8 @@ func TestBudgetModes(t *testing.T) {
 				case err != nil:
 					t.Fatalf("mode %d: %v, want admitted over the budget", mode, err)
 				default:
-					if over, known := tk.OverBudget(); !over || known != 10 {
-						t.Fatalf("mode %d: over %v at %d, want over at 10", mode, over, known)
+					if o := tk.OverBudget(); o.Level != admission.ScopeLevel || o.Known != 10 || o.Limit != 10 {
+						t.Fatalf("mode %d: over %+v, want the scope's at 10", mode, o)
 					}
 					// The in-flight limit holds: p1 has one running.
 					if _, err := l.Admit(ctx, call("c", "p1")); !errors.Is(err, ErrConcurrency) {
@@ -86,7 +86,7 @@ func TestWorstCaseOverBudget(t *testing.T) {
 	c.ID, c.Worst = "b", 2
 	if tk, err := l.Admit(ctx, c); err != nil {
 		t.Fatal(err)
-	} else if over, _ := tk.OverBudget(); over {
+	} else if tk.OverBudget().Level != admission.NoLevel {
 		t.Fatal("8 + 2 fits 10: not over")
 	} else {
 		tk.Complete(ctx, 0)
@@ -94,7 +94,7 @@ func TestWorstCaseOverBudget(t *testing.T) {
 	c.ID, c.Worst = "c", 5
 	if tk, err := l.Admit(ctx, c); err != nil {
 		t.Fatal(err)
-	} else if over, known := tk.OverBudget(); !over || known != 8 {
-		t.Fatalf("8 + 5 past 10: over %v at %d", over, known)
+	} else if o := tk.OverBudget(); o.Level != admission.ScopeLevel || o.Known != 8 {
+		t.Fatalf("8 + 5 past 10: over %+v", o)
 	}
 }

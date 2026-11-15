@@ -24,14 +24,23 @@ func TestClickHouse(t *testing.T) {
 		case r.URL.Query().Get("param_period") != "2026-11-01" || r.URL.Query().Get("param_before") != "2026-11-14 09:55:00.000":
 			http.Error(w, "parameters "+r.URL.RawQuery, 400)
 		default:
-			io.WriteString(w, `{"scope_id":"team-a","spend":"1500000"}`+"\n"+`{"scope_id":"team-b","spend":"9"}`+"\n")
+			io.WriteString(w, `{"scope_id":"team-a","principal_id":"alice","key_id":"glm_live_k1","spend":"1000000"}`+"\n"+
+				`{"scope_id":"team-a","principal_id":"bob","key_id":"","spend":"500000"}`+"\n"+
+				`{"scope_id":"team-b","principal_id":"","key_id":"","spend":"9"}`+"\n")
 		}
 	}))
 	defer srv.Close()
 	c := ClickHouse{URL: srv.URL, User: "golem", Password: "pw"}
 	got, err := c.Spend(t.Context(), "2026-11", time.Date(2026, 11, 14, 9, 55, 0, 0, time.UTC))
-	if err != nil || got["team-a"] != 1_500_000 || got["team-b"] != 9 || len(got) != 2 {
+	// Each row is summed into its scope's, its member's and its key's.
+	if err != nil || got.Scopes["team-a"] != 1_500_000 || got.Scopes["team-b"] != 9 || len(got.Scopes) != 2 {
 		t.Fatalf("%v %v", got, err)
+	}
+	if len(got.Members) != 2 || got.Members[Member{"team-a", "alice"}] != 1_000_000 || got.Members[Member{"team-a", "bob"}] != 500_000 {
+		t.Fatalf("members %v: want alice's 1,000,000 and bob's 500,000 in team-a, none without a principal", got.Members)
+	}
+	if len(got.Keys) != 1 || got.Keys["glm_live_k1"] != 1_000_000 {
+		t.Fatalf("keys %v: want glm_live_k1's 1,000,000, none without a key", got.Keys)
 	}
 	c.Password = "wrong"
 	if _, err := c.Spend(t.Context(), "2026-11", time.Now()); err == nil || !strings.Contains(err.Error(), "401") {
@@ -47,9 +56,9 @@ type fakeLedger struct {
 	period string
 }
 
-func (f *fakeLedger) Spend(_ context.Context, period string, before time.Time) (map[string]int64, error) {
+func (f *fakeLedger) Spend(_ context.Context, period string, before time.Time) (Totals, error) {
 	f.asked, f.period = append(f.asked, before), period
-	return f.spend, f.fail
+	return Totals{Scopes: f.spend}, f.fail
 }
 
 // TestJob: the boundary is a whole minute an allowance back; a failure

@@ -48,6 +48,18 @@ flight, the scope with `SCOPE_LIMIT`, a site's `GATEWAYS`, and a few
 Only the soft check: the declared-worst-case check tightens the bound by a call, as
 accounting.md shows, and changes nothing here.
 
+Each principal is also a **member account** with a cap, `MEMBER_CAP` (0:
+none), the same for every member here (org-model.md §4.2: a member's cap,
+or the scope's default). A key's cap is the same kind of account, nested
+in its member's and sharing its in-flight limit, so what this model shows
+of a member holds of a key. `MEMBER_KNOWN` is how admission knows a
+member's spend: `"counter"` (the design), a member counter beside the
+scope's, written in the same script and so in the same Valkey write, and
+handed over by the same boundary; or `"snapshotOnly"`, the snapshot's
+per-member spend alone, which is simpler (no per-member keys in Valkey)
+and wrong: a member's calls within one publication's lag are not seen at
+all.
+
 Time is in minutes, the counter's grain. `ALLOWANCE` is how many minutes
 the ledger may take to ingest a row: the deployment's assumption (the
 collector's queue and ClickHouse's insert lag, ADR 0043), stated as the
@@ -69,6 +81,8 @@ far behind the time it publishes.
   const HANDOFF: str
   const HOLD_ON_CANCEL: bool
   const REACQUIRE: bool
+  const MEMBER_CAP: int
+  const MEMBER_KNOWN: str
 ```
 
 ## 3. State
@@ -112,19 +126,24 @@ call's end, which its ledger row and its counter minute both carry.
   guard on `graceEnds` is where the model states it.
 - `buffer` and `ledger`: rows on their way to ClickHouse, and there: the
   event, its cost and the minute its call ended.
+- `mcounter`: each member's counter, minute by minute, as `counter` is
+  the scope's: one admission script adds a call's cost to both, so a
+  failover that loses a write loses it from both.
 - `latest`: the snapshot golem-control last published: its boundary `b`,
   the spend of the ledger's rows that ended before it, and the ledger's
-  whole balance `whole` (for the broken hand-off).
+  whole balance `whole` (for the broken hand-off); `mspend` and `mwhole`
+  the same per member.
 - `snaps`: the snapshot each gateway has applied. Gateways apply snapshots
   independently; this is the skew the first version of this model hid by
   applying every snapshot everywhere at once.
 
 ```quint exposure.qnt +=
   type Row = (str, int, int)
-  type Snap = { b: int, spend: int, whole: int }
+  type Snap = { b: int, spend: int, whole: int, mspend: str -> int, mwhole: str -> int }
 
   var now: int
   var counter: int -> int
+  var mcounter: str -> (int -> int)
   var pending: str -> Set[Event]
   var gwDown: Set[str]
   var grace: Set[str]
@@ -138,12 +157,14 @@ call's end, which its ledger row and its counter minute both carry.
 
 `slots` are the calls Valkey holds a concurrency slot for; `valkeyUp`
 whether gateways can reach it. `views` is each gateway's known spend as it
-last computed it: during an outage that is all it has.
+last computed it: during an outage that is all it has; `mviews` each
+gateway's last known spend of each member.
 
 ```quint exposure.qnt +=
   var slots: Set[str]
   var valkeyUp: bool
   var views: str -> int
+  var mviews: str -> (str -> int)
 ```
 
 ### 3.4 Ghosts
@@ -174,20 +195,23 @@ last computed it: during an outage that is all it has.
     gatewayOf' = REQUESTS.mapBy(r => ""),
     billed' = REQUESTS.mapBy(r => 0),
     seenCost' = REQUESTS.mapBy(r => 0),
-    now' = 0, counter' = Map(), pending' = GATEWAYS.mapBy(g => Set()), gwDown' = Set(), grace' = Set(),
+    now' = 0, counter' = Map(), mcounter' = MEMBERS.mapBy(p => Map()), pending' = GATEWAYS.mapBy(g => Set()), gwDown' = Set(), grace' = Set(),
     buffer' = Set(), ledger' = Set(),
     latest' = blankSnap, snaps' = GATEWAYS.mapBy(g => blankSnap),
-    slots' = Set(), valkeyUp' = true, views' = GATEWAYS.mapBy(g => 0),
+    slots' = Set(), valkeyUp' = true, views' = GATEWAYS.mapBy(g => 0), mviews' = GATEWAYS.mapBy(g => MEMBERS.mapBy(p => 0)),
     observed' = Set(), uncounted' = 0, waived' = Set(), heldEver' = 0, overAdmit' = false,
   }
 
   // The first snapshot: nothing from the ledger, every minute counted.
-  val blankSnap: Snap = { b: 0, spend: 0, whole: 0 }
+  val MEMBERS: Set[str] = REQUESTS.map(r => OWNER.get(r))
+  val blankSnap: Snap = { b: 0, spend: 0, whole: 0, mspend: MEMBERS.mapBy(p => 0), mwhole: MEMBERS.mapBy(p => 0) }
   def sum(events: Set[Event]): int = events.fold(0, (acc, e) => acc + e._2)
   def rowsSum(rows: Set[Row]): int = rows.fold(0, (acc, r) => acc + r._2)
   def running: Set[str] = REQUESTS.filter(r => phase.get(r) == "inflight" or phase.get(r) == "cancelled")
   def ownedBy(rs: Set[str], p: str): Set[str] = rs.filter(r => OWNER.get(r) == p)
   def totalBilled: int = REQUESTS.fold(0, (acc, r) => acc + billed.get(r))
+  def billedOf(p: str): int = ownedBy(REQUESTS, p).fold(0, (acc, r) => acc + billed.get(r))
+  def countedOf(p: str): int = sum(observed.filter(e => OWNER.get(e._1) == p))
   def counted: int = sum(observed)
   def held: int = GATEWAYS.fold(0, (acc, g) => acc + sum(pending.get(g)))
   // A gateway uses the store if Valkey answers and it has recovered.
@@ -212,13 +236,26 @@ traffic.
     else sn.spend + counterFrom(sn.b)
 ```
 
+A member's known spend is the same sum over the member's counter, unless
+the snapshot alone is read (`"snapshotOnly"`):
+
+```quint exposure.qnt +=
+  def minutesFrom(c: int -> int, b: int): int = c.keys().filter(t => t >= b).fold(0, (acc, t) => acc + c.get(t))
+  def mknown(g: str, p: str): int =
+    val sn = snaps.get(g)
+    if (MEMBER_KNOWN == "snapshotOnly") sn.mspend.get(p)
+    else if (HANDOFF == "sum") sn.mwhole.get(p) + minutesFrom(mcounter.get(p), -1)
+    else sn.mspend.get(p) + minutesFrom(mcounter.get(p), sn.b)
+  def underCap(v: int): bool = MEMBER_CAP == 0 or v < MEMBER_CAP
+```
+
 "The rest stays as it is", by group:
 
 ```quint exposure.qnt +=
   action keepCalls = all { phase' = phase, gatewayOf' = gatewayOf, billed' = billed, seenCost' = seenCost }
   action keepSpend = all {
-    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views,
+    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
   }
   action keepGhosts = all { observed' = observed, uncounted' = uncounted, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit }
 ```
@@ -246,7 +283,9 @@ implementation would admit.)
     val local = running.filter(r => gatewayOf.get(r) == gateway)
     if (usesStore(gateway)) all {
       known(gateway) < BUDGET,
+      underCap(mknown(gateway, p)), // the member's account, in the same script
       views' = views.put(gateway, known(gateway)), // the check reads the counter
+      mviews' = mviews.put(gateway, mviews.get(gateway).put(p, mknown(gateway, p))),
       ownedBy(slots, p).size() < LIMIT,
       if (SCOPE_LIMIT_ON) slots.size() < SCOPE_LIMIT else true,
       slots' = slots.union(Set(request)),
@@ -255,7 +294,8 @@ implementation would admit.)
       overAdmit' = (overAdmit or (not(grace.contains(gateway)) and (ownedBy(running, p).size() >= LIMIT or running.size() >= SCOPE_LIMIT))),
     } else all {
       views.get(gateway) < BUDGET,
-      views' = views,
+      underCap(mviews.get(gateway).get(p)),
+      views' = views, mviews' = mviews,
       ownedBy(local, p).size() < LIMIT,
       if (SCOPE_LIMIT_ON) local.size() < SCOPE_LIMIT else true,
       slots' = slots,
@@ -266,7 +306,7 @@ implementation would admit.)
     gatewayOf' = gatewayOf.put(request, gateway),
     billed' = billed, seenCost' = seenCost,
     valkeyUp' = valkeyUp, observed' = observed, uncounted' = uncounted, heldEver' = heldEver,
-    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
     latest' = latest, snaps' = snaps,
   }
 ```
@@ -285,11 +325,12 @@ gateway (§5.6).
     all {
       observed' = observed.union(Set(e)),
       counter' = if (usesStore(g)) addAt(counter, now, cost) else counter,
+      mcounter' = if (usesStore(g)) mcounter.set(OWNER.get(id), addAt(mcounter.get(OWNER.get(id)), now, cost)) else mcounter,
       buffer' = buffer.union(Set(e)),
       pending' = if (usesStore(g)) pending else pending.put(g, pending.get(g).union(Set(e))),
       heldEver' = if (usesStore(g)) heldEver else heldEver + cost,
     },
-    now' = now, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
+    now' = now, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
   }
 ```
 
@@ -358,8 +399,8 @@ gateway applies on its own.
   action tick: bool = all {
     buffer.forall(r => r._3 >= now + 1 - ALLOWANCE),
     now' = now + 1,
-    counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views,
+    counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -367,7 +408,7 @@ gateway applies on its own.
     buffer.contains(r),
     buffer' = buffer.exclude(Set(r)),
     ledger' = ledger.union(Set(r)),
-    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, latest' = latest, snaps' = snaps, views' = views,
+    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -375,9 +416,11 @@ gateway applies on its own.
 
   action publishSnapshot: bool = all {
     val b = boundary
-    latest' = { b: b, spend: rowsSum(ledger.filter(r => r._3 < b)), whole: rowsSum(ledger) },
-    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
-    snaps' = snaps, views' = views,
+    latest' = { b: b, spend: rowsSum(ledger.filter(r => r._3 < b)), whole: rowsSum(ledger),
+      mspend: MEMBERS.mapBy(p => rowsSum(ledger.filter(r => r._3 < b and OWNER.get(r._1) == p))),
+      mwhole: MEMBERS.mapBy(p => rowsSum(ledger.filter(r => OWNER.get(r._1) == p))) },
+    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
+    snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -387,7 +430,8 @@ gateway applies on its own.
     // The bug: start the counter again at each snapshot, as if the
     // snapshot held everything before it.
     counter' = if (HANDOFF == "resetAtApply" and valkeyUp) Map() else counter,
-    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, views' = views,
+    mcounter' = if (HANDOFF == "resetAtApply" and valkeyUp) MEMBERS.mapBy(p => Map()) else mcounter,
+    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, views' = views, mviews' = mviews,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 ```
@@ -418,8 +462,8 @@ the model, like the real failure, need not honour.
     gwDown' = GATEWAYS,
     grace' = grace,
     slots' = Set(),
-    now' = now, counter' = counter, pending' = pending, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views,
+    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, buffer' = buffer, ledger' = ledger,
+    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, keepGhosts,
   }
 
@@ -434,8 +478,9 @@ the model, like the real failure, need not honour.
     gwDown.contains(gateway),
     pending.get(gateway).contains(e),
     counter' = addAt(counter, e._3, e._2),
+    mcounter' = mcounter.set(OWNER.get(e._1), addAt(mcounter.get(OWNER.get(e._1)), e._3, e._2)),
     pending' = pending.put(gateway, pending.get(gateway).exclude(Set(e))),
-    now' = now, buffer' = buffer, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
+    now' = now, buffer' = buffer, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -446,8 +491,8 @@ the model, like the real failure, need not honour.
     gwDown' = gwDown.exclude(Set(gateway)),
     grace' = grace.union(Set(gateway)),
     slots' = if (REACQUIRE) slots.union(running.filter(r => gatewayOf.get(r) == gateway)) else slots,
-    now' = now, counter' = counter, pending' = pending, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views,
+    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, buffer' = buffer, ledger' = ledger,
+    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -457,8 +502,8 @@ the model, like the real failure, need not honour.
     grace.contains(gateway),
     gwDown == Set(),
     grace' = grace.exclude(Set(gateway)),
-    now' = now, counter' = counter, pending' = pending, gwDown' = gwDown, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views,
+    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, buffer' = buffer, ledger' = ledger,
+    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, keepGhosts, slots' = slots, valkeyUp' = valkeyUp,
   }
 
@@ -466,8 +511,9 @@ the model, like the real failure, need not honour.
     valkeyUp,
     counter.keys().contains(t),
     counter' = counter.keys().exclude(Set(t)).mapBy(m => counter.get(m)),
+    mcounter' = mcounter.keys().mapBy(p => mcounter.get(p).keys().exclude(Set(t)).mapBy(m => mcounter.get(p).get(m))),
     uncounted' = uncounted + counter.get(t),
-    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views,
+    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp,
     observed' = observed, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit,
   }
@@ -548,7 +594,22 @@ On every gateway, whichever snapshot it holds:
   val knownNeverOver = GATEWAYS.forall(g => known(g) <= counted)
   val noLostIncrements = GATEWAYS.forall(g => usesStore(g) implies known(g) + uncounted + held >= counted)
 
-  val safe = limitsHonoured and withinBound and knownNeverOver and noLostIncrements
+  val safe = limitsHonoured and withinBound and knownNeverOver and noLostIncrements and memberWithinBound and memberKnownNeverOver
+```
+
+### 6.3a A member's bound
+
+A member's account is the scope's argument with the member's own in-flight
+limit: the last admission made with Valkey reachable saw the member's
+known spend below its cap, with fewer than `LIMIT` of its calls running.
+The ghost terms are the scope's (a member's share of them is at most all
+of them). And a member's known spend, like the scope's, never counts what
+was not spent.
+
+```quint exposure.qnt +=
+  val memberWithinBound = MEMBER_CAP == 0 or MEMBERS.forall(p =>
+    billedOf(p) <= MEMBER_CAP + LIMIT * WORST + uncounted + waived.size() * WORST + heldEver)
+  val memberKnownNeverOver = GATEWAYS.forall(g => MEMBERS.forall(p => mknown(g, p) <= countedOf(p)))
 ```
 
 ### 6.4 Possibility
@@ -567,6 +628,8 @@ event is still on its way to the ledger.
   val handoffInFlight = GATEWAYS.exists(g => snaps.get(g).spend > 0 and counterFrom(snaps.get(g).b) > 0)
   // Two gateways on different snapshots, both exact.
   val snapshotSkew = GATEWAYS.exists(g => GATEWAYS.exists(h => snaps.get(g).b != snaps.get(h).b))
+  // A member past its cap (by the calls in flight when it reached it).
+  val memberOvershoots = MEMBER_CAP > 0 and MEMBERS.exists(p => billedOf(p) > MEMBER_CAP)
 ```
 
 ## 7. The stories
@@ -687,6 +750,20 @@ limit of one. Nothing is hidden: both are waived, and the bound holds.
       .expect(waiverExceedsLimit and waived.size() == 2 and withinBound and limitsHonoured)
 ```
 
+**A member seen only in snapshots** (`memberSnapshotOnly`). p1's cap is
+1. Its first call costs 3; no snapshot has been published since, so the
+snapshot says p1 spent nothing, and its second call is admitted and costs
+3 more: 6, past the cap plus a call in flight (4). In the design the
+member counter holds the first call's 3, and the second is refused.
+
+```quint exposure.qnt +=
+  run memberCapTest =
+    init
+      .then(admit("a1", "g1")).then(complete("a1", 3))
+      .then(admit("a2", "g1")).then(complete("a2", 3))
+      .expect(not(memberWithinBound))
+```
+
 The model ends here:
 
 ```quint exposure.qnt +=
@@ -735,6 +812,8 @@ The model ends here:
 | `noAllowance` | `HANDOFF = "noAllowance"` | `noLostIncrements` |
 | `releaseOnCancel` | `HOLD_ON_CANCEL` | `limitsHonoured` |
 | `noReacquire` | `REACQUIRE` | `limitsHonoured` |
+| `memberCaps` | none (members capped at 1, the scope's budget out of the way) | nothing |
+| `memberSnapshotOnly` | `MEMBER_KNOWN = "snapshotOnly"` | `memberWithinBound` |
 
 Each story passes in the design it names and fails in `exposureDesign`;
 `waiverTest` and `skewTest` pass in `exposureDesign`.
@@ -745,49 +824,63 @@ module exposureDesign {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
 }
 
 module noScopeLimit {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = false, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    SCOPE_LIMIT_ON = false, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
 }
 
 module resetAtApply {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "resetAtApply", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    SCOPE_LIMIT_ON = true, HANDOFF = "resetAtApply", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
 }
 
 module sumHandoff {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "sum", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    SCOPE_LIMIT_ON = true, HANDOFF = "sum", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
 }
 
 module releaseOnCancel {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = false, REACQUIRE = true).*
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = false, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
 }
 
 module noAllowance {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "noAllowance", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    SCOPE_LIMIT_ON = true, HANDOFF = "noAllowance", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
+}
+
+module memberCaps {
+  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
+    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 100, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 1, MEMBER_KNOWN = "counter").*
+}
+
+module memberSnapshotOnly {
+  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
+    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 100, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 1, MEMBER_KNOWN = "snapshotOnly").*
 }
 
 module noReacquire {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = false).*
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = false, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
 }
 ```
 
@@ -803,13 +896,15 @@ each to the binding's depth and writes this table, the properties by the
 designs (a cell "breaks in N steps" is its shortest counterexample):
 
 <!-- gotogether:matrix -->
-| | design | no scope limit | reset at apply | sum | no allowance | no hold on cancel | no reacquire |
-|---|---|---|---|---|---|---|---|
-| safe | holds to depth 7 | breaks in 2 steps | breaks in 4 steps | breaks in 5 steps | breaks in 5 steps | breaks in 3 steps | breaks in 7 steps |
-| limitsHonoured | holds to depth 7 | breaks in 2 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 3 steps | breaks in 7 steps |
-| withinBound | holds to depth 7 | breaks in 4 steps | breaks in 6 steps | holds to depth 7 | breaks in 7 steps | holds to depth 7 | holds to depth 7 |
-| knownNeverOver | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 |
-| noLostIncrements | holds to depth 7 | holds to depth 7 | breaks in 4 steps | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 |
+| | design | no scope limit | reset at apply | sum | no allowance | no hold on cancel | no reacquire | member caps | member snapshot only |
+|---|---|---|---|---|---|---|---|---|---|
+| safe | holds to depth 7 | breaks in 2 steps | breaks in 4 steps | breaks in 5 steps | breaks in 5 steps | breaks in 3 steps | breaks in 7 steps | holds to depth 7 | breaks in 4 steps |
+| limitsHonoured | holds to depth 7 | breaks in 2 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 3 steps | breaks in 7 steps | holds to depth 7 | holds to depth 7 |
+| withinBound | holds to depth 7 | breaks in 4 steps | breaks in 6 steps | holds to depth 7 | breaks in 7 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
+| knownNeverOver | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
+| noLostIncrements | holds to depth 7 | holds to depth 7 | breaks in 4 steps | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
+| memberWithinBound | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 4 steps |
+| memberKnownNeverOver | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
 <!-- /gotogether:matrix -->
 
 ```quint exposure.qnt +=
@@ -817,6 +912,6 @@ designs (a cell "breaks in N steps" is its shortest counterexample):
 module small {
   import exposure(REQUESTS = Set("a1", "a2", "b1"), OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2"),
     GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1, SCOPE_LIMIT = 1, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true).*
+    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
 }
 ```

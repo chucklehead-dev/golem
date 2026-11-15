@@ -26,17 +26,17 @@ func at(minute int) time.Time {
 
 // inc is an increment of scope s in November, in the given minute.
 func inc(call string, cost int64, minute int) Increment {
-	return Increment{Scope: "s", Period: nov, Call: call, Cost: cost, At: at(minute)}
+	return Increment{Accounts: []string{"s"}, Period: nov, Call: call, Cost: cost, At: at(minute)}
 }
 
 // acquire admits a slot with no budget: the slot half of Admit.
 func acquire(t *testing.T, st Store, s Slot, principalLimit, scopeLimit int) bool {
 	t.Helper()
-	o, _, err := st.Admit(t.Context(), Admission{Slot: s, Period: nov, PrincipalLimit: principalLimit, ScopeLimit: scopeLimit})
+	r, err := st.Admit(t.Context(), Admission{Slot: s, Period: nov, PrincipalLimit: principalLimit, ScopeLimit: scopeLimit})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return o == Admitted
+	return r.Outcome == Admitted
 }
 
 func testStore(t *testing.T, newStore func(t *testing.T) Store) {
@@ -81,21 +81,23 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 		st.Add(ctx, inc("e1", 2, 1)) // in the snapshot's spend: the total is not above known
 		st.Add(ctx, inc("e2", 5, 2))
 		for _, tc := range []struct {
-			name string
-			a    Admission
-			want Outcome
+			name   string
+			budget int64
+			a      Admission
+			want   Outcome
 		}{ // known: the snapshot's 2 (before minute 2) plus the 5 from it
-			{"soft, under", Admission{Budget: 8}, Admitted},
-			{"soft, at", Admission{Budget: 7}, OverBudget},
-			{"declared-worst-case check, fits", Admission{Budget: 9, DeclaredWorstCaseCheck: true, Worst: 2}, Admitted},
-			{"declared-worst-case check, does not", Admission{Budget: 9, DeclaredWorstCaseCheck: true, Worst: 3}, OverBudget},
-			{"none", Admission{}, Admitted},
+			{"soft, under", 8, Admission{}, Admitted},
+			{"soft, at", 7, Admission{}, OverBudget},
+			{"declared-worst-case check, fits", 9, Admission{DeclaredWorstCaseCheck: true, Worst: 2}, Admitted},
+			{"declared-worst-case check, does not", 9, Admission{DeclaredWorstCaseCheck: true, Worst: 3}, OverBudget},
+			{"none", 0, Admission{}, Admitted},
 		} {
 			a := tc.a
-			a.Slot, a.Period, a.Since, a.Spend = Slot{tc.name, tc.name, "s"}, nov, at(2), 2
-			o, known, err := st.Admit(ctx, a)
-			if err != nil || o != tc.want || known != 7 {
-				t.Errorf("%s: %v %d %v; want %v, known 7", tc.name, o, known, err, tc.want)
+			a.Slot, a.Period = Slot{tc.name, tc.name, "s"}, nov
+			a.Accounts = []Account{{ID: "s", Since: at(2), Spend: 2, Limit: tc.budget}}
+			r, err := st.Admit(ctx, a)
+			if err != nil || r.Outcome != tc.want || r.Known[0] != 7 {
+				t.Errorf("%s: %v %d %v; want %v, known 7", tc.name, r.Outcome, r.Known[0], err, tc.want)
 			}
 		}
 		// Over budget takes no slot.
@@ -111,15 +113,52 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 		ctx, st := t.Context(), newStore(t)
 		st.Add(ctx, inc("old", 10, -7*60)) // seven hours ago: past the retention
 		st.Add(ctx, inc("new", 1, 0))
-		a := Admission{Slot: Slot{"a", "p", "s"}, Period: nov, Since: at(-8 * 60), Spend: 0, Budget: 5}
-		if o, known, err := st.Admit(ctx, a); err != nil || o != OverBudget || known != 11 {
-			t.Fatalf("%v, known %d, %v: a stale boundary must not undercount this site's 11", o, known, err)
+		a := Admission{Slot: Slot{"a", "p", "s"}, Period: nov, Accounts: []Account{{ID: "s", Since: at(-8 * 60), Spend: 0, Limit: 5}}}
+		if r, err := st.Admit(ctx, a); err != nil || r.Outcome != OverBudget || r.Known[0] != 11 {
+			t.Fatalf("%v, known %d, %v: a stale boundary must not undercount this site's 11", r.Outcome, r.Known[0], err)
 		}
 		// A current snapshot: its spend and the minutes from its boundary,
 		// when they are more than the site's total (other sites' calls).
-		a.Since, a.Spend, a.Budget = at(0), 20, 0
-		if _, known, err := st.Admit(ctx, a); err != nil || known != 21 {
-			t.Fatalf("known %d, %v: want the snapshot's 20 and the minute from its boundary", known, err)
+		a.Accounts = []Account{{ID: "s", Since: at(0), Spend: 20}}
+		if r, err := st.Admit(ctx, a); err != nil || r.Known[0] != 21 {
+			t.Fatalf("known %d, %v: want the snapshot's 20 and the minute from its boundary", r.Known[0], err)
+		}
+	})
+	t.Run("accounts", func(t *testing.T) {
+		// A call charged to a key, a member and a scope: one increment adds
+		// to each counter; admission checks them in order, and refuses
+		// over the first past its limit, naming it.
+		ctx, st := t.Context(), newStore(t)
+		accts := []string{KeyAccount("glm_live_abcdefg"), MemberAccount("s", "p1"), "s"}
+		st.Add(ctx, Increment{Accounts: accts, Period: nov, Call: "e1", Cost: 4, At: at(1)})
+		st.Add(ctx, Increment{Accounts: accts[1:], Period: nov, Call: "e2", Cost: 3, At: at(1)}) // another key's: no key account
+		st.Add(ctx, Increment{Accounts: accts[2:], Period: nov, Call: "e3", Cost: 2, At: at(1)}) // another member's
+		admit := func(name string, keyCap, memberCap, budget int64) Result {
+			t.Helper()
+			r, err := st.Admit(ctx, Admission{Slot: Slot{name, name, "s"}, Period: nov, Accounts: []Account{
+				{ID: accts[0], Limit: keyCap}, {ID: accts[1], Limit: memberCap}, {ID: accts[2], Limit: budget}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Known != [MaxAccounts]int64{4, 7, 9} {
+				t.Fatalf("%s: known %v, want the key's 4, the member's 7, the scope's 9", name, r.Known)
+			}
+			return r
+		}
+		if r := admit("a", 5, 8, 10); r.Outcome != Admitted {
+			t.Fatalf("under every limit: %+v", r)
+		}
+		if r := admit("b", 4, 7, 9); r.Outcome != OverBudget || r.Over != 0 {
+			t.Fatalf("at every limit: %+v, want refused over the key's (0)", r)
+		}
+		if r := admit("c", 0, 7, 9); r.Outcome != OverBudget || r.Over != 1 {
+			t.Fatalf("no key cap: %+v, want refused over the member's (1)", r)
+		}
+		if r := admit("d", 0, 0, 9); r.Outcome != OverBudget || r.Over != 2 {
+			t.Fatalf("only the budget: %+v, want refused over the scope's (2)", r)
+		}
+		if got := len(slotsOf(t, st)); got != 1 {
+			t.Fatalf("%d slots: a refused admission takes none", got)
 		}
 	})
 	t.Run("counter", func(t *testing.T) {
@@ -128,15 +167,15 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 		st.Add(ctx, inc("e2", 5, 1))
 		st.Add(ctx, inc("e3", 2, 1)) // the same minute: summed
 		st.Add(ctx, inc("e2", 5, 1)) // an amount, not an event: twice is twice
-		st.Add(ctx, Increment{Scope: "other", Period: nov, Cost: 100, At: at(1)})
-		st.Add(ctx, Increment{Scope: "s", Period: "2026-12", Cost: 100, At: at(1)})
+		st.Add(ctx, Increment{Accounts: []string{"other"}, Period: nov, Cost: 100, At: at(1)})
+		st.Add(ctx, Increment{Accounts: []string{"s"}, Period: "2026-12", Cost: 100, At: at(1)})
 		for since, want := range map[time.Time]int64{{}: 15, at(0): 15, at(1): 12, at(1).Add(30 * time.Second): 12, at(2): 0} {
 			if got, err := st.Since(ctx, "s", nov, since); err != nil || got != want {
 				t.Errorf("Since(%v) = %d, %v; want %d", since, got, err, want)
 			}
 		}
 		// A batch, whole.
-		if err := st.AddAll(ctx, []Increment{inc("e4", 1, 3), inc("e5", 1, 4), {Scope: "other", Period: nov, Cost: 1, At: at(3)}}); err != nil {
+		if err := st.AddAll(ctx, []Increment{inc("e4", 1, 3), inc("e5", 1, 4), {Accounts: []string{"other"}, Period: nov, Cost: 1, At: at(3)}}); err != nil {
 			t.Fatal(err)
 		}
 		if got, _ := st.Since(ctx, "s", nov, at(3)); got != 2 {
@@ -253,7 +292,7 @@ func TestValkeyStore(t *testing.T) {
 		now := time.Now()
 		var incs []Increment
 		for m := range 80 { // 80 minutes back to now, 1 each
-			incs = append(incs, Increment{Scope: "s", Period: nov, Cost: 1, At: now.Add(time.Duration(m-79) * time.Minute)})
+			incs = append(incs, Increment{Accounts: []string{"s"}, Period: nov, Cost: 1, At: now.Add(time.Duration(m-79) * time.Minute)})
 		}
 		if err := st.AddAll(ctx, incs); err != nil {
 			t.Fatal(err)
@@ -263,12 +302,12 @@ func TestValkeyStore(t *testing.T) {
 		if got, err := st.Since(ctx, "s", nov, now.Add(-time.Hour)); err != nil || got != 3 {
 			t.Fatalf("since %d, %v: want the 3 minutes within retention", got, err)
 		}
-		_, known, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov, Since: now.Add(-time.Hour), Now: now})
-		if err != nil || known != 80 {
-			t.Fatalf("known %d, %v: want the total, 80, though the boundary is older than the retention", known, err)
+		r, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov, Accounts: []Account{{ID: "s", Since: now.Add(-time.Hour)}}, Now: now})
+		if err != nil || r.Known[0] != 80 {
+			t.Fatalf("known %d, %v: want the total, 80, though the boundary is older than the retention", r.Known[0], err)
 		}
-		if _, known, _ := st.Admit(ctx, Admission{Slot: Slot{"b", "p2", "s"}, Period: nov, Now: now}); known != 80 {
-			t.Fatalf("known %d with no boundary, want the total, 80", known)
+		if r, _ := st.Admit(ctx, Admission{Slot: Slot{"b", "p2", "s"}, Period: nov, Accounts: []Account{{ID: "s"}}, Now: now}); r.Known[0] != 80 {
+			t.Fatalf("known %d with no boundary, want the total, 80", r.Known[0])
 		}
 		if n, _ := st.mustClient().Do(ctx, st.mustClient().B().Hlen().Key(st.counterKey("s", nov)).Build()).AsInt64(); n > 2+60+1 {
 			t.Fatalf("%d fields kept: past a retention and its margin, the old minutes go", n)
@@ -283,7 +322,7 @@ func TestValkeyStore(t *testing.T) {
 		c.Close()
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		if _, _, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov}); !errors.Is(err, ErrUnavailable) {
+		if _, err := st.Admit(ctx, Admission{Slot: Slot{"a", "p", "s"}, Period: nov}); !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("%v, want ErrUnavailable", err)
 		}
 	})
