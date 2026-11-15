@@ -48,21 +48,21 @@ pool's publication record (`Publications`, a `Record` of epoch, sequence
 and source state version, `state.go:40`), the entitlements (`Principals`,
 `Scopes`, `Keys`, `Revocations`, `Roles`; `entitlements.go`) and the audit
 outbox (`Audit`, `AuditSeq`). Decoding is strict (`Decode`,
-`state.go:432`): another schema or an unknown member is refused, so an
+`state.go:443`): another schema or an unknown member is refused, so an
 older replica never silently drops a field a newer one wrote.
 
-**Reads are from memory.** `Store.Current` (`state.go:257`) hands out a
+**Reads are from memory.** `Store.Current` (`state.go:263`) hands out a
 copy of the document as last read or written. `Load` is a full get;
 `Refresh` is a conditional get with the entity tag the store holds, so an
-unchanged document costs one 304 (`refresh`, `state.go:167`). `Store.Run`
-(`state.go:445`) refreshes every 500 ms. `set` (`state.go:245`) never
+unchanged document costs one 304 (`refresh`, `state.go:173`). `Store.Run`
+(`state.go:456`) refreshes every 500 ms. `set` (`state.go:251`) never
 moves the document back: a slow get that returns an older `stateVersion`
 than one this store wrote is ignored.
 
 **Never adopting a document that went back.** If the bucket holds an older
 version than the store has seen, or none (an out-of-band put of an old
-version, a deletion), `refresh` returns `ErrRegressed` (`state.go:130`,
-message from `regressed`, `state.go:211`) and the store keeps serving what
+version, a deletion), `refresh` returns `ErrRegressed` (`state.go:132`,
+message from `regressed`, `state.go:217`) and the store keeps serving what
 it last read and writes nothing: adopting the older document would drop
 every later revocation. A restore goes through `Restore` (§1.2) instead.
 `TestRegressed` covers both cases.
@@ -71,8 +71,8 @@ A store that has read nothing yet has no memory to compare with, so the
 bucket's other objects tell a first start from a deletion: `Installed`
 (set by golem-control to the lease object and each configured pool's
 checkpoint and pointer; the bucket interface cannot list) are looked for
-when there is no document (`installed`, `state.go:222`), and if one
-exists, `Load` is `ErrMissing` (message from `missing`, `state.go:217`:
+when there is no document (`installed`, `state.go:228`), and if one
+exists, `Load` is `ErrMissing` (message from `missing`, `state.go:223`:
 put the newest version back from the bucket's versions, or bootstrap on
 purpose), not the empty document. Before this, the next replica to start
 after a deletion claimed the fence over an empty document and published
@@ -91,11 +91,11 @@ started after it (nothing in memory to compare). What catches it is the
 publisher (§3, step 2): its records are below what the bucket proves was
 published, so no pool is published from it.
 
-**Writes go through `Update`** (`state.go:282`), a compare-and-swap with
+**Writes go through `Update`** (`state.go:288`), a compare-and-swap with
 retry:
 
 1. Take the current document and its tag.
-2. `apply` (`state.go:373`): run the caller's `change` on a copy, number
+2. `apply` (`state.go:379`): run the caller's `change` on a copy, number
    the new audit events, check the invariants against the document it
    started from. A `change` error or a broken invariant ends the update;
    nothing is written.
@@ -119,44 +119,86 @@ document it is given, not of state outside it. The documents a store holds
 are replaced, never edited in place: that is what lets `apply` read the
 base without copying it twice.
 
-**Leader-only writes go through `FencedUpdate`** (`state.go:335`): an
+**Leader-only writes go through `FencedUpdate`** (`state.go:341`): an
 `Update` whose change first checks that the document's fence is still the
-writer's (holder and epoch), else `ErrFenced` (`state.go:133`) and nothing
+writer's (holder and epoch), else `ErrFenced` (`state.go:135`) and nothing
 is written. The check is inside the same compare-and-swap, so a leader
 deposed while it worked (a pause, a slow directory read) writes nothing.
 Publication (§3), the group sync (§5.2) and the audit trim (§5.1) use it.
 
-**Validate-only.** `Store.Validate` (`state.go:350`) runs the same `apply`
+**Validate-only.** `Store.Validate` (`state.go:356`) runs the same `apply`
 and writes nothing: the API's `validate_only` (control-plane.md §2). The
 service layer builds every change, with its audit event, once and hands it
 to either (`control/service/service.go:99`, `Service.apply`).
 
 **The audit outbox's numbering.** A change appends `AuditEvent`s with
-`Seq` 0; `Document.number` (`state.go:95`) gives each the next number from
+`Seq` 0; `Document.number` (`state.go:97`) gives each the next number from
 `AuditSeq` as part of the write, so numbers are assigned under the same
 compare-and-swap as the change and a retried change is numbered afresh.
 
+**The audit outbox's bound** (`control/state/outbox.go`, ADR 0041 §1).
+The outbox is in the document every write and every 500 ms read carries,
+and only the leader's shipper trims it, after archival (§5.1): without
+`-audit-archive`, or with the archive unreachable, it would grow without
+limit. `Store.MaxOutbox` bounds it (`DefaultMaxOutbox`, 10,000;
+`golem-control -audit-outbox-max`), and `checkOutbox` (`outbox.go:148`), the last check
+`apply` makes, judges every write by the events it adds:
+
+- **Past the reserve** (`Reserve`: 80% of the bound) a write that grants
+  or widens access is refused with `*state.OutboxFull`
+  (`ErrOutboxFull`), naming the action, how it widens, and the fix (the
+  archive is not draining: `-audit-archive` and its bucket; operations.md's
+  *Audit outbox not draining*). Restrictive writes land, into the last
+  20%, which is theirs.
+- **At the bound** every write that adds an event is refused, revocations
+  too (`OutboxFull.Hard`): the document must not grow without limit, and
+  no change is written without its event. A revocation then goes through
+  the site's emergency denylist.
+- A write that adds **no** event (publication records, the fence, the
+  shipper's trim) is never refused by it.
+
+A write is restrictive only if every event it adds is of a `Restrictive`
+action in the class table (`actions`, `outbox.go:69`, beside the action names: revoking a
+key, removing a member, unbinding a group, the sync's removals, a restore,
+a bootstrap or adoption) **and** the change itself widens nothing, judged
+from the documents before and after (`widens`: a scope created or a group
+bound, a principal created, given an identity or made a member, a role
+bound, a live key minted, moved, revived, or widened in models or expiry).
+So a restrictive label cannot carry a grant, and a mixed change is a
+widening one (ADR 0041: classification by the effective diff, not the
+method). An event of an action not in the table is refused at every write
+(`ErrInvariant`), and `TestEveryActionClassified` finds every action
+written in `control/` and `cmd/` (an `AuditEvent`'s `Action`, or the
+argument of a parameter named `action`) and fails on one unclassified or
+a table entry nothing writes. Past the reserve a grant is refused as a
+grant even when it would also pass the bound, so a writer can retry its
+restrictive part alone (the group sync, §5.2).
+
 ### 1.1 The invariants
 
-`check` (`state.go:392`) runs on every write and validation, in order:
+`check` (`state.go:400`) runs on every write and validation, in order:
 
 | Invariant | Where | Tested by |
 | --- | --- | --- |
-| The fence's epoch never goes back, and the fence is never dropped | `checkFence`, `state.go:404` | `TestFenceInvariant` |
+| The fence's epoch never goes back, and the fence is never dropped | `checkFence`, `state.go:415` | `TestFenceInvariant` |
 | A principal is a user or a service; its ID is not in the reserved `entra:` namespace; its scopes exist; its default is one of them; only a user with an Entra ID has synced memberships | `checkPrincipals`, `entitlements.go:139` | `TestEntitlementInvariants` |
 | No two principals share an Entra ID | `checkPrincipals` | `TestEntitlementInvariants` |
 | A key's owner exists; a live key's owner is a member of its scope | `checkKeys`, `entitlements.go:171` | `TestEntitlementInvariants` |
 | A role is `manager`, of an existing principal on an existing scope | `checkRoles`, `entitlements.go:186` | `TestRolesAndAudit` |
 | The outbox loses only its oldest events and gains new ones numbered on without a gap; the counter never goes back | `outboxFollows`, `entitlements.go:306` | `TestRolesAndAudit`, `control/audit`'s tests |
 | Revocations are append-only, and a revoked key stays revoked | `checkRevocations`, `entitlements.go:204` | `TestEntitlementInvariants` |
-| No pool's publication record is removed or goes back in sequence, epoch or source | `checkPublications`, `state.go:414` | `TestInvariants` |
-| A store that has read nothing starts from an empty document only where golem-control has not run (no `Installed` object), else `ErrMissing`; only `Bootstrap` creates one then | `refresh`, `installed`, `state.go:222` | `TestMissingDocument`, `TestBootstrapCommand` |
+| No pool's publication record is removed or goes back in sequence, epoch or source | `checkPublications`, `state.go:425` | `TestInvariants` |
+| A store that has read nothing starts from an empty document only where golem-control has not run (no `Installed` object), else `ErrMissing`; only `Bootstrap` creates one then | `refresh`, `installed`, `state.go:228` | `TestMissingDocument`, `TestBootstrapCommand` |
 | No pool is published from a record below what the bucket proves (its verified checkpoint or pointer): the document went back, `ErrRegressed` | `prepare` and `below`, `control/publish/publish.go:203` | `TestGuard` |
 | A write whose reply was lost is applied once: recognised by its ID among the document's last 32 (`Writes`), even after others wrote over it | `Update`, `wrote`, `state.go` | `TestLostReplyOvertaken`, `TestLostClaim` |
-| A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:335` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced`, `TestDeposedTrim` |
+| A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:341` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced`, `TestDeposedTrim` |
+| A write that adds audit events never leaves the outbox above its bound (`Store.MaxOutbox`); past 80% of it, only a write whose events are all restrictive and whose change widens nothing adds any | `checkOutbox`, `outbox.go:148`; `widens`, `outbox.go:191` | `TestOutboxBound`, `TestOutboxDefault`, `TestWidens`, `TestRestoreLandsPastReserve`; `control/service`'s `TestOutboxBackpressure`, `control/audit`'s `TestShippingReopensGrants` |
+| Every audit event is of a classified action | `checkOutbox` (`ErrInvariant`); the source, by `TestEveryActionClassified` | `TestUnclassifiedAction`, `TestEveryActionClassified` |
 
 Every refusal wraps `ErrInvariant`, which the API maps to Connect's
-`FailedPrecondition` (`control/api/api.go`, `connectError`).
+`FailedPrecondition` (`control/api/api.go`, `connectError`), except the
+outbox's, `ErrOutboxFull`, which is `ResourceExhausted` and retryable once
+the outbox drains.
 
 ### 1.2 Restoring an older document
 
@@ -462,7 +504,7 @@ A stalled control plane must be seen before the gateways' lease runs out,
 so the loop keeps a record of its own work (`status`, under the
 controller's mutex, written by the loop and copied out by accessors that
 hold the lock for a map copy, never across I/O), and `control/metrics`
-(`Register`, `control/metrics/metrics.go:46`) exports it as observable
+(`Register`, `control/metrics/metrics.go:49`) exports it as observable
 instruments, read when the meter collects:
 
 - **Each pool's last successful publication** by this replica
@@ -491,8 +533,9 @@ instruments, read when the meter collects:
 - **The jobs**: the last audit step and group sync that succeeded
   (`ShippedAt`, `SyncedAt`, set in `tick` and `syncStep`), and the sync's
   removal guard tripping (`GuardTrips`); the outbox's length is the
-  store's (`Store.OutboxLen`, `state.go:269`: a `len` under its lock, no
-  copy of the document); known spend's age and staleness are the job's
+  store's (`Store.OutboxLen`, `state.go:275`: a `len` under its lock, no
+  copy of the document), and its bound (`Store.OutboxMax`), so the alert
+  is a ratio; known spend's age and staleness are the job's
   own (`spend.Job.Age`, `Stale`).
 
 | Instrument | Read from |
@@ -503,7 +546,7 @@ instruments, read when the meter collects:
 | `golem.control.scope_policy.unmatched`, `golem.control.config.renewing` | `Controller.Unmatched`, `ConfigRenewing` |
 | `golem.control.spend.age`, `.stale` {period} | `spend.Job.Current`, `Age`, `Stale` |
 | `golem.control.entra_sync.time`, `.guard_trips` | `Controller.SyncedAt`, `GuardTrips` |
-| `golem.control.audit.outbox`, `golem.control.audit.shipped.time` | `Store.OutboxLen`, `Controller.ShippedAt` |
+| `golem.control.audit.outbox`, `golem.control.audit.outbox_max`, `golem.control.audit.shipped.time` | `Store.OutboxLen`, `Store.OutboxMax`, `Controller.ShippedAt` |
 
 Units, the alerts over them and their runbooks: operations.md §2.2.
 
@@ -530,7 +573,11 @@ the outbox's oldest events and, in order:
    higher and stay.
 
 The archive, not the collector, is the durability boundary: an event leaves
-the outbox only once it is durably archived.
+the outbox only once it is durably archived. While it is not (no
+`-audit-archive`, or the archive refusing), the outbox fills towards its
+bound (§1): past 80% grants are refused, at 100% every audited change,
+and the first step that archives and trims makes room again
+(`TestShippingReopensGrants`).
 
 ### 5.2 Entra group sync
 
@@ -555,7 +602,7 @@ minutes) while this replica leads, under the elector's fence:
    404 alone is never taken for a deletion. Any failure but a deleted group
    (`ErrNoGroup`, no members) or `ErrNoUser` ends the step with nothing
    written.
-2. **Reconcile** in one `FencedUpdate` (`reconcile`, `sync.go:236`), so a
+2. **Reconcile** in one `FencedUpdate` (`reconcile`, `sync.go:255`), so a
    replica deposed while it read the directory writes nothing: `wanted`
    gives each enabled member of a group bound to a scope that scope in
    `Synced`; a user not yet a principal is created (`reconciler.create`,
@@ -565,7 +612,15 @@ minutes) while this replica leads, under the elector's fence:
    changed principal's keys outside its memberships are revoked
    (`reconciler.setSynced`, `Document.RevokeOutside`), all of them for a
    user not enabled or whose account is disabled or deleted, and the
-   change is audited by `system:entra-sync`.
+   change is audited by `system:entra-sync`: `principal.create`,
+   `membership.sync.add` for memberships added and
+   `membership.sync.remove` for those ended, keys revoked or a default
+   lost, as separate events. Past the audit outbox's reserve (§1) the
+   store refuses the write for its creations and additions; the step then
+   writes again with `restrictOnly` (no user created, no membership
+   added), so removals and offboarding land in the reserve, and returns
+   the `*state.OutboxFull` with what was held back
+   (`TestSyncOutboxBackpressure`).
 3. **Guard**: `reconcile` plans every user's change before making any.
    **Offboarding** (a user a group reports `Disabled`, or who left and
    whose account is disabled or deleted: `Result.Offboarded`) is never
@@ -586,8 +641,8 @@ membership that is only a group's.
 
 `main` (`cmd/golem-control/main.go:58`) dispatches the subcommands
 (`dispatch`, `main.go:66`); anything else is golem-control itself, `run`
-(`main.go:274`): `parseFlags` (`main.go:236`), the bucket and signer
-opened, the state loaded, `newController` (`main.go:349`) wiring an
+(`main.go:281`): `parseFlags` (`main.go:239`), the bucket and signer
+opened, the state loaded, `newController` (`main.go:356`) wiring an
 elector and a publisher per pool and the jobs the flags ask for, then the
 state's refresh loop, the API (if `-listen`) and the controller until
 SIGTERM or a component fails. With `-telemetry`, `openMetrics` registers
@@ -615,7 +670,8 @@ landed was cut before the key reached its caller. `TestAPIDrains`.
 | `-listen` | serve the control API here; needs `-entra-tenant` |
 | `-drain` | at shutdown, how long the API's calls in flight may take before they are cut and the lease given up (10s) |
 | `-entra-tenant`, `-entra-audience` | the Entra tenant, and the control API registration's audiences (default `api://golem-control`, ADR 0046) |
-| `-audit-archive` | the audit archive bucket; empty: the outbox is not shipped and grows |
+| `-audit-archive` | the audit archive bucket; empty: the outbox is not shipped and fills to its bound |
+| `-audit-outbox-max` | the audit outbox's bound, in events (default 10,000, at least 10): past 80% grants are refused, at it every audited change (§1); also a flag of `restore` and `bootstrap` |
 | `-telemetry` | `off`, or an OTLP/HTTP collector: golem-control's metrics (§4.2) and, with `-audit-archive`, the audit's log records |
 | `-entra-sync-client-id` | the jobs registration (entra.md #4): run the group sync by workload identity; needs `-entra-tenant` |
 | `-entra-sync-every`, `-entra-sync-max-removals` | the sync's interval (5m) and its removal guard (50) |
@@ -625,15 +681,15 @@ landed was cut before the key reached its caller. `TestAPIDrains`.
 
 The subcommands:
 
-- `golem-control keygen <dir>` (`keygen`, `main.go:595`) writes a
+- `golem-control keygen <dir>` (`keygen`, `main.go:602`) writes a
   development key pair (`publishing.key`, never overwritten, and
   `publishing.pub` for gateways). `TestKeygen`.
-- `golem-control pubkey <signing key>` (`pubkey`, `main.go:524`) prints the
+- `golem-control pubkey <signing key>` (`pubkey`, `main.go:531`) prints the
   key's public half for gateways' `-keys` directories: a PEM with a
   `Key-ID` header (a KMS key's ARN, a file key's name), which
   `sign.LoadKeys` trusts under that ID. `TestPubkey`.
 - `golem-control restore -bucket <...> -from <document.json> -actor <who>
-  [-apply]` (`restore`, `main.go:169`) runs `Store.Restore` (§1.2) with a
+  [-apply]` (`restore`, `main.go:170`) runs `Store.Restore` (§1.2) with a
   backup document taken from the bucket's history or its Object Lock
   replica. Without `-apply` it is a dry run: it prints what would be
   withheld and rolled back and writes nothing. `TestRestoreCommand`.
@@ -655,10 +711,10 @@ The subcommands:
    that calls `Document.Revoke` (`control/state/entitlements.go:217`): the
    key's `RevokedAt` is set and a `Revocation` appended. `apply` adds a
    `key.revoke` audit event.
-2. **The state update.** `Store.Update` (`state.go:282`) copies the
-   document, applies the change, numbers the audit event (`state.go:95`),
+2. **The state update.** `Store.Update` (`state.go:288`) copies the
+   document, applies the change, numbers the audit event (`state.go:97`),
    checks the invariants (`checkRevocations` among them), and writes
-   `stateVersion + 1` with `If-Match` (`state.go:305`). On a lost race it
+   `stateVersion + 1` with `If-Match` (`state.go:311`). On a lost race it
    re-reads and reapplies; on a lost reply it finds its own write ID.
 3. **The controller's next step**, within a second on the leader (it may
    be another replica: its `Refresh` at `controller.go:302` reads the new
@@ -689,15 +745,19 @@ path with a real gateway source over one bucket.
   a document gone back refused (`TestRegressed`), a deleted one not
   started over unless bootstrapped (`TestMissingDocument`), every
   invariant above (`TestInvariants`, `TestFenceInvariant`,
-  `TestEntitlementInvariants`, `TestRolesAndAudit`), and the restore
-  (`TestRestore`, `TestRestoreNeverWidens`).
+  `TestEntitlementInvariants`, `TestRolesAndAudit`), the restore
+  (`TestRestore`, `TestRestoreNeverWidens`), and the outbox's bound
+  (`TestOutboxBound`, `TestOutboxDefault`, `TestWidens`,
+  `TestUnclassifiedAction`, `TestRestoreLandsPastReserve`,
+  `TestEveryActionClassified`).
 - `control/lead`: the tests in §2.
 - `control/publish`: the tests in §3.
 - `control/entrasync`: the sync (`TestSync`, `TestSyncNames`), its safety
   (`TestSyncSafety`), offboarding past the guard and the guard over
   active users (`TestSyncOffboarding`), Graph and the token (`TestGraph`,
-  `TestFederatedToken`), and a sync deposed mid-read writing nothing
-  (`TestSyncFenced`).
+  `TestFederatedToken`), a sync deposed mid-read writing nothing
+  (`TestSyncFenced`), and a sync past the outbox's reserve writing its
+  removals alone (`TestSyncOutboxBackpressure`).
 - `control/controller`: two replicas and a gateway over one bucket
   (`TestPublishes`: a change arrives, a renewal extends the lease, a
   broken edit renews the last good config, a paused leader is fenced), the
@@ -711,12 +771,15 @@ path with a real gateway source over one bucket.
   config (`TestRestartOverBrokenConfig`; `lib/compile`'s `TestRenew`:
   a renewal is what compiling the config again would publish).
 - `control/audit`: archive, emit, trim; a retry after a crash; a mismatch;
-  batches; a deposed shipper's trim refused (`TestDeposedTrim`).
+  batches; a deposed shipper's trim refused (`TestDeposedTrim`); grants
+  refused while the archive is unreachable and reopened by a step that
+  ships (`TestShippingReopensGrants`).
 - `control/metrics`: through the OTel SDK's manual reader, a leader's
   publication (time, sequence, lease, leadership, known spend's age),
   then a tampered checkpoint counted as `tampered` with the last
   publication standing, a refused edit as `config_renewing`, and the
-  leadership's end (`TestMetrics`); the outbox's length (`TestOutbox`).
+  leadership's end (`TestMetrics`); the outbox's length and bound
+  (`TestOutbox`).
   `control/controller`'s `TestStatus` (the jobs' last successes, the
   guard tripping) and `TestFailureReason`.
 - `cmd/golem-control`: `TestKeygen`, `TestOpenSigner`, `TestAPINeedsTenant`, `TestAPIDrains`,
@@ -778,6 +841,17 @@ path with a real gateway source over one bucket.
   recovers; Graph's throttling then fails the step, which writes nothing.
   A user with only memberships granted in golem is not looked up: their
   keys are not revoked when Entra deletes them.
+- **The audit outbox's bound is a count, at 100% even revocations wait**:
+  `-audit-outbox-max` counts events, not bytes (an event is a few hundred
+  bytes; a large detail map is not weighed). At the bound a revocation is
+  refused like any other audited change, rather than written without its
+  event: the emergency denylist (operations.md §2) is the path then, and
+  the page at 80% is meant to come first. The class table is by action
+  with the effective diff as a check: a new action is refused until
+  classed (`TestEveryActionClassified`), and the diff's notion of access
+  must grow with the document (a new kind of right in `Document` needs a
+  case in `widens`). A policy widening or capture enablement is config
+  (ADR 0050), not a state write, and is not held back by it.
 - **A replica that will not start reports nothing**: `ErrMissing` at
   `Load`, or a bad flag, stops golem-control before its metrics exist;
   the alert is their absence.

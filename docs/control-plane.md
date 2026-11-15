@@ -104,7 +104,17 @@ validate` (the snapshot compiler as a library), not by a live API call
   ClickHouse keeps one row per seq, and fills a gap from the archive),
   then trimmed from the outbox up to the last event shipped, under the
   leader's fence like every leader-only write (`state.FencedUpdate`): a
-  shipper deposed meanwhile trims nothing.
+  shipper deposed meanwhile trims nothing. The outbox is bounded
+  (`state.Store.MaxOutbox`, `golem-control -audit-outbox-max`, default
+  10,000 events) with a reserve for restrictive changes (ADR 0041 §1,
+  §7.7): past 80% the store refuses a write that grants or widens access
+  (each event's action is classed, `control/state/outbox.go`, and the
+  change itself must widen nothing); restrictive writes land up to the
+  bound; at the bound every write that adds an event is refused, and a
+  revocation goes through the emergency denylist. Writes that add no event
+  (publication, the fence, the trim) are never refused by it. The API
+  answers the refusal `ResourceExhausted`; `golem.control.audit.outbox`
+  over `golem.control.audit.outbox_max` is the alert (operations.md).
 - **Schema evolution**: additive protobuf changes need nothing. A breaking
   change takes two releases: release N reads the new schema and keeps
   writing the old; release N+1 writes the new. Mixed replicas during a
