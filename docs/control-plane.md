@@ -17,6 +17,10 @@ Components and APIs at a glance: architecture.md §1–3.
   **operational overrides** (ADR 0005) in the state document; read
   **declarative config** from the EKS cluster's CRDs (`Backend`,
   `ModelRoute`, `ScopePolicy`, `Hook`, `PriceList`) and write their status.
+  A scope exists in the state (with its memberships, keys, roles and bound
+  Entra groups); its policy, models, budget and budget mode, limits, is
+  its `ScopePolicy`, config changed by a GitOps pull request (ADR 0050).
+  The snapshot compiler joins them by the scope's ID.
 - Enforce every rule of the org model on writes: who may do what, budget
   arithmetic, approvals, key constraints within the owner's rights.
 - Compile, sign and publish each gateway pool's **snapshot** (§4).
@@ -35,7 +39,8 @@ service method:
    registration, ADR 0046, validated by `lib/entra`'s `Verifier`;
    jobs run as a service principal),
 2. loads what it needs and checks authorization against org-model §2,
-3. validates the change (a key's models within its scope's policy; a cap's
+3. validates the change (a key's models within its scope's ScopePolicy, as
+   the config gives it; a cap's
    member in the scope; an override naming a deployment that exists),
 4. applies the change to a copy of the state, appends its audit events to
    the document's outbox, checks the org model's invariants, and writes the
@@ -52,11 +57,12 @@ Services: `ConfigService` (effective config, explain, overrides),
 writes the document except through them.
 
 **Built (slice 1):** `control/service` with the org and key methods:
-`CreateScope` (admins), `AddMember` and `RemoveMember` (the scope's
+`CreateScope` (admins; an ID only, its policy being its ScopePolicy's),
+`AddMember` and `RemoveMember` (the scope's
 managers or admins; a removal revokes the member's keys in the scope and
 its role there), `BindManager` (admins), `MintKey` (a member its own keys,
-a scope's managers its services' keys, admins any; within the scope's
-models; the plaintext returned once, the hash stored) and `RevokeKey`
+a scope's managers its services' keys, admins any; within the models of
+the scope's ScopePolicy; the plaintext returned once, the hash stored) and `RevokeKey`
 (the key's owner, its scope's managers, admins). Each writes its audit
 event with its change in one update; the store numbers events and refuses
 an outbox that loses anything but its oldest or skips a number. The
@@ -108,11 +114,12 @@ validate` (the snapshot compiler as a library), not by a live API call
   a new version after preserving all subsequent restrictive security
   changes; missing history requires quarantined recovery and review.
   Built: `state.Restore` and `golem-control restore` (a dry run unless
-  `-apply`): every right the narrower of the backup's and the current
+  `-apply`): every right the state holds the narrower of the backup's and the current
   document's (what only the backup has is withheld and reported, what was
   added since is rolled back, keys minted since revoked), the fence,
   records, revocations and outbox the current document's, the write an
-  audited `Update`. `golemctl state restore` over the admin API is next.
+  audited `Update`. Scope policy is config, not state: a restore leaves
+  it to the GitOps repository's history. `golemctl state restore` over the admin API is next.
   A document that has gone is never started over silently: a store
   that finds none where the bucket shows golem-control has run (the lease
   object, a pool's checkpoint or pointer) refuses to start (`ErrMissing`)
@@ -140,13 +147,15 @@ validate` (the snapshot compiler as a library), not by a live API call
   back. JSON, decoded strictly, for now; the rest of §3.1, protobuf with
   zstd come as they are built (the audit outbox and restore are, below).
   Entitlements (slice 2): `principals` (kind, Entra ID, memberships,
-  default scope), `scopes` (policy), `keys` (by hash: owner, scope, model
+  default scope), `scopes` (existence and bound Entra groups; the policy
+  is the ScopePolicy's), `keys` (by hash: owner, scope, model
   narrowing, expiry, revocation) and the append-only `revocations`. Every
   write keeps: a key's owner exists and is a member of its scope; a
   principal's scopes exist and its default is one; no two principals share
   an Entra ID; a revocation is never dropped and its key never revived.
-  `Document.Entitlements` is the snapshot's view, a scope's models limited
-  to the routes that exist. Nothing writes them yet but tests: the control
+  `Document.Entitlements` is the snapshot's view: scopes by ID, which the
+  compiler joins with their ScopePolicies, and keys' models limited to the
+  routes that exist. Nothing writes them yet but tests: the control
   API's first endpoints are next.
 
 ### 3.1 State outline
@@ -224,10 +233,11 @@ control plane.
     renewed; a leader with none compiled since it started (a restart over
     a broken edit) renews the publication in the bucket, verified as a
     gateway verifies it, with the current entitlements, and says so. A
-    budgeted scope of the state's that reaches a model no
-    PriceList prices is published without that alias (it fails closed)
-    and reported, never stopping the publication; the control API refuses
-    to create one. Every pool gets the same snapshot, its
+    scope of the state's with no ScopePolicy is published with no models
+    (it fails closed), and a ScopePolicy of no scope is left out, both
+    reported, never stopping the publication; a ScopePolicy whose budget
+    reaches a model no PriceList prices is a config problem, refused with
+    the edit. Every pool gets the same snapshot, its
     entitlements the state document's, republished at the next step when
     they change; pool selectors and the CRD watch come later. Each pool
     is due on its own: one that fails (a tampered checkpoint, a regressed

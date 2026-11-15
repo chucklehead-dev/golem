@@ -259,7 +259,7 @@ except OTel's API.
 
 Built (M0, first part): `gateway/snapshot` (the holder: floor and lease
 enforced, transports kept across swaps; the directory source through
-`os.Root`), `lib/compile` and `lib/api/v1alpha1` (Backend, ModelRoute,
+`os.Root`), `lib/compile` and `lib/api/v1alpha1` (Backend, ModelRoute, ScopePolicy,
 PriceList, LocalIdentity), golem keys (`lib/key`, `gateway/auth`: by hash
 from the snapshot, Bearer or x-api-key, each refusal its own code), Entra
 v2 tokens (RS256 only; tenant, audience, expiry with a minute's leeway;
@@ -270,7 +270,7 @@ a request within it deferred, not dropped), never on the request path; a
 gateway started while Entra is unreachable serves golem keys and refuses
 tokens as `gateway.not_ready` until a retried fetch succeeds; the scope from `golem-scope`, else the principal's default, rights
 from the snapshot; `-entra-tenant`, `-entra-jwks`), the
-limiter in the request path (402 budgets, 429 concurrency, cancellation
+limiter in the request path (402 budgets in enforce mode; over a budget in observe or warn mode, admitted and the ledger row marked, warn adding `golem-warning`; 429 concurrency, cancellation
 holding the slot until the upstream closes), `golemctl config validate`
 and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway
 has one implicit local principal, which takes only the gateway's own local
@@ -278,7 +278,8 @@ key (a dev key generated on first start into a file only its user may
 read, printed as an export line; `-local-key`): the browser guard keeps web
 pages out, the key keeps out the machine's other programs and users. With
 a LocalIdentity, its dev keys are required, each honoured only for a
-listed owner of its kind in its scope. Pool mode reads the bucket source,
+listed owner of its kind in its scope, the scopes being the config's
+ScopePolicies (ADR 0050). Pool mode reads the bucket source,
 writes status objects, applies the emergency denylist, and keeps the last
 publication applied on disk beside its checkpoint (`last-good.json`):
 restarted while the bucket is unreachable, it serves that copy, verified

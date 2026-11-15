@@ -38,8 +38,13 @@ retry pointlessly and users wait through backoff before seeing why.
   Anthropic's `type: error`), with golem's `code`, a message that says what
   to do next and who can change it (the scope's managers, a budget
   manager), and the request ID.
-- `warn` mode lets the request through and adds `golem-warning:
-  budget.member_cap 92%`; `observe` adds nothing to the response.
+- A scope's budget mode is its ScopePolicy's `budgetMode` (PRD §9.1, ADR
+  0050), `observe` unless set. `warn` lets a request over the budget
+  through and adds `golem-warning: budget.pool_exhausted 104%` (the code
+  `enforce` would have refused with, and the share of the budget known
+  spend has reached, rounded down); `observe` lets it through and adds
+  nothing to the response. Both mark its ledger row `over_budget` (§3).
+  In-flight limits (`limit.concurrency`) refuse in every mode.
 - The codes are a stable, documented list: this table, defined as code in
   `lib/contract` (the gateway can send no other), and checked against the
   table by a test in both directions. The ledger's DDL
@@ -188,7 +193,7 @@ API stores responses by default (`store: true`), and file and batch APIs
 keep uploads. Data stored there escapes golem's capture and retention
 rules.
 
-- A `ScopePolicy` sets `provider_storage: forbidden | allowed`, default
+- A `ScopePolicy` sets `providerStorage: forbidden | allowed`, default
   `forbidden`.
 - When forbidden, golem sets `store: false` on Responses requests (and
   equivalents) and refuses file and batch uploads with

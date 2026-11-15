@@ -1,7 +1,9 @@
 # 0005: Declarative config is CRDs read by golem-control; incidents use expiring overrides
 
 Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
-and its normative security and correctness requirements. Baseline text below
+and its normative security and correctness requirements, and by
+[ADR 0050](0050-scope-policy-is-config.md) (ScopePolicy's fields; the
+state keeps a scope's existence, the CRD its policy). Baseline text below
 must be read with those amendments.
 
 Status: Accepted (v1 baseline). From archive 0002, 0012, 0017, 0023, 0025, 0032.
@@ -11,8 +13,10 @@ Status: Accepted (v1 baseline). From archive 0002, 0012, 0017, 0023, 0025, 0032.
 - **Five kinds**, group `golem.dev`: `Backend` (endpoints, dialect and
   envelope, auth, timeouts, egress, deployments, discovery, static provider
   quota shares per site), `ModelRoute` (alias, pools, strategy, affinity,
-  fallbacks, shadow, conditions), `ScopePolicy` (allowed models, capture
-  ceiling, residency, default limits), `Hook`, `PriceList`.
+  fallbacks, shadow, conditions), `ScopePolicy` (one per scope, named by
+  its ID: allowed models, budget and budget mode, limits, request
+  ceilings, provider storage and feature mode; capture ceiling and
+  residency to come; ADR 0050), `Hook`, `PriceList`.
 - They live in the EKS cluster (ADR 0008), selected per gateway pool by
   labels (site, audience). golem-control watches them, compiles them with
   the state (ADR 0006) into snapshots, and writes their status:
