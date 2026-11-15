@@ -17,11 +17,11 @@ import (
 )
 
 // TestUncertainUpstream: absent response bytes are not absent work
-// (golem#4). Only a failure the provider cannot have seen is free, frees
-// its slot at once, and is retried (the route's two attempts: two rows,
-// the second the call's end); otherwise the call is charged an estimate,
-// its slot held for the provider's tail, and it is not retried
-// (model/attempts.md: an uncertain attempt ends the call).
+// (golem#4). Only a failure the provider cannot have seen is free and
+// frees its slot at once (on a pool of one, with no deployment to fail
+// over to, it is not retried: ADR 0051); otherwise the call is charged an
+// estimate, its slot held for the provider's tail, and it is never
+// retried (model/attempts.md: an uncertain attempt ends the call).
 func TestUncertainUpstream(t *testing.T) {
 	alice := key.New(key.Dev)
 	cfg := `apiVersion: golem.dev/v1alpha1
@@ -43,11 +43,11 @@ spec:
 		outcome  string
 		charged  bool
 		heldSlot bool
-		rows     int           // its attempts: a free failure is retried once
+		rows     int           // its rows: one attempt (a pool of one)
 		headers  time.Duration // the route's first-byte timeout, if the provider stays silent
 	}{
-		{"the dial failed", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, false, "failed", false, false, 2, 0},
-		{"the name did not resolve", &net.DNSError{Err: "no such host", Name: "provider.example"}, false, "failed", false, false, 2, 0},
+		{"the dial failed", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, false, "failed", false, false, 1, 0},
+		{"the name did not resolve", &net.DNSError{Err: "no such host", Name: "provider.example"}, false, "failed", false, false, 1, 0},
 		{"reset after the request went out", errors.New("read: connection reset by peer"), false, "uncertain", true, true, 1, 0},
 		{"the caller left before the headers", context.Canceled, true, "cancelled", true, true, 1, 0},
 		{"the headers timed out", nil, false, "uncertain", true, true, 1, 50 * time.Millisecond},

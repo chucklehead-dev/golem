@@ -392,7 +392,8 @@ const (
 )
 
 // DefaultMaxAttempts is a route's attempts per call unless it says: one
-// retry, on the pool's next deployment where it has one. MaxAttempts is
+// failover, to the pool's next deployment where it has one (ADR 0051: a
+// call never retries a deployment it tried). MaxAttempts is
 // the most a route may ask for (each attempt is a provider's round trip
 // before the caller sees a byte).
 const (

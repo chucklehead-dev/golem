@@ -203,6 +203,12 @@ Status:
   fail it; the ninth (a failed probe not re-ejected) is a matter of time,
   which the model leaves out, and `TestEjection` catches it.
 
+- **Retries are failovers, of refusals only (ADR 0051).** After a review
+  of what other gateways retry and what costs twice: an attempt goes only
+  to a deployment the call has not tried (a pool of one makes one attempt;
+  the client's SDK retries the same endpoint), and 500 is no longer
+  retried. The model takes the rule; its connect test found a probe left
+  standing after a readmission, now ended (`TestReadmissionEndsProbes`).
 - **Storm simulation: built, and narrower than planned.** route's
   `TestRetryBudgetBoundsTheStorm` (qload, the real `route.Health` budget
   inside the SDKs' three retries with backoff, a provider at a third of its

@@ -132,11 +132,12 @@ type RouteTimeouts struct {
 
 // RouteRetries bound a call's attempts on a route. Only an attempt the
 // provider refused or never saw is retried (unreached, 429, 503, 529, or
-// an error as the stream's first event); one that may have reached it and
+// an error as the stream's first event), and only on a deployment of the
+// pool the call has not tried (ADR 0051); one that may have reached it and
 // got no answer ends the call.
 type RouteRetries struct {
-	// MaxAttempts is the most attempts one call makes, the first included
-	// (1: no retries; at most 5).
+	// MaxAttempts is the most attempts one call makes, the first included,
+	// each on another deployment (1: no retries; at most 5).
 	MaxAttempts int `json:"maxAttempts,omitempty"`
 }
 

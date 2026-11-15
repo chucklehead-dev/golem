@@ -178,16 +178,15 @@ An attempt ends in one of four ways, as the request path classifies them:
   }
   // The gateway's choice (ORDERED): the first deployment of ORDER that
   // admits c, an untried one first; "" if none does.
-  def firstOf(c: str, untried: bool): str =
-    ORDER.foldl("", (acc, d) => if (acc == "" and admits(c, d) and (not(untried) or not(tried.get(c).contains(d)))) d else acc)
-  def choiceOf(c: str): str = if (firstOf(c, true) != "") firstOf(c, true) else firstOf(c, false)
+  def choiceOf(c: str): str =
+    ORDER.foldl("", (acc, d) => if (acc == "" and admits(c, d) and not(tried.get(c).contains(d))) d else acc)
   // Whether call c may make another attempt: its budget, the pool's, the
   // budget of spend for a first attempt, and a deployment to take it.
   def canAttempt(c: str): bool = and {
     if (RETRY_BUDGET) attempts.get(c) < MAX_ATTEMPTS else true,
     if (POOL_CAP and attempts.get(c) > 0) retries < POOL_RETRIES else true,
     if (attempts.get(c) == 0) known < BUDGET else true,
-    DEPLOYMENTS.exists(d => admits(c, d)),
+    DEPLOYMENTS.exists(d => admits(c, d) and not(tried.get(c).contains(d))),
   }
 ```
 
@@ -215,7 +214,9 @@ budget, the deployment below its quota. A retry checks its own
 deployment's quota (`QUOTA_PER_ATTEMPT`), within the call's budget of
 attempts and the pool's of retries, but not the budget again: the call was
 admitted, and the bound holds without it (§7). An ejected deployment is
-sent only its probe.
+sent only its probe. An attempt goes only to a deployment the call has not
+tried (ADR 0051): the client's SDK already retries the same endpoint with
+backoff, so the gateway's retry is a failover or nothing.
 
 ```quint attempts.qnt +=
   action attempt(c: str, d: str): bool = all {
@@ -226,6 +227,7 @@ sent only its probe.
       if (POOL_CAP and not(first)) retries < POOL_RETRIES else true,
       if (first) known < BUDGET else true,
       admits(c, d),
+      not(tried.get(c).contains(d)),
       if (ORDERED) d == choiceOf(c) else true,
       retries' = if (first) retries else retries + 1,
     },
@@ -441,7 +443,8 @@ worst case it was charged.
 ```
 
 **An ejected deployment gets its probe, and a success readmits it** (the
-design). Two refusals eject `d1`; the next attempt there is its probe
+design). Two refusals, from two calls, eject `d1`; a third call's attempt
+there is its probe
 (no other may follow it: `probeOnly`, checked by §10's search); the probe
 commits and `d1` is back.
 
@@ -452,12 +455,14 @@ commits and `d1` is back.
       .then(start("c2"))
       .then(attempt("c1", "d1"))
       .then(failed("c1", "refused"))
-      .then(attempt("c1", "d1"))
-      .then(failed("c1", "refused"))
+      .then(attempt("c2", "d1"))
+      .then(failed("c2", "refused"))
       .expect(ejected.get("d1"))
-      .then(attempt("c1", "d1"))
+      .then(giveUp("c1"))
+      .then(start("c3"))
+      .then(attempt("c3", "d1"))
       .expect(probes.get("d1") == 1)
-      .then(commit("c1"))
+      .then(commit("c3"))
       .expect(not(ejected.get("d1")) and safe)
 ```
 
@@ -474,7 +479,7 @@ two slots.
       .then(attempt("c2", "d1"))
       .then(attempt("c1", "d2"))
       .then(failed("c1", "uncertain"))
-      .then(attempt("c1", "d2"))
+      .then(attempt("c1", "d1"))
       .expect(not(workWithinLimit))
 ```
 
@@ -566,9 +571,11 @@ module sharedEvent {
 
 The instance the exhaustive search explores (attempts.small.yaml, run by
 check-attempts.sh where it has one): two calls, two deployments, a budget
-of 4 against a worst case of 3, one attempt per deployment at once, three
-attempts a call and three retries for the pool (so that each budget binds
-where the other does not). Its
+of 4 against a worst case of 3, one attempt per deployment at once, two
+attempts a call and one retry for the pool. A call tries each deployment
+once, so its own budget binds only below the pool's size: its variants
+give it one attempt (and the pool two retries, so the call's budget is the
+one that binds); ejection's variants a third call and a ceiling of two. Its
 variants (`simulate.variants`) are the designs, each with the mechanism it
 turns off, what it must hold and what it must break; `gotogether simulate
 -matrix` searches every run of each to the binding's depth and writes this
@@ -576,25 +583,25 @@ table, the properties by the designs (a cell "breaks in N steps" is its
 shortest counterexample):
 
 <!-- gotogether:matrix -->
-| | design | design, two a deployment | retry after commit | retry uncertain | shared event | uncertain free | quota once | no retry budget | no pool cap | no ejection |
-|---|---|---|---|---|---|---|---|---|---|---|
-| safe | holds to depth 14 | holds to depth 14 | breaks in 6 steps | breaks in 6 steps | breaks in 5 steps | breaks in 4 steps | breaks in 6 steps | breaks in 8 steps | breaks in 12 steps | breaks in 6 steps |
-| oneCommit | holds to depth 14 | holds to depth 14 | breaks in 6 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
-| ledgerMatches | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 5 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
-| covered | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 4 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
-| withinBound | holds to depth 14 | holds to depth 14 | breaks in 14 steps | breaks in 14 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
-| workWithinLimit | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 6 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
-| quotaHonoured | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 6 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 |
-| attemptsBounded | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 8 steps | holds to depth 14 | holds to depth 14 |
-| retriesCapped | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 12 steps | holds to depth 14 |
-| probeOnly | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 6 steps |
+| | design | design, two a deployment | design, one attempt a call | retry after commit | retry uncertain | shared event | uncertain free | quota once | no retry budget | no pool cap | no ejection |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| safe | holds | holds to depth 14 | holds | breaks in 6 steps | breaks in 6 steps | breaks in 5 steps | breaks in 4 steps | breaks in 6 steps | breaks in 4 steps | breaks in 8 steps | breaks in 7 steps |
+| oneCommit | holds | holds to depth 14 | holds | breaks in 6 steps | holds to depth 14 | holds | holds | holds | holds | holds | holds to depth 14 |
+| ledgerMatches | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | breaks in 5 steps | holds | holds | holds | holds | holds to depth 14 |
+| covered | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | breaks in 4 steps | holds | holds | holds | holds to depth 14 |
+| withinBound | holds | holds to depth 14 | holds | breaks in 14 steps | breaks in 14 steps | holds | holds | holds | holds | holds | holds to depth 14 |
+| workWithinLimit | holds | holds to depth 14 | holds | holds to depth 14 | breaks in 6 steps | holds | holds | holds | holds | holds | holds to depth 14 |
+| quotaHonoured | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | breaks in 6 steps | holds | holds | holds to depth 14 |
+| attemptsBounded | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | holds | breaks in 4 steps | holds | holds to depth 14 |
+| retriesCapped | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | holds | holds | breaks in 8 steps | holds to depth 14 |
+| probeOnly | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | holds | holds | holds | breaks in 7 steps |
 <!-- /gotogether:matrix -->
 
 ```quint attempts.qnt +=
 
 module small {
   import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 4, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 1,
+    WORST = 3, BUDGET = 4, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 2, POOL_RETRIES = 1, EJECT_AFTER = 1,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
     EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
@@ -604,9 +611,11 @@ module small {
 ## 11. The instance the gateway's tests drive
 
 `gateway/proxy`'s `TestAttemptsModel` replays this instance's traces on the
-real request path (connect): two calls on a pool of two deployments, each
-with a ceiling of one attempt, ejected after two failures, three attempts
-a call and three retries for the route (`gatewayWide`: a ceiling of two, and four retries).
+real request path (connect): two calls on a pool of three deployments,
+each with a ceiling of one attempt, ejected after one failure, two
+attempts a call and two retries for the route (so a call's own budget, not
+the route's, ends its third) (`gatewayWide`: three calls on
+two deployments with a ceiling of two, and two retries).
 Its choices are the gateway's
 (`ORDERED`): the deployment each attempt takes and when a call gives up
 are checked against the code's, not chosen for it. The budget and the
@@ -616,11 +625,11 @@ they do not bind here.
 ```quint attempts.qnt +=
 
 module gateway {
-  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
+  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2", "d3"), COSTS = Set(1, 3),
+    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 2, POOL_RETRIES = 2, EJECT_AFTER = 1,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true, ORDERED = true, ORDER = ["d1", "d2"]).*
+    EJECTION = true, ORDERED = true, ORDER = ["d1", "d2", "d3"]).*
 
   // What the traces must reach: a failover, a call ended by an uncertain
   // attempt, a deployment ejected and then readmitted by its probe, and the
@@ -635,18 +644,17 @@ module gateway {
 // one probe is its own guard (with a ceiling of one, the ceiling already
 // allows a single probe).
 module gatewayWide {
-  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 4, EJECT_AFTER = 2,
+  import attempts(CALLS = Set("c1", "c2", "c3"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
+    WORST = 3, BUDGET = 1000, LIMIT = 3, QUOTA = 2, MAX_ATTEMPTS = 2, POOL_RETRIES = 2, EJECT_AFTER = 1,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
     EJECTION = true, ORDERED = true, ORDER = ["d1", "d2"]).*
 
   // The pool's first deployment ejected, its probe in flight, and another
-  // call's last attempt sent past it: the call had tried every deployment,
-  // so the gateway's order would have taken it to the first but for the
-  // probe (the state is the step after that choice, which a witness run
-  // must take).
+  // call sent past it though it had not tried it: the gateway's order would
+  // have taken it there but for the probe (the state is the step after that
+  // choice, which a witness run must take).
   val probePassedBy = ejected.get("d1") and probes.get("d1") == 1 and
-    CALLS.exists(c => phase.get(c) == "trying" and on.get(c) == "d2" and attempts.get(c) == MAX_ATTEMPTS)
+    CALLS.exists(c => phase.get(c) == "trying" and on.get(c) == "d2" and not(tried.get(c).contains("d1")))
 }
 ```

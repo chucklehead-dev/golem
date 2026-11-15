@@ -135,7 +135,9 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    the caller, so a 200 whose first event is an error is still retryable
    (`gateway/proxy/commit.go`); after it, the attempt is committed. Only
    an attempt the provider never saw or refused before any output is
-   retried; one sent and unanswered ends the call (model/attempts.md:
+   retried, and only on a deployment the call has not tried (ADR 0051: a
+   retry is a failover; the client retries the same endpoint); one sent
+   and unanswered ends the call (model/attempts.md:
    its retry would run beside the provider's tail). The budget is checked
    once, at the first attempt; each attempt takes a lease from its
    deployment's health (ceiling, ejection, one probe), within the route's

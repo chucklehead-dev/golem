@@ -44,6 +44,10 @@ type deployment struct {
 	until     time.Time // ejected until; zero: not ejected
 	probing   bool      // the one probe of an ejected deployment is in flight
 	ejections int       // in a row, for the next ejection's length
+	// admitted counts readmissions: a probe sent before the last one is an
+	// ordinary attempt now (its deployment no longer ejected), so its
+	// verdict is not a probe's.
+	admitted int
 }
 
 func (h *Health) now() time.Time {
@@ -73,6 +77,7 @@ type Lease struct {
 	h     *Health
 	d     *deployment
 	probe bool
+	epoch int  // d.admitted when the lease was taken
 	done  bool // Commit or Fail has reported
 	freed bool
 }
@@ -100,11 +105,16 @@ func (h *Health) Acquire(t *Target) (*Lease, time.Time) {
 	}
 	d.inflight++
 	d.probing = d.probing || probe
-	return &Lease{h: h, d: d, probe: probe}, time.Time{}
+	return &Lease{h: h, d: d, probe: probe, epoch: d.admitted}, time.Time{}
 }
 
+// isProbe reports whether the lease is its deployment's probe still: one
+// taken as a probe, before no readmission since.
+func (l *Lease) isProbe() bool { return l.probe && l.epoch == l.d.admitted }
+
 // Commit reports the attempt committed: the deployment answered, so its
-// failures are forgotten and, if ejected, it is readmitted.
+// failures are forgotten and, if ejected, it is readmitted, which ends any
+// probe in flight (an attempt sent before the ejection may answer first).
 func (l *Lease) Commit() {
 	l.h.mu.Lock()
 	defer l.h.mu.Unlock()
@@ -112,10 +122,10 @@ func (l *Lease) Commit() {
 		return
 	}
 	l.done = true
-	l.d.fails, l.d.until, l.d.ejections = 0, time.Time{}, 0
-	if l.probe {
-		l.d.probing = false
+	if !l.d.until.IsZero() {
+		l.d.admitted++
 	}
+	l.d.fails, l.d.until, l.d.ejections, l.d.probing = 0, time.Time{}, 0, false
 }
 
 // Fail reports the attempt failed before it committed, the provider's
@@ -128,10 +138,11 @@ func (l *Lease) Fail(retryAfter time.Duration) {
 		l.done = true
 		d := l.d
 		d.fails++
-		if l.probe {
+		probe := l.isProbe()
+		if probe {
 			d.probing = false
 		}
-		if l.probe || d.fails >= cmp.Or(l.h.EjectAfter, 3) {
+		if probe || d.fails >= cmp.Or(l.h.EjectAfter, 3) {
 			e := cmp.Or(l.h.Ejection, 10*time.Second) << min(d.ejections, 10)
 			e = min(e, cmp.Or(l.h.MaxEjection, 5*time.Minute))
 			d.until = l.h.now().Add(max(e, retryAfter))
@@ -148,7 +159,7 @@ func (l *Lease) Fail(retryAfter time.Duration) {
 func (l *Lease) Release() {
 	l.h.mu.Lock()
 	defer l.h.mu.Unlock()
-	if !l.done && l.probe {
+	if !l.done && l.isProbe() {
 		l.d.probing = false
 	}
 	l.done = true

@@ -176,20 +176,20 @@ refusal's code; the caller gets that refusal in its dialect's error shape
 
 **The attempts.** The call is admitted once, at its first deployment, and
 then makes up to `Route.MaxAttempts` attempts (default 2) before one
-commits (`proxy.go:267`), the design model/attempts.md checks. `pick`
-(`attempt.go:28`) takes the pool in order, a deployment not yet tried
-first, each only if `route.Health` (`gateway/route/health.go`) gives it a
-lease: under its `maxInFlight` ceiling, and not ejected (one probe at a
+commits, the design model/attempts.md checks. `pick` (`attempt.go`)
+takes the pool in order, only a deployment the call has not tried (a
+retry is a failover: ADR 0051), each only if `route.Health`
+(`gateway/route/health.go`) gives it a lease: under its `maxInFlight` ceiling, and not ejected (one probe at a
 time once its ejection is over). An attempt the provider never saw (a
-dial, DNS or TLS failure), or refused before any output (429, 500, 503,
-529, or a 200 whose first event is an error), is free: its lease reports
+dial, DNS or TLS failure), or refused before any output (429, 503, 529,
+or a 200 whose first event is an error), is free: its lease reports
 the failure, its row is written (`Telemetry.Retried`, its own
 `attempt_id` and `event_id`, cost 0), and the call goes on, if its body
 was kept (`Handler.MaxKept`), it has attempts left, its caller is there,
 nothing withdrew it, and the route's retry budget (a fifth of its calls,
 `Health.Retry`) has one. An attempt that may have reached the provider
-and got no answer ends the call, as does a 4xx, a 502 or 504, or a cut
-after the commit. Enough failures in a row eject a deployment, for longer
+and got no answer ends the call, as does a 4xx, a 500, 502 or 504, or a
+cut after the commit. Enough failures in a row eject a deployment, for longer
 each time (or the provider's longer Retry-After); a committed attempt
 readmits it.
 

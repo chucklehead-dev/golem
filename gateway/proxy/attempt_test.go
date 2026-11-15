@@ -105,7 +105,8 @@ func TestFailover(t *testing.T) {
 // the connection reset) is never retried: the provider may be working on
 // it (the model's uncertainTest; workWithinLimit). A committed stream cut
 // mid-way is not retried: its caller has part of an answer (oneCommit).
-// A 4xx is the request's fault, not the deployment's.
+// A 4xx is the request's fault, not the deployment's; a 500 or a 502 may
+// come after the provider worked (ADR 0051).
 func TestFinalAttempts(t *testing.T) {
 	for name, first := range map[string]func(int32) (*http.Response, error){
 		"uncertain": func(int32) (*http.Response, error) { return nil, errors.New("read: connection reset by peer") },
@@ -114,6 +115,7 @@ func TestFinalAttempts(t *testing.T) {
 				Body: io.NopCloser(io.MultiReader(bytes.NewReader(anthropicStream(1)[0]), &failing{}))}, nil
 		},
 		"400": func(int32) (*http.Response, error) { return statusOf(400, ""), nil },
+		"500": func(int32) (*http.Response, error) { return statusOf(500, ""), nil },
 		"502": func(int32) (*http.Response, error) { return statusOf(502, ""), nil },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -135,25 +137,32 @@ type failing struct{}
 
 func (failing) Read([]byte) (int, error) { return 0, errors.New("connection reset by peer") }
 
-// TestAttemptBudgets: a call makes at most its route's attempts, its pool
-// retried in order and then again from the start (attemptsBounded); and a
-// route's retries are capped across calls (retriesCapped): with a budget
-// of one retry, the second failing call gets none.
+// TestAttemptBudgets: a call makes at most its route's attempts, each on a
+// deployment it has not tried (attemptsBounded; ADR 0051: a pool of one
+// makes one attempt); and a route's retries are capped across calls
+// (retriesCapped): with a budget of one retry, the second failing call
+// gets none.
 func TestAttemptBudgets(t *testing.T) {
 	refuse := func(int32) (*http.Response, error) { return statusOf(503, ""), nil }
-	d1, d2 := &counting{fn: refuse}, &counting{fn: refuse}
-	h, _ := poolHandler(t, 3, d1, d2)
+	d1, d2, d3 := &counting{fn: refuse}, &counting{fn: refuse}, &counting{fn: refuse}
+	h, _ := poolHandler(t, 2, d1, d2, d3)
 	h.Health = &route.Health{EjectAfter: 100}
-	if w := serveOne(h); w.Code != 503 || d1.n.Load() != 2 || d2.n.Load() != 1 {
-		t.Fatalf("status %d, attempts %d and %d: want three attempts (1, 2, 1), then the provider's 503", w.Code, d1.n.Load(), d2.n.Load())
+	if w := serveOne(h); w.Code != 503 || d1.n.Load() != 1 || d2.n.Load() != 1 || d3.n.Load() != 0 {
+		t.Fatalf("status %d, attempts %d, %d, %d: want two attempts (1, 1, 0), then the provider's 503", w.Code, d1.n.Load(), d2.n.Load(), d3.n.Load())
 	}
 
-	d3 := &counting{fn: refuse}
-	h, _ = poolHandler(t, 3, d3)
+	one := &counting{fn: refuse}
+	h, _ = poolHandler(t, 5, one)
+	if serveOne(h); one.n.Load() != 1 {
+		t.Fatalf("%d attempts on a pool of one: a call is never retried on a deployment it tried", one.n.Load())
+	}
+
+	e1, e2 := &counting{fn: refuse}, &counting{fn: refuse}
+	h, _ = poolHandler(t, 2, e1, e2)
 	h.Health = &route.Health{EjectAfter: 100, RetryBurst: 1, RetryRatio: 0.001}
 	serveOne(h)
 	serveOne(h)
-	if n := d3.n.Load(); n != 3 {
+	if n := e1.n.Load() + e2.n.Load(); n != 3 {
 		t.Fatalf("%d attempts over two calls: want the first call's two (its one retry) and the second's one", n)
 	}
 }

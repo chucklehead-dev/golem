@@ -85,16 +85,15 @@ module attempts {
   }
   // The gateway's choice (ORDERED): the first deployment of ORDER that
   // admits c, an untried one first; "" if none does.
-  def firstOf(c: str, untried: bool): str =
-    ORDER.foldl("", (acc, d) => if (acc == "" and admits(c, d) and (not(untried) or not(tried.get(c).contains(d)))) d else acc)
-  def choiceOf(c: str): str = if (firstOf(c, true) != "") firstOf(c, true) else firstOf(c, false)
+  def choiceOf(c: str): str =
+    ORDER.foldl("", (acc, d) => if (acc == "" and admits(c, d) and not(tried.get(c).contains(d))) d else acc)
   // Whether call c may make another attempt: its budget, the pool's, the
   // budget of spend for a first attempt, and a deployment to take it.
   def canAttempt(c: str): bool = and {
     if (RETRY_BUDGET) attempts.get(c) < MAX_ATTEMPTS else true,
     if (POOL_CAP and attempts.get(c) > 0) retries < POOL_RETRIES else true,
     if (attempts.get(c) == 0) known < BUDGET else true,
-    DEPLOYMENTS.exists(d => admits(c, d)),
+    DEPLOYMENTS.exists(d => admits(c, d) and not(tried.get(c).contains(d))),
   }
   action start(c: str): bool = all {
     phase.get(c) == "idle",
@@ -112,6 +111,7 @@ module attempts {
       if (POOL_CAP and not(first)) retries < POOL_RETRIES else true,
       if (first) known < BUDGET else true,
       admits(c, d),
+      not(tried.get(c).contains(d)),
       if (ORDERED) d == choiceOf(c) else true,
       retries' = if (first) retries else retries + 1,
     },
@@ -262,12 +262,14 @@ module attempts {
       .then(start("c2"))
       .then(attempt("c1", "d1"))
       .then(failed("c1", "refused"))
-      .then(attempt("c1", "d1"))
-      .then(failed("c1", "refused"))
+      .then(attempt("c2", "d1"))
+      .then(failed("c2", "refused"))
       .expect(ejected.get("d1"))
-      .then(attempt("c1", "d1"))
+      .then(giveUp("c1"))
+      .then(start("c3"))
+      .then(attempt("c3", "d1"))
       .expect(probes.get("d1") == 1)
-      .then(commit("c1"))
+      .then(commit("c3"))
       .expect(not(ejected.get("d1")) and safe)
   run uncertainRetryTest =
     init
@@ -276,7 +278,7 @@ module attempts {
       .then(attempt("c2", "d1"))
       .then(attempt("c1", "d2"))
       .then(failed("c1", "uncertain"))
-      .then(attempt("c1", "d2"))
+      .then(attempt("c1", "d1"))
       .expect(not(workWithinLimit))
   run cutRetryTest =
     init
@@ -332,18 +334,18 @@ module sharedEvent {
 
 module small {
   import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 4, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 1,
+    WORST = 3, BUDGET = 4, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 2, POOL_RETRIES = 1, EJECT_AFTER = 1,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
     EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
 }
 
 module gateway {
-  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
+  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2", "d3"), COSTS = Set(1, 3),
+    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 2, POOL_RETRIES = 2, EJECT_AFTER = 1,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true, ORDERED = true, ORDER = ["d1", "d2"]).*
+    EJECTION = true, ORDERED = true, ORDER = ["d1", "d2", "d3"]).*
 
   // What the traces must reach: a failover, a call ended by an uncertain
   // attempt, a deployment ejected and then readmitted by its probe, and the
@@ -358,17 +360,16 @@ module gateway {
 // one probe is its own guard (with a ceiling of one, the ceiling already
 // allows a single probe).
 module gatewayWide {
-  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 1000, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 4, EJECT_AFTER = 2,
+  import attempts(CALLS = Set("c1", "c2", "c3"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
+    WORST = 3, BUDGET = 1000, LIMIT = 3, QUOTA = 2, MAX_ATTEMPTS = 2, POOL_RETRIES = 2, EJECT_AFTER = 1,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
     EJECTION = true, ORDERED = true, ORDER = ["d1", "d2"]).*
 
   // The pool's first deployment ejected, its probe in flight, and another
-  // call's last attempt sent past it: the call had tried every deployment,
-  // so the gateway's order would have taken it to the first but for the
-  // probe (the state is the step after that choice, which a witness run
-  // must take).
+  // call sent past it though it had not tried it: the gateway's order would
+  // have taken it there but for the probe (the state is the step after that
+  // choice, which a witness run must take).
   val probePassedBy = ejected.get("d1") and probes.get("d1") == 1 and
-    CALLS.exists(c => phase.get(c) == "trying" and on.get(c) == "d2" and attempts.get(c) == MAX_ATTEMPTS)
+    CALLS.exists(c => phase.get(c) == "trying" and on.get(c) == "d2" and not(tried.get(c).contains("d1")))
 }

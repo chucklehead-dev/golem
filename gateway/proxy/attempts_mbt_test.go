@@ -113,8 +113,10 @@ func (p *mbtProvider) RoundTrip(r *http.Request) (*http.Response, error) {
 
 type attemptsDriver struct {
 	t       testing.TB
-	ceiling int // each deployment's MaxInFlight: the instance's QUOTA
-	retries int // the route's retry budget: its POOL_RETRIES
+	ceiling int      // each deployment's MaxInFlight: the instance's QUOTA
+	retries int      // the route's retry budget: its POOL_RETRIES
+	deps    []string // its ORDER
+	names   []string // its CALLS
 	h       *Handler
 	health  *route.Health
 	rt      *route.Route
@@ -131,15 +133,15 @@ func (d *attemptsDriver) Step(s *connect.Step) error {
 	c := func() *mbtCall { return d.calls[connect.MustPick[string](s, "c")] }
 	return connect.Switch{
 		"init": func(*connect.Step) error {
-			d.health = &route.Health{EjectAfter: 2, Ejection: time.Nanosecond, RetryBurst: float64(d.retries), RetryRatio: 1e-9,
+			d.health = &route.Health{EjectAfter: 1, Ejection: time.Nanosecond, RetryBurst: float64(d.retries), RetryRatio: 1e-9,
 				Now: (&tick{at: time.Unix(0, 0)}).now}
-			d.rt = &route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(), MaxAttempts: 3}
-			for _, dep := range []string{"d1", "d2"} {
+			d.rt = &route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(), MaxAttempts: 2}
+			for _, dep := range d.deps {
 				d.rt.Pool = append(d.rt.Pool, &route.Target{Backend: "b", Deployment: dep, ID: dep, Model: "m", URL: upstreamURL,
 					MaxInFlight: d.ceiling, Transport: &mbtProvider{dep: dep, calls: d.call}})
 			}
 			d.calls = map[string]*mbtCall{}
-			for _, name := range []string{"c1", "c2"} {
+			for _, name := range d.names {
 				d.calls[name] = &mbtCall{paused: make(chan chan struct{}, 1), arrived: make(chan *arrival, 1),
 					done: make(chan struct{}), phase: "idle"}
 			}
@@ -324,11 +326,17 @@ func TestAttemptsModel(t *testing.T) {
 	t.Run("ceiling one", func(t *testing.T) {
 		connect.Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gateway", MaxSamples: 50, MaxSteps: 20,
 			Require: []string{"failedOver", "ejectedThenProbed", "retriesSpent", "attemptsSpent"}},
-			func(t testing.TB) connect.Driver { return &attemptsDriver{t: t, ceiling: 1, retries: 3} })
+			func(t testing.TB) connect.Driver {
+				return &attemptsDriver{t: t, ceiling: 1, retries: 2,
+					deps: []string{"d1", "d2", "d3"}, names: []string{"c1", "c2"}}
+			})
 	})
 	t.Run("ceiling two", func(t *testing.T) {
 		connect.Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gatewayWide", MaxSamples: 50, MaxSteps: 20,
 			Require: []string{"probePassedBy"}},
-			func(t testing.TB) connect.Driver { return &attemptsDriver{t: t, ceiling: 2, retries: 4} })
+			func(t testing.TB) connect.Driver {
+				return &attemptsDriver{t: t, ceiling: 2, retries: 2,
+					deps: []string{"d1", "d2"}, names: []string{"c1", "c2", "c3"}}
+			})
 	})
 }

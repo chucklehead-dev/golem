@@ -19,11 +19,10 @@ var overloaded = []byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"ty
 
 // TestFailedBeforeCommit: a provider that answers 200 and then an error as
 // its first event has produced nothing and told the caller nothing. The
-// attempt is not committed: it is retried (the route's two attempts), and
-// when the second fails alike the caller gets a retryable 503 in its own
-// dialect (with the provider's Retry-After), never a 200; the call is
-// charged nothing and its slot freed at once; each attempt's row says
-// failed, of the provider.
+// attempt is not committed: with no other deployment to fail over to, the
+// caller gets a retryable 503 in its own dialect (with the provider's
+// Retry-After), never a 200; the call is charged nothing and its slot
+// freed at once; its row says failed, of the provider.
 func TestFailedBeforeCommit(t *testing.T) {
 	alice := key.New(key.Dev)
 	cfg := `apiVersion: golem.dev/v1alpha1
@@ -64,11 +63,7 @@ spec:
 	case w.Header().Get("Content-Type") != "application/json":
 		t.Fatalf("Content-Type %q: the provider's stream headers were sent", w.Header().Get("Content-Type"))
 	}
-	all := rowsOf(t, &rows)
-	if len(all) != 2 || all[0]["attempt_id"] == all[1]["attempt_id"] || all[0]["cost_micros"].(float64) != 0 {
-		t.Fatalf("rows %v: the route's two attempts, each its own event, the first free", all)
-	}
-	row := all[1]
+	row := rowOf(t, &rows)
 	if row["outcome"] != "failed" || row["cost_micros"].(float64) != 0 || row["error_origin"] != "provider" || row["error_code"] != "upstream.unavailable" {
 		t.Fatalf("row %v: want failed, uncharged, the provider's", row)
 	}

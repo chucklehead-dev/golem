@@ -117,3 +117,32 @@ func TestRetryBudget(t *testing.T) {
 		t.Fatal("two calls credit one retry; another route has its own budget")
 	}
 }
+
+// TestReadmissionEndsProbes: an attempt sent before the ejection commits
+// while the probe is in flight: the deployment is readmitted, the probe is
+// an ordinary attempt from then on, and its failure is an ordinary one, not
+// a failed probe's ejection (model/attempts.md: a commit readmits and ends
+// the probes in flight).
+func TestReadmissionEndsProbes(t *testing.T) {
+	now := time.Unix(1000, 0)
+	h := &Health{EjectAfter: 2, Ejection: time.Second, Now: func() time.Time { return now }}
+	d := &Target{Backend: "b", Deployment: "d"}
+	early, _ := h.Acquire(d) // sent before the ejection
+	f1, _ := h.Acquire(d)
+	f1.Fail(0)
+	f2, _ := h.Acquire(d)
+	f2.Fail(0) // two in a row: ejected
+	now = now.Add(time.Second)
+	probe, _ := h.Acquire(d)
+	if probe == nil || !h.Deployment(d).Probing {
+		t.Fatal("no probe after the ejection")
+	}
+	early.Commit()
+	if dh := h.Deployment(d); dh.Ejected || dh.Probing {
+		t.Fatalf("%+v: a commit readmits and ends the probe", dh)
+	}
+	probe.Fail(0)
+	if dh := h.Deployment(d); dh.Ejected {
+		t.Fatalf("%+v: the old probe's failure is one failure, not a failed probe's ejection", dh)
+	}
+}
