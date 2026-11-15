@@ -667,8 +667,8 @@ func (c *Controller) Run(ctx context.Context) {
 // replica leads, the audit outbox shipped and the group sync if due.
 func (c *Controller) tick(ctx context.Context) error {
 	_, err := c.Step(ctx)
-	if c.Audit != nil && c.Elector.Epoch() != 0 {
-		if _, aerr := c.Audit.Step(ctx); aerr != nil {
+	if fence, leads := c.Elector.Fence(); c.Audit != nil && leads {
+		if _, aerr := c.Audit.Step(ctx, fence); aerr != nil {
 			err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
 		} else {
 			c.mu.Lock()

@@ -43,9 +43,12 @@ type Shipper struct {
 // until a person looks: the outbox keeps the event.
 var ErrMismatch = errors.New("audit: an archived event differs from the outbox's")
 
-// Step archives, emits and trims up to Batch events, and returns how many
-// it trimmed.
-func (s *Shipper) Step(ctx context.Context) (int, error) {
+// Step archives, emits and trims up to Batch events, as the leader at
+// fence, and returns how many it trimmed. The trim is a leader-only write,
+// fenced like the others (state.FencedUpdate): a shipper deposed while it
+// archived writes nothing (state.ErrFenced). What it archived and emitted
+// stands; the new leader finds the objects identical and goes on.
+func (s *Shipper) Step(ctx context.Context, fence state.Fence) (int, error) {
 	if err := s.State.Refresh(ctx); err != nil {
 		return 0, err
 	}
@@ -67,7 +70,7 @@ func (s *Shipper) Step(ctx context.Context) (int, error) {
 		s.emit(ctx, e)
 	}
 	last := events[len(events)-1].Seq
-	if _, err := s.State.Update(ctx, func(d *state.Document) error {
+	if _, err := s.State.FencedUpdate(ctx, fence, func(d *state.Document) error {
 		// d is the store's copy: its outbox may be edited in place.
 		d.Audit = slices.DeleteFunc(d.Audit, func(e state.AuditEvent) bool { return e.Seq <= last })
 		return nil

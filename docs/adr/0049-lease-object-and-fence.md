@@ -33,7 +33,8 @@ record lowered the trusted floor.
   epoch is below that. A replica leads only once it has claimed.
 - **Every leader-only document write checks the fence in its own
   compare-and-swap** (`state.FencedUpdate`): publication, the group
-  sync, and the period and expiry jobs as they come. Checking the lease
+  sync, the audit outbox's trim, and the period and expiry jobs as they
+  come. Checking the lease
   object first and then writing the document is not enough (the model's
   `readLease` counterexample): no transaction spans two objects.
 - **Publication** wins every pool's record in one fenced update per

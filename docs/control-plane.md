@@ -96,7 +96,9 @@ validate` (the snapshot compiler as a library), not by a live API call
   it archived and goes on; an archived object that differs stops shipping,
   untrimmed), then emitted as a `golem.audit` log record (at least once:
   ClickHouse keeps one row per seq, and fills a gap from the archive),
-  then trimmed from the outbox up to the last event shipped.
+  then trimmed from the outbox up to the last event shipped, under the
+  leader's fence like every leader-only write (`state.FencedUpdate`): a
+  shipper deposed meanwhile trims nothing.
 - **Schema evolution**: additive protobuf changes need nothing. A breaking
   change takes two releases: release N reads the new schema and keeps
   writing the old; release N+1 writes the new. Mixed replicas during a
@@ -241,8 +243,8 @@ control plane.
     the fence in the state document. A taker judges a lease lapsed by its
     own clock on an unchanged object, acquires it at one above the higher
     of the lease's and the fence's epochs, and leads once it has claimed
-    the fence; every leader-only write (publication, the group sync) is
-    fenced in its own write (`state.FencedUpdate`);
+    the fence; every leader-only write (publication, the group sync, the
+    audit trim) is fenced in its own write (`state.FencedUpdate`);
   - slice 2: `lib/bucket/s3bucket` (S3, with its conditional requests:
     If-None-Match on GetObject, If-Match and If-None-Match: * on
     PutObject; 304, 404, 412 and 409 mapped to the bucket's errors; reads

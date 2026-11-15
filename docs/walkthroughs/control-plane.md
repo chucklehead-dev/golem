@@ -124,7 +124,7 @@ base without copying it twice.
 writer's (holder and epoch), else `ErrFenced` (`state.go:118`) and nothing
 is written. The check is inside the same compare-and-swap, so a leader
 deposed while it worked (a pause, a slow directory read) writes nothing.
-Publication (§3) and the group sync (§5.2) use it.
+Publication (§3), the group sync (§5.2) and the audit trim (§5.1) use it.
 
 **Validate-only.** `Store.Validate` (`state.go:331`) runs the same `apply`
 and writes nothing: the API's `validate_only` (control-plane.md §2). The
@@ -153,7 +153,7 @@ compare-and-swap as the change and a retried change is numbered afresh.
 | A store that has read nothing starts from an empty document only where golem-control has not run (no `Installed` object), else `ErrMissing`; only `Bootstrap` creates one then | `refresh`, `installed`, `state.go:207` | `TestMissingDocument`, `TestBootstrapCommand` |
 | No pool is published from a record below what the bucket proves (its verified checkpoint or pointer): the document went back, `ErrRegressed` | `prepare` and `below`, `control/publish/publish.go:203` | `TestGuard` |
 | A write whose reply was lost is applied once: recognised by its ID among the document's last 32 (`Writes`), even after others wrote over it | `Update`, `wrote`, `state.go` | `TestLostReplyOvertaken`, `TestLostClaim` |
-| A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:316` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced` |
+| A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:316` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced`, `TestDeposedTrim` |
 
 Every refusal wraps `ErrInvariant`, which the API maps to Connect's
 `FailedPrecondition` (`control/api/api.go`, `connectError`).
@@ -514,8 +514,12 @@ the outbox's oldest events and, in order:
 2. **Emits** each as a `golem.audit` OTel log record for ClickHouse
    (`emit`, `audit.go:101`), at least once; ClickHouse keeps one row per
    seq.
-3. **Trims** the outbox up to the last event archived, by `Update`
-   (`audit.go:70`). Events written meanwhile are numbered higher and stay.
+3. **Trims** the outbox up to the last event archived, by `FencedUpdate`
+   under the fence `tick` passes (`Elector.Fence`), as every leader-only
+   write: a shipper deposed while it archived trims nothing
+   (`state.ErrFenced`); the new leader finds the objects identical and
+   goes on (`TestDeposedTrim`). Events written meanwhile are numbered
+   higher and stay.
 
 The archive, not the collector, is the durability boundary: an event leaves
 the outbox only once it is durably archived.
@@ -697,7 +701,7 @@ path with a real gateway source over one bucket.
   config (`TestRestartOverBrokenConfig`; `lib/compile`'s `TestRenew`:
   a renewal is what compiling the config again would publish).
 - `control/audit`: archive, emit, trim; a retry after a crash; a mismatch;
-  batches.
+  batches; a deposed shipper's trim refused (`TestDeposedTrim`).
 - `control/metrics`: through the OTel SDK's manual reader, a leader's
   publication (time, sequence, lease, leadership, known spend's age),
   then a tampered checkpoint counted as `tampered` with the last
@@ -765,6 +769,3 @@ path with a real gateway source over one bucket.
 - **A replica that will not start reports nothing**: `ErrMissing` at
   `Load`, or a bad flag, stops golem-control before its metrics exist;
   the alert is their absence.
-- **The audit trim is not fenced**: `Shipper.Step` trims with `Update`, not
-  `FencedUpdate`. It only removes events already archived, which
-  `outboxFollows` checks, so a deposed leader's trim loses nothing.
