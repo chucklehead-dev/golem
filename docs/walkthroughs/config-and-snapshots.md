@@ -79,7 +79,7 @@ carries.
 
 `ContentHash` (`decode.go:137`) hashes the YAML files' names and contents
 in walk order: golem-control (`Controller.load`,
-`control/controller/controller.go:338`) and the standalone gateway
+`control/controller/controller.go:552`) and the standalone gateway
 (`Dir.Load`, `gateway/snapshot/file.go:40`) use it to skip decoding and
 compiling a directory that has not changed.
 
@@ -87,8 +87,8 @@ compiling a directory that has not changed.
 
 One validation path (ADR 0005): `golemctl config validate` (`validate`,
 `cmd/golemctl/main.go:136`) runs it offline, golem-control on the live
-config (`Controller.Step`'s publication, `control/controller/controller.go:309`,
-and `load`'s trial compile at `:349`), the standalone gateway on its
+config (`Controller.Step`'s publication, `control/controller/controller.go:488`,
+and `load`'s trial compile at `:570`), the standalone gateway on its
 directory (`Dir.Load`, `gateway/snapshot/file.go:51`).
 
 `Compile` (`compile.go:72`) reports **every** problem, not the first, as
@@ -157,8 +157,8 @@ compiled backends and routes.
 A **published** snapshot's entitlements come from the state document
 (`control/state`): golem-control passes `Options.Entitlements`, a function
 told the sorted route aliases that exist (`compile.go:86`); golem-control's
-fills in each scope's known spend (`Controller.Step`,
-`control/controller/controller.go:284`). Without one, the snapshot
+fills in each scope's known spend (`Controller.entitlements`,
+`control/controller/controller.go:529`). Without one, the snapshot
 authorizes no one. Compile still runs `entitlements` first, so that a
 LocalIdentity in a published config is reported.
 
@@ -392,15 +392,15 @@ fixture of `compile_test.go:14`, a Backend `anthropic` with one deployment
 deployment under one alias, and a ConfigMap.
 
 1. **Read.** golem-control's `Controller.Step` calls `load`
-   (`control/controller/controller.go:331`), which hashes the directory
+   (`control/controller/controller.go:552`), which hashes the directory
    with `ContentHash`; it changed, so `DecodeFS` reads it (`decode.go:38`).
    Document 1 decodes into `objs.Backends`, document 2 into
    `objs.Routes`; the ConfigMap in document 3 is skipped (`decode.go:83`).
-   A trial compile with a lease and no entitlements (`controller.go:349`)
+   A trial compile with a lease and no entitlements (`controller.go:570`)
    passes, and the objects become the good config.
 2. **Compile.** `PublishAll`'s build function calls `Compile`
    (`compile.go:72`) with the publication's sequence, a lease and the
-   state's entitlements (`controller.go:309`). `compileBackends`
+   state's entitlements (`controller.go:488`). `compileBackends`
    (`compile.go:122`) accepts `anthropic`; `backendAuth` compiles its auth
    to `secretRef: "anthropic/api-key"`; `deployments` checks the one
    deployment's https URL; `catalog.add` records the backend's dialect and
