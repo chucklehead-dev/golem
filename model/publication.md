@@ -874,13 +874,13 @@ designs (a cell "breaks in N steps" is its shortest counterexample):
 <!-- gotogether:matrix -->
 | | design | no fence | lease from the gateway | no trusted floor | restore replaces | expiry unchecked |
 |---|---|---|---|---|---|---|
-| safe | holds | breaks in 5 steps | breaks in 6 steps | breaks in 4 steps | breaks in 2 steps | breaks in 3 steps |
-| revocationBounded | holds | holds | breaks in 6 steps | holds | breaks in 8 steps | breaks in 4 steps |
-| noExpiredServe | holds | holds | holds | holds | holds | breaks in 3 steps |
-| noRollback | holds | breaks in 7 steps | holds | holds | holds | holds |
-| noRollbackBelowCheckpoint | holds | holds | holds | breaks in 4 steps | holds | holds |
-| publicationsOrdered | holds | breaks in 5 steps | holds | holds | holds | holds |
-| revocationsSurviveRestore | holds | holds | holds | holds | breaks in 2 steps | holds |
+| safe | holds to depth 8 | breaks in 5 steps | breaks in 6 steps | breaks in 4 steps | breaks in 2 steps | breaks in 3 steps |
+| revocationBounded | holds to depth 8 | holds to depth 8 | breaks in 6 steps | holds to depth 8 | breaks in 8 steps | breaks in 4 steps |
+| noExpiredServe | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 | breaks in 3 steps |
+| noRollback | holds to depth 8 | breaks in 7 steps | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 |
+| noRollbackBelowCheckpoint | holds to depth 8 | holds to depth 8 | holds to depth 8 | breaks in 4 steps | holds to depth 8 | holds to depth 8 |
+| publicationsOrdered | holds to depth 8 | breaks in 5 steps | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 |
+| revocationsSurviveRestore | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 | breaks in 2 steps | holds to depth 8 |
 <!-- /gotogether:matrix -->
 
 ```quint publication.qnt +=

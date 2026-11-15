@@ -805,11 +805,11 @@ designs (a cell "breaks in N steps" is its shortest counterexample):
 <!-- gotogether:matrix -->
 | | design | no scope limit | reset at apply | sum | no allowance | no hold on cancel | no reacquire |
 |---|---|---|---|---|---|---|---|
-| safe | holds | breaks in 2 steps | breaks in 4 steps | breaks in 5 steps | breaks in 5 steps | breaks in 3 steps | breaks in 7 steps |
-| limitsHonoured | holds | breaks in 2 steps | holds | holds | holds | breaks in 3 steps | breaks in 7 steps |
-| withinBound | holds | breaks in 4 steps | breaks in 6 steps | holds | breaks in 7 steps | holds | holds |
-| knownNeverOver | holds | holds | holds | breaks in 5 steps | holds | holds | holds |
-| noLostIncrements | holds | holds | breaks in 4 steps | holds | breaks in 5 steps | holds | holds |
+| safe | holds to depth 7 | breaks in 2 steps | breaks in 4 steps | breaks in 5 steps | breaks in 5 steps | breaks in 3 steps | breaks in 7 steps |
+| limitsHonoured | holds to depth 7 | breaks in 2 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 3 steps | breaks in 7 steps |
+| withinBound | holds to depth 7 | breaks in 4 steps | breaks in 6 steps | holds to depth 7 | breaks in 7 steps | holds to depth 7 | holds to depth 7 |
+| knownNeverOver | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 |
+| noLostIncrements | holds to depth 7 | holds to depth 7 | breaks in 4 steps | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 |
 <!-- /gotogether:matrix -->
 
 ```quint exposure.qnt +=

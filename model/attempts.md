@@ -578,16 +578,16 @@ shortest counterexample):
 <!-- gotogether:matrix -->
 | | design | design, two a deployment | retry after commit | retry uncertain | shared event | uncertain free | quota once | no retry budget | no pool cap | no ejection |
 |---|---|---|---|---|---|---|---|---|---|---|
-| safe | holds | holds | breaks in 6 steps | breaks in 6 steps | breaks in 5 steps | breaks in 4 steps | breaks in 6 steps | breaks in 8 steps | breaks in 12 steps | breaks in 6 steps |
-| oneCommit | holds | holds | breaks in 6 steps | holds | holds | holds | holds | holds | holds | holds |
-| ledgerMatches | holds | holds | holds | holds | breaks in 5 steps | holds | holds | holds | holds | holds |
-| covered | holds | holds | holds | holds | holds | breaks in 4 steps | holds | holds | holds | holds |
-| withinBound | holds | holds | breaks in 14 steps | breaks in 14 steps | holds | holds | holds | holds | holds | holds |
-| workWithinLimit | holds | holds | holds | breaks in 6 steps | holds | holds | holds | holds | holds | holds |
-| quotaHonoured | holds | holds | holds | holds | holds | holds | breaks in 6 steps | holds | holds | holds |
-| attemptsBounded | holds | holds | holds | holds | holds | holds | holds | breaks in 8 steps | holds | holds |
-| retriesCapped | holds | holds | holds | holds | holds | holds | holds | holds | breaks in 12 steps | holds |
-| probeOnly | holds | holds | holds | holds | holds | holds | holds | holds | holds | breaks in 6 steps |
+| safe | holds to depth 14 | holds to depth 14 | breaks in 6 steps | breaks in 6 steps | breaks in 5 steps | breaks in 4 steps | breaks in 6 steps | breaks in 8 steps | breaks in 12 steps | breaks in 6 steps |
+| oneCommit | holds to depth 14 | holds to depth 14 | breaks in 6 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
+| ledgerMatches | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 5 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
+| covered | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 4 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
+| withinBound | holds to depth 14 | holds to depth 14 | breaks in 14 steps | breaks in 14 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
+| workWithinLimit | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 6 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 |
+| quotaHonoured | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 6 steps | holds to depth 14 | holds to depth 14 | holds to depth 14 |
+| attemptsBounded | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 8 steps | holds to depth 14 | holds to depth 14 |
+| retriesCapped | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 12 steps | holds to depth 14 |
+| probeOnly | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | holds to depth 14 | breaks in 6 steps |
 <!-- /gotogether:matrix -->
 
 ```quint attempts.qnt +=

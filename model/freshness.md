@@ -694,10 +694,10 @@ designs (a cell "breaks in N steps" is its shortest counterexample):
 <!-- gotogether:matrix -->
 | | design | anchor latest | fence one | restore replaces |
 |---|---|---|---|---|
-| safe | holds | breaks in 7 steps | breaks in 5 steps | breaks in 2 steps |
-| restrictionsBounded | holds | breaks in 7 steps | holds | holds |
-| noConfigRollback | holds | holds | breaks in 5 steps | holds |
-| restoreNeverWidens | holds | holds | holds | breaks in 2 steps |
+| safe | holds to depth 7 | breaks in 7 steps | breaks in 5 steps | breaks in 2 steps |
+| restrictionsBounded | holds to depth 7 | breaks in 7 steps | holds to depth 7 | holds to depth 7 |
+| noConfigRollback | holds to depth 7 | holds to depth 7 | breaks in 5 steps | holds to depth 7 |
+| restoreNeverWidens | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 2 steps |
 <!-- /gotogether:matrix -->
 
 ```quint freshness.qnt +=
