@@ -58,9 +58,16 @@ override it (ADR 0032). Longer internal leases require an explicit
 per-pool maximum and security approval. Refresh must incorporate
 current authoritative state and CRDs; it cannot merely re-sign stale content.
 At expiry reject new model requests, even when routing configuration remains
-usable. Existing streams follow a documented termination policy; the default
-is termination at authorization expiry, with locally applied emergency
-revocations terminating matching streams promptly.
+usable. Lease expiry stops new requests only: calls already in flight finish.
+Revocation and local denial end them: when a gateway applies a snapshot that
+revokes a key, removes its principal from the key's scope or drops the
+principal, or the emergency denylist gains an entry for a key or principal,
+the gateway terminates that caller's calls in flight within seconds (a
+stream with its dialect's error event carrying the refusal's code, a call
+still waiting for the provider's headers with its dialect's error, a whole
+response already begun by a cut), charged what was produced, its slot held
+for the provider's tail, its ledger row's outcome `terminated`. Other calls
+are untouched (gateway/proxy InFlight; contracts.md §1, §3).
 
 The five-second revocation target applies to healthy connected gateways,
 not partitions within the lease. Publish lag, lease expiry, clock skew,

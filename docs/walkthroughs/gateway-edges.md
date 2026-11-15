@@ -120,6 +120,37 @@ seconds, logging a failure once until it changes. `Keys` holds the
 `DenyFile`, not a list, so a reload applies to the next request without a
 new snapshot. `denies` (`deny.go:94`) matches a key by hash or prefix (a
 token is matched by its Entra ID only) and any caller by principal ID.
+`DenyFile.OnApply` is told each changed list once it is in force:
+golem-gateway sweeps its calls in flight with it (below).
+
+### Ending withdrawn calls in flight (`Grant`, `Honours`)
+
+`AuthenticateGrant` is `Authenticate` that also fills a caller-held
+`Grant`: what was honoured (a key's hash and text, a token's principal
+with its Entra ID and scope, the implicit principal), no allocation. A
+later snapshot's `Keys.Honours(grant)` answers whether it still would, by
+the same rules: a key while listed and not revoked, its scope there and
+its principal a listed member of it (else the refusal a new request gets:
+`auth.key_revoked`, `authz.scope_not_member`); a token while its principal
+is a member of the scope it acted in; neither while the denylist in force
+names it (`auth.denied`). Expiry is not checked: a key's, a token's or the
+lease's passing ends no call that began in time.
+
+The request path (`gateway/proxy/inflight.go`) registers each admitted call
+in the shared `InFlight`, with its grant and its upstream context's cancel,
+from just after admission until its upstream context is released: an
+intrusive list in one of 16 mutex-guarded shards (picked by the request
+ID's random byte), the entry in the pooled exchange, so a call costs two
+uncontended lock round trips and no allocation (`BenchmarkInFlight`, about
+60 ns). `InFlight.Sweep`, run by golem-gateway's `newHolder` after each
+snapshot is applied and by `newDenyFile`'s hook after each list, asks the
+current keys (`InFlight.Keys`: the applied snapshot's, lease expired or
+not) about every call in flight and cancels each one refused, with the
+refusal as the cause. A sweep counts a generation first; a call that
+authenticated before a sweep began and registered after it passed its
+shard sees the changed generation and checks itself (`add`), so no call
+slips between. The cancelled upstream request then ends as a cut the
+gateway made (`terminatedBy`): see request-path.md, step 8.
 
 ## 2. The snapshot holder and its sources (`gateway/snapshot`)
 
@@ -387,8 +418,10 @@ and pool), the Entra verifier if a tenant is given (`newEntra`,
 `main.go:377`: its key set, from `-entra-jwks` or Entra's public cloud,
 fetched once; a failure is logged, not fatal, and the verifier's `Run`
 retries, golem keys served meanwhile), the limiter over its store (`newLimiter`, `main.go:216`),
-the holder that hands each snapshot's known spend to the limiter
-(`newHolder`, `main.go:277`), the denylist if one is named (loaded before
+the holder that hands each snapshot's known spend to the limiter and then
+sweeps the calls in flight both dialects' handlers share (`newHolder`,
+`proxy.InFlight`), the denylist if one is named (`newDenyFile`, its each
+list sweeping them too; loaded before
 the source, `main.go:155`, so neither a first request nor the last-good
 publication is ever compiled without it), the snapshot source
 (`startSource`, `main.go:288`: standalone's directory with the dev key, or
@@ -479,6 +512,8 @@ that started before it.
 | A gateway starts while Entra is unreachable: golem keys served, Entra tokens refused as `gateway.not_ready` until a retried fetch succeeds | `newEntra`, `Verify` (`errNoKeys`), `Run`'s backoff, `Keys.token` | `TestPoolModeEntraDown`, `TestStartWithoutKeys` (lib/entra), `TestEntraKeysNotYetFetched` |
 | A refresh asked for within a minute of the last is deferred to the minute's end, not dropped | `Verifier.Run` | `TestRefreshDeferred` (lib/entra, `testing/synctest`) |
 | A caller the denylist names is refused whatever the snapshot says; a bad edit keeps the list in force | `Authenticate`, `Denylist.denies`, `DenyFile.Load` | `TestDenylist` |
+| A grant is honoured by a later snapshot by the rules a new request is refused by (revoked, removed, its principal gone from its scope or from golem, denied); expiry ends none | `Keys.AuthenticateGrant`, `Keys.Honours` | `TestHonours` |
+| A snapshot revoking a key, or a denylist entry, ends that caller's calls in flight within seconds (both dialects: a stream's error event, a waiting call's error, a begun whole response cut); other calls run on; the lease's expiry ends none | `InFlight.Sweep`, `add`, `newHolder`, `newDenyFile` | `TestTerminateStream`, `TestTerminateWhole`, `TestLeaseExpiryEndsNoCall`, `TestTerminateRace` (gateway/proxy), `TestWiringEndsWithdrawnCalls` |
 | Every ledger row is delivered, dropped or failed, and counted | `LedgerQueue` | `TestLedgerQueue*` (shutdown races, emission during shutdown, flush during shutdown, retries, partial delivery) |
 | Standalone's ledger rows on stdout are written whole or counted as lost | `jsonLogger.Emit` | `TestStdoutCountsLostRows` |
 | A row has golem.spend's columns in order, and the counter's period | `Ledger.row` | `TestRowMatchesLedgerDDL`, `TestRowPeriodIsTheCounters` |
@@ -510,6 +545,12 @@ that started before it.
 - OTLP's TLS is tested at the decision, not against a collector.
 - Standalone's stdout ledger counts and logs a row it could not write, but
   does not retry it.
+- Termination's seconds bound runs from the change being in force at the
+  gateway (a snapshot applied, a denylist read): the denylist's five-second
+  re-read and the ConfigMap's projection come before it, and are measured
+  per site, not promised. A sweep ends only what the keys can see: a
+  route or model taken from a scope does not end calls already on it, nor
+  does a key's or a token's expiry.
 - The m1 acceptance record's "Not yet shown" lists the rest: client
   certificates for OTLP, OpenAI's restricted mode, provider-account
   spending limits (ADR 0044).

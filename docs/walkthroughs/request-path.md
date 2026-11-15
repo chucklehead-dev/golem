@@ -147,6 +147,19 @@ never an `anthropic-*` header) and the target's credential, its body an
 `upstreamBody` (`exchange.go:175`) that returns the buffer to the pool when
 the transport closes it.
 
+**Registered in flight.** With a `Handler.InFlight` (golem-gateway's, one
+for both dialects), the call is registered right after `lim.bound`, with
+the `auth.Grant` its authentication filled and the upstream context's
+cancel, and taken off just before that context is released
+(`InFlight.add`, `remove`; the entry lives in the exchange, nothing is
+allocated). A snapshot that revokes its key, or removes its principal, or a
+denylist that names it, cancels that context with the refusal as its cause
+(`InFlight.Sweep`, gateway-edges.md §1). The caller's own context is
+untouched, so such an end is never taken for a caller gone: `terminatedBy`
+reads the cause. A call withdrawn as it registers (`add` rechecks one that
+authenticated before a sweep it missed) is refused with that code at once
+and costs nothing: the provider never had it.
+
 **If the round trip fails** (`proxy.go:206-219`), `chargeUnanswered`
 (`proxy.go:326`) decides what the provider may have seen: a DNS, dial or TLS
 failure (`reachedProvider`, `proxy.go:364`) is free and completes the
@@ -155,6 +168,11 @@ is `uncertain`, charged its worst case (with 8192 output tokens if it set no
 `max_tokens`) and its slot held for the provider's tail. The row is written
 before the ticket ends, and the caller gets `upstream.unavailable`, naming
 the route's timeout if one fired (`unavailableMessage`, `proxy.go:350`).
+A round trip a sweep cancelled (the call withdrawn while it waited for the
+provider's headers) is ended as a caller gone is, charged its input and
+its slot held for the tail, its row's outcome `terminated` with the
+refusal's code; the caller gets that refusal in its dialect's error shape
+(`auth.key_revoked`, `authz.scope_not_member` or `auth.denied`).
 
 **The response.** `gotHeaders` (`bounds.go:127`) stops the headers alarm
 and arms the idle one, whose clock every read stamps (`bounds.go:154`).
@@ -198,7 +216,8 @@ unreported, every request byte; `EstimatedFraction` records the estimated
 share of the cost. `price.Cost` (`price.go:14`) prices it.
 
 **The row and the ticket.** `outcome` (`proxy.go:544`) names the ledger
-outcome (`completed`, `failed`, `cancelled`) with its error origin and code.
+outcome (`completed`, `failed`, `cancelled`, or `terminated` for a cut a
+sweep made: `Result.Terminated`) with its error origin and code.
 `Telemetry.Ended` (`gateway/telemetry/telemetry.go:182`) records the span
 and metrics and writes the `golem.spend` row (`Ledger.Ended`,
 `telemetry/ledger.go:36`). Only then does the ticket end
@@ -214,6 +233,10 @@ still there, the stream gets the contract's `upstream.stream_failed` event
 (`streamError`, `dialect.go:248`) and the handler panics with
 `http.ErrAbortHandler` (`proxy.go:277`): the connection is reset, not ended,
 so no client can mistake a short answer for a whole one (contracts.md §1).
+A call the gateway ended (its authorization withdrawn) takes the same path,
+cancel and abort included, but its stream's event carries the refusal's
+code and message instead (`errorEvent`); a whole response already begun is
+cut alone, as any cut whole response is.
 
 An Anthropic stream differs only inside the dialect seam: no usage is
 injected, so the plain parser runs with `StreamUsage.Want`
@@ -235,6 +258,7 @@ are checked in restricted mode and forwarded.
 | Work the provider may have done is never free; estimates err high | `chargeUnanswered`, `estimate` | `TestEstimates` (`estimate_test.go:65`), `TestUncertainUpstream` (`uncertain_test.go:23`) |
 | A whole response's usage is read from all of it or not at all | `forward`'s `overflow`, `readWhole`'s `errResponseUnread` | `TestKeptNotSpliced` (`exchange_test.go:14`) |
 | A cut response is never taken for whole | `streamError` and the abort (`proxy.go:268-278`) | `TestUpstreamCut` (`proxy_test.go:266`) |
+| A call whose key is revoked, or whose key or principal is denied, ends within seconds in its dialect's error (an event, a refusal, a cut), as a caller gone is charged and held, its row `terminated`; other calls and the lease's expiry end none | `InFlight` (`inflight.go`), `terminatedBy`, `outcome`, `chargeUnanswered` | `TestTerminateStream`, `TestTerminateWhole`, `TestLeaseExpiryEndsNoCall`, `TestTerminateRace` (`terminate_test.go`) |
 | An ambiguous end holds the slot for the provider's tail, at most to the deadline | `settlement.cancel` (`proxy.go:310`) | `TestTailClampedToDeadline` (`settlement_test.go:21`), `TestConcurrencyAndCancel`, `TestUncertainUpstream` |
 | The injected usage chunk never reaches the caller | `startStream` and `sse.Filter` | `TestInjectedUsageWithheld` (`proxy_test.go:135`), `TestFilter` (`sse/filter_test.go:24`) |
 | Only allowlisted headers cross, each API's own; golem's never reach the provider | `Dialect.forwardRequest` (`dialect.go:38`), `forwardResponse` (`proxy.go:85`), `copyHeaders` | `TestHeaders` (`proxy_test.go:61`), `TestOpenAIHeaders` (`proxy_test.go:90`) |
@@ -277,7 +301,9 @@ are checked in restricted mode and forwarded.
   `BenchmarkScan` (the scan alone, 0 allocations), `BenchmarkHandler`
   (the in-memory Anthropic fast path with a 200-event stream: 21
   allocations a call), `BenchmarkHandlerAdmitted` (with a key, an alias
-  check and the in-memory limiter: 25), `BenchmarkStub` (the stub's share,
+  check and the in-memory limiter: 25; both with the in-flight registry,
+  which adds none: `BenchmarkInFlight`, its add and remove from every core,
+  about 60 ns and 0 allocations), `BenchmarkStub` (the stub's share,
   to subtract), `BenchmarkLoopback` (over real sockets, direct against
   proxied) and `prod_bench_test.go`'s `BenchmarkProduction` (with real
   telemetry exporters), and `chat`'s `BenchmarkChunkNullUsage` (0
@@ -321,6 +347,11 @@ dialect-free. To add one:
 - Estimates are byte counts: they do not bound images, audio or files, or
   units billed outside tokens (ADR 0044), and the provider's work past a cut
   is unseen until reconciliation.
+- A terminated whole response whose headers were already forwarded can
+  only be cut: its caller sees a reset, not the refusal's code (a stream
+  gets the code as its error event). Termination ends nothing a snapshot
+  narrows short of the key or principal (a model or route taken from a
+  scope ends no call already on it).
 - Unknown request members are counted, not logged by name (the sanitized
   names ADR 0037 describes are not built).
 - Restricted mode checks only the first `anthropic-version` value

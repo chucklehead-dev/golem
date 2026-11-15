@@ -22,10 +22,18 @@ ordinary GitOps and gateway identities cannot clear it. Reinstallation and
 namespace cleanup must preserve/export it or keep the gateway unready.
 Do not rely solely on ignoreDifferences: sync, prune, replacement and field
 ownership behavior must all be tested. Mount the whole projected volume,
-not a subPath. Measure file propagation and matching-stream termination;
-Kubernetes projection is asynchronous, so do not promise a seconds bound
+not a subPath. Once a denial or a revocation is in force at a gateway (a
+denylist read, a snapshot applied), the gateway terminates the matching
+calls in flight within seconds: a stream with its dialect's error event, a
+call awaiting the provider's headers with its dialect's error, a whole
+response already begun by a cut; each is charged what was produced, its
+slot held for the provider's tail, its ledger outcome `terminated`. Lease
+expiry is not a termination: it stops new requests only. Measure file
+propagation, which comes before that bound and is the site's: Kubernetes
+projection is asynchronous, so do not promise a seconds bound from the edit
 until the site has demonstrated it. A local API-server/kubelet failure can
-also prevent delivery; lease expiry remains the fallback bound.
+also prevent delivery; lease expiry remains the fallback bound for new
+requests.
 
 Keep denials until durable authoritative revocation and an applied fresh
 publication are confirmed at that site. Clearing a denial is a separate

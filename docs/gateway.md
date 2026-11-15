@@ -246,6 +246,13 @@ except OTel's API.
 - An **emergency denylist** (a ConfigMap mounted as a file, read with
   `os.Root`) is applied over every snapshot: a site admin's way to revoke a
   key or principal when the control plane or the bucket is unreachable.
+- Each snapshot applied and each denylist change terminates the calls in
+  flight it withdraws (a key revoked, its principal gone from the key's
+  scope or from golem, a key or principal denied), within seconds: a
+  stream with its dialect's error event, a call awaiting the provider's
+  headers with its dialect's error, a whole response already begun by a
+  cut; charged what was produced, the slot held for the provider's tail,
+  the ledger outcome `terminated`. Lease expiry stops new requests only.
 - Each new snapshot is compiled (CEL, lookup maps) off the request path and
   swapped in; a failure to compile keeps the previous snapshot.
 - After each apply (or failure) the gateway writes
