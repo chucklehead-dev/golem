@@ -6,7 +6,18 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/valkey-io/valkey-go"
 )
+
+// mustClient is the store's client, for a test's own commands.
+func (v *Valkey) mustClient() valkey.Client {
+	c, err := v.client()
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
 
 // valkeyFaults injects the model's environment into a Valkey store: an
 // outage (every call fails, and the slots' TTLs lapse) and a failover (a
@@ -74,7 +85,7 @@ func (f *valkeyFaults) SetDown(down bool) {
 			keys = append(keys, f.principalKey(p))
 		}
 		keys = append(keys, f.scopeKey(scope))
-		f.c.Do(ctx, f.c.B().Del().Key(keys...).Build())
+		f.mustClient().Do(ctx, f.mustClient().B().Del().Key(keys...).Build())
 	}
 	f.down.Store(down)
 }
@@ -84,14 +95,14 @@ func (f *valkeyFaults) SetDown(down bool) {
 func (f *valkeyFaults) Failover(sc, period string, minute int64) {
 	ctx := context.Background()
 	k, field := f.counterKey(sc, period), strconv.FormatInt(minute, 10)
-	lost, _ := f.c.Do(ctx, f.c.B().Hget().Key(k).Field(field).Build()).AsInt64()
-	f.c.Do(ctx, f.c.B().Hdel().Key(k).Field(field).Build())
-	f.c.Do(ctx, f.c.B().Hincrby().Key(k).Field("total").Increment(-lost).Build())
+	lost, _ := f.mustClient().Do(ctx, f.mustClient().B().Hget().Key(k).Field(field).Build()).AsInt64()
+	f.mustClient().Do(ctx, f.mustClient().B().Hdel().Key(k).Field(field).Build())
+	f.mustClient().Do(ctx, f.mustClient().B().Hincrby().Key(k).Field("total").Increment(-lost).Build())
 }
 
 // Buckets is the counter, minute to spend.
 func (f *valkeyFaults) Buckets(sc, period string) map[int64]int64 {
-	m, _ := f.c.Do(context.Background(), f.c.B().Hgetall().Key(f.counterKey(sc, period)).Build()).AsStrMap()
+	m, _ := f.mustClient().Do(context.Background(), f.mustClient().B().Hgetall().Key(f.counterKey(sc, period)).Build()).AsStrMap()
 	out := map[int64]int64{}
 	for k, v := range m {
 		minute, err := strconv.ParseInt(k, 10, 64)

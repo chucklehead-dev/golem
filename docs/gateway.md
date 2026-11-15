@@ -117,7 +117,10 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    counted exactly once. Nor does the limiter's outage behaviour fit a
    hook's fail-open or fail-closed: it admits on its own in-flight counts,
    each admission a waiver, then replays and re-acquires in a grace after
-   recovery (ADR 0041 §7.3). Stateless refusals (deny lists, size rules)
+   recovery (ADR 0041 §7.3). A gateway that starts while the site's
+   Valkey is unreachable starts in that mode, retries the connection in
+   the background, and is ready all the same: readiness never depends on
+   the site store. Stateless refusals (deny lists, size rules)
    fit a Request hook; rate limits do not, since a hook that took a token
    before a budget refusal would spend it on a refused call: they belong
    in the admitter's round trip.

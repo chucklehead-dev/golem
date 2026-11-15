@@ -315,7 +315,7 @@ minute over OTLP), so nothing is added to a request:
 (`ValidUntil` − now, negative once run out), `golem.snapshot.seq`, the bucket
 source's `golem.snapshot.pointer_overdue` and `golem.snapshot.last_good`
 (0/1), the limiter's `golem.limit.down` (0/1), `golem.limit.waivers`
-(`Limiter.Waived`, counted where a waived ticket is made, `limit.go:279`),
+(`Limiter.Waived`, counted where a waived ticket is made, `limit.go:289`),
 `golem.limit.held` (`Limiter.Held`, under the limiter's lock for a
 `len`) and `golem.limit.dropped`, and `golem.denylist.entries`. They carry
 no attributes of their own: the resource's site and pool name the
@@ -327,16 +327,16 @@ increment, a lease run out).
 ## 4. The binary's lifecycle (`cmd/golem-gateway`)
 
 `parse` (`main.go:64`) reads the flags and applies `releaseGate`
-(`main.go:398`). The gateway has two modes:
+(`main.go:411`). The gateway has two modes:
 
 - **standalone** (`-standalone <dir>`, ADR 0023): only on a loopback
   address; the in-memory limiter; dev keys, with the local key
-  (`loadLocalKey`, `main.go:429`: a dev key in a 0600 file, kept across
+  (`loadLocalKey`, `main.go:442`: a dev key in a 0600 file, kept across
   restarts); the directory source, which must load once before the server
   starts; provider credentials from the environment;
 - **pool** (`-pool <name>`): `-bucket`, `-keys`, `-valkey` and `-site` are
   required, and until golem#7's deployment evidence is in, so is
-  `-accept-unreleased`. `poolSource` (`main.go:283`) opens the bucket
+  `-accept-unreleased`. `poolSource` (`main.go:296`) opens the bucket
   (`s3bucket.Open`; a directory for tests), loads the trusted publishing
   keys (`sign.LoadKeys`: a directory of PEM public keys, a KMS key's named
   by its `Key-ID` header), opens the Secrets mounted under `-secrets`
@@ -344,26 +344,30 @@ increment, a lease run out).
   name) and starts the bucket source: `Start` raises the floor from the
   local checkpoint (`-checkpoint`) and the pool's signed trusted
   checkpoint, refusing to start with neither, and applies the last-good
-  copy beside the checkpoint (`lastGoodPath`, `main.go:462`); then one
+  copy beside the checkpoint (`lastGoodPath`, `main.go:475`); then one
   `Poll`, whose failure is logged, not fatal. The limiter is over the
-  site's Valkey (`limit.NewValkey`, `-valkey-replica-acks` for WAIT).
+  site's Valkey (`limit.DialValkey`, `-valkey-replica-acks` for WAIT). A
+  Valkey unreachable at the start is not fatal either: the limiter starts
+  in its outage mode (`Limiter.MarkDown`: waivers, increments held) and
+  `Valkey.Connect` retries the dial in the background, backing off to 30
+  seconds; the limiter's `Run` then recovers it (accounting.md §3.4).
 
 `run` (`main.go:99`) builds the parts in dependency order, each a named
-step: telemetry (`setupTelemetry`, `main.go:363`, labelled with the site
+step: telemetry (`setupTelemetry`, `main.go:376`, labelled with the site
 and pool), the Entra verifier if a tenant is given (`newEntra`,
-`main.go:318`), the limiter over its store (`newLimiter`, `main.go:200`),
+`main.go:331`), the limiter over its store (`newLimiter`, `main.go:206`),
 the holder that hands each snapshot's known spend to the limiter
-(`newHolder`, `main.go:220`), the denylist if one is named (loaded before
-the source, `main.go:142`, so neither a first request nor the last-good
+(`newHolder`, `main.go:233`), the denylist if one is named (loaded before
+the source, `main.go:145`, so neither a first request nor the last-good
 publication is ever compiled without it), the snapshot source
-(`startSource`, `main.go:231`: standalone's directory with the dev key, or
-`poolSource`), and the routes (`newMux`, `main.go:252`) on the server
-(`newServer`, `main.go:337`). Every background loop (the source, the
-denylist, the limiter, Entra's refresh) runs under `bg` in one
+(`startSource`, `main.go:244`: standalone's directory with the dev key, or
+`poolSource`), and the routes (`newMux`, `main.go:265`) on the server
+(`newServer`, `main.go:350`). Every background loop (the source, the
+denylist, the limiter, Valkey's connection retries, Entra's refresh) runs under `bg` in one
 `WaitGroup`. Once the source has started, the state gauges are
 registered over the holder, the bucket source, the limiter and the
-denylist (`telemetry.ObserveState`, `main.go:162`; with any telemetry but
-`off`, and exported only over OTLP). `announce` (`main.go:269`) says what
+denylist (`telemetry.ObserveState`, `main.go:165`; with any telemetry but
+`off`, and exported only over OTLP). `announce` (`main.go:282`) says what
 is served.
 
 Standalone's API handlers are wrapped as `track(localOnly(...))`; pool
@@ -376,21 +380,26 @@ after `srv.Close` a handler whose connection was already accepted can
 still start while the wait runs. Once `wait` (`lifecycle.go:69`) has begun
 a call that starts is refused with a 503 rather than counted after the
 count was taken. `/readyz` (`lifecycle.go:82`) fails while draining and
-while the holder has no current snapshot or its lease has expired.
+while the holder has no current snapshot or its lease has expired. It
+does not look at the site's Valkey: the limiter fails open by design, so a
+Valkey outage must not take the pool's endpoints away (`golem.limit.down`
+is the signal, operations.md §2.2).
 `TestPoolMode` runs pool mode end to end: golem-control's publisher writes
 a snapshot to a bucket, and the gateway serves a key's call from it, with
 the provider credential from a mounted Secret, its spend in a real Valkey
-and its local checkpoint written.
+and its local checkpoint written. `TestPoolModeValkeyDown` starts the
+same gateway with nothing listening at `-valkey`: it becomes ready and
+serves the call as a waiver.
 
 ### Worked example: shutdown with a stream in flight
 
 SIGTERM ends `sig` (`main.go:128`). The shutdown goroutine
-(`main.go:176`) runs `lifecycle.shutdown` (`lifecycle.go:98`):
+(`main.go:179`) runs `lifecycle.shutdown` (`lifecycle.go:98`):
 
 1. `draining` is set, so `/readyz` answers 503, and the gateway sleeps
    `-unready` for the endpoints to stop sending.
 2. `srv.Shutdown` closes the listeners (`ListenAndServe` returns at
-   `main.go:183`) and waits up to `-drain` for calls to finish.
+   `main.go:186`) and waits up to `-drain` for calls to finish.
 3. At the deadline `srv.Close` (`lifecycle.go:107`) cuts the remaining
    connections; the stream's context ends and the proxy accounts it as a
    cancellation, under `context.WithoutCancel`, its row and counter add
@@ -399,10 +408,10 @@ SIGTERM ends `sig` (`main.go:128`). The shutdown goroutine
    counted call's end, up to `cut` (10 seconds); a call that starts now is
    refused.
 
-Only then (`<-drained`, `main.go:188`) does `run` stop the background loops
-(`stopBg`, `wg.Wait`, `main.go:189`; they ran through the drain because
+Only then (`<-drained`, `main.go:191`) does `run` stop the background loops
+(`stopBg`, `wg.Wait`, `main.go:192`; they ran through the drain because
 the limiter's renewals keep calls' slots), let the limiter finish
-(`main.go:192`), close the Valkey client (`closeStore`, deferred) and shut
+(`main.go:195`), close the Valkey client (`closeStore`, deferred) and shut
 telemetry down last (`shutdownTelemetry`, deferred at `main.go:119`),
 delivering the rows the cut calls wrote. `TestShutdownAccounts` checks
 this end to end: the cut stream leaves one row with outcome `cancelled`,
@@ -442,6 +451,7 @@ that started before it.
 | Standalone answers only loopback, same-origin JSON requests | `localOnly` | `TestLocalOnly` |
 | Pool mode needs its inputs, and `-accept-unreleased` until golem#7 | `releaseGate` | `TestReleaseGate` |
 | A pool's published snapshot is served, its credential from a Secret, its spend in Valkey | `poolSource`, `run` | `TestPoolMode` |
+| A gateway starts, is ready and serves while its Valkey is unreachable | `newLimiter` (`limit.DialValkey`, `MarkDown`), `/readyz` | `TestPoolModeValkeyDown`, `TestStartWithValkeyDown` (gateway/limit) |
 | A source reports a failure once, not every second | `repeat` | `TestRepeat` |
 
 ## Known gaps

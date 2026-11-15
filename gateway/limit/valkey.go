@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"sync"
@@ -38,7 +39,10 @@ import (
 // from its Valkey keeps an old snapshot and needs the minutes from its
 // boundary on.
 type Valkey struct {
-	c      valkey.Client
+	// cl is the client, nil until DialValkey's dial has made one: every
+	// operation fails as ErrUnavailable until then (the limiter's outage).
+	cl     atomic.Pointer[valkey.Client]
+	dial   func() (valkey.Client, error)
 	prefix string
 	// TTL is a slot's life without renewal (ADR 0038: 90 seconds).
 	TTL time.Duration
@@ -58,6 +62,8 @@ type Valkey struct {
 	// Unreplicated counts adds that fewer than ReplicaAcks replicas
 	// acknowledged in time: the exposure a failover could still lose.
 	Unreplicated atomic.Int64
+
+	afterFn func(time.Duration) <-chan time.Time // Connect's waits (tests)
 
 	keys   sync.Map // keyOf -> *scopeKeys, built once
 	cached atomic.Int64
@@ -86,7 +92,96 @@ func (v *Valkey) durations() *durArgs {
 
 // NewValkey returns the store for site over a client.
 func NewValkey(c valkey.Client, site string) *Valkey {
-	return &Valkey{c: c, prefix: "{golem:" + site + "}:", TTL: 90 * time.Second, Retain: 6 * time.Hour}
+	v := &Valkey{prefix: "{golem:" + site + "}:", TTL: 90 * time.Second, Retain: 6 * time.Hour}
+	v.cl.Store(&c)
+	return v
+}
+
+// DialValkey returns the store for site over a client dial makes. It dials
+// once now; if that fails (Valkey unreachable as the gateway starts), the
+// store is returned all the same, every operation failing as
+// ErrUnavailable, so the limiter runs in its outage mode (waivers, held
+// increments) until Connect's retries make a client and Limiter.Recover
+// finds the store answering. A gateway that refused to start without its
+// Valkey would turn an outage plus any pod churn into lost capacity, where
+// the limiter is to fail open (ADR 0041 §7.3). The error is the first
+// dial's, for the caller to log; the store is never nil.
+func DialValkey(site string, dial func() (valkey.Client, error)) (*Valkey, error) {
+	v := &Valkey{dial: dial, prefix: "{golem:" + site + "}:", TTL: 90 * time.Second, Retain: 6 * time.Hour}
+	c, err := dial()
+	if err != nil {
+		return v, err
+	}
+	v.cl.Store(&c)
+	return v, nil
+}
+
+// errNotConnected is every operation's error before the first client:
+// built once, so a call refused for it allocates nothing.
+var errNotConnected = fmt.Errorf("%w: not connected yet (the gateway retries in the background; check the Valkey address, the network policy, and -valkey-tls, -valkey-user and VALKEY_PASSWORD)", ErrUnavailable)
+
+// client is the store's client, or errNotConnected before the first.
+func (v *Valkey) client() (valkey.Client, error) {
+	if c := v.cl.Load(); c != nil {
+		return *c, nil
+	}
+	return nil, errNotConnected
+}
+
+// Connected reports whether the store has a client (its calls may still
+// fail).
+func (v *Valkey) Connected() bool { return v.cl.Load() != nil }
+
+// Connect retries DialValkey's dial until it makes a client or ctx ends,
+// a second after the last failure, doubling to 30 seconds. It returns at
+// once for a store that has a client.
+func (v *Valkey) Connect(ctx context.Context) {
+	wait := time.Second
+	for !v.Connected() && v.dial != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case <-v.after(wait):
+		}
+		c, err := v.dial()
+		if err != nil {
+			wait = min(2*wait, 30*time.Second)
+			slog.Warn("limit: Valkey still unreachable; admitting on local counts, recorded as waivers", "retry_in", wait, "err", err)
+			continue
+		}
+		if ctx.Err() != nil {
+			c.Close() // made as the gateway stopped: nothing else would close it
+			return
+		}
+		v.cl.Store(&c)
+		slog.Info("limit: connected to Valkey; the limiter recovers at its next renewal")
+	}
+}
+
+// after is time.After, or a test's.
+func (v *Valkey) after(d time.Duration) <-chan time.Time {
+	if v.afterFn != nil {
+		return v.afterFn(d)
+	}
+	return time.After(d)
+}
+
+// Close closes the client, if there is one.
+func (v *Valkey) Close() {
+	if c := v.cl.Load(); c != nil {
+		(*c).Close()
+	}
+}
+
+// Ping checks the store answers. Limiter.Recover asks it before it marks
+// the store up: a gateway with nothing to replay or renew would otherwise
+// find an unreachable store answering.
+func (v *Valkey) Ping(ctx context.Context) error {
+	c, err := v.client()
+	if err != nil {
+		return err
+	}
+	return wrap(c.Do(ctx, c.B().Ping().Build()).Error())
 }
 
 // maxCachedKeys bounds the key cache: scopes times periods in use.
@@ -299,7 +394,11 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, int64, error)
 	keys := []string{v.principalKey(a.Principal), ks.slots, ks.counter}
 	args := []string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), d.ttlMs,
 		i64(fromMinute(a.Since)), i64(a.Spend), i64(a.Budget), check, i64(a.Worst), d.retainMinutes, i64(minuteOf(cmp.Or(a.Now, v.now())))}
-	r, err := admitScript.Exec(ctx, v.c, keys, args).AsIntSlice()
+	c, err := v.client()
+	if err != nil {
+		return 0, 0, err
+	}
+	r, err := admitScript.Exec(ctx, c, keys, args).AsIntSlice()
 	if err != nil {
 		return 0, 0, wrap(err)
 	}
@@ -322,13 +421,17 @@ func (v *Valkey) Complete(ctx context.Context, in Increment, s Slot) error {
 // replica's acknowledgement only narrows what a failover can lose, so a
 // short one is counted (Unreplicated), not an error.
 func (v *Valkey) write(ctx context.Context, s *script, keys, args []string, n int64) error {
+	c, err := v.client()
+	if err != nil {
+		return err
+	}
 	if v.ReplicaAcks <= 0 {
-		return wrap(s.Exec(ctx, v.c, keys, args).Error())
+		return wrap(s.Exec(ctx, c, keys, args).Error())
 	}
 	send := func(eval bool) []valkey.ValkeyResult {
 		// Built for each send: a built command is spent once sent.
-		wait := v.c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build()
-		return v.c.DoMulti(ctx, v.run(s, eval, keys, args), wait)
+		wait := c.B().Wait().Numreplicas(int64(v.ReplicaAcks)).Timeout(100).Build()
+		return c.DoMulti(ctx, run(c, s, eval, keys, args), wait)
 	}
 	// Lua.Exec falls back from EVALSHA to EVAL itself, one command at a
 	// time; a pipeline has to do it by hand.
@@ -347,11 +450,11 @@ func (v *Valkey) write(ctx context.Context, s *script, keys, args []string, n in
 
 // run is the command that runs a script: EVALSHA, or with eval EVAL of its
 // source (the server lacked it: NOSCRIPT).
-func (v *Valkey) run(s *script, eval bool, keys, args []string) valkey.Completed {
+func run(c valkey.Client, s *script, eval bool, keys, args []string) valkey.Completed {
 	if eval {
-		return v.c.B().Eval().Script(s.src).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build()
+		return c.B().Eval().Script(s.src).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build()
 	}
-	return v.c.B().Evalsha().Sha1(s.sha).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build()
+	return c.B().Evalsha().Sha1(s.sha).Numkeys(int64(len(keys))).Key(keys...).Arg(args...).Build()
 }
 
 // replicated reports whether a WAIT's reply counts ReplicaAcks replicas.
@@ -361,11 +464,15 @@ func (v *Valkey) replicated(wait valkey.ValkeyResult) bool {
 }
 
 func (v *Valkey) Release(ctx context.Context, s Slot) error {
-	cmds := valkey.Commands{
-		v.c.B().Zrem().Key(v.principalKey(s.Principal)).Member(s.Call).Build(),
-		v.c.B().Zrem().Key(v.scopeKey(s.Scope)).Member(s.Call).Build(),
+	c, err := v.client()
+	if err != nil {
+		return err
 	}
-	for _, r := range v.c.DoMulti(ctx, cmds...) {
+	cmds := valkey.Commands{
+		c.B().Zrem().Key(v.principalKey(s.Principal)).Member(s.Call).Build(),
+		c.B().Zrem().Key(v.scopeKey(s.Scope)).Member(s.Call).Build(),
+	}
+	for _, r := range c.DoMulti(ctx, cmds...) {
 		if err := r.Error(); err != nil {
 			return wrap(err)
 		}
@@ -376,6 +483,10 @@ func (v *Valkey) Release(ctx context.Context, s Slot) error {
 func (v *Valkey) Reacquire(ctx context.Context, slots []Slot) error {
 	if len(slots) == 0 {
 		return nil
+	}
+	c, err := v.client()
+	if err != nil {
+		return err
 	}
 	// In chunks: one script holds Valkey's only thread for its whole run,
 	// and a gateway with 10,000 calls in flight would stall every gateway
@@ -388,7 +499,7 @@ func (v *Valkey) Reacquire(ctx context.Context, slots []Slot) error {
 			keys = append(keys, v.principalKey(s.Principal), v.scopeKey(s.Scope))
 			args = append(args, s.Call)
 		}
-		if err := registerScript.Exec(ctx, v.c, keys, args).Error(); err != nil {
+		if err := registerScript.Exec(ctx, c, keys, args).Error(); err != nil {
 			return wrap(err)
 		}
 	}
@@ -425,14 +536,22 @@ func (v *Valkey) AddAll(ctx context.Context, incs []Increment) error {
 const addChunk = 256
 
 func (v *Valkey) Since(ctx context.Context, scope, period string, since time.Time) (int64, error) {
-	n, err := sinceScript.Exec(ctx, v.c, []string{v.counterKey(scope, period)},
+	c, err := v.client()
+	if err != nil {
+		return 0, err
+	}
+	n, err := sinceScript.Exec(ctx, c, []string{v.counterKey(scope, period)},
 		[]string{i64(fromMinute(since)), i64(minuteOf(v.now())), v.durations().retainMinutes}).AsInt64()
 	return n, wrap(err)
 }
 
 // ScopeSlots lists the calls holding a scope's slots (status, tests).
 func (v *Valkey) ScopeSlots(ctx context.Context, scope string) ([]string, error) {
-	r, err := v.c.Do(ctx, v.c.B().Zrange().Key(v.scopeKey(scope)).Min("0").Max("-1").Build()).AsStrSlice()
+	c, err := v.client()
+	if err != nil {
+		return nil, err
+	}
+	r, err := c.Do(ctx, c.B().Zrange().Key(v.scopeKey(scope)).Min("0").Max("-1").Build()).AsStrSlice()
 	return r, wrap(err)
 }
 

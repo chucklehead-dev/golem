@@ -64,13 +64,15 @@ func TestReleaseGate(t *testing.T) {
 	}
 }
 
-// TestPoolMode: golem-control's publisher writes a pool's snapshot to a
-// bucket, and a pool-mode gateway, over a real Valkey with its provider
-// credential from a mounted Secret, serves a key's call from it, then stops
-// on its context.
-func TestPoolMode(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+// poolFixture is a published pool for a pool-mode gateway: a bucket with
+// golem-control's publication of one route, the trusted publishing key,
+// a provider Secret and alice's key.
+type poolFixture struct {
+	root, alice string
+}
+
+func newPoolFixture(t *testing.T) *poolFixture {
+	ctx := t.Context()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		if r.Header.Get("X-Api-Key") != "sk-from-the-secret" {
@@ -80,7 +82,7 @@ func TestPoolMode(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}`)
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
 
 	root := t.TempDir()
 	dir := func(name string) string { p := filepath.Join(root, name); os.MkdirAll(p, 0o700); return p }
@@ -135,31 +137,41 @@ spec: {alias: claude, pool: [{backend: anthropic, deployment: sonnet}]}
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return &poolFixture{root: root, alice: alice}
+}
 
+// start runs a pool-mode gateway over the fixture, with its Valkey at vk
+// and extra flags, until ctx ends: its base URL, once ready, and its exit
+// status's channel.
+func (f *poolFixture) start(t *testing.T, ctx context.Context, vk string, extra ...string) (string, <-chan int) {
 	listen := freeAddr(t)
-	vk := startValkey(t)
 	done := make(chan int, 1)
-	go func() {
-		done <- run(ctx, []string{"-pool", "internal", "-bucket", filepath.Join(root, "bucket"), "-keys", filepath.Join(root, "keys"),
-			"-checkpoint", filepath.Join(root, "checkpoint"), "-valkey", vk, "-site", "test", "-secrets", filepath.Join(root, "secrets"),
-			"-listen", listen, "-telemetry", "off", "-drain", "1s", "-accept-unreleased"})
-	}()
+	args := append([]string{"-pool", "internal", "-bucket", filepath.Join(f.root, "bucket"), "-keys", filepath.Join(f.root, "keys"),
+		"-checkpoint", filepath.Join(f.root, "checkpoint"), "-valkey", vk, "-site", "test", "-secrets", filepath.Join(f.root, "secrets"),
+		"-listen", listen, "-telemetry", "off", "-drain", "1s", "-accept-unreleased"}, extra...)
+	go func() { done <- run(ctx, args) }()
 	base := "http://" + listen
-	ready := false
 	for range 200 {
 		if r, err := http.Get(base + "/readyz"); err == nil {
 			r.Body.Close()
-			if ready = r.StatusCode == 200; ready {
-				break
+			if r.StatusCode == 200 {
+				return base, done
 			}
 		}
-		time.Sleep(25 * time.Millisecond) // the gateway starting: another goroutine's server
+		select {
+		case code := <-done:
+			t.Fatalf("the gateway exited %d while starting", code)
+		case <-time.After(25 * time.Millisecond): // the gateway starting: another goroutine's server
+		}
 	}
-	if !ready {
-		t.Fatal("the gateway never became ready")
-	}
+	t.Fatal("the gateway never became ready")
+	return "", nil
+}
+
+// call is alice's call to the gateway at base: its status and body.
+func (f *poolFixture) call(t *testing.T, base string) (int, string) {
 	req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(`{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("X-Api-Key", alice)
+	req.Header.Set("X-Api-Key", f.alice)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Anthropic-Version", "2023-06-01")
 	resp, err := http.DefaultClient.Do(req)
@@ -168,8 +180,33 @@ spec: {alias: claude, pool: [{backend: anthropic, deployment: sonnet}]}
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 || !strings.Contains(string(body), `"text":"hi"`) {
-		t.Fatalf("the call: %d %s", resp.StatusCode, body)
+	return resp.StatusCode, string(body)
+}
+
+// stopped waits for the gateway's exit after its context ended.
+func stopped(t *testing.T, done <-chan int) {
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gateway did not stop on its context")
+	}
+}
+
+// TestPoolMode: golem-control's publisher writes a pool's snapshot to a
+// bucket, and a pool-mode gateway, over a real Valkey with its provider
+// credential from a mounted Secret, serves a key's call from it, then stops
+// on its context.
+func TestPoolMode(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f := newPoolFixture(t)
+	vk := startValkey(t)
+	base, done := f.start(t, ctx, vk)
+	if code, body := f.call(t, base); code != 200 || !strings.Contains(body, `"text":"hi"`) {
+		t.Fatalf("the call: %d %s", code, body)
 	}
 	// The call's spend is in the site's Valkey, not a memory store.
 	c, err := valkeygo.NewClient(valkeygo.ClientOption{InitAddress: []string{vk}, DisableCache: true})
@@ -181,18 +218,26 @@ spec: {alias: claude, pool: [{backend: anthropic, deployment: sonnet}]}
 	if err != nil || len(keys) == 0 {
 		t.Fatalf("Valkey holds %v (%v): the limiter is not the site's", keys, err)
 	}
-	if b, err := os.ReadFile(filepath.Join(root, "checkpoint")); err != nil || strings.TrimSpace(string(b)) != "1" {
+	if b, err := os.ReadFile(filepath.Join(f.root, "checkpoint")); err != nil || strings.TrimSpace(string(b)) != "1" {
 		t.Fatalf("the local checkpoint: %q %v", b, err)
 	}
 	cancel()
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("exit %d", code)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the gateway did not stop on its context")
+	stopped(t, done)
+}
+
+// TestPoolModeValkeyDown: a gateway whose Valkey is unreachable as it
+// starts still starts, is ready (the limiter fails open: readiness does
+// not depend on the site store), and serves a key's call, a waiver.
+func TestPoolModeValkeyDown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f := newPoolFixture(t)
+	base, done := f.start(t, ctx, freeAddr(t)) // nothing listens there
+	if code, body := f.call(t, base); code != 200 || !strings.Contains(body, `"text":"hi"`) {
+		t.Fatalf("the call with Valkey down: %d %s; want it served as a waiver", code, body)
 	}
+	cancel()
+	stopped(t, done)
 }
 
 func freeAddr(t *testing.T) string {

@@ -133,11 +133,14 @@ func run(ctx context.Context, args []string) int {
 	defer stopBg() // also on a failed start
 	var wg sync.WaitGroup
 
-	limiter, closeStore, err := newLimiter(o, zone)
+	limiter, connectStore, closeStore, err := newLimiter(o, zone)
 	if err != nil {
 		return failed("%v", err)
 	}
 	defer closeStore()
+	if connectStore != nil {
+		wg.Go(func() { connectStore(bg) })
+	}
 	holder := newHolder(entra, limiter)
 	if o.denylist != "" {
 		// Read before the source loads: a gateway started during an
@@ -195,23 +198,33 @@ func run(ctx context.Context, args []string) int {
 }
 
 // newLimiter is the limiter over its store: in memory standalone (ADR
-// 0023), the site's Valkey in pool mode. The returned func closes the
-// store's client.
-func newLimiter(o options, zone *time.Location) (*limit.Limiter, func(), error) {
+// 0023), the site's Valkey in pool mode. A Valkey unreachable at the start
+// does not stop the gateway: the limiter starts in its outage mode
+// (waivers, increments held) and connect, run in the background, dials
+// until it answers; Run's Recover then brings the limiter back. connect is
+// nil when there is nothing to dial; closeStore closes the store's client.
+func newLimiter(o options, zone *time.Location) (limiter *limit.Limiter, connect func(context.Context), closeStore func(), err error) {
 	var store limit.Store = limit.NewMem()
-	closeStore := func() {}
+	closeStore = func() {}
+	var down error
 	if o.standalone == "" {
-		c, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true})
+		v, err := limit.DialValkey(o.site, func() (valkey.Client, error) {
+			return valkey.NewClient(valkey.ClientOption{InitAddress: []string{o.valkeyAddr}, DisableCache: true})
+		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("-valkey %s: %w", o.valkeyAddr, err)
+			down = fmt.Errorf("-valkey %s: %w", o.valkeyAddr, err)
+			slog.Error("golem-gateway: the site's Valkey is unreachable; starting with the limiter in its outage mode (calls admitted on local counts, recorded as waivers) and retrying the connection",
+				"valkey", o.valkeyAddr, "err", err)
 		}
-		v := limit.NewValkey(c, o.site)
 		v.ReplicaAcks = o.replicaAcks
-		store, closeStore = v, c.Close
+		store, connect, closeStore = v, v.Connect, v.Close
 	}
-	limiter := limit.New(store)
+	limiter = limit.New(store)
 	limiter.Location = zone
-	return limiter, closeStore, nil
+	if down != nil {
+		limiter.MarkDown(down)
+	}
+	return limiter, connect, closeStore, nil
 }
 
 // newHolder is the snapshot holder of a live installation (startSource
