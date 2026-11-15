@@ -9,6 +9,7 @@ simulate:
   search: {depth: 8, states: 600000}
   variants:
     - name: design
+      dead: []
     - name: no fence
       constants: {FENCE: 'false'}
       holds: [revocationBounded, noExpiredServe, noRollbackBelowCheckpoint, revocationsSurviveRestore]

@@ -12,7 +12,9 @@ simulate:
   search: {depth: 12, states: 300000}
   variants:
     - name: soft
+      dead: [expireSlot]
     - name: worst check
+      dead: [expireSlot]
       constants: {WORST_CHECK: 'true', BUDGET: '4'}
     - name: no limit
       constants: {LIMIT_ON: 'false'}

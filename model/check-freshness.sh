@@ -52,7 +52,7 @@ echo "== exhaustive: freshness.small.yaml, every run up to a depth (not a sample
 if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
   . ./graph.sh
   # CONFIG_FRESH=false needs 8 steps the search cannot exhaust here; staleCacheTest is its witness.
-  matrix freshness watchSync
+  matrix freshness
 else
   echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
 fi

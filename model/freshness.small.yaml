@@ -9,6 +9,7 @@ simulate:
   search: {depth: 7, states: 300000}
   variants:
     - name: design
+      dead: [watchSync]
     - name: anchor latest
       constants: {ANCHOR_EARLIEST: 'false'}
       holds: [noConfigRollback, restoreNeverWidens]

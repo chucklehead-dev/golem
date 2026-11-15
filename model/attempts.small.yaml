@@ -17,7 +17,9 @@ simulate:
   search: {depth: 14, states: 2000000}
   variants:
     - name: design
+      dead: []
     - name: design, two a deployment
+      dead: []
       constants: {QUOTA: '2'}
     - name: retry after commit
       constants: {COMMIT_FINAL: 'false'}

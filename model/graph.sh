@@ -23,17 +23,14 @@ MEMORY=${MEMORY:-6000}
 PROCESS_MEMORY=${PROCESS_MEMORY:-5500}
 STATES=${STATES:-300000} # graph_run's (a matrix's variants carry their own)
 
-# The actions a design that breaks nothing may leave never enabled (a
-# switch of the small instance turns them off): dead[variant], else
-# matrix's own arguments. (gotogether#144 proposes a dead: list per
-# variant, which would move these into the binding.)
-declare -A dead=()
 
-# matrix MODEL [ALLOWED_DEAD...]: every variant holds what it lists and
-# breaks what it lists, each search complete to its depth; a variant that
-# breaks nothing leaves no action dead but those allowed.
+# matrix MODEL: every variant holds what it lists, breaks what it lists,
+# and leaves dead exactly the actions it lists (simulate.dead: a design
+# that breaks nothing names those its switches turn off), each search
+# complete to its depth. A failing check outside the table (a deadlock, a
+# dead action) is named under it.
 matrix() {
-  local m=$1 rc=0 json; shift
+  local m=$1 rc=0 json
   json=$("$GOTOGETHER" simulate -matrix -graph -json -binding "$m.small.yaml" -memory "$MEMORY" -process-memory "$PROCESS_MEMORY" -write-matrix "$m.md" 2>/dev/null) || rc=$?
   if [[ -z $json ]]; then
     echo "$m: the matrix did not run (exit $rc): run gotogether simulate -matrix -graph -binding $m.small.yaml to see why"; fail=1; return
@@ -43,19 +40,7 @@ matrix() {
   cuts=$(jq -r '.variants[] | .report.graph as $g | select($g.cut == "states" or $g.cut == "memory")
     | "\(.name): the search'"'"'s \($g.cut) bound stopped it at depth \($g.completeDepth) of \($g.bound.depth): raise its states, or MEMORY"' <<<"$json")
   [[ -z $cuts ]] || { echo "$cuts"; fail=1; }
-  # A failing check the table has no row for (a deadlock): named here.
-  jq -r '.variants[] | .name as $v | .report.checks[] | select(.verdict == "fail" and .kind != "invariant")
-    | "\($v): \(.name) fails"' <<<"$json"
-  local v missing a allowed extra
-  while IFS=$'\t' read -r v missing; do
-    allowed=${dead[$v]-$*}
-    extra=""
-    for a in $missing; do [[ " $allowed " == *" $a "* ]] || extra+=" $a"; done
-    [[ -z $extra ]] || { echo "$v: actions never enabled:$extra"; fail=1; }
-  done < <(jq -r '[.rows[].cells[] | select(.expect == "allows") | .variant] as $broken
-    | .variants[] | select(.name as $n | $broken | index($n) | not)
-    | [.name, (.report.graph.stepActions.missing // [] | join(" "))] | @tsv' <<<"$json")
-  [[ $rc == 0 ]] || { echo "$m: NOT as designed (exit $rc): see the FAIL cells"; fail=1; }
+  [[ $rc == 0 ]] || { echo "$m: NOT as designed (exit $rc): see FAIL above (cells, or the checks outside the table)"; fail=1; }
 }
 
 # graph_run MODEL DEPTH [CONST]: the report's JSON in $graph_json, the exit

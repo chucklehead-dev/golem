@@ -10,6 +10,7 @@ simulate:
   search: {depth: 7, states: 600000}
   variants:
     - name: design
+      dead: []
     - name: no scope limit
       constants: {SCOPE_LIMIT_ON: 'false'}
       holds: [knownNeverOver, noLostIncrements]
