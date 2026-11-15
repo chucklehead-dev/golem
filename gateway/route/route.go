@@ -8,6 +8,7 @@ package route
 import (
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 )
 
@@ -69,6 +70,18 @@ func NewTable(routes ...*Route) *Table {
 
 // Lookup finds an alias, without allocating.
 func (t *Table) Lookup(alias []byte) *Route { return t.byAlias[string(alias)] }
+
+// Aliases are the aliases of a dialect's routes, sorted.
+func (t *Table) Aliases(dialect string) []string {
+	var out []string
+	for a, r := range t.byAlias {
+		if r.Dialect == dialect {
+			out = append(out, a)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // Len is the number of routes.
 func (t *Table) Len() int { return len(t.byAlias) }

@@ -21,6 +21,25 @@ import (
 //     curl send neither;
 //   - have a JSON body, which no page can send cross-origin without a
 //     preflight, and the gateway answers none.
+//
+// loopbackOnly is localOnly's host check alone, for a GET (no body, so no
+// Content-Type to require): a standalone gateway answers only to a
+// loopback host name.
+func loopbackOnly(d proxy.Dialect, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		if !isLoopback(host) {
+			proxy.Refuse(w, d, contract.AuthzOriginForbidden,
+				"this standalone gateway answers only to a loopback host name (localhost, 127.0.0.1, [::1]), not "+r.Host)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func localOnly(d proxy.Dialect, next http.Handler) http.Handler {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.Host)

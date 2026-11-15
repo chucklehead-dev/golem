@@ -96,12 +96,22 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	count := strings.HasSuffix(r.URL.Path, "/count_tokens")
 	body, stream, err := rewrite(body, betas(r.Header))
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: the request body: %w", err)
 	}
 	action := "invoke"
-	if stream {
+	switch {
+	case count:
+		// Anthropic's token count is Bedrock's CountTokens, over the body
+		// InvokeModel would take (which needs max_tokens; a count's has
+		// none), base64 inside its input.
+		action, stream = "count-tokens", false
+		if body, err = countBody(body); err != nil {
+			return nil, err
+		}
+	case stream:
 		action = "invoke-with-response-stream"
 	}
 	// The model is one path segment, escaped as the AWS SDK escapes it (an
@@ -141,6 +151,8 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	switch {
 	case resp.StatusCode != http.StatusOK:
 		return anthropicError(resp)
+	case count:
+		return countAnswer(resp)
 	case stream:
 		resp.Header.Set("Content-Type", "text/event-stream")
 		resp.Header.Del("Content-Length")
@@ -173,6 +185,77 @@ func (t *Transport) sign(ctx context.Context, up *http.Request, body []byte) err
 // modelSegment is a model ID as one escaped path segment.
 func modelSegment(model string) string {
 	return strings.ReplaceAll(url.PathEscape(model), ":", "%3A")
+}
+
+// countBody is CountTokens' request for an InvokeModel body: the body,
+// with a max_tokens if it has none, base64 in input.invokeModel.body.
+func countBody(invoke []byte) ([]byte, error) {
+	if !hasMember(invoke, "max_tokens") {
+		invoke = append(bytes.TrimSuffix(bytes.TrimSpace(invoke), []byte("}")), []byte(`,"max_tokens":1}`)...)
+	}
+	b := []byte(`{"input":{"invokeModel":{"body":"`)
+	b = base64.StdEncoding.AppendEncode(b, invoke)
+	return append(b, `"}}}`...), nil
+}
+
+// hasMember reports whether a JSON object has a top-level member.
+func hasMember(raw []byte, want string) bool {
+	dec := jsontext.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+		return false
+	}
+	for dec.PeekKind() == '"' {
+		name, err := dec.ReadToken()
+		if err != nil {
+			return false
+		}
+		if name.String() == want {
+			return true
+		}
+		if err := dec.SkipValue(); err != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// countAnswer is CountTokens' answer ({"inputTokens": n}) in Anthropic's
+// shape ({"input_tokens": n}).
+func countAnswer(resp *http.Response) (*http.Response, error) {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	var n int64 = -1
+	dec := jsontext.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.ReadToken(); err == nil && tok.Kind() == '{' {
+		for dec.PeekKind() == '"' {
+			name, err := dec.ReadToken()
+			if err != nil {
+				break
+			}
+			key := name.String()
+			tok, err := dec.ReadToken()
+			if err != nil {
+				break
+			}
+			if key == "inputTokens" && tok.Kind() == '0' {
+				if v, err := tok.Int(); err == nil {
+					n = v
+				}
+			}
+		}
+	}
+	if n < 0 {
+		return nil, fmt.Errorf("bedrock: a token count with no inputTokens: %.200s", raw)
+	}
+	body := []byte(`{"input_tokens":` + strconv.FormatInt(n, 10) + "}")
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	resp.Header.Set("Content-Type", "application/json")
+	return resp, nil
 }
 
 // betas are the request's anthropic-beta values, each comma list split.

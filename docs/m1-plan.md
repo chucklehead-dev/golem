@@ -295,6 +295,17 @@ Done when:
 
 ### 4. The team's endpoints
 
+Status:
+- **Built:** `GET /v1/models` and `/v1/models/{id}` in both dialects (the
+  scope's aliases only; another scope's model unknown, not forbidden), and
+  Anthropic's `POST /v1/messages/count_tokens`, free, to the deployment's
+  count endpoint or Bedrock's CountTokens (gateway.md §3a). Tests:
+  `TestModels` (ablated: the scope's filter), `TestCountTokens` in proxy
+  and in the bedrock envelope.
+- **Waiting on the team:** which of Responses, Embeddings, vLLM, Codex and
+  Copilot their apps and agents call (the list below, from their provider
+  logs), before building them.
+
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.
 

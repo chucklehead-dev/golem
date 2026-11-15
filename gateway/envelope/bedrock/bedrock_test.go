@@ -306,3 +306,36 @@ func TestMetadata(t *testing.T) {
 		t.Fatalf("%s", m)
 	}
 }
+
+// TestCountTokens: Anthropic's token count goes to Bedrock's CountTokens
+// over the body InvokeModel would take (no model, anthropic_version set, a
+// max_tokens added, which InvokeModel needs and a count lacks), base64 in
+// input.invokeModel.body; the answer comes back as Anthropic's.
+func TestCountTokens(t *testing.T) {
+	c := &capture{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{"inputTokens":17}`))}}
+	r, _ := http.NewRequest("POST", "https://x/v1/messages/count_tokens", strings.NewReader(`{"model":"claude","messages":[{"role":"user","content":"max_tokens"}]}`))
+	resp, err := transport(c).RoundTrip(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(c.req.URL.EscapedPath(), "/count-tokens") {
+		t.Fatalf("path %s", c.req.URL.EscapedPath())
+	}
+	var wrapped struct {
+		Input struct{ InvokeModel struct{ Body string } }
+	}
+	json.Unmarshal(c.body, &wrapped)
+	inner, err := base64.StdEncoding.DecodeString(wrapped.Input.InvokeModel.Body)
+	if err != nil {
+		t.Fatalf("%s: %v", c.body, err)
+	}
+	var got map[string]any
+	json.Unmarshal(inner, &got)
+	if got["model"] != nil || got["anthropic_version"] != Version || got["max_tokens"] != 1.0 || got["messages"] == nil {
+		t.Fatalf("inner body %s", inner)
+	}
+	if b, _ := io.ReadAll(resp.Body); string(b) != `{"input_tokens":17}` {
+		t.Fatalf("answer %s", b)
+	}
+}

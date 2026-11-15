@@ -364,6 +364,21 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 		}
 		mux.Handle(pattern, lc.track(d, h))
 	}
+	// The models list, either dialect's shape (ServeModels picks it): the
+	// Messages handler serves it, with the same snapshots and identity.
+	var models http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder}).ServeModels)
+	if o.standalone != "" {
+		models = loopbackOnly(proxy.AnthropicMessages, models)
+	}
+	for _, pattern := range []string{"GET /v1/models", "GET /v1/models/{id}"} {
+		mux.Handle(pattern, lc.track(proxy.AnthropicMessages, models))
+	}
+	// Anthropic's token count: free, no admission, no ledger row.
+	var count http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody}).ServeCountTokens)
+	if o.standalone != "" {
+		count = localOnly(proxy.AnthropicMessages, count)
+	}
+	mux.Handle("POST /v1/messages/count_tokens", lc.track(proxy.AnthropicMessages, count))
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	// Ready once a snapshot is applied and its authorization holds.
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))

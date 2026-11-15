@@ -196,6 +196,23 @@ another dialect; envelopes depend on neither. A translated request is
 `encode(backend, decode(frontend, req))` wrapped by the backend's
 envelope, assembled by `proxy`.
 
+## 3a. Endpoints beside the calls
+
+- `GET /v1/models`, `GET /v1/models/{id}` (`proxy.ServeModels`): the
+  aliases the caller's scope may call, of the dialect it calls with, in
+  that dialect's shape (Anthropic's when it sends anthropic-version, as its
+  SDKs and agents do; OpenAI's otherwise). A model the scope may not use
+  is not listed, and asked for by ID is `route.unknown_model`: a list must
+  not tell a caller what other scopes have. Authenticated; nothing
+  admitted or charged.
+- `POST /v1/messages/count_tokens` (`proxy.ServeCountTokens`): checked as
+  a Messages call is (the scope's alias, the route's features), sent to
+  the route's first deployment that takes it, at its count endpoint (a
+  bedrock deployment's envelope uses Bedrock's CountTokens, over the body
+  InvokeModel would take, and answers in Anthropic's shape). Free: no
+  admission, no slot, no ledger row; providers bill no count. Its rate
+  limit is step 4's (m1-plan.md).
+
 ## 4a. The bedrock envelope
 
 Built: `gateway/envelope/bedrock`, an `http.RoundTripper` over the
