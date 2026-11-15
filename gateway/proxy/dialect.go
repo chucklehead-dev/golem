@@ -9,6 +9,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
 	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
+	"github.com/chucklehead-dev/golem/gateway/dialect/openai/responses"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
@@ -22,12 +23,16 @@ type Dialect int
 const (
 	AnthropicMessages Dialect = iota // POST /v1/messages
 	OpenAIChat                       // POST /v1/chat/completions
+	OpenAIResponses                  // POST /v1/responses (stateless: store false)
 )
 
 // Name is the dialect's name in config (Backend spec.dialect).
 func (d Dialect) Name() string {
-	if d == OpenAIChat {
+	switch d {
+	case OpenAIChat:
 		return "openai.chat"
+	case OpenAIResponses:
+		return "openai.responses"
 	}
 	return "anthropic.messages"
 }
@@ -36,10 +41,10 @@ func (d Dialect) Name() string {
 // own, never another's (an anthropic-beta on an OpenAI call is the
 // caller's mistake, not a feature to approve or pass on).
 func (d Dialect) forwardRequest() []string {
-	if d == OpenAIChat {
-		return openAIForward
+	if d == AnthropicMessages {
+		return anthropicForward
 	}
-	return anthropicForward
+	return openAIForward
 }
 
 var (
@@ -95,6 +100,12 @@ type scanned struct {
 	state       bool  // provider-side state with no off switch (an Anthropic container)
 	serverTools bool  // tools the provider runs: egress, and no cost bound
 	unknown     int   // members golem does not know (restricted mode refuses them)
+	// stateful names a member needing state the provider keeps, which M1
+	// refuses whatever the scope allows (security-and-correctness.md §4):
+	// a Responses continuation, conversation, background run, stored
+	// prompt or provider file; storeTrue, a store: true asked by name.
+	stateful  string
+	storeTrue bool
 }
 
 // scan reads the routing and policy fields of a request body.
@@ -105,6 +116,12 @@ func (ex *exchange) scan(d Dialect, body []byte) (scanned, error) {
 		return scanned{alias: ex.msg.Model, stream: ex.msg.Stream, maxTokens: ex.msg.MaxTokens, hasMax: ex.msg.HasMaxTokens,
 			n: 1, state: f&messages.FlagContainer != 0, serverTools: f&(messages.FlagServerTools|messages.FlagMCPServers) != 0,
 			unknown: ex.msg.Unknown}, err
+	}
+	if d == OpenAIResponses {
+		err := ex.resp.Scan(body)
+		r := &ex.resp
+		return scanned{alias: r.Model, stream: r.Stream, maxTokens: r.MaxTokens, hasMax: r.HasMaxTokens, n: 1,
+			serverTools: r.ServerTools, unknown: r.Unknown, stateful: r.Stateful, storeTrue: r.StoreTrue}, err
 	}
 	err := ex.chat.Scan(body)
 	return scanned{alias: ex.chat.Model, stream: ex.chat.Stream, maxTokens: ex.chat.MaxTokens, hasMax: ex.chat.HasMaxTokens,
@@ -122,8 +139,11 @@ func (ex *exchange) forbidStorage(d Dialect) {
 // rewrite appends the scanned body to dst for the provider: its model
 // replaced and, for an OpenAI stream, usage requested.
 func (ex *exchange) rewrite(d Dialect, dst, body []byte, model string) []byte {
-	if d == AnthropicMessages {
+	switch d {
+	case AnthropicMessages:
 		return ex.msg.Rewrite(dst, body, model)
+	case OpenAIResponses:
+		return ex.resp.Rewrite(dst, body, model) // store always false
 	}
 	return ex.chat.Rewrite(dst, body, model)
 }
@@ -136,6 +156,12 @@ func (ex *exchange) startStream(d Dialect) (filter bool) {
 	if d == AnthropicMessages {
 		ex.msgUsage = messages.StreamUsage{}
 		ex.parser.Want, ex.parser.OnEvent = ex.msgWant, ex.msgOn
+		ex.parser.Reset()
+		return false
+	}
+	if d == OpenAIResponses { // its terminal event carries usage: nothing to ask for
+		ex.respUsage = responses.StreamUsage{}
+		ex.parser.Want, ex.parser.OnEvent = nil, ex.respOn
 		ex.parser.Reset()
 		return false
 	}
@@ -154,14 +180,18 @@ func (ex *exchange) startStream(d Dialect) (filter bool) {
 // response larger than those has its usage unread (errResponseUnread), and
 // is charged its estimate.
 func (ex *exchange) readWhole(d Dialect) {
-	ex.msgUsage, ex.chatUsage = messages.StreamUsage{}, chat.StreamUsage{}
+	ex.msgUsage, ex.chatUsage, ex.respUsage = messages.StreamUsage{}, chat.StreamUsage{}, responses.StreamUsage{}
 	switch {
 	case ex.overflow && d == AnthropicMessages:
 		ex.msgUsage.Err = errResponseUnread
+	case ex.overflow && d == OpenAIResponses:
+		ex.respUsage.Err = errResponseUnread
 	case ex.overflow:
 		ex.chatUsage.Err = errResponseUnread
 	case d == AnthropicMessages:
 		ex.msgUsage.Response(ex.kept)
+	case d == OpenAIResponses:
+		ex.respUsage.Response(ex.kept)
 	default:
 		ex.chatUsage.Response(ex.kept)
 	}
@@ -172,8 +202,11 @@ var errResponseUnread = errors.New("proxy: a whole response over 1 MiB: its usag
 // reported is what the dialect's usage reader has read: the usage so far,
 // whether it is the provider's final report, and the first malformed one.
 func (ex *exchange) reported(d Dialect) (u canon.Usage, final bool, err error) {
-	if d == AnthropicMessages {
+	switch d {
+	case AnthropicMessages:
 		return ex.msgUsage.Usage, ex.msgUsage.Final, ex.msgUsage.Err
+	case OpenAIResponses:
+		return ex.respUsage.Usage, ex.respUsage.Final, ex.respUsage.Err
 	}
 	return ex.chatUsage.Usage, ex.chatUsage.Final, ex.chatUsage.Err
 }
@@ -257,9 +290,19 @@ func streamError(d Dialect, reqID string) []byte {
 }
 
 // errorEvent is a contract code as the error event of a dialect's stream:
-// Anthropic's event: error, OpenAI's data-only error object.
+// Anthropic's event: error, Chat's data-only error object, the Responses
+// API's error event.
 func errorEvent(d Dialect, c contract.Code, msg, reqID string) []byte {
 	var b []byte
+	if d == OpenAIResponses {
+		b = append(b, `event: error`+"\n"+`data: {"type":"error","code":"`...)
+		b = append(b, c.Name...)
+		b = append(b, `","message":`...)
+		b = appendQuoted(b, msg)
+		b = append(b, `,"param":null,"request_id":"`...)
+		b = append(b, reqID...)
+		return append(b, `"}`+"\n\n"...)
+	}
 	if d == AnthropicMessages {
 		b = append(b, "event: error\n"...)
 	}

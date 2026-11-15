@@ -47,6 +47,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
+	"github.com/chucklehead-dev/golem/lib/contract"
 	"github.com/chucklehead-dev/golem/lib/entra"
 	"github.com/chucklehead-dev/golem/lib/key"
 	"github.com/chucklehead-dev/golem/lib/sign"
@@ -357,7 +358,8 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 	// One view of the deployments' health and the routes' retry budgets for
 	// both dialects' calls, as they share deployments.
 	health := &route.Health{}
-	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
+	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat,
+		"POST /v1/responses": proxy.OpenAIResponses} {
 		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health}
 		if o.standalone != "" {
 			h = localOnly(d, h)
@@ -373,6 +375,12 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 	for _, pattern := range []string{"GET /v1/models", "GET /v1/models/{id}"} {
 		mux.Handle(pattern, lc.track(proxy.AnthropicMessages, models))
 	}
+	// A stored response's retrieval, deletion, cancellation or input items:
+	// M1 stores none (security-and-correctness.md §4).
+	mux.HandleFunc("/v1/responses/{rest...}", func(w http.ResponseWriter, _ *http.Request) {
+		proxy.Refuse(w, proxy.OpenAIResponses, contract.AuthzProviderStorageForbidden,
+			"golem serves stateless responses only: no response is stored to retrieve, delete or cancel")
+	})
 	// Anthropic's token count: free, no admission, no ledger row.
 	var count http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody}).ServeCountTokens)
 	if o.standalone != "" {

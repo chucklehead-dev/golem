@@ -93,7 +93,7 @@ func keep(b []byte) []byte {
 // Anthropic's event: error, or an OpenAI chunk whose first member is
 // "error".
 func isErrorEvent(d Dialect, event, data []byte) bool {
-	if d == AnthropicMessages {
+	if d == AnthropicMessages || d == OpenAIResponses {
 		return string(event) == "error"
 	}
 	data = bytes.TrimLeft(data, " \t\r\n")

@@ -302,9 +302,13 @@ Status:
   count endpoint or Bedrock's CountTokens (gateway.md §3a). Tests:
   `TestModels` (ablated: the scope's filter), `TestCountTokens` in proxy
   and in the bedrock envelope.
-- **Waiting on the team:** which of Responses, Embeddings, vLLM, Codex and
-  Copilot their apps and agents call (the list below, from their provider
-  logs), before building them.
+- **The team uses** the OpenAI Responses API and vLLM (not Embeddings,
+  Codex or Copilot BYOK, which are deferred).
+- **Built: Responses**, stateless (gateway.md §3a): `TestResponses` (a
+  stream byte for byte, usage from response.completed, store false added;
+  previous_response_id, background, a provider file and store true each
+  refused before any call; an error first refused before the commit), and
+  the dialect's tests; ablated: the stateful refusal, the store rewrite.
 
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.

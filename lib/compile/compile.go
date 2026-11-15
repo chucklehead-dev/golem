@@ -23,7 +23,7 @@ import (
 )
 
 // Dialects the gateway serves.
-var Dialects = []string{"anthropic.messages", "openai.chat"} // read-only
+var Dialects = []string{"anthropic.messages", "openai.chat", "openai.responses"} // read-only
 
 // Options are the compile's context.
 type Options struct {

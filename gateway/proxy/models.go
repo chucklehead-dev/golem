@@ -11,8 +11,9 @@ import (
 // ServeModels serves GET /v1/models and GET /v1/models/{id}: the aliases
 // the caller may call, in the dialect it calls with (Anthropic's shape if
 // it sends anthropic-version, as the Anthropic SDKs and agents do;
-// OpenAI's otherwise), each of that dialect's routes only, since the other
-// dialect's would be refused at its endpoint (route.wrong_frontend). A
+// OpenAI's otherwise, Chat's and Responses' routes), the routes its
+// endpoints serve: another dialect's would be refused there
+// (route.wrong_frontend). A
 // model the caller may not use is not listed, and asked for by ID is
 // unknown: listing it would tell a caller what other scopes have. Nothing
 // is admitted or charged.
@@ -34,11 +35,18 @@ func (h *Handler) ServeModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ids []string
-	for _, alias := range snap.Routes.Aliases(d.Name()) {
-		if p.Allows([]byte(alias)) {
-			ids = append(ids, alias)
+	dialects := []string{d.Name()}
+	if d == OpenAIChat { // an OpenAI caller's list: its Chat and Responses routes
+		dialects = append(dialects, OpenAIResponses.Name())
+	}
+	for _, name := range dialects {
+		for _, alias := range snap.Routes.Aliases(name) {
+			if p.Allows([]byte(alias)) {
+				ids = append(ids, alias)
+			}
 		}
 	}
+	slices.Sort(ids)
 	w.Header()["Content-Type"] = jsonType
 	if id := r.PathValue("id"); id != "" {
 		if !slices.Contains(ids, id) {

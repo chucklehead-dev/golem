@@ -198,6 +198,20 @@ envelope, assembled by `proxy`.
 
 ## 3a. Endpoints beside the calls
 
+- `POST /v1/responses` (dialect `openai.responses`,
+  `gateway/dialect/openai/responses`): OpenAI's Responses API, stateless
+  only (security-and-correctness.md §4, whatever the scope allows): store
+  is written false (an absent store is the provider's true); a request
+  needing provider-side state (`previous_response_id`, `conversation`,
+  `background`, a stored `prompt`, a `file_id` in its input, a
+  `file_search` tool) or asking `store: true` is refused,
+  `authz.provider_storage_forbidden`, before any provider call; the
+  stored object endpoints (`/v1/responses/{id}`, its cancel and input
+  items) are refused alike. Usage is read from the stream's terminal event
+  (`response.completed`, `.incomplete`, `.failed`) or the whole
+  response's; an `error` event first is refused before the commit. An
+  OpenAI caller's model list holds its Chat and Responses routes.
+
 - `GET /v1/models`, `GET /v1/models/{id}` (`proxy.ServeModels`): the
   aliases the caller's scope may call, of the dialect it calls with, in
   that dialect's shape (Anthropic's when it sends anthropic-version, as its

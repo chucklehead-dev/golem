@@ -9,6 +9,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/dialect/anthropic/messages"
 	"github.com/chucklehead-dev/golem/gateway/dialect/openai/chat"
+	"github.com/chucklehead-dev/golem/gateway/dialect/openai/responses"
 	"github.com/chucklehead-dev/golem/gateway/sse"
 )
 
@@ -25,6 +26,8 @@ type exchange struct {
 	msgUsage   messages.StreamUsage
 	chat       chat.Request
 	chatUsage  chat.StreamUsage
+	resp       responses.Request
+	respUsage  responses.StreamUsage
 	parser     sse.Parser
 	filter     sse.Filter // an OpenAI stream's, when golem injected include_usage
 	kept       []byte     // a non-streamed response, up to maxRetained bytes, for its usage
@@ -34,8 +37,8 @@ type exchange struct {
 
 	// The usage readers' methods, bound once: a method value allocates
 	// each time it is taken, and the readers stay at these addresses.
-	msgWant       func([]byte) bool
-	msgOn, chatOn func(event, data []byte)
+	msgWant               func([]byte) bool
+	msgOn, chatOn, respOn func(event, data []byte)
 
 	// The caller's side of the response: each write has a deadline, set
 	// before it and cleared after (net/http's idiom, as nginx's
@@ -57,7 +60,7 @@ type exchange struct {
 // readers' methods once, at the addresses they keep.
 var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
-	ex.msgWant, ex.msgOn, ex.chatOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent
+	ex.msgWant, ex.msgOn, ex.chatOn, ex.respOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent, ex.respUsage.OnEvent
 	ex.filter.Drop = dropUsageOnly
 	ex.first.parser.OnEvent = ex.first.onEvent
 	ex.lim = newBounds()
