@@ -42,6 +42,17 @@ and the least where the compiler and a table test suffice.
 
 Every test that fails names what to do next, as the code's errors do.
 
+Hegel tests live in the package they test, as internal tests in
+`*_hegel_test.go` files behind `//go:build hegel` (gateway/limit's
+exposure and stale-view tests, gateway/snapshot's publication test), their
+bindings beside them. They reach the package's internals, so nothing is
+exported for them alone. A plain `go test ./...` does not compile them and
+needs no libhegel; `go mod tidy` keeps hegel and qhegel in go.mod as
+test-only requirements, never linked into the binaries. Run them with
+`QUINT_BACKEND=typescript go test -tags hegel ./gateway/...`; CI's models
+job does, after `go vet -tags hegel ./...`. Editors need the tag too
+(gopls's `buildFlags: ["-tags=hegel"]`).
+
 ## 3. gotogether: what to model, what to trial
 
 gotogether (github.com/chucklehead-dev/gotogether) checks Go code against
@@ -120,9 +131,9 @@ gates name what is still owed):
 | Code | Model | How | Found |
 |---|---|---|---|
 | `gateway/snapshot.Holder`, `.Bucket` and `control/publish` | model/publication.md | `connect`: the model's traces drive the real publisher (numbered and fenced by the record), a bucket, and each gateway's Bucket source; replayPointer copies an old signed pointer back; an empty-disk restart takes its floor from the record; the record, the pointer and each gateway's applied publication and floor compared after every step (leadership and the state remain the environment) | the floor was strict where the model's is inclusive: a gateway restarted with an empty disk refused its own trusted checkpoint and could not become ready while the publisher was down. A publisher numbering from the pointer instead of the record fails right after a replay (numbered 2, the model 3) |
-| the same | the same | `qhegel` (`test/props`): Hegel drives the Holder with a stand-in publisher and an attacker replaying any old publication; the model judges each run | planted bugs (no floor check, no expiry check) caught and shrunk to four steps; neither is visible to the connect test, since the model never asks for a forbidden step |
+| the same | the same | `qhegel` (`gateway/snapshot/publication_hegel_test.go`, `-tags hegel`): Hegel drives the Holder with a stand-in publisher and an attacker replaying any old publication; the model judges each run | planted bugs (no floor check, no expiry check) caught and shrunk to four steps; neither is visible to the connect test, since the model never asks for a forbidden step |
 | `gateway/limit.Limiter` | model/exposure.md | `connect`: one Limiter per gateway over one store; slots, waivers, held increments and known spend compared | the model's rules shown necessary by ablation (cancel holding its slot, re-acquiring, the hand-off by boundary, recording waivers, replaying increments into their own minutes); recovery converging under load and a completion racing recovery each have a test (`TestRecoverUnderLoad`, `TestCompletionRacingRecovery`) |
-| the same | the same | `qhegel`: Hegel drives the limiters, a late ledger, snapshots, outages and failovers | **the model was wrong**: during an outage it judged by the true counter, which no gateway can read; it now keeps each gateway's view. A missing scope limit is caught and shrunk to three steps |
+| the same | the same | `qhegel` (`gateway/limit/exposure_hegel_test.go`, `-tags hegel`): Hegel drives the limiters, a late ledger, snapshots, outages and failovers | **the model was wrong**: during an outage it judged by the true counter, which no gateway can read; it now keeps each gateway's view. A missing scope limit is caught and shrunk to three steps |
 | the same | the same | a benchmark of the admitted path, then the model | **the design was wrong, twice hidden by an atomic model**: matching counter events to snapshots cost O(window) per admission, and deleting included events lost them for gateways still on an older snapshot. ADR 0042 replaced it (numbered counter, ledger watermark: O(1), exact under skew), and ADR 0048 that (minute counters and a time boundary, once budgets were controls, ADR 0044); the model now applies snapshots and recovers per gateway, which also exposed admissions next to unrecovered peers' calls (now waived for a grace period). 32 µs and 23 allocations per admitted request, flat |
 | the request path, profiled | — | a performance review: `BenchmarkProduction` (the OTel SDK as production sets it up), `BenchmarkAdmitComplete` (Mem and Valkey), pprof, escape analysis | as production runs it, 75 µs and 89 allocations a call, now 44 µs and 42 (the SDK deduplicated the ledger row's keys, attribute sets were rebuilt per call); OpenAI chunks were scanned in full twice (2.3 µs, now 171 ns); an 8 MiB body pinned 16 MiB per P in the scanner's pool; ledger rows were dropped silently on a full queue; `WAIT` acknowledged nothing; the upstream idle pool was capped at 100 connections in all; a client that stopped reading held its call for ever. Over Valkey a call adds 21 allocations, above the 50 target: next to measure |
 | `gateway/dialect/...`, `gateway/sse` | — | fuzzing: scan acceptance equals `encoding/json`'s, rewrites change one field, usage independent of chunking | a split `\r\n` across an empty write |

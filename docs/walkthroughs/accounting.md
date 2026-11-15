@@ -513,13 +513,14 @@ The Go tests use exposure.md four ways:
   check, sums past 2^53 rounded by Lua (hence the `MaxMicros` clamp),
   `Mem` reading minutes past the retention that Valkey does not, and
   Valkey's reads on the wall clock (hence `Valkey.Now`).
-- `test/props/exposure_test.go` (Hegel): Hegel drives the real limiter,
-  and the model judges every run; TestNoScopeLimitCaught shows a planted
-  mutant is caught. `test/props/stale_test.go` is a scripted regression:
-  an outage's admission from a stale view conforms.
+- `exposure_hegel_test.go` (Hegel, behind the `hegel` build tag): Hegel
+  drives the real limiter, and the model judges every run;
+  TestNoScopeLimitCaught shows a planted mutant is caught.
+  `stale_hegel_test.go` (the same tag) is a scripted regression: an
+  outage's admission from a stale view conforms.
 
-Run them with `QUINT_BACKEND=typescript go test ./gateway/limit/` and
-`cd test/props && go test ./...`. The Valkey tests use
+Run them with `QUINT_BACKEND=typescript go test ./gateway/limit/`, and
+the Hegel tests with `-tags hegel` added. The Valkey tests use
 `GOLEM_VALKEY_ADDR`, or start a `valkey-server` (or `redis-server`), and
 skip without one; TestReplicaAcks needs a local server binary to attach a
 replica to.
@@ -529,7 +530,7 @@ replica to.
 | Invariant | Enforced | Tested |
 |---|---|---|
 | Budget check and slot taken in one atomic step | `admitScript` (`valkey.go:308`); `Mem`'s lock | store_test.go "limits", "budget"; exposure MBT |
-| Limits hold while the store is reachable | `take` (`valkey.go:238`), `Mem.acquire` (`store.go:178`) | props TestLimiterAgainstExposureModel, TestNoScopeLimitCaught |
+| Limits hold while the store is reachable | `take` (`valkey.go:238`), `Mem.acquire` (`store.go:178`) | Hegel (TestLimiterAgainstExposureModel, TestNoScopeLimitCaught) |
 | The two stores answer alike | one check (`overBudget`, mirrored in Lua); one read window (`since`, `Mem.since`, `clockSkewMinutes`) | TestStoresAgree, TestStoresAgreeVaried |
 | A call on one side of the boundary | the row stamped before the increment (`proxy.go:259`); `fromMinute`; the ledger deduplicated by event | TestBoundary; both MBT tests; TestClickHouseLedger |
 | Known spend exact on every gateway, any snapshot (within the allowance) | `since`, `Mem.since`; `ApplySnapshot` leaves the counter | TestBoundary, store_test.go "counter", both MBT tests |
@@ -581,7 +582,7 @@ replica to.
 - **Grace is an assumption.** The model lets grace end only once every
   gateway has recovered; the code ends it after `Grace`, assuming each
   peer notices within a renewal interval.
-- **The models check enforce only.** model/exposure.qnt and the props
+- **The models check enforce only.** model/exposure.qnt and the Hegel tests
   drive the limiter with its zero mode, enforce; observe and warn never
   refuse on the budget, so their exposure is unbounded by design (they
   are rollout and monitoring modes, PRD §9.1).
