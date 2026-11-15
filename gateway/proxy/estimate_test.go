@@ -41,7 +41,7 @@ func priced(t *testing.T, d Dialect, rt http.RoundTripper) (*Handler, *bytes.Buf
 	var rows bytes.Buffer
 	tel, _ := telemetry.New(telemetry.Stdout(&rows), "local", "standalone")
 	var res Result
-	return &Handler{Dialect: d, MaxBody: 1 << 20, Snapshots: h, Telemetry: tel, Record: func(_ *http.Request, r Result) { res = r }}, &rows, &res
+	return &Handler{Dialect: d, MaxBody: 1 << 20, Snapshots: h, Telemetry: tel, record: func(_ *http.Request, r Result) { res = r }}, &rows, &res
 }
 
 func rowOf(t *testing.T, rows *bytes.Buffer) map[string]any {

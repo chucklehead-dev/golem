@@ -128,7 +128,6 @@ lib/                       shared libraries with no control-plane or Kubernetes-
                            (lib/compile), key, period, contract
 internal/archtest/         the rules below, as tests
 model/                     the Quint models, literate (model/*.md)
-test/props/                Hegel property tests over the models' machines
 deploy/                    Helm charts, Crossplane composition, ClickHouse DDL (planned in part)
 docs/
 ```

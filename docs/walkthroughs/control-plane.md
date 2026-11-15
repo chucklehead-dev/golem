@@ -791,8 +791,9 @@ path with a real gateway source over one bucket.
   traces drive the real `Elector`, `Publisher` and gateway source,
   including replayed pointers and empty-disk restarts
   (`QUINT_BACKEND=typescript go test ./gateway/snapshot/`). The Hegel
-  properties in `test/props` (a module of its own) exercise publication
-  from the gateway's side.
+  properties beside it (`publication_hegel_test.go`, behind the `hegel`
+  build tag: `go test -tags hegel ./gateway/snapshot/`) exercise
+  publication from the gateway's side.
 
 ## 9. Known gaps
 

@@ -54,7 +54,7 @@ type event struct {
 type faultyStore interface {
 	Store
 	SetDown(bool)
-	Failover(scope, period string, minute int64)
+	failover(scope, period string, minute int64)
 	Buckets(scope, period string) map[int64]int64
 	Slots() []Slot
 }
@@ -151,13 +151,13 @@ func (d *expDriver) Step(s *connect.Step) error {
 			if i < 0 {
 				return fmt.Errorf("gateway %s holds no increment %s", gw(), e.ID)
 			}
-			_, _, err := l.ReplayOne(ctx)
+			_, _, err := l.replayOne(ctx)
 			return err
 		},
 		"recover":   func(*connect.Step) error { return d.gws[gw()].Recover(ctx) },
-		"graceEnds": func(*connect.Step) error { d.gws[gw()].EndGrace(); return nil },
+		"graceEnds": func(*connect.Step) error { d.gws[gw()].endGrace(); return nil },
 		"failover": func(s *connect.Step) error {
-			d.store.Failover(scope, period, minuteOf(inPeriod)+connect.MustPick[int64](s, "t"))
+			d.store.failover(scope, period, minuteOf(inPeriod)+connect.MustPick[int64](s, "t"))
 			return nil
 		},
 	}.Step(s)
@@ -195,7 +195,7 @@ func (d *expDriver) State() (any, error) {
 	}
 	for _, g := range slices.Sorted(maps.Keys(d.gws)) {
 		ps := []event{}
-		for _, in := range d.gws[g].Pending(scope) {
+		for _, in := range d.gws[g].pendingIn(scope) {
 			ps = append(ps, event{in.Call, in.Cost, modelMinute(in.At)})
 		}
 		slices.SortFunc(ps, func(a, b event) int { return strings.Compare(a.ID, b.ID) })

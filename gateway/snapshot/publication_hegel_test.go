@@ -1,6 +1,6 @@
-// Package props holds the property-based tests that need Hegel, in a module
-// of their own so the gateway's module does not depend on it.
-package props
+//go:build hegel
+
+package snapshot
 
 import (
 	"context"
@@ -14,49 +14,47 @@ import (
 	"github.com/chucklehead-dev/gotogether/qobs"
 	"github.com/chucklehead-dev/gotogether/qtest"
 	"hegel.dev/go/hegel"
-
-	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
-	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// Hegel drives the real gateway (gateway/snapshot.Holder) with a stand-in
-// publisher and an attacker that replays any old publication, and
-// model/publication.md judges every step the gateway took. This is the
-// direction model-driven tests cannot cover: a gateway that applies or
-// serves what the model forbids. (gateway/snapshot's connect test covers
-// the other: a gateway refusing what the model allows.)
+// Hegel drives the real gateway (Holder) with a stand-in publisher and an
+// attacker that replays any old publication, and model/publication.md
+// judges every step the gateway took. This is the direction model-driven
+// tests cannot cover: a gateway that applies or serves what the model
+// forbids. (The connect test, publication_mbt_test.go, covers the other: a
+// gateway refusing what the model allows.)
 
 const (
 	lease   = 3 // the design instance's LEASE
 	maxTime = 8 // and MAX_TIME
 )
 
+// The clock is publication_mbt_test.go's (epoch, at).
 var (
 	gateways = []string{"g1", "g2"}
 	keys     = []string{"k1", "k2"}
-	epoch    = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
-func at(tick int) time.Time { return epoch.Add(time.Duration(tick) * time.Minute) }
-
-type pub struct {
+// fullPub is a publication in full: the model's Pub with its epoch, source
+// and revocations (publication_mbt_test.go's pub keeps what its driver
+// checks).
+type fullPub struct {
 	Seq, Epoch, Source int
 	Revoked            []string
 	ValidUntil         int
 }
 
-// mutation plants a gateway bug, to show the test catches it.
-type mutation int
+// pubMutation plants a gateway bug, to show the test catches it.
+type pubMutation int
 
 const (
-	faithful mutation = iota
-	noFloor           // a gateway that ignores its floor
-	noExpiry          // a gateway that serves past its lease
+	pubFaithful pubMutation = iota
+	noFloor                 // a gateway that ignores its floor
+	noExpiry                // a gateway that serves past its lease
 )
 
-type machine struct {
+type pubMachine struct {
 	ctx context.Context
-	mut mutation
+	mut pubMutation
 
 	// The stand-in publisher: replica r1, always the leader at epoch 1, as
 	// the model's publish defines it (golem-control replaces it).
@@ -68,17 +66,17 @@ type machine struct {
 		Revoked           []string
 	}
 	record    struct{ Seq, Source int }
-	pointer   pub
-	published []pub
+	pointer   fullPub
+	published []fullPub
 
-	gws       map[string]*gsnap.Holder
+	gws       map[string]*Holder
 	revokedAt map[uint64][]string // what each publication's entitlements revoke
 }
 
-func newMachine(ctx context.Context, mut mutation) *machine {
-	m := &machine{ctx: ctx, mut: mut, gws: map[string]*gsnap.Holder{}, revokedAt: map[uint64][]string{}}
-	genesis := pub{Seq: 0, Epoch: 1, ValidUntil: lease}
-	m.pointer, m.published = genesis, []pub{genesis}
+func newPubMachine(ctx context.Context, mut pubMutation) *pubMachine {
+	m := &pubMachine{ctx: ctx, mut: mut, gws: map[string]*Holder{}, revokedAt: map[uint64][]string{}}
+	genesis := fullPub{Seq: 0, Epoch: 1, ValidUntil: lease}
+	m.pointer, m.published = genesis, []fullPub{genesis}
 	for _, g := range gateways {
 		m.gws[g] = m.holder()
 		m.apply(g, genesis)
@@ -86,13 +84,13 @@ func newMachine(ctx context.Context, mut mutation) *machine {
 	return m
 }
 
-func (m *machine) holder() *gsnap.Holder {
-	return &gsnap.Holder{Now: func() time.Time { return at(m.clock) }}
+func (m *pubMachine) holder() *Holder {
+	return &Holder{Now: func() time.Time { return at(m.clock) }}
 }
 
 // apply is the gateway's poll: the real Holder decides.
-func (m *machine) apply(g string, p pub) error {
-	s := &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: uint64(p.Seq), ValidUntil: at(p.ValidUntil)}
+func (m *pubMachine) apply(g string, p fullPub) error {
+	s := publication(pub{Seq: p.Seq, ValidUntil: p.ValidUntil})
 	err := m.gws[g].Apply(s, fmt.Sprint(p.Seq), nil)
 	if err != nil && m.mut == noFloor && strings.Contains(err.Error(), "below the floor") {
 		// The planted bug: a gateway without the floor takes it anyway.
@@ -106,7 +104,7 @@ func (m *machine) apply(g string, p pub) error {
 	return err
 }
 
-func (m *machine) RuleRevoke(tc hegel.TestCase) {
+func (m *pubMachine) RuleRevoke(tc hegel.TestCase) {
 	k := hegel.Draw(tc, hegel.SampledFrom(keys))
 	if slices.Contains(m.revoked, k) {
 		return
@@ -117,13 +115,13 @@ func (m *machine) RuleRevoke(tc hegel.TestCase) {
 	qobs.Record(m.ctx, "revoke", nil, "key", k)
 }
 
-func (m *machine) RuleLoadState(hegel.TestCase) {
+func (m *pubMachine) RuleLoadState(hegel.TestCase) {
 	m.view.Version, m.view.Revoked, m.view.LoadedAt = m.stateVersion, m.revoked, m.clock
 	qobs.Record(m.ctx, "loadState", nil, "replica", "r1")
 }
 
-func (m *machine) RulePublish(hegel.TestCase) {
-	p := pub{Seq: m.record.Seq + 1, Epoch: 1, Source: m.view.Version, Revoked: m.view.Revoked,
+func (m *pubMachine) RulePublish(hegel.TestCase) {
+	p := fullPub{Seq: m.record.Seq + 1, Epoch: 1, Source: m.view.Version, Revoked: m.view.Revoked,
 		ValidUntil: m.view.LoadedAt + lease} // the lease counts from the source read (ADR 0030)
 	m.record.Seq, m.record.Source = p.Seq, p.Source
 	m.pointer = p
@@ -132,21 +130,21 @@ func (m *machine) RulePublish(hegel.TestCase) {
 }
 
 // RuleReplay is the attacker: any old publication back in the pointer.
-func (m *machine) RuleReplay(tc hegel.TestCase) {
+func (m *pubMachine) RuleReplay(tc hegel.TestCase) {
 	p := m.published[hegel.Draw(tc, hegel.Integers(0, len(m.published)-1))]
 	m.pointer = p
 	qobs.Record(m.ctx, "replayPointer", nil, "seq", p.Seq, "epoch", p.Epoch, "source", p.Source,
 		"revoked", slices.Clone(p.Revoked), "validUntil", p.ValidUntil)
 }
 
-func (m *machine) RulePoll(tc hegel.TestCase) {
+func (m *pubMachine) RulePoll(tc hegel.TestCase) {
 	g := hegel.Draw(tc, hegel.SampledFrom(gateways))
 	if m.apply(g, m.pointer) == nil {
 		qobs.Record(m.ctx, "poll", nil, "gateway", g, "obs.seq", m.pointer.Seq)
 	}
 }
 
-func (m *machine) RuleRestart(tc hegel.TestCase) {
+func (m *pubMachine) RuleRestart(tc hegel.TestCase) {
 	g := hegel.Draw(tc, hegel.SampledFrom(gateways))
 	h := m.holder()
 	h.RaiseFloor(uint64(m.record.Seq)) // the trusted publisher checkpoint
@@ -154,18 +152,18 @@ func (m *machine) RuleRestart(tc hegel.TestCase) {
 	qobs.Record(m.ctx, "restartEmpty", nil, "gateway", g)
 }
 
-func (m *machine) RuleTick(hegel.TestCase) {
+func (m *pubMachine) RuleTick(hegel.TestCase) {
 	if m.clock < maxTime {
 		m.clock++
 		qobs.Record(m.ctx, "tick", nil)
 	}
 }
 
-func (m *machine) RuleServe(tc hegel.TestCase) {
+func (m *pubMachine) RuleServe(tc hegel.TestCase) {
 	g := hegel.Draw(tc, hegel.SampledFrom(gateways))
 	k := hegel.Draw(tc, hegel.SampledFrom(keys))
 	c, err := m.gws[g].Current()
-	if err == gsnap.ErrExpired && m.mut == noExpiry {
+	if err == ErrExpired && m.mut == noExpiry {
 		err = nil // the planted bug
 	}
 	if err != nil || slices.Contains(m.revokedAt[c.Snapshot.PublishSeq], k) {
@@ -174,16 +172,16 @@ func (m *machine) RuleServe(tc hegel.TestCase) {
 	qobs.Record(m.ctx, "serve", nil, "gateway", g, "key", k)
 }
 
-func body(mut mutation) func(hegel.TestCase, *qhegel.Case) {
+func pubBody(mut pubMutation) func(hegel.TestCase, *qhegel.Case) {
 	return func(ht hegel.TestCase, c *qhegel.Case) {
 		ctx := qobs.WithRecorder(context.Background(), c.Recorder)
-		hegel.RunStateful(ht, newMachine(ctx, mut), hegel.WithStatefulStepCount(25))
+		hegel.RunStateful(ht, newPubMachine(ctx, mut), hegel.WithStatefulStepCount(25))
 	}
 }
 
 func TestGatewayAgainstPublicationModel(t *testing.T) {
 	qtest.RequireQuint(t)
-	qhegel.Test(t, qhegel.Config{Binding: "publication.binding.yaml", Mode: qhegel.Batched, AllowEmpty: true}, body(faithful),
+	qhegel.Test(t, qhegel.Config{Binding: "publication.binding.yaml", Mode: qhegel.Batched, AllowEmpty: true}, pubBody(pubFaithful),
 		hegel.WithTestCases(60), hegel.WithDatabase(""))
 }
 
@@ -192,7 +190,7 @@ func TestNoFloorCaught(t *testing.T) {
 	if testing.Short() {
 		t.Skip("shrinks against the model")
 	}
-	qhegel.FindViolation(t, qhegel.ViolationConfig{Binding: "publication.binding.yaml"}, body(noFloor),
+	qhegel.FindViolation(t, qhegel.ViolationConfig{Binding: "publication.binding.yaml"}, pubBody(noFloor),
 		hegel.WithTestCases(100), hegel.WithSeed(1), hegel.WithDatabase("")).Expect(t, qtest.Rejects("poll"))
 }
 
@@ -201,6 +199,6 @@ func TestNoExpiryCaught(t *testing.T) {
 	if testing.Short() {
 		t.Skip("shrinks against the model")
 	}
-	qhegel.FindViolation(t, qhegel.ViolationConfig{Binding: "publication.binding.yaml"}, body(noExpiry),
+	qhegel.FindViolation(t, qhegel.ViolationConfig{Binding: "publication.binding.yaml"}, pubBody(noExpiry),
 		hegel.WithTestCases(100), hegel.WithSeed(1), hegel.WithDatabase("")).Expect(t, qtest.Rejects("serve"))
 }

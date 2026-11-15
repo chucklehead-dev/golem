@@ -29,7 +29,7 @@ func routes(d Dialect, u *url.URL, s http.RoundTripper) *gsnap.Holder {
 }
 
 func handler(d Dialect, s http.RoundTripper, record func(*http.Request, Result)) *Handler {
-	return &Handler{Dialect: d, MaxBody: 1 << 20, Record: record, Snapshots: routes(d, upstreamURL, s)}
+	return &Handler{Dialect: d, MaxBody: 1 << 20, record: record, Snapshots: routes(d, upstreamURL, s)}
 }
 
 func TestAnthropicStream(t *testing.T) {
@@ -210,7 +210,7 @@ func TestCallerCancels(t *testing.T) {
 	defer up.Close()
 	u, _ := url.Parse(up.URL)
 	results := make(chan Result, 1)
-	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Record: func(_ *http.Request, r Result) { results <- r },
+	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, record: func(_ *http.Request, r Result) { results <- r },
 		Snapshots: routes(AnthropicMessages, u, up.Client().Transport)}
 	gw := httptest.NewServer(h)
 	defer gw.Close()
@@ -287,7 +287,7 @@ func TestUpstreamCut(t *testing.T) {
 			defer up.Close()
 			u, _ := url.Parse(up.URL)
 			results := make(chan Result, 1)
-			h := &Handler{Dialect: tc.d, MaxBody: 1 << 20, Record: func(_ *http.Request, r Result) { results <- r },
+			h := &Handler{Dialect: tc.d, MaxBody: 1 << 20, record: func(_ *http.Request, r Result) { results <- r },
 				Snapshots: routes(tc.d, u, up.Client().Transport)}
 			gw := httptest.NewServer(h)
 			defer gw.Close()
@@ -350,7 +350,7 @@ func TestStalledClient(t *testing.T) {
 		u, _ := url.Parse(up.URL)
 		results := make(chan Result, 1)
 		h := &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, WriteStall: 200 * time.Millisecond,
-			Record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
+			record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
 		gw, client := serve(t, h, h2c)
 		resp, err := client.Post(gw, "application/json",
 			strings.NewReader(`{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`))
@@ -389,7 +389,7 @@ func TestSilentProviderKeepsClient(t *testing.T) {
 		u, _ := url.Parse(up.URL)
 		results := make(chan Result, 1)
 		h := &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, WriteStall: stall,
-			Record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
+			record: func(_ *http.Request, r Result) { results <- r }, Snapshots: routes(OpenAIChat, u, up.Client().Transport)}
 		gw, client := serve(t, h, h2c)
 		resp, err := client.Post(gw, "application/json",
 			strings.NewReader(`{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`))
@@ -414,7 +414,7 @@ func bounded(t *testing.T, up *httptest.Server, maxD, headers, idle time.Duratio
 	c, _ := h.Current()
 	rt := c.Routes.Lookup([]byte("claude"))
 	rt.MaxDuration, rt.Headers, rt.Idle = maxD, headers, idle
-	return &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, Snapshots: h, Record: func(_ *http.Request, r Result) { results <- r }}
+	return &Handler{Dialect: OpenAIChat, MaxBody: 1 << 20, Snapshots: h, record: func(_ *http.Request, r Result) { results <- r }}
 }
 
 const streamReq = `{"model":"claude","stream":true,"stream_options":{"include_usage":true},"messages":[]}`
