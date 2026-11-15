@@ -95,6 +95,14 @@ func (s *Server) connectError(err error) error {
 		code = connect.CodeNotFound
 	case errors.Is(err, service.ErrInvalid):
 		code = connect.CodeInvalidArgument
+	case errors.Is(err, state.ErrOutboxFull):
+		// The audit outbox is past its reserve (a grant refused) or at its
+		// bound. ResourceExhausted, not Unavailable: the service answers,
+		// and restrictive changes still land; what is out is the outbox's
+		// space, which returns only as the archive drains it (an operator's
+		// fix, not a moment's). A client retries it with backoff, as it
+		// would a quota, rather than at once as it would an Unavailable.
+		code = connect.CodeResourceExhausted
 	case errors.Is(err, state.ErrInvariant):
 		code = connect.CodeFailedPrecondition
 	case errors.Is(err, state.ErrContended):

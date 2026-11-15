@@ -115,6 +115,7 @@ func bootstrap(ctx context.Context, w io.Writer, args []string) error {
 	pools := fs.String("pools", "internal", "the gateway pools golem-control publishes, comma-separated")
 	actor := fs.String("actor", "", "who bootstraps, for the audit event (required)")
 	adopt := fs.Bool("adopt", false, "accept the document that is there (an older version put back) instead of creating one")
+	outboxMax := fs.Int("audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, as golem-control's -audit-outbox-max")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -129,7 +130,7 @@ func bootstrap(ctx context.Context, w io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
-	st := &state.Store{Bucket: b}
+	st := &state.Store{Bucket: b, MaxOutbox: *outboxMax}
 	floors := map[string]uint64{}
 	for p := range strings.SplitSeq(*pools, ",") {
 		if p = strings.TrimSpace(p); p == "" {
@@ -172,6 +173,7 @@ func restore(ctx context.Context, w io.Writer, args []string) error {
 	from := fs.String("from", "", "the backup: a state document file")
 	actor := fs.String("actor", "", "who restores, for the audit event (required)")
 	apply := fs.Bool("apply", false, "write the restore; without it, only show what it would do")
+	outboxMax := fs.Int("audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, as golem-control's -audit-outbox-max: a restore is restrictive, and lands until the bound")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -190,7 +192,7 @@ func restore(ctx context.Context, w io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
-	st := &state.Store{Bucket: b}
+	st := &state.Store{Bucket: b, MaxOutbox: *outboxMax}
 	report, err := st.Restore(ctx, backup, *actor, !*apply)
 	if err != nil {
 		return fmt.Errorf("restore refused (nothing written): %w", err)
@@ -222,6 +224,7 @@ type options struct {
 	listen                                string
 	drain                                 time.Duration
 	archive, telemetry                    string
+	outboxMax                             int
 	tenant, audience                      string
 	syncClient                            string
 	syncEvery                             time.Duration
@@ -245,6 +248,7 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
 	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut and the lease is given up")
 	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
+	flag.IntVar(&o.outboxMax, "audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, in events: past 80% of it changes that grant access are refused, and at it every change that adds an audit event, until the archive drains it")
 	flag.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for golem-control's metrics and, with -audit-archive, the audit's log records (TLS unless a literal loopback address)")
 	flag.StringVar(&o.tenant, "entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
 	flag.StringVar(&o.audience, "entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
@@ -259,6 +263,9 @@ func parseFlags() (options, error) {
 	flag.Parse()
 	if o.config == "" || o.bucket == "" || o.signingKey == "" {
 		return o, errors.New("-config, -bucket and -signing-key are required")
+	}
+	if o.outboxMax < 10 {
+		return o, fmt.Errorf("-audit-outbox-max %d: at least 10, so its last 20%% is kept for restrictive changes (default %d)", o.outboxMax, state.DefaultMaxOutbox)
 	}
 	return o, nil
 }
@@ -292,7 +299,7 @@ func run() error {
 			return fmt.Errorf("-id: %w", err)
 		}
 	}
-	st := &state.Store{Bucket: b, Installed: installed(o.pools)}
+	st := &state.Store{Bucket: b, Installed: installed(o.pools), MaxOutbox: o.outboxMax}
 	if err := st.Load(ctx); err != nil {
 		return fmt.Errorf("the state document: %w", err)
 	}
@@ -376,7 +383,7 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 			return nil, closeAudit, err
 		}
 	} else {
-		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped, and grows in the state document")
+		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped; past 80% of -audit-outbox-max changes that grant access are refused, and at it every audited change", "audit-outbox-max", st.OutboxMax())
 	}
 	if o.clickhouse != "" {
 		zone, err := time.LoadLocation(o.periodZone)
