@@ -1,167 +1,317 @@
 # M1 plan: first team in production
 
-The working plan for roadmap.md's Phase 2 (M1). Each item names what is
-built, what is left, and the evidence that it is done. Evidence is a test,
-a model check or a drill, never a claim. Update an item in place when it
+The working plan for roadmap.md's Phase 2 (M1). Each step names what is
+left and the evidence that it is done. Evidence is a test, a model check or
+a drill with a written record in docs/acceptance/, never a claim. A test
+that shows an invariant is ablated (run with the fix removed, and seen to
+fail), as m1-security-gates.md records. Update a step in place when it
 lands; dated progress goes in the walkthroughs and the commit log.
 
-M1's exit (roadmap.md):
+## The exit, made measurable
 
-1. The platform team sends all its model traffic through golem for two weeks.
-2. The ledger is within 3–5% of provider usage for those accounts.
-3. Outage drills fail over without caller changes: a Bedrock region to
-   another region or inference profile, and a local box to its fallback
-   pool.
-4. The team's budgets are switched from `observe` to `enforce`.
+roadmap.md's four exit criteria, each with the measure that decides it.
+They are recorded in docs/acceptance/m1-exit.md.
 
-Every item below serves one of these. Exits 1 and 2 need the ledger to be
-right and the team's real traffic to fit: their providers, endpoints and
-agents. Exit 3 needs the attempt loop. Exit 4 needs budget modes and
-enough ledger history to trust them.
+1. **All the team's model traffic through golem for two weeks.** The
+   measure:
+   - A baseline of the team's provider usage before golem: a month of AWS
+     CUR and provider usage by account.
+   - Then zero usage on the team's direct provider accounts and roles
+     outside golem's dedicated ones (ADR 0038).
+   - Bypass attempts (denied Bedrock calls, blocked egress) logged and
+     dashboarded (ADR 0039).
+2. **Ledger within 3–5% of provider usage.**
+   - **What is compared:** cost (and tokens by kind: input, output, cache
+     read, cache write 5m/1h) per account × model × UTC day, from
+     `golem.spend_dedup`, excluding `adjustment` rows, against CUR (a day
+     or two late) and the OpenAI usage API.
+   - **Time alignment:** rows are bucketed by `started_at` in UTC for the
+     comparison, whatever `-period-zone` is; a stream crossing midnight is
+     counted on its start day both sides, or the difference is reported as
+     the boundary's share.
+   - **Rule:** the whole two weeks within 5%, and every day within 10%.
+     Days are previews; ADR 0038's monthly reconciliation is the record.
+   - **Estimated and uncertain rows** are reported as their own share. They
+     are charged high on purpose (contracts.md), so the ledger may run high
+     by that share and still be right. Their share is the reconciliation's
+     explanation, not a tolerance to widen.
+3. **Outage drills fail over without caller changes:**
+   - a Bedrock region to another region or inference profile;
+   - a local box to its fallback pool.
+
+   Each is run under synthetic load at the team's peak rate. It passes with
+   no caller-visible failures beyond those already in flight (cut streams
+   are allowed, and counted), TTFT p95 added under 2 s, and every attempt
+   on the ledger.
+4. **Budgets from observe to enforce.**
+   - **Owner:** the platform team's lead signs off.
+   - **Condition:** two weeks of observe with every `over_budget` row
+     explained, and budgets sized from that history.
+   - **Rollback:** a ScopePolicy PR back to `observe`, live at the next
+     publication. It is drilled once before the switch, and the time it
+     takes is recorded.
+
+Production also needs the release gate lifted: pool mode refuses to run
+without `-accept-unreleased` until golem#7's evidence is in (`releaseGate`,
+cmd/golem-gateway; m1-security-gates.md). Step 5 schedules it.
 
 ## Built
 
 | Area | What | Evidence |
 |---|---|---|
-| Frontends | Anthropic Messages and OpenAI Chat, streaming, usage extraction, feature modes | `gateway/proxy` tests; m1-security-gates.md |
-| Backends | Anthropic and OpenAI-compatible dialects, pass-through, one deployment per attempt | `gateway/proxy`, `gateway/dialect` tests |
-| Identity | `glm_live_` keys, Entra users and services, `golemctl login`, minted keys, the emergency denylist, revocation by snapshot and stream termination (`proxy.InFlight`) | `gateway/auth`, `TestSweepSparesANewerGrant` |
-| Org | Scopes, members, managers, services, keys with model constraints, group sync (Entra) | `control/state`, `control/entrasync` tests |
-| Limits | Valkey and Mem stores, soft budgets on known spend, declared worst case, concurrency slots, cut-stream estimates, Valkey outage start, TLS/auth | `gateway/limit` (store differential, hegel props); model/accounting, model/exposure |
+| Frontends | Anthropic Messages and OpenAI Chat, streaming, usage extraction, feature modes, request boundary | `gateway/proxy` `TestFeatureModes`, `TestRequestBoundary`; m1-security-gates.md |
+| Backends | Anthropic and OpenAI-compatible upstreams, pass-through, one attempt per call | `gateway/proxy` tests |
+| Policy | Provider-side storage refused by default (ADR 0027) | `TestStoreOff` |
+| Identity | `glm_live_` keys, Entra users and services, `golemctl login` and `token` (credential helper), minted keys, the emergency denylist; revoked or denied callers' streams ended (`proxy.InFlight`) | `gateway/auth` tests; `gateway/proxy` terminate_test.go, `TestSweepSparesANewerGrant` |
+| Org | Scopes, members, managers, services, keys with model constraints, Entra group sync | `control/state`, `control/entrasync` tests |
+| Limits | Valkey and Mem stores, soft budgets on known spend, declared worst case, concurrency slots, cut-stream estimates, Valkey outage start, TLS/auth | `gateway/limit` (store differential, Hegel props); model/accounting, model/exposure, `TestExposureModel` |
 | Budget modes | ScopePolicy CRD: observe, warn, enforce; a live scope's policy cannot be deleted | `TestRemovedPolicyRefused`; ADR 0050 |
-| Control plane | golem-control on the bucket document, lease and fence, signed publication with checkpoints, restore, bounded audit outbox, API drain, last-good config | `control/*` tests; model/leadership, model/publication, model/freshness |
-| Ledger | `golem.spend` and `spend_dedup` by materialized view, the price model, ingestion lag metric and alert | ClickHouse integration tests; `TestLedgerQueue*` |
+| Control plane | golem-control on the bucket document, lease and fence, signed publication with checkpoints, restore, bounded audit outbox, API drain, last-good config, `golemctl config validate` (offline, one compiler) | `control/*` tests; model/leadership, model/publication (`TestPublicationModel`), model/freshness |
+| Ledger | `golem.spend` and `spend_dedup` by materialized view, the price model, the ingestion-lag metric (its alert a rule in operations.md, not yet a rule file), `golem.error.origin` | ClickHouse integration tests; `TestLedgerQueue*` |
+| Release | The release gate | `TestReleaseGate` |
 | Testing | Five Quint models with exhaustive small-instance checks and mutants; Hegel props in CI | `model/check-*.sh`; CI |
 
 ## Left, in order
 
-The order puts first whatever could change the design, then whatever
-blocks exit 1 (the team's traffic), then exit 3 (failover), then
-operations and install. Items in one step are independent.
+Production must start by about week 6 of 8–10, so that two weeks of
+observe and reconciliation fit inside the milestone. The order puts first
+what could change the design (steps 1–2), then what the team's traffic
+needs (3–4), then production in observe (5) and the drills and operations
+around it (6), then enforce (7). Each step names the spike that gates it.
 
-### 1. Bedrock envelope and SigV4
+### 1. Upstream envelopes and the commit point; reconciliation spike
 
-The team's Claude traffic goes to Bedrock. Built: nothing.
+Today the dialect is the frontend only: `rewrite` splices `model` into the
+body, and the provider's status goes to the caller once its headers arrive
+(gateway/proxy). Both have to change before Bedrock or retries.
 
-- A `bedrock` dialect: the Messages body moved into
-  `InvokeModelWithResponseStream`, with `anthropic_beta` and
-  `anthropic_version` in the body, the event stream reframed as SSE, and
-  inference profile IDs as deployment targets.
-- SigV4 signing of each attempt, with credentials from the pod's role
-  (IRSA or Pod Identity). No AWS SDK in the gateway beyond the signer, if
-  the fast-path budget allows it (spikes/fast-path.md).
-- Usage taken from Bedrock's `amazon-bedrock-invocationMetrics` and the
-  stream's `message_delta`; count_tokens through `CountTokens`.
+- **Envelope layer** (ADR 0001, gateway.md `gateway/envelope`): a backend
+  has a dialect and an envelope. `plain` is today's behaviour. `bedrock`
+  wraps Messages: `model` and `stream` taken from the body, the model in
+  the path, the beta header moved into the body as `anthropic_beta`, and the
+  response reframed. Failover is across pools of one dialect (ADR 0033),
+  so Bedrock to the direct Anthropic API stays allowed.
+- **Commit point**: an attempt is committed when its first valid event is
+  written to the caller, not when its headers arrive. A provider that
+  answers 200 and then sends a throttling or overloaded event first is an
+  attempt that failed before commit. The envelope tells the loop which it
+  was. The first event is buffered up to a bound (it is small); nothing
+  else is.
+- **Reconciliation spike**: a recorded day of CUR and OpenAI usage for a
+  test account, compared with that account's ledger by exit 2's rule.
+  Access to CUR and the usage APIs is arranged here, not at the end.
 
-Done when: Claude Code streams through a standalone gateway to a stub
-that checks SigV4 and speaks the event stream (a golden of the framing);
-the same against real Bedrock by hand, recorded; usage on the ledger row
-equals the invocation metrics. Roadmap spike: "Bedrock envelope".
+Done when:
+- the `plain` envelope passes every existing test unchanged;
+- a stub that answers 200 and then an overloaded event shows the call
+  refused as retryable (503 with Retry-After) and not committed (ablated:
+  committed at headers);
+- the spike's note is in docs/spikes/reconciliation.md, with the day's
+  difference and its causes.
 
-### 2. The attempt loop: retries, failover, ejection
+### 2. The attempt loop, on the accounting model
 
-The design-risk item: an attempt loop interacts with accounting (each
-attempt charged once, uncertain ones at worst case), with slots and with
-streaming (no retry after the first byte). Built: one attempt
-(`proxy.go`'s marked place). Model first.
+The design risk. Today a call is admitted once, holds one slot and ends
+once (`admission.Ticket`). Its ledger row's `attempt_id` and `event_id` are
+the request ID (gateway/telemetry/ledger.go). Retries change the accounting,
+so the model comes first and extends model/accounting and model/exposure
+rather than sitting beside them.
 
-- **Model**: model/attempts.md. Attempts before the first byte, a retry
-  budget per pool (a token bucket, ADR 0024), ejection after consecutive
-  failures with probation, and failover to the route's next pool. Its
-  invariants: at most one attempt streams to the caller; every attempt is
-  charged exactly once (an uncertain one at worst case); the retry budget
-  bounds attempts per call and per pool; an ejected deployment gets no
-  traffic until probation. Mutants: a retry after the first byte, an
-  uncharged failed attempt, an unbounded budget.
-- **Code**: the rewritten body kept until an attempt commits; the
-  retryable statuses from spikes/sdk-compat.md; `Retry-After` honoured;
-  per-deployment health in the gateway (no shared state); failover across
-  pools of one dialect only (ADR 0033).
-- Weighted and least-in-flight balancing, and prompt-cache affinity (a
-  hash of the principal and the prompt prefix) pick the first attempt.
-- The in-process hooks (`Request`, `Response`, `Complete`) at the loop's
-  three points, so later hooks need no second loop.
+- **Model** (model/attempts.md, on the accounting model):
+  - Attempts are made before commit, within a **per-request** retry budget
+    (ADR 0002), with an aggregate cap per pool so retries cannot storm.
+  - Admission runs per attempt: each attempt checks its deployment's
+    provider quota share and rate counters in the same round trip, and
+    takes its own charge and event ID. One slot is held per call.
+  - An uncertain attempt (sent, no answer) is not retried: its retry would
+    double bill (ADR 0029: commitment is not idempotency). It is charged
+    the worst case and holds its tail as today.
+  - The overshoot bound is restated for k attempts. Because uncertain
+    attempts are not retried, at most one attempt per call is uncertain,
+    which keeps ADR 0031's L×W.
+  - Ejection: a deployment out after consecutive failures, or for its
+    Retry-After, with probation, per gateway. It is kept across snapshot
+    swaps by deployment identity.
+  - Invariants: at most one attempt commits; every attempt is charged once
+    under its own event ID; the overshoot bound; no traffic to an ejected
+    deployment except its probe.
+  - Mutants: a retry after commit, a retried uncertain attempt, an
+    uncharged failed attempt, one event ID shared by attempts, no budget.
+- **Code**:
+  - Per-attempt ledger rows and admission, and quota shares and rate limits
+    per deployment in the Valkey check script (gated by the Valkey scripts
+    spike).
+  - The body: kept until commit only for a route that has a fallback,
+    counted against a per-gateway memory bound. Past the bound, the call
+    gets no retries rather than more memory (fast-path.md's 64 KiB a held
+    stream).
+  - Retryable statuses: 429, 503, 529 and overloaded events, and failures
+    the provider cannot have seen (dial, DNS, TLS). Not timeouts after
+    sending.
+  - A final 503's Retry-After is the earliest across the pools tried
+    (ADR 0024).
+- **Retry storms**: a load simulation (testing.md §3.2, qload) of client
+  SDK retries (3×) times gateway retries under a provider brownout. It
+  shows the aggregate cap holding attempts per second under 1.5× the
+  offered load.
 
-Done when: the model's exhaustive check holds and finds each mutant;
-connect-driven tests run the proxy's loop against it; a drill with two
-stub upstreams, one killed mid-run, shows calls succeeding without caller
-changes and the ledger charging each attempt. This is exit 3's drill in
-small; the real one is step 6.
+Done when:
+- the model's exhaustive check holds, and finds each mutant;
+- connect-driven tests run the proxy's loop against the model;
+- each mutant's code counterpart fails a test (ablated);
+- the storm simulation holds its bound;
+- two stubs, one killed under load, show calls succeeding and one ledger
+  row per attempt.
 
-### 3. The team's endpoints
+### 3. Bedrock and SigV4
 
-What the team's apps and agents call that golem does not serve yet.
+- The `bedrock` envelope's response side:
+  - the AWS event stream (prelude and message CRCs, headers, base64
+    `bytes` payloads, exception message types) reframed as SSE;
+  - non-streaming `InvokeModel`;
+  - inference profile IDs as deployment targets.
+- SigV4 per attempt, re-signed on each retry, with region and host from
+  the deployment, so failover to another region signs for it.
+- Credentials from the pod's role (IRSA or Pod Identity), refreshed through
+  the SDK's credential providers (gateway.md allows them); the signer and
+  providers only, no Bedrock client.
+- Usage from `message_delta` and `amazon-bedrock-invocationMetrics`, cache
+  read and write tokens mapped. A cut stream without metrics is estimated
+  as today.
+- `count_tokens` through Bedrock's CountTokens.
 
-- OpenAI Responses (`/v1/responses`), Embeddings (`/v1/embeddings`),
-  and models lists (`GET /v1/models` in both dialects: the caller's
-  allowed aliases).
-- Anthropic `count_tokens` (free, not charged, rate limited).
-- vLLM pass-through: static endpoints, discovered models, static
-  concurrency ceilings, per-principal limits and overflow to a fallback
-  pool (spike: "vLLM on the Macs and Sparks").
-- Copilot BYOK and Codex through the OpenAI routes (spike results).
+Done when:
+- golden tests of the framing, including a bad CRC refused and an
+  exception event mapped to its status;
+- a stub checks the signature (ablated: an unsigned or stale-signed
+  request is refused);
+- Claude Code streams through a standalone gateway to real Bedrock, with
+  the ledger row's usage equal to the invocation metrics, recorded in
+  docs/acceptance/m1-bedrock.md (the request IDs, both usages, the
+  difference).
 
-Done when: each endpoint's golden tests and usage extraction tests pass;
-the SDK compatibility suite (spikes/sdk-compat.md) runs each endpoint with
-the real SDKs against a stub; a vLLM box serves through golem in
-`make dev-up` or by hand, recorded.
+### 4. The team's endpoints
 
-### 4. Rate limits and provider quotas
+Only what the team uses. First, list their apps' and agents' endpoints in
+docs/acceptance/m1-exit.md from a week of their provider logs.
 
-Built: concurrency slots; budgets. Left:
+- Responses (`/v1/responses`), refusing stored retrieval,
+  `previous_response_id`, background execution and provider file
+  references (security-and-correctness.md §4).
+- `GET /v1/models` in both dialects (the caller's allowed aliases);
+  Anthropic `count_tokens`, not charged, rate limited.
+- vLLM pass-through (Chat, Completions, Messages):
+  - static endpoints with discovered models;
+  - static concurrency ceilings, per-principal limits;
+  - health probes and passive ejection;
+  - overflow to a fallback pool.
 
-- Requests and tokens per minute per key, principal and scope, in the
-  Valkey check script with the slot (ADR 0012).
-- Provider quota limits per deployment (TPM/RPM shares), refused as
-  retryable with `Retry-After`, so the attempt loop fails over.
+  Gated by the vLLM spike.
+- Capability-aware routing (ADR 0028): a route's pool filtered by what the
+  request needs.
+- Member and key caps, and team pools granted by admins (roadmap.md, Org).
+- Embeddings, Codex and Copilot BYOK if the team uses them. Copilot is
+  gated by its spike, the agents by sdk-compat.md's open half.
+- Request limits before authentication: per-source connections and
+  request rate, JSON depth, SSE event size, invalid-token floods
+  (security-and-correctness.md §8).
 
-Done when: the store differential covers the new counters (Valkey vs
-Mem); the accounting model's limiter instance includes them; a load test
-on the stub shows a deployment held under its quota.
+Done when:
+- each endpoint's golden and usage extraction tests pass;
+- the SDK compatibility suite runs each with the real SDKs against a stub;
+- each refusal above has its test (ablated);
+- one vLLM box serves through golem, recorded in
+  docs/acceptance/m1-vllm.md.
 
-### 5. Control plane operations
+### 5. Production in observe
 
-- Operational overrides (drain a deployment, pin a route, raise a cap for
-  an incident) with expiry, audited, published as snapshot changes.
-- `golemctl explain <key|principal> <model>`: the decision the snapshot
-  would make, and why.
-- `golemctl gateways` (what each gateway has applied), `golemctl state
-  restore` over the API, the snapshot's period zone.
-- CRD watch in golem-control instead of the directory read.
-- `golemctl agent setup` for Claude Code, Codex and Copilot BYOK; the
-  secret-scanning webhook that revokes a leaked key.
+The team's traffic moves to golem with budgets in observe, on the real
+install. Two weeks begin here.
 
-Done when: each has its test; explain is checked against the gateway's own
-decision over random snapshots (a differential: explain says yes exactly
-when the gateway admits); the webhook revokes a key in a test with
-GitHub's payload, and the gateway refuses it after the next snapshot.
+- **Install**: Helm charts for the gateway and golem-control through Argo
+  CD, on EKS. The chart sets drain to the 10 minutes operations.md assumes
+  (the binary's `-drain` defaults to 30 s). Argo Rollouts and Crossplane
+  claims are deferred: canaries by hand, cloud resources by hand or Terraform,
+  recorded.
+- **golem#7's evidence**, to lift the release gate:
+  - provider spending limits per account, recorded with who set them;
+  - OTLP TLS against the real collector;
+  - the mTLS owner of each hop.
+- **ADR 0041's M1 gates** (security-and-correctness.md):
+  - the denylist surviving Argo sync, prune and restarts;
+  - negative Argo and Crossplane authorization and admission tests;
+  - implementation tests of composite freshness and restore.
+- **Policy**: the threat model reviewed; the model onboarding checklist;
+  CODEOWNERS on config, with RBAC on CRD writes as the enforcement.
+- **Dedicated provider accounts** and **bypass controls** (ADRs 0038,
+  0039): the Bedrock SCP, egress blocks, provider key-creation limits,
+  managed agent settings.
+- **Ledger**: ClickHouse TTLs; a reconciliation job by exit 2's rule, daily
+  previews and the month's record.
 
-### 6. Install, ledger operations and drills
+Done when:
+- the charts deploy to the EKS cluster through Argo, recorded;
+- `TestReleaseGate`'s gate is lifted by a commit citing golem#7's closed
+  evidence;
+- each ADR 0041 gate has its test (ablated) in m1-security-gates.md;
+- a direct Bedrock call from the team's role outside golem is denied and
+  appears on the dashboard;
+- the threat model review is recorded with its sign-off;
+- reconciliation's first preview is published.
 
-- Helm charts (gateway, golem-control) through Argo CD; Argo Rollouts for
-  gateway canaries; Crossplane claims (`GolemInstallation`, `GolemSite`).
-- Grafana dashboards for spend, limits, latency and TTFT; snapshot-age
-  alerts; a synthetic request per pool.
-- Provider usage reconciliation: a daily job comparing the ledger with
-  Bedrock's and OpenAI's usage per account (exit 2's measure).
-- Bypass controls (the Bedrock SCP, egress blocks, provider key-creation
-  limits, managed agent settings) and dedicated provider accounts (ADRs
-  0038, 0039): deployment work, recorded in golem#7.
+### 6. Operations and drills
 
-Done when: the charts render in CI (helm template plus the policy checks)
-and install on kind; the reconciliation job runs on a recorded day and
-reports its difference; the two outage drills (a Bedrock region, a local
-box) run on the real install and are written up in docs/acceptance/
-with the ledger's charges for each.
+- **Alerts, as rule files with the charts**:
+  - request and upstream error rate by `error.origin`;
+  - latency and TTFT;
+  - retry budget exhaustion and ejections;
+  - `golem.ledger.dropped` and `failed`, since a dropped row undercounts
+    exit 2;
+  - snapshot age;
+  - absent metrics;
+  - the leader's CAS retries;
+  - ingestion lag.
+- **SLOs** and an on-call rotation for the team's hours.
+- Grafana dashboards for spend, limits, latency and TTFT; a synthetic
+  request per pool.
+- **Load test** at the team's peak volume times three, against stubs on the
+  real install: Valkey's and ClickHouse's headroom recorded.
+- **Drills**, each written up in docs/acceptance/m1-drills.md:
+  - the two failover drills of exit 3 (a second region or inference profile
+    with model access and quota, allowed under the SCP);
+  - signing-key rotation;
+  - the incident denylist, with its time to apply measured;
+  - a state bucket restore;
+  - a gateway canary rolled back.
 
-### 7. Production
+Done when:
+- each alert fires in a test against recorded metrics;
+- the dashboards show the synthetic requests;
+- each drill's record names its pass criterion and result.
 
-The team moves its traffic over in observe mode. Reconciliation runs
-daily. After two weeks within 3–5%, the team's ScopePolicies go to
-enforce. The record of each exit criterion goes in
-docs/acceptance/m1-exit.md, as m1-security-gates.md does for the gates.
+### 7. Enforce
 
-## Not in M1
+Exit 4's condition and rollback, then the switch. The team's ScopePolicies
+move to `enforce` in a reviewed PR, and the rollback drill's record is
+linked from it.
 
-Translation between dialects (M1.5), remote hooks and guardrails, remote
-sites, the console, Langfuse capture.
+Done when:
+- m1-exit.md records all four measures with links to their evidence;
+- the published snapshot shows `enforce` for the team's scopes;
+- the first refusal in enforce appears on the ledger as `402`.
+
+## Deferred past M1
+
+- Argo Rollouts automation and Crossplane claims (by hand in M1).
+- Weighted and least-in-flight balancing (round robin with ejection is
+  enough for one team).
+- Session affinity: when it comes, keyed by the session header (ADR 0026),
+  not a prompt hash.
+- In-process hooks.
+- `golemctl explain`, `golemctl gateways`, restore over the API, the CRD
+  watch (with its watch-sync barrier, ADR 0041) and operational overrides:
+  the directory read and PRs serve one team. Incidents use the denylist.
+- The secret-scanning webhook (leaked keys revoked by hand meanwhile).
+- `golemctl agent setup`.
+- Translation (M1.5), remote hooks and guardrails, remote sites, the
+  console, Langfuse capture.
