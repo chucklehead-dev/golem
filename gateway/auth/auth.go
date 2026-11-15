@@ -207,15 +207,97 @@ func (k *Keys) Deny(f *DenyFile) { k.deny = f }
 // x-api-key (Anthropic's). A caller the site's emergency denylist names is
 // refused, whatever the snapshot says.
 func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
+	var g Grant
+	return k.AuthenticateGrant(h, &g)
+}
+
+// AuthenticateGrant is Authenticate, recording in g what it honoured, so
+// a call in flight can later ask another snapshot's keys whether they
+// still would (Honours). g is the caller's, kept where it keeps the call
+// (the request path's pooled exchange), so nothing is allocated for it.
+func (k *Keys) AuthenticateGrant(h http.Header, g *Grant) (*Principal, *Refusal) {
+	*g = Grant{}
 	cred, conflict := credential(h)
 	if conflict {
 		return nil, &Refusal{contract.AuthMissing, "two different credentials (Authorization and x-api-key): send one"}
 	}
-	p, r := k.principal(cred, h)
-	if r == nil && k.deny.Current().denies(p, keyCred(cred), p.entraID) {
+	p, r := k.principal(cred, h, g)
+	switch {
+	case r != nil:
+		*g = Grant{}
+		return nil, r
+	case k.deny.Current().denies(p, keyCred(cred), p.entraID):
+		*g = Grant{}
 		return nil, denied
 	}
-	return p, r
+	g.p = p
+	return p, nil
+}
+
+// Grant is what one authentication honoured: the credential's identity (a
+// key's hash and text, a token's Entra ID by its principal) and the
+// principal it acted as. The zero Grant is none (a snapshot without
+// entitlements), which every Keys honours.
+type Grant struct {
+	p    *Principal
+	kind grantKind
+	hash [32]byte // a key's
+	cred string   // a key's text, for the denylist's prefixes
+}
+
+type grantKind uint8
+
+const (
+	grantNone grantKind = iota
+	grantImplicit
+	grantKey
+	grantToken
+)
+
+// Principal is the principal the grant authenticated; nil for none.
+func (g *Grant) Principal() *Principal { return g.p }
+
+// Honours reports whether these keys, with the denylist in force now,
+// still honour a grant another snapshot's keys made, by the rules
+// Authenticate applies: a key while it is listed and not revoked, its
+// scope exists and its principal is a listed member of it; a token while
+// its principal is a member of the scope it acted in; neither while the
+// denylist names it. It returns the refusal a call in flight is ended
+// with, nil if honoured. Expiry (a key's, a token's) is not checked: the
+// passing of time ends no call that began in time, as the authorization
+// lease's expiry stops only new requests (ADR 0041).
+func (k *Keys) Honours(g *Grant) *Refusal {
+	var p *Principal
+	switch g.kind {
+	case grantNone:
+		return nil
+	case grantImplicit:
+		if k.implicit == nil || k.local == ([32]byte{}) {
+			return &Refusal{contract.AuthKeyRevoked, "this standalone gateway no longer takes its local key: its configuration names its keys now"}
+		}
+		p = k.implicit
+	case grantKey:
+		e := k.byHash[g.hash]
+		switch {
+		case e == nil:
+			return &Refusal{contract.AuthKeyRevoked, "this key is no longer in golem's configuration (revoked or removed): mint a new one (golemctl keys mint)"}
+		case e.revoked:
+			return &Refusal{contract.AuthKeyRevoked, "this key was revoked: mint a new one (golemctl keys mint)"}
+		case e.refused != nil:
+			return e.refused
+		}
+		p = &e.p
+	case grantToken:
+		q := k.byEntra[g.p.entraID][g.p.Scope]
+		if q == nil || q.Kind != g.p.Kind {
+			return &Refusal{contract.AuthzScopeNotMember, "no longer a member of scope " + g.p.Scope + ": its managers can add you back"}
+		}
+		p = q
+	}
+	if k.deny.Current().denies(p, g.cred, p.entraID) {
+		return denied
+	}
+	return nil
 }
 
 // keyCred is cred if it is a golem key, else "" (a token is matched by its
@@ -230,13 +312,14 @@ func keyCred(cred string) string {
 // principal is the snapshot's principal for cred, before the denylist: the
 // implicit principal for the local key, an Entra token's in the scope h's
 // golem-scope header names, or a golem key's.
-func (k *Keys) principal(cred string, h http.Header) (*Principal, *Refusal) {
+func (k *Keys) principal(cred string, h http.Header, g *Grant) (*Principal, *Refusal) {
 	if k.implicit != nil {
 		// Standalone without a LocalIdentity: the one local principal, for
 		// the gateway's own generated key alone (ADR 0023; golem#5). Its
 		// browser guard keeps web pages out; the key keeps out other
 		// programs and users of the machine.
 		if sum := key.Hash(cred); k.local != ([32]byte{}) && subtle.ConstantTimeCompare(sum[:], k.local[:]) == 1 {
+			g.kind, g.cred = grantImplicit, cred
 			return k.implicit, nil
 		}
 		return nil, &Refusal{contract.AuthKeyUnknown, "this standalone gateway takes its own local key: the one it printed at start, in the file it named"}
@@ -245,6 +328,7 @@ func (k *Keys) principal(cred string, h http.Header) (*Principal, *Refusal) {
 		return nil, &Refusal{contract.AuthMissing, "no credential: send a golem key as Authorization: Bearer or x-api-key (golemctl keys mint), or an Entra token (golemctl token)"}
 	}
 	if looksLikeJWS(cred) {
+		g.kind = grantToken
 		return k.token(cred, h.Get(contract.HeaderScope))
 	}
 	// A known hash is a valid key: parsing it (base62 through math/big) is
@@ -254,7 +338,8 @@ func (k *Keys) principal(cred string, h http.Header) (*Principal, *Refusal) {
 	// installation's key in.
 	var e *entry
 	if strings.HasPrefix(cred, k.prefix) {
-		e = k.byHash[key.Hash(cred)]
+		g.hash = key.Hash(cred)
+		e = k.byHash[g.hash]
 	}
 	if e == nil {
 		env, err := key.Parse(cred)
@@ -277,6 +362,7 @@ func (k *Keys) principal(cred string, h http.Header) (*Principal, *Refusal) {
 	case e.refused != nil:
 		return nil, e.refused
 	}
+	g.kind, g.cred = grantKey, cred
 	return &e.p, nil
 }
 

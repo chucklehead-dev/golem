@@ -117,6 +117,9 @@ type DenyFile struct {
 	Path     string
 	Interval time.Duration // default 5 seconds
 	Log      *slog.Logger
+	// OnApply, if set, is called after each changed list is put in force
+	// (the gateway ends the calls in flight it now denies).
+	OnApply func(*Denylist)
 
 	cur atomic.Pointer[Denylist]
 	sum [32]byte
@@ -141,6 +144,9 @@ func (f *DenyFile) Load() error {
 	f.sum = sum
 	if f.Log != nil {
 		f.Log.Warn("emergency denylist applied", "path", f.Path, "entries", d.Len())
+	}
+	if f.OnApply != nil {
+		f.OnApply(d)
 	}
 	return nil
 }
