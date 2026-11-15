@@ -209,6 +209,16 @@ Status:
   the client's SDK retries the same endpoint), and 500 is no longer
   retried. The model takes the rule; its connect test found a probe left
   standing after a readmission, now ended (`TestReadmissionEndsProbes`).
+- **Drill in small: built.** `TestFailoverDrill` (gateway/proxy): two
+  providers over real HTTP, the gateway's own server in front, eight
+  callers streaming for two seconds, the first provider killed at 0.7 s.
+  Every call started after the kill succeeded whole, with no change at the
+  caller; the calls cut by the kill ended with the contract's error event;
+  one ledger row per attempt, each its own event, the free attempts at the
+  dead provider charged nothing; the dead provider ejected. Ablated: no
+  failover (no call fails over) and no ejection (calls after the kill get
+  503 once the route's retry budget is spent: ejection, not the budget,
+  is what keeps an outage's calls succeeding).
 - **Storm simulation: built, and narrower than planned.** route's
   `TestRetryBudgetBoundsTheStorm` (qload, the real `route.Health` budget
   inside the SDKs' three retries with backoff, a provider at a third of its
@@ -229,8 +239,8 @@ Done when:
 - ~~each mutant's code counterpart fails a test (ablated)~~ (done);
 - ~~connect-driven tests run the proxy's loop against the model~~ (done);
 - ~~the storm simulation holds its bound~~ (done: the amplification bound; recovery is not the gateway's to decide);
-- two stubs, one killed under load, show calls succeeding and one ledger
-  row per attempt.
+- ~~two stubs, one killed under load, show calls succeeding and one ledger
+  row per attempt~~ (done: `TestFailoverDrill`).
 
 ### 3. Bedrock and SigV4
 
