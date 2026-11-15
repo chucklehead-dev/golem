@@ -60,6 +60,27 @@ def run(case, base):
             openai_client(base).chat.completions.create(model="nope", messages=[{"role": "user", "content": "hi"}])
         except openai.APIStatusError as e:
             return {"status": e.status_code, "error_class": type(e).__name__, "code": e.code, "message": e.message}
+    if case == "anthropic_stream_terminated":
+        # A stream the gateway ends mid-way: what the SDK raises, and the text before it.
+        text = ""
+        try:
+            with anthropic_client(base).messages.stream(model="claude", max_tokens=64,
+                                                         messages=[{"role": "user", "content": "hi"}]) as s:
+                for t in s.text_stream:
+                    text += t
+        except anthropic.APIError as e:
+            body = getattr(e, "body", None)
+            code = body.get("error", {}).get("type") if isinstance(body, dict) else None
+            return {"text": text, "error_class": type(e).__name__, "code": code, "message": str(e)}
+    if case == "openai_stream_terminated":
+        text = ""
+        try:
+            for chunk in openai_client(base).chat.completions.create(
+                    model="gpt", stream=True, messages=[{"role": "user", "content": "hi"}]):
+                if chunk.choices:
+                    text += chunk.choices[0].delta.content or ""
+        except openai.APIError as e:
+            return {"text": text, "error_class": type(e).__name__, "code": getattr(e, "code", None), "message": e.message}
     if case.startswith("retries_"):
         # base is a status server answering every request with the status; count attempts there.
         try:

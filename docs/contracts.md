@@ -53,6 +53,11 @@ retry pointlessly and users wait through backoff before seeing why.
 - The SDKs' retry rules are pinned by the SDK compatibility tests (§7):
   `test/compat` checks every status above against the official Python and
   TypeScript SDKs in CI (docs/spikes/sdk-compat.md).
+- A terminated stream surfaces in every SDK as an error raised after the
+  text that came before it, carrying golem's code (Python's
+  `anthropic.APIStatusError` and `openai.APIError`, TypeScript's
+  `APIError` for both), never as a short whole answer
+  (`TestSDKsSeeTermination`).
 
 ## 2. Error origin (ADR 0024)
 

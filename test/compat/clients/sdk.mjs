@@ -49,6 +49,29 @@ async function run() {
       try { await openai().chat.completions.create({ model: "nope", messages: hi }); }
       catch (e) { return { status: e.status, error_class: e.constructor.name, code: e.code, message: e.message }; }
       break;
+    case "anthropic_stream_terminated": {
+      // A stream the gateway ends mid-way: what the SDK throws, and the text before it.
+      let text = "";
+      try {
+        const s = anthropic().messages.stream({ model: "claude", max_tokens: 64, messages: hi });
+        s.on("text", (t) => (text += t));
+        await s.finalMessage();
+      } catch (e) {
+        return { text, error_class: e.constructor.name, code: e.error?.error?.type ?? e.type, message: e.message };
+      }
+      break;
+    }
+    case "openai_stream_terminated": {
+      let text = "";
+      try {
+        for await (const chunk of await openai().chat.completions.create({ model: "gpt", stream: true, messages: hi })) {
+          if (chunk.choices.length) text += chunk.choices[0].delta.content ?? "";
+        }
+      } catch (e) {
+        return { text, error_class: e.constructor.name, code: e.code, message: e.message };
+      }
+      break;
+    }
     case "retries_anthropic":
       try { await anthropic(2).messages.create({ model: "m", max_tokens: 8, messages: hi }); }
       catch (e) { return { status: e.status, error_class: e.constructor.name }; }
