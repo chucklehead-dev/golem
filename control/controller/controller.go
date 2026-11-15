@@ -699,8 +699,8 @@ func (c *Controller) syncStep(ctx context.Context) error {
 		c.status.guardTrips++
 	}
 	c.mu.Unlock()
-	if err == nil && res != (entrasync.Result{}) {
-		c.log().Info("entra sync", "created", res.Created, "added", res.Added, "removed", res.Removed, "keysRevoked", res.Revoked)
+	if res != (entrasync.Result{}) { // a step its guard refused may still have offboarded
+		c.log().Info("entra sync", "created", res.Created, "added", res.Added, "removed", res.Removed, "keysRevoked", res.Revoked, "offboarded", res.Offboarded)
 	}
 	return err
 }

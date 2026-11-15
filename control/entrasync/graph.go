@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,8 +16,10 @@ import (
 )
 
 // Graph is the directory as Microsoft Graph serves it: a group's
-// transitive user members, paged. It needs the application permission
-// GroupMember.Read.All (entra.md #4).
+// transitive user members, paged, and a user's account, live or deleted.
+// It needs the application permissions GroupMember.Read.All and
+// User.Read.All (entra.md #4: accountEnabled and the deleted items are not
+// basic properties).
 type Graph struct {
 	Token  func(ctx context.Context) (string, error)
 	Base   string // default https://graph.microsoft.com/v1.0
@@ -42,12 +45,13 @@ func (g *Graph) Members(ctx context.Context, group string) ([]User, error) {
 			Next string `json:"@odata.nextLink"`
 		}
 		if err := g.get(ctx, next, &page); err != nil {
+			if errors.Is(err, errNotFound) {
+				return nil, ErrNoGroup
+			}
 			return nil, err
 		}
 		for _, u := range page.Value {
-			// An account whose state Graph does not report is not taken as
-			// enabled.
-			users = append(users, User{ID: u.ID, UPN: u.UPN, Enabled: u.AccountEnabled != nil && *u.AccountEnabled})
+			users = append(users, account(u.ID, u.UPN, u.AccountEnabled))
 		}
 		if page.Next == "" {
 			return users, nil
@@ -61,6 +65,45 @@ func (g *Graph) Members(ctx context.Context, group string) ([]User, error) {
 	}
 	return nil, fmt.Errorf("group %s: more than %d pages", group, cmp.Or(g.MaxPages, 1000))
 }
+
+// account is a user as Graph reports it. An account whose state Graph does
+// not report is neither enabled nor disabled: a member of nothing, and its
+// removal not taken for offboarding.
+func account(id, upn string, enabled *bool) User {
+	return User{ID: id, UPN: upn, Enabled: enabled != nil && *enabled, Disabled: enabled != nil && !*enabled}
+}
+
+// User looks up the account with object ID id: the live user, or failing
+// that the deleted one (Deleted); ErrNoUser if Graph has neither (purged,
+// or not this tenant's). A deletion is taken only from the deleted items,
+// never from a 404 alone, so a lookup failing for every user cannot
+// offboard everyone past the removal guard.
+func (g *Graph) User(ctx context.Context, id string) (User, error) {
+	base := strings.TrimRight(cmp.Or(g.Base, "https://graph.microsoft.com/v1.0"), "/")
+	var u struct {
+		ID             string `json:"id"`
+		UPN            string `json:"userPrincipalName"`
+		AccountEnabled *bool  `json:"accountEnabled"`
+	}
+	const sel = "?$select=id,userPrincipalName,accountEnabled"
+	err := g.get(ctx, base+"/users/"+url.PathEscape(id)+sel, &u)
+	if err == nil {
+		return account(u.ID, u.UPN, u.AccountEnabled), nil
+	}
+	if !errors.Is(err, errNotFound) {
+		return User{}, err
+	}
+	switch err := g.get(ctx, base+"/directory/deletedItems/"+url.PathEscape(id)+"?$select=id,userPrincipalName", &u); {
+	case errors.Is(err, errNotFound):
+		return User{}, ErrNoUser
+	case err != nil:
+		return User{}, err
+	}
+	return User{ID: u.ID, UPN: u.UPN, Deleted: true}, nil
+}
+
+// errNotFound is Graph's 404: no such group, user or deleted item.
+var errNotFound = errors.New("Graph: 404 Not Found")
 
 func (g *Graph) get(ctx context.Context, u string, into any) error {
 	tok, err := g.Token(ctx)
@@ -83,7 +126,7 @@ func (g *Graph) get(ctx context.Context, u string, into any) error {
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return ErrNoGroup
+		return errNotFound
 	case resp.StatusCode != http.StatusOK:
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("Graph: %s: %s", resp.Status, b)

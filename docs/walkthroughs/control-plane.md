@@ -524,21 +524,40 @@ minutes) while this replica leads, under the elector's fence:
    group's transitive user members (`id`, `userPrincipalName`,
    `accountEnabled`), following `@odata.nextLink` only on Graph's own
    host, with a token from `FederatedToken` (the pod's projected service
-   account token as the client assertion). Any failure but a deleted group
-   (`ErrNoGroup`, no members) ends the step with nothing written.
+   account token as the client assertion). An account Graph does not
+   report as enabled is a member of nothing; only an explicit
+   `accountEnabled: false` makes it `Disabled`. Then **the users who
+   left** (`left`: principals with synced memberships in no group read)
+   are looked up one by one (`Directory.User`; `Graph.User`: `/users/<id>`,
+   failing that `/directory/deletedItems/<id>`), because Entra drops a
+   deleted user from its groups and a departure alone cannot tell a
+   deletion from a membership removed: an account in the deleted items is
+   `Deleted`; one in neither (`ErrNoUser`, purged) is a plain removal. A
+   404 alone is never taken for a deletion. Any failure but a deleted group
+   (`ErrNoGroup`, no members) or `ErrNoUser` ends the step with nothing
+   written.
 2. **Reconcile** in one `FencedUpdate` (`reconcile`, `sync.go:162`), so a
    replica deposed while it read the directory writes nothing: `wanted`
    gives each enabled member of a group bound to a scope that scope in
    `Synced`; a user not yet a principal is created (`reconciler.create`,
    `principalID`: the sign-in name, lowercased; with part of the object ID
    if taken; `user-<oid>` for a name in the reserved `entra:` namespace);
-   a user in no bound group, or disabled, has `Synced` emptied. Each
+   a user in no bound group, or not enabled, has `Synced` emptied. Each
    changed principal's keys outside its memberships are revoked
-   (`reconciler.setSynced`, `Document.RevokeOutside`), a disabled user's
-   all of them, and the change is audited by `system:entra-sync`.
-3. **Guard**: a step ending more than `MaxRemovals` (50) memberships
-   returns `ErrTooManyRemovals` and writes nothing; a step changing nothing
-   writes nothing either.
+   (`reconciler.setSynced`, `Document.RevokeOutside`), all of them for a
+   user not enabled or whose account is disabled or deleted, and the
+   change is audited by `system:entra-sync`.
+3. **Guard**: `reconcile` plans every user's change before making any.
+   **Offboarding** (a user a group reports `Disabled`, or who left and
+   whose account is disabled or deleted: `Result.Offboarded`) is never
+   held back. Over `MaxRemovals` (50) memberships of everyone else
+   ending (a reorg, a group re-bound, Graph answering empty), the step
+   writes only the offboarding and returns `ErrTooManyRemovals`, which
+   the controller counts as a guard trip; with no offboarding, nothing is
+   written. A step changing nothing writes nothing either. Before this,
+   the guard counted every removal and refused the step whole, so a mass
+   offboarding (60 users disabled at once) revoked nothing until an
+   operator raised the limit. `TestSyncOffboarding`.
 
 Memberships granted in golem (`Scopes`) are never the sync's: a member by
 both ways keeps one when the other ends, and `members remove` refuses a
@@ -649,7 +668,8 @@ path with a real gateway source over one bucket.
 - `control/lead`: the tests in §2.
 - `control/publish`: the tests in §3.
 - `control/entrasync`: the sync (`TestSync`, `TestSyncNames`), its safety
-  (`TestSyncSafety`), Graph and the token (`TestGraph`,
+  (`TestSyncSafety`), offboarding past the guard and the guard over
+  active users (`TestSyncOffboarding`), Graph and the token (`TestGraph`,
   `TestFederatedToken`), and a sync deposed mid-read writing nothing
   (`TestSyncFenced`).
 - `control/controller`: two replicas and a gateway over one bucket
@@ -722,6 +742,12 @@ path with a real gateway source over one bucket.
   backoff (every two seconds at first, then once a renewal interval), so
   alerts read its increase over a window longer than a renewal interval,
   not its value.
+- **A departure costs a Graph call**: the sync looks up every user who
+  left every bound group (two calls for a deleted one), so a directory
+  answering empty costs a call per synced user each step until it
+  recovers; Graph's throttling then fails the step, which writes nothing.
+  A user with only memberships granted in golem is not looked up: their
+  keys are not revoked when Entra deletes them.
 - **A replica that will not start reports nothing**: `ErrMissing` at
   `Load`, or a bad flag, stops golem-control before its metrics exist;
   the alert is their absence.

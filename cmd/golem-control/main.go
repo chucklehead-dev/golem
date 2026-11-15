@@ -248,7 +248,7 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.audience, "entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
 	flag.StringVar(&o.syncClient, "entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
 	flag.DurationVar(&o.syncEvery, "entra-sync-every", 5*time.Minute, "how often the group sync runs")
-	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships one sync may end; a step over it changes nothing (raise it for one run when intended)")
+	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships of still-active users one sync may end; a step over it writes only its offboarding of disabled or deleted users (raise it for one run when intended)")
 	flag.StringVar(&o.clickhouse, "clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
 	flag.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
 	flag.DurationVar(&o.counterRetention, "counter-retention", 6*time.Hour, "how long the gateways' site counters keep a minute (their stores' Retain): a known-spend result older than this less the lease is reported stale")

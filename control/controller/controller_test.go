@@ -256,6 +256,11 @@ type groupDir struct{ users []entrasync.User }
 
 func (g *groupDir) Members(context.Context, string) ([]entrasync.User, error) { return g.users, nil }
 
+// User is live and enabled: a user who left the group.
+func (g *groupDir) User(_ context.Context, id string) (entrasync.User, error) {
+	return entrasync.User{ID: id, Enabled: true}, nil
+}
+
 // TestGroupSync: a member of a group bound to a scope reaches the gateway
 // as a member of the scope through the sync and the next publication;
 // removed from the group, they lose it at the next sync and publication.
