@@ -83,7 +83,7 @@ func (s *Store) create(ctx context.Context, floors map[string]uint64, actor stri
 		}
 		d.Audit = append(d.Audit, AuditEvent{At: time.Now().UTC(), Actor: actor, Action: "state.bootstrap", Target: "document", Detail: detail})
 		return nil
-	})
+	}, s.OutboxMax())
 	if err != nil {
 		return nil, err
 	}

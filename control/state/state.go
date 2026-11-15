@@ -72,7 +72,9 @@ type Document struct {
 	Revocations []Revocation         `json:"revocations,omitempty"`
 	Roles       []RoleBinding        `json:"roles,omitempty"`
 	// Audit is the outbox (§3): a write's events go in with it; the leader
-	// ships them and trims only what is durably archived.
+	// ships them and trims only what is durably archived. It is bounded
+	// (Store.MaxOutbox, outbox.go), with the last 20% for restrictive
+	// changes.
 	Audit    []AuditEvent `json:"audit,omitempty"`
 	AuditSeq uint64       `json:"auditSeq,omitempty"` // the last event's number
 }
@@ -150,6 +152,10 @@ type Store struct {
 	// not the empty document. Without them a missing document is a first
 	// start.
 	Installed []string
+	// MaxOutbox bounds the audit outbox (outbox.go; default
+	// DefaultMaxOutbox): past 80% of it a write that grants or widens
+	// access is refused, and at it every write that adds an audit event.
+	MaxOutbox int
 
 	mu  sync.Mutex
 	cur *Document
@@ -291,7 +297,7 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 		s.mu.Lock()
 		base, tag := s.cur, s.tag
 		s.mu.Unlock()
-		next, err := apply(base, change)
+		next, err := apply(base, change, s.OutboxMax())
 		if err != nil {
 			return nil, err
 		}
@@ -354,7 +360,7 @@ func (s *Store) Validate(ctx context.Context, change func(*Document) error) erro
 	s.mu.Lock()
 	base := s.cur
 	s.mu.Unlock()
-	_, err := apply(base, change)
+	_, err := apply(base, change, s.OutboxMax())
 	return err
 }
 
@@ -367,16 +373,16 @@ func (s *Store) loaded(ctx context.Context) error {
 }
 
 // apply is the part of a write that touches no bucket: change on a copy of
-// base, its new audit events numbered, the invariants checked. base is
-// read, never changed: the documents a store holds are replaced, never
-// edited in place.
-func apply(base *Document, change func(*Document) error) (*Document, error) {
+// base, its new audit events numbered, the invariants checked, the outbox
+// within outbox (its bound). base is read, never changed: the documents a
+// store holds are replaced, never edited in place.
+func apply(base *Document, change func(*Document) error, outbox int) (*Document, error) {
 	next := base.clone()
 	if err := change(next); err != nil {
 		return nil, err
 	}
 	next.number()
-	if err := check(base, next); err != nil {
+	if err := check(base, next, outbox); err != nil {
 		return nil, err
 	}
 	return next, nil
@@ -388,15 +394,20 @@ func broken(format string, args ...any) error {
 }
 
 // check is what every write must keep, the fence's and the publication
-// records' here and the entitlements' in checkEntitlements.
-func check(old, next *Document) error {
+// records' here, the entitlements' in checkEntitlements, and the audit
+// outbox's bound (checkOutbox), outbox, last: a change that breaks an
+// invariant says so, whatever the outbox holds.
+func check(old, next *Document, outbox int) error {
 	if err := checkFence(old, next); err != nil {
 		return err
 	}
 	if err := checkEntitlements(old, next); err != nil {
 		return err
 	}
-	return checkPublications(old, next)
+	if err := checkPublications(old, next); err != nil {
+		return err
+	}
+	return checkOutbox(old, next, outbox)
 }
 
 // checkFence: the fence's epoch never goes back and the fence is never

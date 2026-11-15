@@ -95,7 +95,7 @@ func TestRolesAndAudit(t *testing.T) {
 	ev := func(a string) AuditEvent { return AuditEvent{At: time.Unix(1, 0), Actor: "root", Action: a} }
 	if _, err := s.Update(ctx, func(d *Document) error {
 		d.Roles = append(d.Roles, RoleBinding{"alice", "manager", "a"})
-		d.Audit = append(d.Audit, ev("one"), ev("two"), ev("three"))
+		d.Audit = append(d.Audit, ev("scope.create"), ev("membership.add"), ev("key.mint"))
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func TestRolesAndAudit(t *testing.T) {
 		"an event dropped midway": func(d *Document) { d.Audit = []AuditEvent{d.Audit[0], d.Audit[2]} },
 		"the newest dropped":      func(d *Document) { d.Audit = d.Audit[:2] },
 		"a number skipped": func(d *Document) {
-			d.Audit = append(d.Audit, AuditEvent{Seq: d.AuditSeq + 2, Action: "x"})
+			d.Audit = append(d.Audit, AuditEvent{Seq: d.AuditSeq + 2, Action: "key.revoke"})
 		},
 		"the counter set back": func(d *Document) { d.AuditSeq = 0; d.Audit = nil },
 	} {
@@ -116,7 +116,7 @@ func TestRolesAndAudit(t *testing.T) {
 			t.Errorf("%s: %v, want ErrInvariant", name, err)
 		}
 	}
-	if _, err := s.Update(ctx, func(d *Document) error { d.Audit = append(d.Audit[2:], ev("four")); return nil }); err != nil {
+	if _, err := s.Update(ctx, func(d *Document) error { d.Audit = append(d.Audit[2:], ev("key.revoke")); return nil }); err != nil {
 		t.Fatalf("the oldest shipped and trimmed, a new one added: %v", err)
 	}
 	if !s.Current().Has("alice", "manager", "a") || len(s.Current().Audit) != 2 {

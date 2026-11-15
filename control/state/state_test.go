@@ -211,7 +211,7 @@ func TestLostReplyOvertaken(t *testing.T) {
 			return errGone // a RemoveMember's NotFound
 		}
 		delete(d.Scopes, "team-a")
-		d.Audit = append(d.Audit, AuditEvent{Actor: "root", Action: "scope.delete", Target: "team-a"})
+		d.Audit = append(d.Audit, AuditEvent{Actor: "root", Action: "membership.remove", Target: "team-a"})
 		return nil
 	})
 	if err != nil || applied != 1 {
