@@ -81,9 +81,13 @@ jobs:
         run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/... ./control/...   # TestExposureModelValkey too
         env:
           QUINT_BACKEND: typescript
+      # The Hegel machines sit in the packages they test, behind the hegel
+      # build tag (the go job's plain go test never compiles them, nor needs
+      # libhegel): vet them here, then run them.
+      - name: vet with the hegel tag
+        run: go vet -tags hegel ./...
       - name: "the gateway against its models (qhegel: Hegel drives, the model judges; planted bugs caught)"
-        working-directory: test/props
-        run: go test -count=1 -timeout 20m ./...
+        run: go test -count=1 -timeout 20m -tags hegel ./gateway/...
         env:
           QUINT_BACKEND: typescript
 

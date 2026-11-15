@@ -1,4 +1,6 @@
-package props
+//go:build hegel
+
+package limit
 
 import (
 	"testing"
