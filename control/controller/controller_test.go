@@ -79,10 +79,22 @@ func newWorld(t *testing.T) *world {
 		w.replicas[id] = r
 	}
 	w.gateway = &gwsnap.Bucket{Bucket: b, Keys: sign.Ed25519Keys{"k": pk}, Pool: "internal",
-		Holder: &gwsnap.Holder{Env: key.Live, Now: func() time.Time { return start }}, Secrets: secrets{}}
+		Holder: &gwsnap.Holder{Env: key.Live, Now: w.latest}, Secrets: secrets{}}
 	w.write("backend.yaml", backend)
 	w.write("claude.yaml", route("claude"))
 	return w
+}
+
+// latest is the gateway's clock: the latest replica's, so a pointer is
+// never issued in the gateway's future (it refuses one beyond its skew).
+func (w *world) latest() time.Time {
+	var t time.Time
+	for _, r := range w.replicas {
+		if r.clock.After(t) {
+			t = r.clock
+		}
+	}
+	return t
 }
 
 func (w *world) write(name, body string) {

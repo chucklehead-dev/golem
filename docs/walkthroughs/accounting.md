@@ -25,7 +25,7 @@ spend by a time boundary and minute counters).
 | `control/spend/spend.go` | the known-spend job: `Job`, the `Ledger` it reads (and `Ingestion`, each site's latest row), and `ClickHouse`, the ledger's queries |
 | `deploy/clickhouse/spend.sql` | the ledger (`golem.spend`), its deduplicated view, `golem.spend_by_event`, which the job sums, and `golem.ingest_by_site`, each site's latest row |
 | `control/controller/controller.go:343` | where each publication runs the job and stamps every scope with its result |
-| `cmd/golem-gateway/main.go:160` | `OnApply`: each applied snapshot's known spend handed to the limiter |
+| `cmd/golem-gateway/main.go:278` | `OnApply`: each applied snapshot's known spend handed to the limiter |
 | `gateway/proxy/proxy.go:291` | the request path: `settlement` ends each ticket once (`complete`, `cancel`) |
 | `model/exposure.md`, `model/accounting.md` | the Quint models the design is checked against |
 
