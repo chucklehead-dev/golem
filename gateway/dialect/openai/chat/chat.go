@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"errors"
+	"fmt"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
@@ -61,6 +62,10 @@ type Request struct {
 var (
 	ErrNoModel = errors.New(`chat: the request has no "model" string; name a model or alias`)
 	ErrField   = errors.New("chat: a routing field has the wrong type")
+	// ErrStore is ErrField for store: it decides whether the provider keeps
+	// the conversation, so a value that is not a boolean must not pass as
+	// not storing (the storage policy would fail open on a wrong type).
+	ErrStore = fmt.Errorf(`%w: "store" must be true, false or null; send a JSON boolean`, ErrField)
 )
 
 // Scan reads the routing fields of body.
@@ -121,7 +126,13 @@ func (r *Request) Scan(body []byte) error {
 			if err != nil {
 				return err
 			}
-			r.Store, r.storeSpan = v.Kind() == 't', span
+			switch v.Kind() {
+			case 't':
+				r.Store, r.storeSpan = true, span
+			case 'f', 'n': // null: the default, not stored
+			default:
+				return ErrStore
+			}
 		case "n":
 			r.Flags |= FlagN
 			v, _, err := d.ReadValue()
