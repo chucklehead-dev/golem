@@ -126,8 +126,16 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    key, member, scope, the first reached refusing (`budget.key_cap`,
    `budget.member_cap`, `budget.pool_exhausted`), under the scope's
    budget mode (org-model.md §4.2). Refusals are 402 (budgets and caps)
-   or 429 (limits). *Planned, not built:* rate limits per member and
-   scope, in the same round trip.
+   or 429 (limits).
+
+   A call is charged its scope's **rate limits** once, before admission
+   (a ScopePolicy's `rateLimits: {member: {requestsPerMinute,
+   tokensPerMinute}, scope: {...}}`, PRD §5.5): a bucket per member and
+   one for the scope, taken together or not at all, each as the quota
+   buckets below (a request, estimated tokens, corrected at the end). Past
+   either, `limit.rate` with a Retry-After, naming which, in every budget
+   mode (a limit, not a budget). One Valkey round trip per call on a
+   scope with rate limits; failing open with Valkey down.
 
    Each **attempt** is charged its deployment's share of the provider's
    quota (a Deployment's `quota: {requestsPerMinute, tokensPerMinute}`,

@@ -123,14 +123,14 @@ type Deployment struct {
 	// statically), shared by the site's gateways in Valkey: an attempt past
 	// it goes to the pool's next deployment, and a call that finds every
 	// one at its quota is refused limit.provider_quota with a Retry-After.
-	Quota *Quota `json:"quota,omitempty"`
+	Quota *Rate `json:"quota,omitempty"`
 }
 
-// Quota is a per-minute allowance: requests, and tokens (uncached input,
-// cache writes and output; an attempt is charged its input's bytes over
+// Rate is a per-minute allowance: requests, and tokens (uncached input,
+// cache writes and output; a request is charged its input's bytes over
 // four and its max_tokens, corrected to its usage when it ends). 0 in
 // either: no limit on it.
-type Quota struct {
+type Rate struct {
 	RequestsPerMinute int64 `json:"requestsPerMinute,omitempty"`
 	TokensPerMinute   int64 `json:"tokensPerMinute,omitempty"`
 }
@@ -226,6 +226,11 @@ type ScopePolicySpec struct {
 	// it is refused budget.member_cap, under the budget's mode. Zero is
 	// none.
 	DefaultMemberCapMicros int64 `json:"defaultMemberCapMicros,omitempty"`
+	// RateLimits are the scope's rate limits (PRD §5.5): each member's and
+	// the whole scope's, at this site. A call past either is refused
+	// limit.rate, 429 with a Retry-After, in every budget mode (a limit,
+	// not a budget); with Valkey unreachable they fail open.
+	RateLimits *RateLimits `json:"rateLimits,omitempty"`
 	// BudgetMode is what the budget does at admission (PRD §9.1): observe
 	// (the default: calls over it are admitted and their ledger rows
 	// marked), warn (admitted, marked, and the response carries a
@@ -248,6 +253,12 @@ type ScopePolicySpec struct {
 	// (approved fields, betas and versions only) or compatible (unknown
 	// features forwarded); unset, restricted except on agent routes.
 	Features string `json:"features,omitempty"`
+}
+
+// RateLimits are a scope's rate limits.
+type RateLimits struct {
+	Member *Rate `json:"member,omitempty"`
+	Scope  *Rate `json:"scope,omitempty"`
 }
 
 // LocalIdentity is standalone mode's stand-in for the state document's

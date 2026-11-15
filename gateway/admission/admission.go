@@ -147,20 +147,32 @@ type Rate struct {
 	RequestsPerMinute, TokensPerMinute int64
 }
 
-// Quotas meters a deployment's share of its provider account's quota
-// (PRD §9.2, ADR 0012), shared by a site's gateways: each attempt takes
-// one request and its estimated tokens, and the estimate is corrected once
-// the attempt's usage is known. Checked per attempt (model/attempts.md's
-// QUOTA_PER_ATTEMPT): a failover must not land on a deployment at its
-// quota.
-type Quotas interface {
-	// TakeQuota takes an attempt's request and tokens from deployment's
-	// share, or reports how long until it can; an unreachable store admits
-	// (rate limits fail open, PRD §5.5).
-	TakeQuota(ctx context.Context, deployment string, r Rate, tokens int64) (ok bool, wait time.Duration)
-	// AdjustQuota gives back tokens (or, negative, takes more): the
-	// estimate's error, or a refused attempt's whole estimate.
-	AdjustQuota(ctx context.Context, deployment string, r Rate, tokens int64)
+// Meter is one per-minute bucket a request is charged to: a deployment's
+// share of its provider's quota (PRD §9.2, ADR 0012), or a member's or a
+// scope's rate limit (PRD §5.5), each shared by a site's gateways.
+type Meter struct {
+	Key  string // QuotaMeter, MemberRateMeter, ScopeRateMeter
+	Rate Rate
+}
+
+// The meters' keys.
+func QuotaMeter(deployment string) string            { return "q:" + deployment }
+func MemberRateMeter(scope, principal string) string { return "rm:" + scope + "/" + principal }
+func ScopeRateMeter(scope string) string             { return "rs:" + scope }
+
+// Meters takes requests and tokens from meters: a call's rate limits
+// once, its deployment's quota share each attempt (model/attempts.md's
+// QUOTA_PER_ATTEMPT: a failover must not land on a deployment at its
+// quota). Each take is one request and an estimate of its tokens, the
+// estimate corrected once its usage is known.
+type Meters interface {
+	// Take takes a request and tokens from every meter of ms, or from none,
+	// reporting the first it could not (its index) and how long until it
+	// could; an unreachable store admits (rate limits fail open, PRD §5.5).
+	Take(ctx context.Context, ms []Meter, tokens int64) (ok bool, over int, wait time.Duration)
+	// Adjust gives tokens back to every meter of ms (or, negative, takes
+	// more): an estimate's error, or a refused attempt's whole estimate.
+	Adjust(ctx context.Context, ms []Meter, tokens int64)
 }
 
 // Refusal is a call admission turned away: rendered with its code, and a

@@ -12,6 +12,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
+	"github.com/chucklehead-dev/golem/lib/key"
 )
 
 // quotaRoute is a route over two deployments of one stub each, with quotas.
@@ -39,7 +40,7 @@ func quotaCall(h *Handler) *httptest.ResponseRecorder {
 func TestQuotaFailover(t *testing.T) {
 	a, b := &stub{events: anthropicStream(1)}, &stub{events: anthropicStream(1)}
 	one := admission.Rate{RequestsPerMinute: 1}
-	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, b, one, one), Quotas: limit.New(limit.NewMem())}
+	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, b, one, one), Meters: limit.New(limit.NewMem())}
 	if w := quotaCall(h); w.Code != 200 || a.got == nil || b.got != nil {
 		t.Fatalf("the first call: %d, a %v b %v; want a's", w.Code, a.got != nil, b.got != nil)
 	}
@@ -65,13 +66,50 @@ func TestQuotaFailover(t *testing.T) {
 func TestQuotaTokens(t *testing.T) {
 	a := &stub{events: anthropicStream(1)}
 	q := admission.Rate{TokensPerMinute: 3000}
-	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, &stub{}, q, q), Quotas: limit.New(limit.NewMem())}
+	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, &stub{}, q, q), Meters: limit.New(limit.NewMem())}
 	h.Snapshots = gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(&route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(),
 		Pool: []*route.Target{{Backend: "anthropic", Deployment: "a", Model: "claude-sonnet", URL: upstreamURL, Transport: a, Quota: q}}})})
 	for i, want := range []int{200, 200, http.StatusTooManyRequests} {
 		a.events = anthropicStream(1)
 		if w := quotaCall(h); w.Code != want {
 			t.Fatalf("call %d: %d %s, want %d", i, w.Code, w.Body, want)
+		}
+	}
+}
+
+// TestRateLimits: a scope's rate limits, each member's and the whole
+// scope's, refuse a call past either with limit.rate and a Retry-After,
+// in observe mode too (a limit, not a budget), naming which; a member
+// past its own leaves the others theirs.
+func TestRateLimits(t *testing.T) {
+	alice, bob, carol := key.New(key.Dev), key.New(key.Dev), key.New(key.Dev)
+	s := &stub{events: anthropicStream(1)}
+	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude], rateLimits: {member: {requestsPerMinute: 1}, scope: {requestsPerMinute: 2}}}
+---
+apiVersion: golem.dev/v1alpha1
+kind: LocalIdentity
+metadata: {name: local}
+spec:
+  keys: [{key: `+alice+`, principal: alice, scope: team-a}, {key: `+bob+`, principal: bob, scope: team-a}, {key: `+carol+`, principal: carol, scope: team-a}]
+`, s)
+	body := `{"model":"claude","max_tokens":10,"stream":true,"messages":[]}`
+	for _, tc := range []struct {
+		key, who string
+		code     int
+		says     string
+	}{
+		{alice, "alice", 200, ""},
+		{alice, "alice again", 429, "your rate limit"},
+		{bob, "bob", 200, ""},
+		{carol, "carol, the scope's third", 429, "this scope's rate limit"},
+	} {
+		s.events = anthropicStream(1)
+		w := send(h, tc.key, body)
+		if w.Code != tc.code || tc.code == 429 && (errorCode(t, w) != "limit.rate" || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), tc.says)) {
+			t.Fatalf("%s: %d %s (Retry-After %q), want %d %s", tc.who, w.Code, w.Body, w.Header().Get("Retry-After"), tc.code, tc.says)
 		}
 	}
 }

@@ -362,7 +362,13 @@ Status:
   Retry-After, failing open with Valkey down. Tests: `TestQuotaFailover`,
   `TestQuotaTokens`, the store suite's rate buckets on Mem and Valkey,
   `TestQuotaFailsOpen`; ablated: the per-attempt check, the correction.
-  Open: per-member and per-scope rate limits; `x-ratelimit-*` headers.
+- **Built: rate limits per member and scope** (gateway.md §3 step 6): a
+  ScopePolicy's `rateLimits`, buckets taken together once a call, as the
+  quota's; `limit.rate` naming which, in every mode. Tests:
+  `TestRateLimits` (a member past its own, the scope past its own, a
+  refused take not counted against the scope), the store suite's
+  all-or-none case, `TestScopePolicyCheck`; ablated: the check. Open:
+  per-key rate limits and $/min (PRD §5.5), `x-ratelimit-*` headers.
 
 Only what the team uses. First, list their apps' and agents' endpoints in
 docs/acceptance/m1-exit.md from a week of their provider logs.

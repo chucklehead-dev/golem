@@ -76,18 +76,18 @@ func (f *valkeyFaults) Since(ctx context.Context, account, period string, since 
 	return f.Valkey.Since(ctx, account, period, since)
 }
 
-func (f *valkeyFaults) Take(ctx context.Context, key string, r Rate, tokens int64) (bool, time.Duration, error) {
+func (f *valkeyFaults) Take(ctx context.Context, ms []Meter, tokens int64) (bool, int, time.Duration, error) {
 	if f.down.Load() {
-		return false, 0, ErrUnavailable
+		return false, 0, 0, ErrUnavailable
 	}
-	return f.Valkey.Take(ctx, key, r, tokens)
+	return f.Valkey.Take(ctx, ms, tokens)
 }
 
-func (f *valkeyFaults) Adjust(ctx context.Context, key string, r Rate, tokens int64) error {
+func (f *valkeyFaults) Adjust(ctx context.Context, ms []Meter, tokens int64) error {
 	if f.down.Load() {
 		return ErrUnavailable
 	}
-	return f.Valkey.Adjust(ctx, key, r, tokens)
+	return f.Valkey.Adjust(ctx, ms, tokens)
 }
 
 // SetDown: going down, every slot lapses (the outage outlasts the TTL).

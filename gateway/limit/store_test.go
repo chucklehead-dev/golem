@@ -166,39 +166,45 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 		// about the refill of one; tokens may go into debt by one large
 		// request, which the next then waits for; a correction repays it.
 		ctx, st := t.Context(), newStore(t)
-		take := func(key string, r Rate, tokens int64) (bool, time.Duration) {
+		take := func(tokens int64, ms ...Meter) (bool, int, time.Duration) {
 			t.Helper()
-			ok, wait, err := st.Take(ctx, key, r, tokens)
+			ok, over, wait, err := st.Take(ctx, ms, tokens)
 			if err != nil {
 				t.Fatal(err)
 			}
-			return ok, wait
+			return ok, over, wait
 		}
-		rpm := Rate{RequestsPerMinute: 2}
-		if a, _ := take("r", rpm, 0); !a {
+		r := Meter{Key: "r", Rate: Rate{RequestsPerMinute: 2}}
+		if a, _, _ := take(0, r); !a {
 			t.Fatal("the first request")
 		}
-		if b, _ := take("r", rpm, 0); !b {
+		if b, _, _ := take(0, r); !b {
 			t.Fatal("the second request, within the minute's two")
 		}
-		if ok, wait := take("r", rpm, 0); ok || wait <= 25*time.Second || wait > 30*time.Second {
+		if ok, _, wait := take(0, r); ok || wait <= 25*time.Second || wait > 30*time.Second {
 			t.Fatalf("a third: %v, wait %v; want refused for about half a minute", ok, wait)
 		}
-		tpm := Rate{TokensPerMinute: 100}
-		if ok, _ := take("t", tpm, 150); !ok {
+		tk := Meter{Key: "t", Rate: Rate{TokensPerMinute: 100}}
+		if ok, _, _ := take(150, tk); !ok {
 			t.Fatal("a request larger than the minute's tokens: admitted, into debt")
 		}
-		if ok, wait := take("t", tpm, 1); ok || wait <= 25*time.Second || wait > 31*time.Second {
+		if ok, _, wait := take(1, tk); ok || wait <= 25*time.Second || wait > 31*time.Second {
 			t.Fatalf("after the debt: %v, wait %v; want refused for about the debt's 30 seconds", ok, wait)
 		}
-		if err := st.Adjust(ctx, "t", tpm, 100); err != nil {
+		if err := st.Adjust(ctx, []Meter{tk}, 100); err != nil {
 			t.Fatal(err)
 		}
-		if ok, _ := take("t", tpm, 1); !ok {
+		if ok, _, _ := take(1, tk); !ok {
 			t.Fatal("the debt repaid by a correction: admitted")
 		}
-		if ok, _ := take("other", tpm, 1); !ok {
-			t.Fatal("another bucket is its own")
+		// Several meters: all or none. With r full, a take of a fresh
+		// meter and r takes from neither, naming r.
+		fresh := Meter{Key: "f", Rate: Rate{RequestsPerMinute: 1}}
+		if ok, over, _ := take(0, fresh, r); ok || over != 1 {
+			t.Fatalf("a full second meter: %v over %d, want refused over 1", ok, over)
+		}
+		if ok, _, _ := take(0, fresh); !ok {
+			t.Fatal("the fresh meter was taken from by a refused take")
 		}
 	})
 	t.Run("counter", func(t *testing.T) {

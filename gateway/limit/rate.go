@@ -40,8 +40,8 @@ func (b *rateBucket) refill(now time.Time, r Rate) {
 	b.at = now
 }
 
-// take takes a request and tokens, or reports the wait until it can.
-func (b *rateBucket) take(r Rate, tokens int64) (bool, time.Duration) {
+// wait is how long until b has room for a request: 0 if it has.
+func (b *rateBucket) wait(r Rate) time.Duration {
 	var wait time.Duration
 	if r.RequestsPerMinute > 0 && b.requests < 1 {
 		wait = max(wait, minutesFor((1-b.requests)/float64(r.RequestsPerMinute)))
@@ -49,16 +49,17 @@ func (b *rateBucket) take(r Rate, tokens int64) (bool, time.Duration) {
 	if r.TokensPerMinute > 0 && b.tokens <= 0 {
 		wait = max(wait, minutesFor(-b.tokens/float64(r.TokensPerMinute))+time.Millisecond)
 	}
-	if wait > 0 {
-		return false, wait
-	}
+	return wait
+}
+
+// take takes a request and tokens from b, which has room.
+func (b *rateBucket) take(r Rate, tokens int64) {
 	if r.RequestsPerMinute > 0 {
 		b.requests--
 	}
 	if r.TokensPerMinute > 0 {
 		b.tokens -= float64(tokens)
 	}
-	return true, 0
 }
 
 func (b *rateBucket) adjust(r Rate, tokens int64) {
@@ -71,29 +72,42 @@ func minutesFor(m float64) time.Duration {
 	return time.Duration(math.Ceil(m*float64(time.Minute/time.Millisecond))) * time.Millisecond
 }
 
-// Take takes from a bucket (Store's).
-func (m *Mem) Take(_ context.Context, key string, r Rate, tokens int64) (bool, time.Duration, error) {
+// Meter is a bucket a request is charged to.
+type Meter = admission.Meter
+
+// Take takes a request and tokens from every meter or none (Store's).
+func (m *Mem) Take(_ context.Context, ms []Meter, tokens int64) (bool, int, time.Duration, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
-		return false, 0, ErrUnavailable
+		return false, 0, 0, ErrUnavailable
 	}
-	b := m.bucket(key)
-	b.refill(m.Now(), r)
-	ok, wait := b.take(r, tokens)
-	return ok, wait, nil
+	now := m.Now()
+	for i, mt := range ms {
+		b := m.bucket(mt.Key)
+		b.refill(now, mt.Rate)
+		if wait := b.wait(mt.Rate); wait > 0 {
+			return false, i, wait, nil
+		}
+	}
+	for _, mt := range ms {
+		m.bucket(mt.Key).take(mt.Rate, tokens)
+	}
+	return true, 0, 0, nil
 }
 
-// Adjust corrects a bucket's tokens (Store's).
-func (m *Mem) Adjust(_ context.Context, key string, r Rate, tokens int64) error {
+// Adjust corrects every meter's tokens (Store's).
+func (m *Mem) Adjust(_ context.Context, ms []Meter, tokens int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
 		return ErrUnavailable
 	}
-	b := m.bucket(key)
-	b.refill(m.Now(), r)
-	b.adjust(r, tokens)
+	for _, mt := range ms {
+		b := m.bucket(mt.Key)
+		b.refill(m.Now(), mt.Rate)
+		b.adjust(mt.Rate, tokens)
+	}
 	return nil
 }
 
@@ -110,114 +124,134 @@ func (m *Mem) bucket(key string) *rateBucket {
 	return b
 }
 
-// rateFill is the Lua form of rateBucket.refill: KEYS[1] the bucket, ARGV
-// requests and tokens a minute; it leaves r, tok and nowMs set, the store's
-// clock (one clock for every gateway).
+// rateFill is the Lua form of rateBucket.refill and its save, for the
+// buckets in KEYS, ARGV holding each one's requests and tokens a minute
+// (from ARGV[2]; ARGV[1] the tokens); nowMs is the store's clock (one
+// clock for every gateway).
 const rateFill = nowMillis + `
-local key, rpm, tpm = KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2])
-local v = redis.call('HMGET', key, 'r', 't', 'at')
-local r, tok, at = tonumber(v[1]), tonumber(v[2]), tonumber(v[3])
-if not at then r, tok, at = rpm, tpm, nowMs end
-local dt = math.max(nowMs - at, 0) / 60000
-r, tok = math.min(rpm, r + rpm * dt), math.min(tpm, tok + tpm * dt)
+local need, bs = tonumber(ARGV[1]), {}
+for i, key in ipairs(KEYS) do
+  local rpm, tpm = tonumber(ARGV[2*i]), tonumber(ARGV[2*i+1])
+  local v = redis.call('HMGET', key, 'r', 't', 'at')
+  local r, tok, at = tonumber(v[1]), tonumber(v[2]), tonumber(v[3])
+  if not at then r, tok, at = rpm, tpm, nowMs end
+  local dt = math.max(nowMs - at, 0) / 60000
+  bs[i] = {key = key, rpm = rpm, tpm = tpm, r = math.min(rpm, r + rpm * dt), tok = math.min(tpm, tok + tpm * dt)}
+end
 local function save()
-  redis.call('HSET', key, 'r', tostring(r), 't', tostring(tok), 'at', nowMs)
-  -- Kept while it is not full: a minute's refill, or its debt's repayment.
-  local life = 120000
-  if tpm > 0 and tok < 0 then life = life + math.ceil(-tok / tpm * 60000) end
-  redis.call('PEXPIRE', key, life)
+  for _, b in ipairs(bs) do
+    redis.call('HSET', b.key, 'r', tostring(b.r), 't', tostring(b.tok), 'at', nowMs)
+    -- Kept while it is not full: a minute's refill, or its debt's repayment.
+    local life = 120000
+    if b.tpm > 0 and b.tok < 0 then life = life + math.ceil(-b.tok / b.tpm * 60000) end
+    redis.call('PEXPIRE', b.key, life)
+  end
 end
 `
 
-// takeScript is rateBucket.take: ARGV[3] the tokens. It returns {1, 0},
-// or {0, the wait in ms}.
+// takeScript is Take: every bucket has room, or none is taken from. It
+// returns {1, 0, 0}, or {0, the first bucket without room (from 0), the
+// wait in ms}.
 var takeScript = valkey.NewLuaScript(rateFill + `
-local need, wait = tonumber(ARGV[3]), 0
-if rpm > 0 and r < 1 then wait = math.max(wait, math.ceil((1 - r) / rpm * 60000)) end
-if tpm > 0 and tok <= 0 then wait = math.max(wait, math.ceil(-tok / tpm * 60000) + 1) end
-if wait > 0 then save(); return {0, wait} end
-if rpm > 0 then r = r - 1 end
-if tpm > 0 then tok = tok - need end
+for i, b in ipairs(bs) do
+  local wait = 0
+  if b.rpm > 0 and b.r < 1 then wait = math.max(wait, math.ceil((1 - b.r) / b.rpm * 60000)) end
+  if b.tpm > 0 and b.tok <= 0 then wait = math.max(wait, math.ceil(-b.tok / b.tpm * 60000) + 1) end
+  if wait > 0 then save(); return {0, i - 1, wait} end
+end
+for _, b in ipairs(bs) do
+  if b.rpm > 0 then b.r = b.r - 1 end
+  if b.tpm > 0 then b.tok = b.tok - need end
+end
 save()
-return {1, 0}`)
+return {1, 0, 0}`)
 
-// adjustScript is rateBucket.adjust: ARGV[3] the tokens given back.
+// adjustScript is Adjust: ARGV[1] the tokens given back to each.
 var adjustScript = valkey.NewLuaScript(rateFill + `
-if tpm > 0 then tok = math.min(tpm, tok + tonumber(ARGV[3])) end
+for _, b in ipairs(bs) do
+  if b.tpm > 0 then b.tok = math.min(b.tpm, b.tok + need) end
+end
 save()
 return 1`)
 
-// Take takes from a bucket (Store's).
-func (v *Valkey) Take(ctx context.Context, key string, r Rate, tokens int64) (bool, time.Duration, error) {
-	c, err := v.client()
-	if err != nil {
-		return false, 0, err
+// meterArgs are a script's KEYS and ARGV for ms.
+func (v *Valkey) meterArgs(ms []Meter, tokens int64) ([]string, []string) {
+	keys, args := make([]string, len(ms)), append(make([]string, 0, 1+2*len(ms)), i64(tokens))
+	for i, mt := range ms {
+		keys[i] = v.prefix + "rate:" + mt.Key
+		args = append(args, i64(mt.Rate.RequestsPerMinute), i64(mt.Rate.TokensPerMinute))
 	}
-	res, err := takeScript.Exec(ctx, c, []string{v.prefix + "rate:" + key},
-		[]string{i64(r.RequestsPerMinute), i64(r.TokensPerMinute), i64(tokens)}).AsIntSlice()
-	if err != nil {
-		return false, 0, wrap(err)
-	}
-	if len(res) != 2 {
-		return false, 0, fmt.Errorf("limit: the take script returned %d values", len(res))
-	}
-	return res[0] == 1, time.Duration(res[1]) * time.Millisecond, nil
+	return keys, args
 }
 
-// Adjust corrects a bucket's tokens (Store's).
-func (v *Valkey) Adjust(ctx context.Context, key string, r Rate, tokens int64) error {
+// Take takes a request and tokens from every meter or none (Store's).
+func (v *Valkey) Take(ctx context.Context, ms []Meter, tokens int64) (bool, int, time.Duration, error) {
+	c, err := v.client()
+	if err != nil {
+		return false, 0, 0, err
+	}
+	keys, args := v.meterArgs(ms, tokens)
+	res, err := takeScript.Exec(ctx, c, keys, args).AsIntSlice()
+	if err != nil {
+		return false, 0, 0, wrap(err)
+	}
+	if len(res) != 3 {
+		return false, 0, 0, fmt.Errorf("limit: the take script returned %d values", len(res))
+	}
+	return res[0] == 1, int(res[1]), time.Duration(res[2]) * time.Millisecond, nil
+}
+
+// Adjust corrects every meter's tokens (Store's).
+func (v *Valkey) Adjust(ctx context.Context, ms []Meter, tokens int64) error {
 	c, err := v.client()
 	if err != nil {
 		return err
 	}
-	return wrap(adjustScript.Exec(ctx, c, []string{v.prefix + "rate:" + key},
-		[]string{i64(r.RequestsPerMinute), i64(r.TokensPerMinute), i64(tokens)}).Error())
+	keys, args := v.meterArgs(ms, tokens)
+	return wrap(adjustScript.Exec(ctx, c, keys, args).Error())
 }
 
-// QuotaAccount is a deployment's quota bucket's key.
-func QuotaAccount(deployment string) string { return "q:" + deployment }
-
-// TakeQuota takes an attempt's request and estimated tokens from a
-// deployment's quota share (admission.Quotas). While the store is
-// unreachable it admits: a rate limit fails open (PRD §5.5), the
-// provider's own 429 the backstop, and the attempt is retried elsewhere.
-func (l *Limiter) TakeQuota(ctx context.Context, deployment string, r Rate, tokens int64) (bool, time.Duration) {
-	if l.Down() {
-		return true, 0
+// Take takes a request and tokens from every meter of ms or none
+// (admission.Meters). While the store is unreachable it admits: a rate
+// limit fails open (PRD §5.5), and a provider's own 429 is the quota's
+// backstop.
+func (l *Limiter) Take(ctx context.Context, ms []Meter, tokens int64) (bool, int, time.Duration) {
+	if len(ms) == 0 || l.Down() {
+		return true, 0, 0
 	}
 	sctx, cancel := l.storeContext(ctx)
 	defer cancel()
-	ok, wait, err := l.store.Take(sctx, QuotaAccount(deployment), r, tokens)
+	ok, over, wait, err := l.store.Take(sctx, ms, tokens)
 	if err != nil {
 		if ctx.Err() == nil {
 			l.markDown(err)
-			l.failedOpen("provider quota", err)
+			l.failedOpen(err)
 		}
-		return true, 0
+		return true, 0, 0
 	}
-	return ok, wait
+	return ok, over, wait
 }
 
-// AdjustQuota corrects a deployment's quota share by tokens
-// (admission.Quotas); with the store unreachable, the correction is lost
-// (the bucket refills within a minute regardless).
-func (l *Limiter) AdjustQuota(ctx context.Context, deployment string, r Rate, tokens int64) {
-	if tokens == 0 || l.Down() {
+// Adjust corrects every meter of ms by tokens (admission.Meters); with the
+// store unreachable the correction is lost (a bucket refills within a
+// minute regardless).
+func (l *Limiter) Adjust(ctx context.Context, ms []Meter, tokens int64) {
+	if len(ms) == 0 || tokens == 0 || l.Down() {
 		return
 	}
 	sctx, cancel := l.storeContext(ctx)
 	defer cancel()
-	if err := l.store.Adjust(sctx, QuotaAccount(deployment), r, tokens); err != nil && ctx.Err() == nil {
+	if err := l.store.Adjust(sctx, ms, tokens); err != nil && ctx.Err() == nil {
 		l.markDown(err)
 	}
 }
 
 // failedOpen logs, at most once a minute, a rate limit admitted unchecked.
-func (l *Limiter) failedOpen(what string, err error) {
+func (l *Limiter) failedOpen(err error) {
 	now := l.now()
 	if last := l.openLogged.Load(); last != 0 && now.Sub(time.Unix(0, last)) < time.Minute {
 		return
 	}
 	l.openLogged.Store(now.UnixNano())
-	slog.Warn("limit: the site store is unreachable; admitting without the "+what+" check (rate limits fail open)", "err", err)
+	slog.Warn("limit: the site store is unreachable; admitting without rate limit and quota checks (they fail open)", "err", err)
 }

@@ -284,7 +284,7 @@ var regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`) // read-only
 // knows it.
 // quota validates a deployment's quota share, giving its requests and
 // tokens a minute (0, 0 for none).
-func quota(obj, at string, q *v1.Quota, add adder) (int64, int64) {
+func quota(obj, at string, q *v1.Rate, add adder) (int64, int64) {
 	if q == nil {
 		return 0, 0
 	}

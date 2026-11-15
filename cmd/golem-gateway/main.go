@@ -405,7 +405,7 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 	guard := newGuard(o)
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat,
 		"POST /v1/responses": proxy.OpenAIResponses} {
-		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), Quotas: limiter, MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health, Guard: guard}
+		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), Meters: limiter, MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health, Guard: guard}
 		if o.standalone != "" {
 			h = localOnly(d, h)
 		}

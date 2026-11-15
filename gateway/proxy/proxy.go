@@ -90,9 +90,9 @@ type Handler struct {
 	// Health is the deployments' health and the routes' retry budgets the
 	// gateway's handlers share (route.Health); nil: the handler's own.
 	Health *route.Health
-	// Quotas meters each deployment's share of its provider's quota per
-	// attempt (gateway/limit's Limiter); nil: none.
-	Quotas admission.Quotas
+	// Meters meters each call's rate limits and each attempt's deployment's
+	// share of its provider's quota (gateway/limit's Limiter); nil: none.
+	Meters admission.Meters
 	// Guard is the floor before authentication the gateway's handlers
 	// share (a source's requests and failed authentications); nil: none.
 	Guard *guard.Guard
@@ -199,9 +199,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.beforePick != nil {
 		h.beforePick(r)
 	}
-	// Each attempt is charged its deployment's quota share (PRD §9.2): its
-	// request, and its tokens as estimated here, corrected when it ends.
-	qh := &quotaHold{q: h.Quotas, ctx: context.WithoutCancel(ctx), tokens: int64(len(body))/4 + req.maxTokens*max(req.n, 1)}
+	// The call is charged its rate limits once (PRD §5.5), and each attempt
+	// its deployment's quota share (§9.2): a request, and its tokens as
+	// estimated here, corrected when it ends.
+	estimate := int64(len(body))/4 + req.maxTokens*max(req.n, 1)
+	rh := &meterHold{m: h.Meters, ctx: context.WithoutCancel(ctx), tokens: estimate}
+	if ms := rateMeters(principal, &rh.one); len(ms) > 0 {
+		if ok, over, at := rh.takeAll(ms); !ok {
+			msg := "your rate limit in this scope is reached for this minute; retry after the Retry-After"
+			if ms[over].Key == admission.ScopeRateMeter(principal.Scope) {
+				msg = "this scope's rate limit is reached for this minute; retry after the Retry-After"
+			}
+			h.fail(ctx, w, &refusal{code: contract.LimitRate, retryAfter: time.Until(at), msg: msg})
+			return
+		}
+	}
+	defer rh.done()
+	qh := &meterHold{m: h.Meters, ctx: context.WithoutCancel(ctx), tokens: estimate}
 	target, lease, retryAt := pick(hl, rt, tried, principal.ID, qh)
 	if target == nil {
 		if qh.full {
@@ -258,7 +272,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	call := telemetry.Call{RequestID: reqIDs, Principal: principal.ID, PrincipalKind: principal.Kind, Key: principal.Key,
 		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Started: started,
 		Currency: snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived()}
-	qh.usage = &call.Usage
+	qh.usage, rh.usage = &call.Usage, &call.Usage
 	if ticket != nil {
 		call.Period = ticket.Period() // the counter's: one period per call
 		call.OverBudget = h.overBudget(w, principal, ticket)
@@ -777,6 +791,24 @@ func budgetWarning(o admission.Over) string {
 		pct = known * 100 / limit
 	}
 	return o.Level.Code().Name + " " + strconv.FormatInt(pct, 10) + "%"
+}
+
+// rateMeters is a call's rate-limit meters: its member's and its scope's,
+// those its scope limits (none: an empty slice, backed by buf's one and a
+// second only when both are limited).
+func rateMeters(p *auth.Principal, buf *[1]admission.Meter) []admission.Meter {
+	member, scope := p.Limits.MemberRate, p.Limits.ScopeRate
+	switch {
+	case member != (admission.Rate{}) && scope != (admission.Rate{}):
+		return []admission.Meter{{Key: admission.MemberRateMeter(p.Scope, p.ID), Rate: member}, {Key: admission.ScopeRateMeter(p.Scope), Rate: scope}}
+	case member != (admission.Rate{}):
+		buf[0] = admission.Meter{Key: admission.MemberRateMeter(p.Scope, p.ID), Rate: member}
+		return buf[:]
+	case scope != (admission.Rate{}):
+		buf[0] = admission.Meter{Key: admission.ScopeRateMeter(p.Scope), Rate: scope}
+		return buf[:]
+	}
+	return nil
 }
 
 // upstreamRequest is the provider's request: the rewritten body, the
