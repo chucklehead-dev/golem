@@ -141,3 +141,70 @@ func TestJobReportsStaleResult(t *testing.T) {
 		t.Fatalf("a lease as long as the retention: %v", err)
 	}
 }
+
+// ingestionLedger is a fakeLedger that also says each site's latest row.
+type ingestionLedger struct {
+	fakeLedger
+	latest map[string]time.Time
+	fail   error
+}
+
+func (l *ingestionLedger) Latest(context.Context) (map[string]time.Time, error) {
+	return l.latest, l.fail
+}
+
+// TestJobReportsIngestionLag: each site's lag is now less its latest
+// ingested row; a site whose lag exceeds the allowance is behind (the
+// boundary would miss its late rows), as is a site seen before and now
+// without rows; a failed read keeps the last one, so the lags grow; the
+// boundary is not moved for any of it.
+func TestJobReportsIngestionLag(t *testing.T) {
+	now := time.Date(2026, 11, 14, 10, 0, 30, 0, time.UTC)
+	l := &ingestionLedger{fakeLedger: fakeLedger{spend: map[string]int64{"team-a": 7}}, latest: map[string]time.Time{
+		"eu-1": now.Add(-90 * time.Second), // within the allowance
+		"us-1": now.Add(-7 * time.Minute),  // past it
+	}}
+	j := &Job{Ledger: l, Now: func() time.Time { return now }}
+	if lags := j.Lags(); len(lags) != 0 {
+		t.Fatalf("lags before a read: %v", lags)
+	}
+	if err := j.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	lags := j.Lags()
+	if eu := lags["eu-1"]; eu.Lag != 90*time.Second || eu.Behind || eu.NoRows {
+		t.Errorf("eu-1 %+v: want 90s, not behind", eu)
+	}
+	if us := lags["us-1"]; us.Lag != 7*time.Minute || !us.Behind {
+		t.Errorf("us-1 %+v: want 7m, behind the 5m allowance", us)
+	}
+	if k, _ := j.Current(); !k.Since.Equal(time.Date(2026, 11, 14, 9, 55, 0, 0, time.UTC)) {
+		t.Errorf("the boundary moved to %v for a lagging site", k.Since)
+	}
+	// us-1's rows are gone (a rebuilt table); eu-1 caught up.
+	l.latest = map[string]time.Time{"eu-1": now}
+	if err := j.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	lags = j.Lags()
+	if us := lags["us-1"]; !us.NoRows || !us.Behind {
+		t.Errorf("us-1 %+v: want no rows, behind", us)
+	}
+	if eu := lags["eu-1"]; eu.Lag != 0 || eu.Behind {
+		t.Errorf("eu-1 %+v: want caught up", eu)
+	}
+	// The ledger stops answering: the last read is kept, and its lag grows.
+	l.fail = errors.New("connection refused")
+	now = now.Add(6 * time.Minute)
+	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "ingestion lag") {
+		t.Fatalf("a failed read: %v", err)
+	}
+	if eu := j.Lags()["eu-1"]; eu.Lag != 6*time.Minute || !eu.Behind {
+		t.Errorf("eu-1 %+v six minutes into an outage: want behind", eu)
+	}
+	// A Ledger that is not an Ingestion reports no lag.
+	j = &Job{Ledger: &fakeLedger{}, Now: func() time.Time { return now }}
+	if err := j.Step(t.Context()); err != nil || len(j.Lags()) != 0 {
+		t.Fatalf("%v, lags %v", err, j.Lags())
+	}
+}

@@ -22,8 +22,8 @@ spend by a time boundary and minute counters).
 | `gateway/limit/limit.go` | `Limiter`: one gateway's admission, its tickets, outages, renewal and replay |
 | `gateway/limit/store.go` | the `Store` interface (`store.go:105`), the shared budget check, and `Mem`, the in-memory store |
 | `gateway/limit/valkey.go` | `Valkey`, the production store: one Lua script per operation |
-| `control/spend/spend.go` | the known-spend job: `Job`, the `Ledger` it reads, and `ClickHouse`, the ledger's query |
-| `deploy/clickhouse/spend.sql` | the ledger (`golem.spend`), its deduplicated view, and `golem.spend_by_event`, which the job sums |
+| `control/spend/spend.go` | the known-spend job: `Job`, the `Ledger` it reads (and `Ingestion`, each site's latest row), and `ClickHouse`, the ledger's queries |
+| `deploy/clickhouse/spend.sql` | the ledger (`golem.spend`), its deduplicated view, `golem.spend_by_event`, which the job sums, and `golem.ingest_by_site`, each site's latest row |
 | `control/controller/controller.go:281` | where each publication runs the job and stamps every scope with its result |
 | `cmd/golem-gateway/main.go:147` | `OnApply`: each applied snapshot's known spend handed to the limiter |
 | `gateway/proxy/proxy.go:291` | the request path: `settlement` ends each ticket once (`complete`, `cancel`) |
@@ -96,7 +96,8 @@ answer:
 It holds while the ledger ingests within the allowance. A row later than
 that, or minutes a Valkey failover lost, undercount until a later boundary
 passes them or reconciliation books them: soft controls, stated in ADR
-0048, not hidden.
+0048, not hidden. The job measures the first: each site's ingestion lag,
+reported behind once it exceeds the allowance (`Job.Lags`, §5).
 
 The gateway side is `Known` (`limit.go:34`): `Period`, `Spend`, `Since`
 (B), applied per scope by `ApplySnapshot` (`limit.go:438`; the gateway's
@@ -300,7 +301,7 @@ minute.)
 
 The job (`control/spend`):
 
-- `Job.Step` (`spend.go:114`) places B: now minus the `Allowance` (five
+- `Job.Step` (`spend.go:146`; the spend half `stepSpend`, `:195`) places B: now minus the `Allowance` (five
   minutes, `-spend-allowance`), truncated to a minute, in the period now
   falls in. A B still in the previous period gives this period nothing,
   without asking the ledger. Otherwise it asks the `Ledger` for each
@@ -322,11 +323,33 @@ The job (`control/spend`):
   (TestJobReportsStaleResult). `Job.Validate` refuses a
   configuration whose `MaxAge` is no more than the allowance and a
   minute: every result would be stale from its first publication.
-- `ClickHouse.Spend` (`spend.go:213`) is one query (`spendQuery`,
-  `spend.go:206`) over ClickHouse's HTTP interface, the period and B
+- **Ingestion lag.** B assumes every call that ended before it is in the
+  ledger, which holds only while each site's rows arrive within the
+  allowance. With a `Ledger` that is also an `Ingestion` (`spend.go:46`;
+  `ClickHouse` is), `Step` also reads each site's latest ingested
+  `ended_at` (`stepLatest`, `spend.go:153`), and `Job.Lags`
+  (`spend.go:178`) reports each site's lag, now less that row's end, as a
+  `SiteLag`: **behind** when the lag exceeds the allowance (B is past the
+  site's latest row, so its calls that ended between the two and have not
+  arrived are in neither the snapshot's spend nor the minutes counted),
+  or when a site of an earlier read has no rows any more (`NoRows`: the
+  table rebuilt, or another ClickHouse). B is not moved for a lagging
+  site; the lag is reported, for an alert. A failed read keeps the last
+  one, so the lags grow with the clock while ClickHouse is down. A site
+  that served nothing lately is behind as well: the ledger cannot tell
+  idle from late, so an alert on it wants the site's traffic beside it
+  (TestJobReportsIngestionLag; TestClickHouseIngestion against a real
+  ClickHouse).
+- `ClickHouse.Spend` (`spend.go:294`) is one query (`spendQuery`,
+  `spend.go:287`) over ClickHouse's HTTP interface, the period and B
   bound as parameters, never in the query's text; `readSpend`
-  (`spend.go:244`) reads its rows (TestClickHouse against a fake;
+  (`spend.go:375`) reads its rows (TestClickHouse against a fake;
   TestClickHouseLedger against a real ClickHouse, below).
+  `ClickHouse.Latest` (`spend.go:313`, `latestQuery`) reads
+  `golem.ingest_by_site` (`spend.sql:104`), an `AggregatingMergeTree` of
+  each site's `max(ended_at)` filled by a materialized view from
+  `golem.spend`: a few rows to read whatever the ledger's size, exact
+  over unmerged parts since the query takes `max` again.
 - `Job.Current` is what a publication carries. The controller runs `Step`
   whenever a publication is due and stamps every scope of the
   entitlements with the result's period, B and spend
@@ -395,7 +418,7 @@ spend 0 (nothing ended before 11:55).
 
 ### 6.3 A snapshot's known spend and boundary reaching the gateways
 
-9. **12:06:00, golem-control publishes.** `Job.Step` (`spend.go:114`)
+9. **12:06:00, golem-control publishes.** `Job.Step` (`spend.go:146`)
    places B at 12:01 (12:06 minus five minutes) and asks ClickHouse for
    the spend of 2026-11's rows that ended before 12:01:00.000: a's 3. The
    controller stamps `team-a` with period 2026-11, B 12:01, spend 3
@@ -411,7 +434,9 @@ spend 0 (nothing ended before 11:55).
     minutes from 12:03 do not: exact. If it is later than the allowance,
     say at 12:09, the 12:08 snapshot misses it while its minutes from 12:03
     lack it too: an undercount of 2 until a publication after the row is
-    ingested (ADR 0048's stated limit).
+    ingested (ADR 0048's stated limit). From 12:07 on, `Job.Lags` reports
+    b's site behind (its latest row ended at 12:02:10, more than the
+    allowance back) until the row arrives.
 
 ## 7. The models and how the tests use them
 
@@ -472,6 +497,7 @@ replica to.
 | A boundary older than the retention allows is reported stale | `Job.MaxAge`, `Job.Stale`, `Step`'s error | TestJobReportsStaleResult |
 | The snapshot's spend counts each event once, before B only | `spendQuery` over `spend_by_event FINAL` | TestClickHouseLedger, TestClickHouse |
 | A boundary on a whole minute, an allowance back; a new period from nothing | `Job.Step` | TestJob, TestKnownSpend |
+| A site whose rows arrive later than the allowance (or no longer at all) is reported behind; B is not moved for it | `Job.Lags`, `stepLatest`, `ClickHouse.Latest` over `golem.ingest_by_site` | TestJobReportsIngestionLag, TestClickHouseIngestion |
 | Sums exact | `account`'s clamp to `MaxMicros`; config's budget bound | TestStoresAgreeVaried |
 | The counter bounded | retention: `trim`, `Mem.add` | TestBoundary; Valkey "a counter keeps a retention's minutes and its whole total" |
 | A cancelled call keeps its slot for its tail | `Cancel`, `EndAt`, `Ended` | TestLimits, TestAdmitter |
@@ -489,8 +515,11 @@ replica to.
 - **Late rows and lost minutes undercount.** A row later than the
   ingestion allowance, or minutes a Valkey failover lost, are missing from
   known spend until a later boundary passes them or reconciliation books
-  them (ADR 0048). `ReplicaAcks` narrows the second; the collector's lag
-  is alerted on.
+  them (ADR 0048). `ReplicaAcks` narrows the second; the first is
+  measured: `Job.Lags` reports each site's ingestion lag and whether it is
+  past the allowance. It is not yet exported as a metric
+  (`golem.control.spend.ingestion_lag`, to come), and a quiet site reads
+  as lagging.
 - **Other sites' spend after B.** The counter is the site's own: another
   site's calls that ended after B reach a gateway only with a snapshot
   whose B has passed them (ADR 0048).

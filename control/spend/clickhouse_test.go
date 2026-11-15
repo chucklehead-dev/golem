@@ -75,6 +75,67 @@ func TestClickHouseLedger(t *testing.T) {
 	}
 }
 
+// TestClickHouseIngestion runs deploy/clickhouse/spend.sql as
+// TestClickHouseLedger does and checks Latest against it: each site's
+// latest ended_at, over inserts not yet merged and in any order (an older
+// row arriving last does not lower it); a site with no rows is not listed.
+// Then a Job over it reports the lagging site behind.
+func TestClickHouseIngestion(t *testing.T) {
+	base := os.Getenv("GOLEM_CLICKHOUSE_URL")
+	if base == "" {
+		t.Skip("no ClickHouse: set GOLEM_CLICKHOUSE_URL (e.g. http://127.0.0.1:8123) to run the ledger's DDL and query")
+	}
+	ch := chClient{base: base, user: os.Getenv("GOLEM_CLICKHOUSE_USER"), password: os.Getenv("GOLEM_CLICKHOUSE_PASSWORD")}
+	db := "golem_test_" + strings.ToLower(rand.Text()[:10])
+	ddl, err := os.ReadFile("../../deploy/clickhouse/spend.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ch.exec(context.Background(), "DROP DATABASE IF EXISTS "+db) })
+	for _, stmt := range statements(strings.ReplaceAll(string(ddl), "golem.", db+".")) {
+		stmt = strings.Replace(stmt, "CREATE DATABASE IF NOT EXISTS golem", "CREATE DATABASE IF NOT EXISTS "+db, 1)
+		if err := ch.exec(t.Context(), stmt); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+	c := ClickHouse{URL: base, User: ch.user, Password: ch.password, Database: db}
+	if got, err := c.Latest(t.Context()); err != nil || len(got) != 0 {
+		t.Fatalf("an empty ledger: %v %v", got, err)
+	}
+	n := 0
+	insert := func(site, ended string) {
+		t.Helper()
+		n++
+		e := fmt.Sprintf("00000000-0000-0000-0000-%012d", n)
+		row := fmt.Sprintf(`{"schema_version":2,"row_kind":"attempt","request_id":%q,"attempt_id":%q,"event_id":%q,"started_at":%q,"ended_at":%q,"period":"2026-11-01","site":%q,"scope_id":"team-a","cost_micros":1,"currency":"USD"}`,
+			e, e, e, ended, ended, site)
+		if err := ch.exec(t.Context(), "INSERT INTO "+db+".spend FORMAT JSONEachRow\n"+row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each insert its own part: no merge yet.
+	insert("eu-1", "2026-11-14 09:58:00.000")
+	insert("eu-1", "2026-11-14 09:59:30.250")
+	insert("eu-1", "2026-11-14 09:10:00.000") // an older row, arriving last
+	insert("us-1", "2026-11-14 09:53:00.000")
+	got, err := c.Latest(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]time.Time{"eu-1": time.Date(2026, 11, 14, 9, 59, 30, 250e6, time.UTC), "us-1": time.Date(2026, 11, 14, 9, 53, 0, 0, time.UTC)}
+	if len(got) != len(want) || !got["eu-1"].Equal(want["eu-1"]) || !got["us-1"].Equal(want["us-1"]) {
+		t.Fatalf("latest %v, want %v", got, want)
+	}
+	now := time.Date(2026, 11, 14, 10, 0, 30, 0, time.UTC)
+	j := &Job{Ledger: c, Now: func() time.Time { return now }}
+	if err := j.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if lags := j.Lags(); lags["eu-1"].Behind || !lags["us-1"].Behind || lags["us-1"].Lag != 7*time.Minute+30*time.Second {
+		t.Fatalf("lags %+v: want us-1 behind by 7m30s, eu-1 not", lags)
+	}
+}
+
 // statements splits the DDL file into statements, comments dropped.
 func statements(ddl string) []string {
 	var b strings.Builder

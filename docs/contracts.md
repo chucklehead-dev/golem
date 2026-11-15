@@ -101,7 +101,9 @@ prevent double counting.
   `event_id`. The site counter holds the same calls' costs by the minute
   of their end, so a call is counted on one side of B only. A row that
   arrives later than the allowance is counted from the next snapshot
-  whose boundary passes it, and by reconciliation.
+  whose boundary passes it, and by reconciliation; golem-control reports
+  each site whose latest ingested `ended_at` is more than the allowance
+  old (`golem.ingest_by_site`, `spend.Job.Lags`).
 - Rounding: per row, cost is computed in micro-units from integer token
   counts and prices in micro-units per million tokens, rounded half-even
   once, at the end.

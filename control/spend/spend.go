@@ -11,6 +11,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,34 @@ type Ledger interface {
 	// Spend sums each scope's cost in period over the calls that ended
 	// before before.
 	Spend(ctx context.Context, period string, before time.Time) (map[string]int64, error)
+}
+
+// Ingestion is a Ledger that also says how far each site's rows have
+// arrived: the boundary assumes every call that ended before it is in the
+// ledger, which holds only while a site's rows arrive within the
+// allowance. A Ledger without it reports no lag (Job.Lags is empty).
+type Ingestion interface {
+	// Latest is, by site, the latest ended_at of any row ingested from it.
+	Latest(ctx context.Context) (map[string]time.Time, error)
+}
+
+// SiteLag is one site's ingestion lag as of the job's clock.
+type SiteLag struct {
+	// Latest is the latest ended_at ingested from the site; zero with
+	// NoRows.
+	Latest time.Time
+	// NoRows: the site was in an earlier read and is in the ledger no
+	// more (the table rebuilt or truncated, or another ClickHouse).
+	NoRows bool
+	// Lag is now − Latest; zero with NoRows.
+	Lag time.Duration
+	// Behind: Lag exceeds the allowance, or NoRows. The boundary then lies
+	// past the site's latest row, so any of its calls that ended between
+	// the two and have not arrived are in neither the snapshot's spend
+	// nor the gateways' minutes (ADR 0048): known spend undercounts them
+	// until a later boundary passes their rows. A site that served nothing
+	// lately is behind too: the ledger cannot tell idle from late.
+	Behind bool
 }
 
 // Age is how far the result's boundary is behind now: an allowance and a
@@ -75,8 +104,9 @@ type Job struct {
 	// clocks (default ten minutes).
 	Margin time.Duration
 
-	mu   sync.Mutex
-	last *Known
+	mu     sync.Mutex
+	last   *Known
+	latest map[string]time.Time // by site, as last read; zero: no rows any more
 }
 
 // Defaults of the Job's durations.
@@ -107,11 +137,62 @@ func (j *Job) Validate() error {
 	return nil
 }
 
-// Step reads the ledger's spend at a new boundary. On a failure the last
-// result is kept for its own period (a new period's spend is not the old
-// one's), and the error returned, saying whether it is stale; Current says
-// what to publish.
+// Step reads the ledger's spend at a new boundary, and, from an Ingestion
+// ledger, each site's latest row (Lags). On a failure the last result is
+// kept for its own period (a new period's spend is not the old one's), and
+// the error returned, saying whether it is stale; Current says what to
+// publish. The boundary is never moved for a lagging site: Lags reports
+// it, for an alert.
 func (j *Job) Step(ctx context.Context) error {
+	return errors.Join(j.stepSpend(ctx), j.stepLatest(ctx))
+}
+
+// stepLatest reads each site's latest ingested row. On a failure the last
+// read is kept, so the lags grow with the clock: the job cannot see the
+// sites' rows arrive, and the alert stays on.
+func (j *Job) stepLatest(ctx context.Context) error {
+	in, ok := j.Ledger.(Ingestion)
+	if !ok {
+		return nil
+	}
+	got, err := in.Latest(ctx)
+	if err != nil {
+		return fmt.Errorf("ingestion lag: %w (the last read is kept: the lags grow until the ledger answers)", err)
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	next := map[string]time.Time{}
+	for site := range j.latest {
+		next[site] = time.Time{} // seen before: no rows, unless read now
+	}
+	for site, t := range got {
+		next[site] = t
+	}
+	j.latest = next
+	return nil
+}
+
+// Lags is each site's ingestion lag, as of now and the last read, by
+// site: empty before the first read, or for a Ledger that is not an
+// Ingestion. For a metric, and an alert on Behind.
+func (j *Job) Lags() map[string]SiteLag {
+	now := j.now()
+	allowance := cmp.Or(j.Allowance, DefaultAllowance)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	out := make(map[string]SiteLag, len(j.latest))
+	for site, t := range j.latest {
+		if t.IsZero() {
+			out[site] = SiteLag{NoRows: true, Behind: true}
+			continue
+		}
+		lag := now.Sub(t)
+		out[site] = SiteLag{Latest: t, Lag: lag, Behind: lag > allowance}
+	}
+	return out
+}
+
+func (j *Job) stepSpend(ctx context.Context) error {
 	now := j.now()
 	loc := cmp.Or(j.Location, time.UTC)
 	since := now.Add(-cmp.Or(j.Allowance, DefaultAllowance)).Truncate(time.Minute)
@@ -215,10 +296,33 @@ func (c ClickHouse) Spend(ctx context.Context, period string, before time.Time) 
 		"param_period": {budget.FirstDay(period)},
 		"param_before": {before.UTC().Format("2006-01-02 15:04:05.000")},
 	}
-	query := strings.Replace(spendQuery, "{db}", cmp.Or(c.Database, "golem"), 1)
-	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(c.URL, "/")+"/?"+q.Encode(), strings.NewReader(query))
+	var out map[string]int64
+	err := c.query(ctx, spendQuery, q, func(r io.Reader) (err error) { out, err = readSpend(r); return err })
+	return out, err
+}
+
+// latestQuery is each site's latest ingested ended_at
+// (deploy/clickhouse/spend.sql: golem.ingest_by_site, one row per site
+// once merged; max over the unmerged parts makes it exact at read time).
+const latestQuery = `SELECT site, toString(max(latest)) AS latest
+FROM {db}.ingest_by_site
+GROUP BY site
+FORMAT JSONEachRow`
+
+// Latest runs latestQuery: the Ingestion half.
+func (c ClickHouse) Latest(ctx context.Context) (map[string]time.Time, error) {
+	var out map[string]time.Time
+	err := c.query(ctx, latestQuery, url.Values{}, func(r io.Reader) (err error) { out, err = readLatest(r); return err })
+	return out, err
+}
+
+// query runs query in c's database, its values bound in params, and hands
+// the answer to read.
+func (c ClickHouse) query(ctx context.Context, query string, params url.Values, read func(io.Reader) error) error {
+	query = strings.Replace(query, "{db}", cmp.Or(c.Database, "golem"), 1)
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(c.URL, "/")+"/?"+params.Encode(), strings.NewReader(query))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if c.User != "" {
 		req.Header.Set("X-ClickHouse-User", c.User)
@@ -230,14 +334,41 @@ func (c ClickHouse) Spend(ctx context.Context, period string, before time.Time) 
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("ClickHouse: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		return fmt.Errorf("ClickHouse: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
-	return readSpend(io.LimitReader(resp.Body, 64<<20))
+	return read(io.LimitReader(resp.Body, 64<<20))
+}
+
+// readLatest reads latestQuery's rows: site to its latest ended_at.
+func readLatest(r io.Reader) (map[string]time.Time, error) {
+	out := map[string]time.Time{}
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		if len(strings.TrimSpace(sc.Text())) == 0 {
+			continue
+		}
+		var row struct {
+			Site   string `json:"site"`
+			Latest string `json:"latest"` // DateTime64(3, 'UTC') as text
+		}
+		if err := json.Unmarshal(sc.Bytes(), &row); err != nil {
+			return nil, fmt.Errorf("ClickHouse row %q: %w", sc.Text(), err)
+		}
+		t, err := time.Parse("2006-01-02 15:04:05.000", row.Latest)
+		if err != nil {
+			return nil, fmt.Errorf("ClickHouse row %q: %w", sc.Text(), err)
+		}
+		out[row.Site] = t.UTC()
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // readSpend reads the query's JSONEachRow rows: scope to spend.
@@ -267,4 +398,7 @@ func readSpend(r io.Reader) (map[string]int64, error) {
 	return out, nil
 }
 
-var _ Ledger = ClickHouse{}
+var (
+	_ Ledger    = ClickHouse{}
+	_ Ingestion = ClickHouse{}
+)

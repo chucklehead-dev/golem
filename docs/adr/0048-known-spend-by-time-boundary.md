@@ -75,7 +75,12 @@ prevented:
   ingested) nor the minutes counted (before B): an undercount of that
   row's cost until a later snapshot's boundary passes it, or
   reconciliation. The allowance is a deployment parameter, sized above
-  the collector's observed delivery lag, which is alerted on.
+  the collector's observed delivery lag, which is measured: the
+  known-spend job reads each site's latest ingested `ended_at`
+  (`golem.ingest_by_site`) and reports a site whose lag exceeds the
+  allowance, or that has no rows any more, as behind (`spend.Job.Lags`),
+  for an alert. B is not moved for it. The ledger cannot tell a quiet
+  site from a late one, so the alert reads the site's traffic beside it.
 - **A Valkey failover** that loses recent minutes undercounts them until
   the boundary passes them (the ledger has their rows): at most the
   allowance plus a minute's spend at the site. `ReplicaAcks` (`WAIT`)

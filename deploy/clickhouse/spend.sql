@@ -92,3 +92,24 @@ ORDER BY (scope_id, event_id);
 --   INSERT INTO golem.spend_by_event SELECT period, scope_id, event_id, ended_at, cost_micros FROM golem.spend;
 CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_by_event_mv TO golem.spend_by_event AS
 SELECT period, scope_id, event_id, ended_at, cost_micros FROM golem.spend;
+
+-- Ingestion lag's input (ADR 0048): each site's latest ended_at, filled
+-- from golem.spend by the materialized view below as rows arrive. Known
+-- spend's boundary assumes every call that ended before it is in the
+-- ledger; the known-spend job reads this every minute and reports a site
+-- whose latest row is more than the allowance old (spend.Job.Lags), whose
+-- later rows the boundary would miss. One row per site once merged; the
+-- query takes max over the parts not yet merged, so it is exact at read
+-- time. The read is of a few rows, whatever the ledger's size.
+CREATE TABLE IF NOT EXISTS golem.ingest_by_site (
+    site   LowCardinality(String),
+    latest SimpleAggregateFunction(max, DateTime64(3, 'UTC'))
+)
+ENGINE = AggregatingMergeTree
+ORDER BY site;
+
+-- Rows inserted before this view existed are not in the table: on a ledger
+-- that already has rows, backfill once with
+--   INSERT INTO golem.ingest_by_site SELECT site, max(ended_at) FROM golem.spend GROUP BY site;
+CREATE MATERIALIZED VIEW IF NOT EXISTS golem.ingest_by_site_mv TO golem.ingest_by_site AS
+SELECT site, max(ended_at) AS latest FROM golem.spend GROUP BY site;
