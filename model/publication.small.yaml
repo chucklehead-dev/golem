@@ -4,3 +4,28 @@ spec: publication.qnt
 module: small
 actions: {}
 invariants: [safe, revocationBounded, noExpiredServe, noRollback, noRollbackBelowCheckpoint, publicationsOrdered, revocationsSurviveRestore]
+simulate:
+  holds: [safe, revocationBounded, noExpiredServe, noRollback, noRollbackBelowCheckpoint, publicationsOrdered, revocationsSurviveRestore]
+  search: {depth: 8, states: 600000}
+  variants:
+    - name: design
+    - name: no fence
+      constants: {FENCE: 'false'}
+      holds: [revocationBounded, noExpiredServe, noRollbackBelowCheckpoint, revocationsSurviveRestore]
+      allows: [safe, noRollback, publicationsOrdered]
+    - name: lease from the gateway
+      constants: {LEASE_FROM_SOURCE: 'false'}
+      holds: [noExpiredServe, noRollback, noRollbackBelowCheckpoint, publicationsOrdered, revocationsSurviveRestore]
+      allows: [safe, revocationBounded]
+    - name: no trusted floor
+      constants: {TRUSTED_FLOOR: 'false'}
+      holds: [revocationBounded, noExpiredServe, noRollback, publicationsOrdered, revocationsSurviveRestore]
+      allows: [safe, noRollbackBelowCheckpoint]
+    - name: restore replaces
+      constants: {PRESERVE_ON_RESTORE: 'false'}
+      holds: [noExpiredServe, noRollback, noRollbackBelowCheckpoint, publicationsOrdered]
+      allows: [safe, revocationBounded, revocationsSurviveRestore]
+    - name: expiry unchecked
+      constants: {CHECK_EXPIRY: 'false'}
+      holds: [noRollback, noRollbackBelowCheckpoint, publicationsOrdered, revocationsSurviveRestore]
+      allows: [safe, revocationBounded, noExpiredServe]

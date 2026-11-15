@@ -44,12 +44,7 @@ done
 echo "== exhaustive: publication.small.yaml, every run up to a depth (not a sample)"
 if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
   . ./graph.sh
-  graph_holds publication 8 ""
-  graph_breaks publication 8 FENCE=false publicationsOrdered
-  graph_breaks publication 8 LEASE_FROM_SOURCE=false revocationBounded
-  graph_breaks publication 8 TRUSTED_FLOOR=false noRollbackBelowCheckpoint
-  graph_breaks publication 8 PRESERVE_ON_RESTORE=false revocationsSurviveRestore
-  graph_breaks publication 8 CHECK_EXPIRY=false noExpiredServe
+  matrix publication
 else
   echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
 fi

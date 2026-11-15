@@ -1,6 +1,32 @@
 # accounting.md's small instance, explored exhaustively (check-accounting.sh):
-# three requests, costs 1 or 3, a budget of 2, one call in flight.
+# three requests, costs 1 or 3, a budget of 2, one call in flight. Each
+# variant is a design: the two that hold, and each mechanism shown
+# necessary by the design without it (gotogether simulate -matrix). A
+# broken design lists exactly what it breaks: safe is their conjunction.
 spec: accounting.qnt
 module: small
 actions: {}
 invariants: [safe, withinBound, noDoubleCount, booksMatch]
+simulate:
+  holds: [safe, withinBound, noDoubleCount, booksMatch]
+  search: {depth: 12, states: 300000}
+  variants:
+    - name: soft
+    - name: worst check
+      constants: {WORST_CHECK: 'true', BUDGET: '4'}
+    - name: no limit
+      constants: {LIMIT_ON: 'false'}
+      holds: [noDoubleCount, booksMatch]
+      allows: [safe, withinBound]
+    - name: no slot renewal
+      constants: {RENEW_SLOTS: 'false'}
+      holds: [noDoubleCount, booksMatch]
+      allows: [safe, withinBound]
+    - name: no dedup
+      constants: {DEDUP: 'false'}
+      holds: [withinBound]
+      allows: [safe, noDoubleCount, booksMatch]
+    - name: no reconcile
+      constants: {RECONCILE: 'false'}
+      holds: [withinBound, noDoubleCount]
+      allows: [safe, booksMatch]

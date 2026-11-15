@@ -685,8 +685,20 @@ module naiveRestore {
 The instance the exhaustive search explores (freshness.small.yaml, run by
 check-freshness.sh where it has one): the design at sizes small enough to
 search every run to a depth. The binding names this module rather than
-repeating its constants, and the check scripts vary one switch at a time
-with `-const`.
+repeating its constants. Its variants (`simulate.variants`) are the
+designs, each with the mechanism it turns off, what it must hold and
+what it must break; `gotogether simulate -matrix` searches every run of
+each to the binding's depth and writes this table, the properties by the
+designs (a cell "breaks in N steps" is its shortest counterexample):
+
+<!-- gotogether:matrix -->
+| | design | anchor latest | fence one | restore replaces |
+|---|---|---|---|---|
+| safe | holds | breaks in 7 steps | breaks in 5 steps | breaks in 2 steps |
+| restrictionsBounded | holds | breaks in 7 steps | holds | holds |
+| noConfigRollback | holds | holds | breaks in 5 steps | holds |
+| restoreNeverWidens | holds | holds | holds | breaks in 2 steps |
+<!-- /gotogether:matrix -->
 
 ```quint freshness.qnt +=
 

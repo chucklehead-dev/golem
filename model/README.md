@@ -19,4 +19,13 @@ runs when gotogether is installed): every run up to a depth, each broken
 design's shortest counterexample, and dead actions reported. The
 exhaustive search is a proof for its instance and depth only.
 
+The small instance's designs are its binding's `simulate.variants`: each
+with the mechanism it turns off, what it must hold and exactly what it
+breaks. `simulate -matrix` searches every one and writes the table, the
+properties by the designs, into the model's document (its "The small
+instance" section); CI fails if a committed table is not the model's.
+Leadership still runs one search per design (`graph.sh`'s `graph_holds`,
+`graph_breaks`) until a variant's own search depth is applied
+(gotogether#144).
+
 Planned (testing.md §3): approvals and grants.

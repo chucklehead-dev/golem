@@ -863,10 +863,25 @@ mutants of the code, which the checks must catch.
 ## The small instance
 
 The instance the exhaustive search explores (publication.small.yaml, run by
-check-publication.sh where it has one): the design at sizes small enough to
+check.sh where it has one): the design at sizes small enough to
 search every run to a depth. The binding names this module rather than
-repeating its constants, and the check scripts vary one switch at a time
-with `-const`.
+repeating its constants. Its variants (`simulate.variants`) are the
+designs, each with the mechanism it turns off, what it must hold and
+what it must break; `gotogether simulate -matrix` searches every run of
+each to the binding's depth and writes this table, the properties by the
+designs (a cell "breaks in N steps" is its shortest counterexample):
+
+<!-- gotogether:matrix -->
+| | design | no fence | lease from the gateway | no trusted floor | restore replaces | expiry unchecked |
+|---|---|---|---|---|---|---|
+| safe | holds | breaks in 5 steps | breaks in 6 steps | breaks in 4 steps | breaks in 2 steps | breaks in 3 steps |
+| revocationBounded | holds | holds | breaks in 6 steps | holds | breaks in 8 steps | breaks in 4 steps |
+| noExpiredServe | holds | holds | holds | holds | holds | breaks in 3 steps |
+| noRollback | holds | breaks in 7 steps | holds | holds | holds | holds |
+| noRollbackBelowCheckpoint | holds | holds | holds | breaks in 4 steps | holds | holds |
+| publicationsOrdered | holds | breaks in 5 steps | holds | holds | holds | holds |
+| revocationsSurviveRestore | holds | holds | holds | holds | breaks in 2 steps | holds |
+<!-- /gotogether:matrix -->
 
 ```quint publication.qnt +=
 

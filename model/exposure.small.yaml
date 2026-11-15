@@ -5,3 +5,32 @@ spec: exposure.qnt
 module: small
 actions: {}
 invariants: [safe, limitsHonoured, withinBound, knownNeverOver, noLostIncrements]
+simulate:
+  holds: [safe, limitsHonoured, withinBound, knownNeverOver, noLostIncrements]
+  search: {depth: 7, states: 600000}
+  variants:
+    - name: design
+    - name: no scope limit
+      constants: {SCOPE_LIMIT_ON: 'false'}
+      holds: [knownNeverOver, noLostIncrements]
+      allows: [safe, limitsHonoured, withinBound]
+    - name: reset at apply
+      constants: {HANDOFF: '"resetAtApply"'}
+      holds: [limitsHonoured, knownNeverOver]
+      allows: [safe, withinBound, noLostIncrements]
+    - name: sum
+      constants: {HANDOFF: '"sum"'}
+      holds: [limitsHonoured, withinBound, noLostIncrements]
+      allows: [safe, knownNeverOver]
+    - name: no allowance
+      constants: {HANDOFF: '"noAllowance"'}
+      holds: [limitsHonoured, knownNeverOver]
+      allows: [safe, withinBound, noLostIncrements]
+    - name: no hold on cancel
+      constants: {HOLD_ON_CANCEL: 'false'}
+      holds: [withinBound, knownNeverOver, noLostIncrements]
+      allows: [safe, limitsHonoured]
+    - name: no reacquire
+      constants: {REACQUIRE: 'false'}
+      holds: [withinBound, knownNeverOver, noLostIncrements]
+      allows: [safe, limitsHonoured]

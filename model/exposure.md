@@ -796,8 +796,21 @@ module noReacquire {
 The instance the exhaustive search explores (exposure.small.yaml, run by
 check-exposure.sh where it has one): the design at sizes small enough to
 search every run to a depth. The binding names this module rather than
-repeating its constants, and the check scripts vary one switch at a time
-with `-const`.
+repeating its constants. Its variants (`simulate.variants`) are the
+designs, each with the mechanism it turns off, what it must hold and
+what it must break; `gotogether simulate -matrix` searches every run of
+each to the binding's depth and writes this table, the properties by the
+designs (a cell "breaks in N steps" is its shortest counterexample):
+
+<!-- gotogether:matrix -->
+| | design | no scope limit | reset at apply | sum | no allowance | no hold on cancel | no reacquire |
+|---|---|---|---|---|---|---|---|
+| safe | holds | breaks in 2 steps | breaks in 4 steps | breaks in 5 steps | breaks in 5 steps | breaks in 3 steps | breaks in 7 steps |
+| limitsHonoured | holds | breaks in 2 steps | holds | holds | holds | breaks in 3 steps | breaks in 7 steps |
+| withinBound | holds | breaks in 4 steps | breaks in 6 steps | holds | breaks in 7 steps | holds | holds |
+| knownNeverOver | holds | holds | holds | breaks in 5 steps | holds | holds | holds |
+| noLostIncrements | holds | holds | breaks in 4 steps | holds | breaks in 5 steps | holds | holds |
+<!-- /gotogether:matrix -->
 
 ```quint exposure.qnt +=
 

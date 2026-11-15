@@ -69,7 +69,7 @@ jobs:
         run: |
           npm install --global @informalsystems/quint@0.33.1
           go install github.com/driusan/lmt@v0.0.0-20210421124901-62fe18f2f6a6
-          go install github.com/chucklehead-dev/gotogether/cmd/gotogether@v0.0.0-20261115013712-0762ed8447bd
+          go install github.com/chucklehead-dev/gotogether/cmd/gotogether@v0.0.0-20261115031336-d4c558eec9b7
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: the generated models match the markdown
         run: make -C model verify-tangled
@@ -77,6 +77,8 @@ jobs:
         run: make -C model check
         env:
           QUINT_BACKEND: typescript
+      - name: the design matrices in the model documents are the models'
+        run: git diff --exit-code -- model/*.md
       - name: "the gateway against its models (connect: the model drives)"
         run: go test -count=1 -run 'TestPublicationModel|TestExposureModel' ./gateway/... ./control/...   # TestExposureModelValkey too
         env:

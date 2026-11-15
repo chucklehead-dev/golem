@@ -55,13 +55,7 @@ expect exposureDesign waiverTest pass
 echo "== exhaustive: exposure.small.yaml, every run up to a depth (not a sample)"
 if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
   . ./graph.sh
-  graph_holds exposure 7 ""  # with the clock, 8 passes the state bound
-  graph_breaks exposure 8 SCOPE_LIMIT_ON=false limitsHonoured
-  graph_breaks exposure 8 'HANDOFF="resetAtApply"' noLostIncrements
-  graph_breaks exposure 8 'HANDOFF="sum"' knownNeverOver
-  graph_breaks exposure 8 'HANDOFF="noAllowance"' noLostIncrements
-  graph_breaks exposure 8 HOLD_ON_CANCEL=false limitsHonoured
-  graph_breaks exposure 8 REACQUIRE=false limitsHonoured
+  matrix exposure
 else
   echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
 fi
