@@ -129,8 +129,8 @@ rather than sitting beside them.
 - **Model** (model/attempts.md, on the accounting model):
   - Attempts are made before commit, within a **per-request** retry budget
     (ADR 0002), with an aggregate cap per pool so retries cannot storm.
-  - Admission runs per attempt: each attempt checks its deployment's
-    provider quota share and rate counters in the same round trip, and
+  - Admission: the budget at the first attempt, as today; each attempt
+    checks its deployment's provider quota share and rate counters, and
     takes its own charge and event ID. One slot is held per call.
   - An uncertain attempt (sent, no answer) is not retried: its retry would
     double bill (ADR 0029: commitment is not idempotency). It is charged
@@ -164,8 +164,24 @@ rather than sitting beside them.
   shows the aggregate cap holding attempts per second under 1.5× the
   offered load.
 
+Status:
+- **Model: built.** model/attempts.md, checked by check-attempts.sh: the
+  design's sampled runs, four scenarios, six stories, and the small
+  instance's matrix (nine designs, every run to depth 14): the design holds
+  all nine properties; each of the eight broken designs breaks what it
+  must, and nothing else. Two results changed the plan:
+  - The budget need not be checked again per attempt: a call bills at most
+    once (refused and unreached attempts are free, an uncertain one ends
+    it), so at most `LIMIT` admitted calls are unbilled at once, and L×W
+    holds. A switch for the per-attempt check found no run it prevents.
+    Quota shares are checked per attempt (without it a failover lands on a
+    deployment at its quota).
+  - A retry after a commit, or after an uncertain attempt, also breaks the
+    budget bound (the call bills twice), not only one answer per caller and
+    the provider's work within the slots.
+
 Done when:
-- the model's exhaustive check holds, and finds each mutant;
+- ~~the model's exhaustive check holds, and finds each mutant~~ (done);
 - connect-driven tests run the proxy's loop against the model;
 - each mutant's code counterpart fails a test (ablated);
 - the storm simulation holds its bound;

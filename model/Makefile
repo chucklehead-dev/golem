@@ -2,7 +2,7 @@
 # Needs quint (npm i -g @informalsystems/quint) and lmt (go install github.com/driusan/lmt@latest).
 QUINT ?= quint
 LMT ?= lmt
-MODELS = publication accounting freshness exposure leadership
+MODELS = publication accounting freshness exposure leadership attempts
 
 GOTOGETHER ?= gotogether
 
@@ -27,6 +27,7 @@ check: tangle lint
 	QUINT=$(QUINT) ./check-freshness.sh
 	QUINT=$(QUINT) ./check-exposure.sh
 	QUINT=$(QUINT) ./check-leadership.sh
+	QUINT=$(QUINT) ./check-attempts.sh
 
 # CI: the committed .qnt files must match the markdown.
 verify-tangled:

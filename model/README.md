@@ -10,6 +10,7 @@ be run without lmt; `make verify-tangled` checks they match.
 | [publication.md](publication.md) | After a revocation is acknowledged, how long can any gateway keep serving the key, and what must hold for that bound? |
 | [freshness.md](freshness.md) | With two sources (the state document and the config CRDs), stale watch caches, Git rollbacks, leader changes and restores, is every restriction from either source honoured within one lease (ADR 0041 §5, §7.2)? |
 | [accounting.md](accounting.md) | With soft budgets (ADR 0031), is the overshoot within the stated bound, is anything counted twice, and do the books match the provider's bill after a crash? |
+| [attempts.md](attempts.md) | When a call is retried or fails over before it commits, does each caller get one answer, is every attempt charged once, does the budget bound hold, do retries stay within the slots, quotas and budgets, and does an ejected deployment see only its probe? |
 | [exposure.md](exposure.md) | For a scope shared by several principals on several gateways, with late ingestion, Valkey outages and cancelled calls, does the scope stay within a stated bound, and is the rest of the exposure recorded (ADR 0041 §6)? |
 
 Each model is checked two ways (`make check`): random simulation of a

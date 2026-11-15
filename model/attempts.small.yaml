@@ -1,0 +1,48 @@
+# attempts.md's small instance, explored exhaustively (check-attempts.sh):
+# two calls, two deployments with a quota of one each, a budget of 4
+# against a worst case of 3, three attempts a call, three retries for the pool.
+# Each variant is a design: the attempt loop, and each mechanism shown
+# necessary by the design without it (gotogether simulate -matrix). A
+# broken design lists exactly what it breaks: safe is their conjunction.
+spec: attempts.qnt
+module: small
+actions: {}
+invariants: [safe, oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped, probeOnly]
+simulate:
+  terminal: finished
+  holds: [safe, oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped, probeOnly]
+  search: {depth: 14, states: 2000000}
+  variants:
+    - name: design
+    - name: retry after commit
+      constants: {COMMIT_FINAL: 'false'}
+      holds: [ledgerMatches, covered, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped, probeOnly]
+      allows: [safe, oneCommit, withinBound]
+    - name: retry uncertain
+      constants: {UNCERTAIN_FINAL: 'false'}
+      holds: [oneCommit, ledgerMatches, covered, quotaHonoured, attemptsBounded, retriesCapped, probeOnly]
+      allows: [safe, workWithinLimit, withinBound]
+    - name: shared event
+      constants: {ATTEMPT_EVENTS: 'false'}
+      holds: [oneCommit, covered, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped, probeOnly]
+      allows: [safe, ledgerMatches]
+    - name: uncertain free
+      constants: {CHARGE_UNCERTAIN: 'false'}
+      holds: [oneCommit, ledgerMatches, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped, probeOnly]
+      allows: [safe, covered]
+    - name: quota once
+      constants: {QUOTA_PER_ATTEMPT: 'false'}
+      holds: [oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, attemptsBounded, retriesCapped, probeOnly]
+      allows: [safe, quotaHonoured]
+    - name: no retry budget
+      constants: {RETRY_BUDGET: 'false'}
+      holds: [oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, quotaHonoured, retriesCapped, probeOnly]
+      allows: [safe, attemptsBounded]
+    - name: no pool cap
+      constants: {POOL_CAP: 'false'}
+      holds: [oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, probeOnly]
+      allows: [safe, retriesCapped]
+    - name: no ejection
+      constants: {EJECTION: 'false'}
+      holds: [oneCommit, ledgerMatches, covered, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped]
+      allows: [safe, probeOnly]
