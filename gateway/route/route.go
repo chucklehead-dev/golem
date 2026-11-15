@@ -1,8 +1,8 @@
 // Package route resolves an alias to the deployment that serves it. The
 // table is built from a snapshot and replaced whole; nothing in it changes
 // after it is built, so requests read it without locks (gateway.md §1).
-// Strategies, health and affinity come later; for now a route picks its
-// first deployment.
+// A call's attempts take the pool in order (failover order), each from a
+// deployment Health admits (health.go); weights and affinity come later.
 package route
 
 import (
@@ -18,6 +18,21 @@ type Target struct {
 	URL                 *url.URL
 	Transport           http.RoundTripper
 	Header              http.Header // the provider credential; never logged
+	// MaxInFlight is this gateway's ceiling on the deployment's calls in
+	// flight; 0: none.
+	MaxInFlight int
+	// ID is "backend/deployment", set when the snapshot is compiled (Key
+	// makes it if not), so the request path does not build it per call.
+	ID string
+}
+
+// Key is the deployment's identity across snapshots, "backend/deployment":
+// what its health is kept by, and the ledger's deployment.
+func (t *Target) Key() string {
+	if t.ID != "" {
+		return t.ID
+	}
+	return t.Backend + "/" + t.Deployment
 }
 
 // Route is an alias and its pool.
@@ -32,10 +47,9 @@ type Route struct {
 	// the anthropic-beta values restricted mode forwards.
 	Agent bool
 	Betas map[string]bool
+	// MaxAttempts is the most attempts a call makes before it commits.
+	MaxAttempts int
 }
-
-// Pick chooses the deployment for one request.
-func (r *Route) Pick() *Target { return r.Pool[0] }
 
 // Table is every route of one snapshot, by alias.
 type Table struct{ byAlias map[string]*Route }

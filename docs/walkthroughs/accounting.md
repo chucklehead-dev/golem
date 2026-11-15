@@ -25,8 +25,8 @@ spend by a time boundary and minute counters).
 | `control/spend/spend.go` | the known-spend job: `Job`, the `Ledger` it reads (and `Ingestion`, each site's latest row), and `ClickHouse`, the ledger's queries |
 | `deploy/clickhouse/spend.sql` | the ledger (`golem.spend`), its deduplicated view, `golem.spend_by_event`, which the job sums, and `golem.ingest_by_site`, each site's latest row |
 | `control/controller/controller.go:343` | where each publication runs the job and stamps every scope with its result |
-| `cmd/golem-gateway/main.go:278` | `OnApply`: each applied snapshot's known spend handed to the limiter |
-| `gateway/proxy/proxy.go:312` | the request path: `settlement` ends each ticket once (`complete`, `cancel`) |
+| `cmd/golem-gateway/main.go:279` | `OnApply`: each applied snapshot's known spend handed to the limiter |
+| `gateway/proxy/proxy.go:410` | the request path: `settlement` ends each ticket once (`complete`, `cancel`) |
 | `model/exposure.md`, `model/accounting.md` | the Quint models the design is checked against |
 
 ## 1. Budgets are controls, not ceilings
@@ -106,7 +106,7 @@ answer:
   deduplicated by event (§5).
 - **Known spend = snapshot spend + the counter's minutes from B on.** A
   call's ledger row and its counter increment carry the same end (the row
-  is stamped first, `proxy.go:282`, so the increment's minute is never
+  is stamped first, `proxy.go:380`, so the increment's minute is never
   before the row's), so a call is on one side of B: in the snapshot, or in
   the minutes counted. A gateway on an older snapshot has an earlier B and
   is just as exact.
@@ -126,7 +126,7 @@ reported behind once it exceeds the allowance (`Job.Lags`, §5).
 
 The gateway side is `Known` (`limit.go:34`): `Period`, `Spend`, `Since`
 (B), applied per scope by `ApplySnapshot` (`limit.go:448`; the gateway's
-`OnApply` calls it, `cmd/golem-gateway/main.go:162`). The counter is left
+`OnApply` calls it, `cmd/golem-gateway/main.go:163`). The counter is left
 as it is at an apply: a gateway still on an older snapshot needs the
 minutes from its own boundary. `snapshotFor` (`limit.go:183`) treats a
 snapshot of another period as none: a new month starts from nothing. The
@@ -181,7 +181,7 @@ A ticket ends once (`claimEnd`, `limit.go:144`; TestTicketEndsOnce).
   `tailed` (`limit.go:783`): its `Cancel(ctx, seen, until)` also calls
   `EndAt` (`limit.go:399`), a timer that calls `Ended` (`limit.go:411`)
   at the provider-tail time (now plus `ProviderTail`, default two
-  minutes, but no later than the call's deadline: `proxy.go:306`).
+  minutes, but no later than the call's deadline: `proxy.go:262`).
   `Ended` frees the slot locally and at the store.
 
 `account` clamps a cost to [0, `snapshot.MaxMicros`] (2^50,
@@ -429,7 +429,7 @@ spend 0 (nothing ended before 11:55).
    the last slot, Valkey would run one script after the other, so one
    wins; the check and the take are never split.
 4. **12:00:40, a completes on g1, costing 3.** The proxy writes a's row
-   (ended 12:00:40) first (`proxy.go:282`), then `complete`: `Complete`
+   (ended 12:00:40) first (`proxy.go:380`), then `complete`: `Complete`
    (`limit.go:333`) ends the ticket, frees its local counts, and `account`
    stamps the increment 12:00:40. `completeScript` adds 3 to minute 12:00
    and to `total`, and removes `a` from both slot sets.
@@ -440,7 +440,7 @@ spend 0 (nothing ended before 11:55).
 
 6. **12:02:10, b's upstream cuts** after 2 has been produced. The proxy
    writes b's row (ended 12:02:10, cut), then `settlement.cancel`
-   (`proxy.go:306`) computes the tail's end (12:04:10, two minutes, unless
+   (`proxy.go:262`) computes the tail's end (12:04:10, two minutes, unless
    the call's deadline is sooner) and calls `tailed.Cancel`
    (`limit.go:785`): `account` without release sends `addScript`, which
    adds 2 to minute 12:02, and `EndAt` sets a timer. b's slot stays in
@@ -532,7 +532,7 @@ replica to.
 | Budget check and slot taken in one atomic step | `admitScript` (`valkey.go:308`); `Mem`'s lock | store_test.go "limits", "budget"; exposure MBT |
 | Limits hold while the store is reachable | `take` (`valkey.go:238`), `Mem.acquire` (`store.go:178`) | Hegel (TestLimiterAgainstExposureModel, TestNoScopeLimitCaught) |
 | The two stores answer alike | one check (`overBudget`, mirrored in Lua); one read window (`since`, `Mem.since`, `clockSkewMinutes`) | TestStoresAgree, TestStoresAgreeVaried |
-| A call on one side of the boundary | the row stamped before the increment (`proxy.go:282`); `fromMinute`; the ledger deduplicated by event | TestBoundary; both MBT tests; TestClickHouseLedger |
+| A call on one side of the boundary | the row stamped before the increment (`proxy.go:380`); `fromMinute`; the ledger deduplicated by event | TestBoundary; both MBT tests; TestClickHouseLedger |
 | Known spend exact on every gateway, any snapshot (within the allowance) | `since`, `Mem.since`; `ApplySnapshot` leaves the counter | TestBoundary, store_test.go "counter", both MBT tests |
 | Known spend never below the site's period total | `admitScript`'s floor, `Mem.known`, `Limiter.Known` | TestStaleBoundary, store_test.go "known spend is never below the counter's total", TestStoresAgreeVaried (`Admits`) |
 | A boundary older than the retention allows is reported stale | `Job.MaxAge`, `Job.Stale`, `Step`'s error | TestJobReportsStaleResult |

@@ -133,7 +133,13 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    `http.Transport`. Retry or fail over on a retryable outcome *before the
    attempt commits*: a stream commits when its first event is written to
    the caller, so a 200 whose first event is an error is still retryable
-   (`gateway/proxy/commit.go`); after it, the attempt is committed.
+   (`gateway/proxy/commit.go`); after it, the attempt is committed. Only
+   an attempt the provider never saw or refused before any output is
+   retried; one sent and unanswered ends the call (model/attempts.md:
+   its retry would run beside the provider's tail). The budget is checked
+   once, at the first attempt; each attempt takes a lease from its
+   deployment's health (ceiling, ejection, one probe), within the route's
+   `maxAttempts` and a retry budget per route (`gateway/route/health.go`).
 8. **Respond.** Fast path: copy headers through an allowlist, copy the
    body through a tee whose other side is an SSE scanner feeding the usage
    extractor; flush per event. Translated: decode upstream events, encode

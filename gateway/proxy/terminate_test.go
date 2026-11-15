@@ -117,7 +117,7 @@ func (g *tgw) apply(aliceRevoked bool) {
 		g.t.Fatal(err)
 	}
 	c, _ := g.src.Holder.Current()
-	c.Routes.Lookup([]byte("claude")).Pick().Transport = roundTrip(g.provide)
+	c.Routes.Lookup([]byte("claude")).Pool[0].Transport = roundTrip(g.provide)
 }
 
 // denyAlice puts alice on the emergency denylist.

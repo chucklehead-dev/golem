@@ -220,7 +220,8 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 			}
 			used[id] = true
 			targets[targetKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
-				URL: u, Transport: t, Header: header}
+				URL: u, Transport: t, Header: header, MaxInFlight: d.MaxInFlight,
+				ID: b.Name + "/" + d.Name}
 		}
 	}
 	return targets, used, nil
@@ -230,7 +231,7 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 func compileRoute(r snapshot.Route, targets map[targetKey]*route.Target) (*route.Route, error) {
 	rt := &route.Route{Alias: r.Alias, Dialect: r.Dialect, MaxDuration: time.Duration(r.MaxDurationMs) * time.Millisecond,
 		Headers: time.Duration(r.HeadersMs) * time.Millisecond, Idle: time.Duration(r.IdleMs) * time.Millisecond,
-		Agent: r.Agent, Betas: map[string]bool{}}
+		Agent: r.Agent, Betas: map[string]bool{}, MaxAttempts: r.MaxAttempts}
 	for _, b := range r.ApprovedBetas {
 		rt.Betas[b] = true
 	}

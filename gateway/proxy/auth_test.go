@@ -61,8 +61,8 @@ spec:
 		t.Fatal(err)
 	}
 	c, _ := h.Current()
-	c.Routes.Lookup([]byte("claude")).Pick().Transport = s
-	c.Routes.Lookup([]byte("haiku")).Pick().Transport = s
+	c.Routes.Lookup([]byte("claude")).Pool[0].Transport = s
+	c.Routes.Lookup([]byte("haiku")).Pool[0].Transport = s
 	return &Handler{Dialect: AnthropicMessages, Snapshots: h, Limiter: lim.Admitter(), MaxBody: 1 << 20}, lim
 }
 

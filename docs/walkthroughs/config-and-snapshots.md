@@ -46,10 +46,10 @@ function too, since those move more often.
   header carrying either a Kubernetes `secretRef` or, standalone only, an
   `env` variable), `deployments` (one model at one URL each) and
   `network.allowPrivateAddresses`.
-- **ModelRoute** (`types.go:91`): an `alias` callers send as their model
+- **ModelRoute** (`types.go:96`): an `alias` callers send as their model
   name, a `pool` of backend deployments with weights, optional
   `timeouts`, `agent` and `approvedBetas`.
-- **PriceList** (`types.go:203`): a currency and per-model rates in
+- **PriceList** (`types.go:204`): a currency and per-model rates in
   micro-units per million tokens ([contracts.md §4](../contracts.md#4-the-price-model-adr-0025);
   this version has the per-token rates only).
 - **ScopePolicy**: a scope's policy, named by the scope's ID (ADR 0050):
@@ -122,17 +122,19 @@ The passes, in order:
    exactly one of `secretRef`/`env`, `env` standalone only, the secret
    compiled to a `"name/key"` reference, never a value); deployments by
    `deployments` (`compile.go:160`): at least one, each with a unique
-   name, a model and a URL that `checkURL` (`compile.go:305`) accepts:
+   name, a model and a URL that `checkURL` (`compile.go:309`) accepts:
    https, or plain http only to a loopback IP or in standalone mode, and
    never credentials in the URL. Each backend with a usable name enters
    the `catalog` (`compile.go:114`, `catalog.add` at `:149`), problems or
    not, so that routes are checked against it rather than reported as
-   dangling too: its dialect, and each deployment's provider model.
+   dangling too: its dialect, and each deployment's provider model and
+   `maxInFlight` (each gateway's ceiling on it; 0 none, never negative).
 3. **Routes** (`compileRoutes`, `compile.go:208`): a unique alias; a
-   non-empty pool; timeouts by `timeouts` (`compile.go:330`), defaulting
+   non-empty pool; timeouts by `timeouts` (`compile.go:334`), defaulting
    to `DefaultMaxDuration` (30 minutes) for the whole call, the whole call
    for headers, and `DefaultIdle` (5 minutes, capped by the whole call)
-   for silence; then the pool by `pool` (`compile.go:237`): members name a
+   for silence; attempts by `maxAttempts` (`spec.retries.maxAttempts`,
+   `DefaultMaxAttempts` 2, 1 to 5); then the pool by `pool` (`compile.go:240`): members name a
    catalogued backend and deployment; weights not negative (zero means 1);
    **one dialect per pool**, the first member's (ADR 0033: conversion is
    explicit, never implied by a mixed pool).
@@ -151,7 +153,7 @@ The passes, in order:
 
 With no problems, backends and routes are sorted, so equal configs encode
 to equal bytes (`TestDeterministic`, `compile_test.go:72`), and
-`Source.ConfigDigest` (`digest`, `compile.go:293`) is the SHA-256 of the
+`Source.ConfigDigest` (`digest`, `compile.go:297`) is the SHA-256 of the
 compiled backends and routes.
 
 ### Standalone versus published
@@ -226,20 +228,20 @@ digest it was built from), backends with secret *references*, routes,
 entitlements, currency and prices. It is data only: the gateway compiles
 it into lookup structures.
 
-`Encode` (`snapshot.go:190`) is `encoding/json`'s `Marshal`, which writes
+`Encode` (`snapshot.go:196`) is `encoding/json`'s `Marshal`, which writes
 struct fields in declaration order: with the compiler's sorting, equal
-snapshots give equal bytes, and `Hash` (`snapshot.go:224`), their hex
+snapshots give equal bytes, and `Hash` (`snapshot.go:230`), their hex
 SHA-256, names the object in the bucket. So **reordering a struct's fields
 changes every snapshot's hash.**
 
-`Decode` (`snapshot.go:196`) reads in two steps:
+`Decode` (`snapshot.go:202`) reads in two steps:
 
-1. **The schema first** (`snapshot.go:205`): only the `schema` member is
+1. **The schema first** (`snapshot.go:211`): only the `schema` member is
    read; any value other than 1 is a `SchemaError` telling the operator to
    upgrade gateways before the publisher. A newer schema's members are
    unknown here, so reading the schema first is what makes its refusal
    say "upgrade the gateway" rather than name a member.
-2. **The whole snapshot, strictly** (`snapshot.go:209`):
+2. **The whole snapshot, strictly** (`snapshot.go:215`):
    `encoding/json/v2` with `RejectUnknownMembers`, which also refuses
    duplicate names and names in another case (v2's defaults).
 
@@ -346,7 +348,7 @@ verifier refuses an ID it holds no key for with the same error
   KMS's ECDSA_SHA_256 produces; `ParseECDSAPublicKey` (`ecdsa.go:32`)
   reads KMS's DER or PEM public key and refuses other curves.
 - `Keys` and `LoadKeys` (`keys.go:17`, `:43`): what a pool gateway trusts
-  (`-keys`, `cmd/golem-gateway/main.go:248`). Every `*.pub` file of the
+  (`-keys`, `cmd/golem-gateway/main.go:249`). Every `*.pub` file of the
   directory is a PEM `PUBLIC KEY`, Ed25519 or ECDSA P-256; its key ID is
   the PEM's `Key-ID` header if it has one (a KMS key's ARN), else the
   file's name without `.pub`. A key ID given by two files is refused,
@@ -445,7 +447,7 @@ deployment under one alias, and a ConfigMap.
 3. **Encode and store.** `PublishAll` (`control/publish/publish.go:107`)
    checks the lease; `prepare` (`publish.go:176`) numbers the publication
    above the record and the bucket's verified floor, encodes
-   (`snapshot.go:190`), hashes (`snapshot.go:224`) and puts
+   (`snapshot.go:196`), hashes (`snapshot.go:230`) and puts
    `snapshots/<pool>/<hash>.json` (`publish.go:201`).
 4. **Record, checkpoint, pointer.** It wins every pool's publication
    record in one fenced update of the state document (`publish.go:136`,
@@ -478,7 +480,7 @@ publishing the last good config.
 | A scope's policy is refused field by field: a budget above 2^50 micro-units or negative, an unknown budget mode or one without a budget, a negative in-flight limit or ceiling, an unknown `features` or `providerStorage` | `scopePolicy`, `policy.go` | `TestScopePolicyCheck`, `policy_test.go`; `TestEntitlementProblems`, `entitlements_test.go` |
 | A ScopePolicy names routed aliases, once per scope, and a budget over an unpriced model is the config's problem | `compilePolicies`, `checkPriced` | `TestPolicyProblems`, `policy_test.go` |
 | A state scope with no ScopePolicy can call nothing; a ScopePolicy of no scope is not published; both are reported, neither stops the publication | `join`, `DefaultScope`, `policy.go` | `TestJoin`, `policy_test.go`; `TestRenew`; control/controller's `TestUnmatchedScopes` |
-| An unknown, duplicate or miscased snapshot member, or another schema, is refused; another schema says to upgrade the gateway | `Decode`, `snapshot.go:196` | `TestDecodeFailsClosed`, `lib/snapshot/snapshot_test.go:35` |
+| An unknown, duplicate or miscased snapshot member, or another schema, is refused; another schema says to upgrade the gateway | `Decode`, `snapshot.go:202` | `TestDecodeFailsClosed`, `lib/snapshot/snapshot_test.go:35` |
 | Only a pointer or checkpoint signed by a trusted key, in its own context, opens | `open`, `pointer.go:110` | `TestPointer`, `lib/snapshot/pointer_test.go:37`; `TestCheckpoint`, `:67`; `TestKMSPointer`, `lib/sign/kmssign/kmssign_test.go:48` |
 | A gateway trusts the keys of its key directory, by Key-ID header or file name, and refuses an empty one, or one key ID given by two files | `LoadKeys`, `lib/sign/keys.go:43` | `TestLoadKeys`, `lib/sign/keys_test.go:53`; `TestLoadKeysRefusesARepeatedID`, `:21` |
 | Of concurrent swaps from one tag exactly one wins, on Dir and S3 | `Dir.Put`, `bucket.go:102`; S3's conditional writes | `lib/bucket/buckettest/buckettest.go:56`, run by `bucket_test.go:10` and `s3bucket_test.go:39` |

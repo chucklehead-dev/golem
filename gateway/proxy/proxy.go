@@ -17,6 +17,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 	"uuid"
 
@@ -83,8 +85,19 @@ type Handler struct {
 	// denylist entry ends the calls it withdraws (InFlight.Sweep); the
 	// gateway's handlers share one.
 	InFlight *InFlight
+	// Health is the deployments' health and the routes' retry budgets the
+	// gateway's handlers share (route.Health); nil: the handler's own.
+	Health *route.Health
+	// MaxKept bounds the request bodies the handler keeps for retries
+	// until their calls commit (default 256 MiB); a call past it makes one
+	// attempt.
+	MaxKept int64
 	// record, if set, is told each call's result (tests).
 	record func(*http.Request, Result)
+
+	healthOnce sync.Once
+	ownHealth  *route.Health
+	kept       atomic.Int64 // bytes of bodies kept for retries
 }
 
 // Response headers returned to the caller (contracts.md §5: golem's own
@@ -163,8 +176,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, no)
 		return
 	}
-	target := rt.Pick()
-	deployment := target.Backend + "/" + target.Deployment
+	// The call's attempts (model/attempts.md): the pool in order, each
+	// attempt from a deployment its health admits; one refused or never
+	// seen by its provider is retried, within the route's attempts and its
+	// pool's retry budget, until one commits (commit.go). The budget and
+	// the slots are the call's, admitted once at its first deployment (a
+	// call bills at most once, so its bound needs no check per attempt).
+	hl := h.health()
+	hl.Called(rt.Alias)
+	tried := make([]bool, len(rt.Pool))
+	target, lease, retryAt := pick(hl, rt, tried)
+	if target == nil {
+		h.fail(ctx, w, &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
+			msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"})
+		return
+	}
+	defer func() { lease.Release() }() // the last attempt's: when the call is over
+	deployment := target.Key()
 	pr := snap.Prices[target.Model]
 	var deadline time.Time // the call's end at the latest: renewals stop there
 	if rt.MaxDuration > 0 {
@@ -195,27 +223,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	out := getBody()
-	if n := len(body) + len(target.Model) + 64; cap(*out) < n {
-		*out = make([]byte, 0, n)
+	// A retry needs the caller's body, to rewrite for the next deployment:
+	// it is kept until the call commits, within the gateway's bound on
+	// bodies kept (past it the call makes one attempt, rather than taking
+	// more memory).
+	kept := rt.MaxAttempts > 1 && h.keep(int64(len(body)))
+	if kept {
+		defer h.unkeep(int64(len(body)))
 	}
-	*out = ex.rewrite(h.Dialect, (*out)[:0], body, target.Model)
-	putBody(in) // the caller's body is no longer needed
-	in = nil
 
 	call := telemetry.Call{RequestID: reqIDs, Principal: principal.ID, PrincipalKind: principal.Kind, Key: principal.Key,
-		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Model: target.Model,
-		Deployment: deployment, Provider: target.Backend, Started: started,
+		Scope: principal.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Started: started,
 		Currency: snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived()}
 	if ticket != nil {
 		call.Period = ticket.Period() // the counter's: one period per call
 		call.OverBudget = h.overBudget(w, principal, ticket)
 	}
 
-	// One attempt. (Retries and failover before its commit go here, the
-	// commit being its first event (commit.go); a retry needs the rewritten
-	// body kept until then.)
-	// The route's bounds: the caller's going away still cancels it too.
+	// The route's bounds, over all its attempts: the caller's going away
+	// still cancels it too.
 	lim := &ex.lim
 	upCtx := lim.bound(ctx, started, rt)
 	defer lim.end()
@@ -225,7 +251,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		t := h.InFlight.add(&ex.call, &grant, lim.cancel, reqID[15], gen)
 		defer h.InFlight.remove(&ex.call)
 		if t != nil { // withdrawn as it was admitted: the provider never had it
-			putBody(out)
+			call.Model, call.Deployment, call.Provider = target.Model, deployment, target.Backend
 			call.Ended, call.Status = time.Now(), t.code.Status
 			call.Outcome, call.ErrorOrigin, call.ErrorCode = outcomeTerminated, string(t.code.Origin), t.code.Name
 			h.Telemetry.Ended(ctx, call)
@@ -234,50 +260,122 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	up, ub := upstreamRequest(upCtx, r, target, out, h.Dialect.forwardRequest())
-	resp, err := target.Transport.RoundTrip(up)
-	if err != nil {
-		ub.Close()
-		c, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(upCtx)) // the cause as the call failed
-		ended := terminatedBy(upCtx)
-		if ended != nil && r.Context().Err() == nil { // the headers not yet sent: the dialect's error
-			c, msg = ended.code, ended.message()
-		}
-		call.Ended, call.Status = time.Now(), c.Status
-		cost := chargeUnanswered(&call, err, r.Context().Err() != nil, ended, requestBytes, req, pr)
-		h.Telemetry.Ended(ctx, call) // before the ticket numbers its event
-		if cost == 0 {
-			acct.complete(0) // the provider never had it
-		} else {
-			acct.cancel(cost)
-		}
-		Refuse(w, h.Dialect, c, msg)
-		return
-	}
-	defer resp.Body.Close()
-	lim.gotHeaders()
 
-	streamed := req.stream && resp.StatusCode == http.StatusOK
-	upBody := lim.bodyOf(resp.Body)
-	call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
-	if streamed {
-		// Nothing is written until the first event (commit.go): one that is
-		// an error is an attempt that failed before commit, refused as
-		// retryable, the provider billing nothing for it.
-		if ex.first.await(h.Dialect, upBody, ex.buf) {
-			resp.Body.Close()
-			c := contract.UpstreamUnavailable
-			call.Ended, call.Status = time.Now(), c.Status
-			call.Outcome, call.ErrorOrigin, call.ErrorCode = "failed", string(c.Origin), c.Name
-			h.Telemetry.Ended(ctx, call)
-			acct.complete(0)
-			if h.record != nil {
-				h.record(r, Result{RequestID: reqID, Principal: principal, Target: target, Status: c.Status})
+	var resp *http.Response
+	var upBody io.Reader
+	streamed := false
+	for attempt := 1; ; attempt++ {
+		deployment, pr = target.Key(), snap.Prices[target.Model]
+		call.Attempt, call.Model, call.Deployment, call.Provider = attempt, target.Model, deployment, target.Backend
+		out := getBody()
+		if n := len(body) + len(target.Model) + 64; cap(*out) < n {
+			*out = make([]byte, 0, n)
+		}
+		*out = ex.rewrite(h.Dialect, (*out)[:0], body, target.Model)
+		if !kept && in != nil {
+			putBody(in) // the caller's body is no longer needed
+			in, body = nil, nil
+		}
+		if attempt > 1 {
+			lim.nextAttempt(rt)
+		}
+		// retry, given the attempt's failure before it committed, takes the
+		// pool's next deployment if the call may retry: it was kept, has
+		// attempts left, its caller is there, nothing withdrew it, and the
+		// pool's budget has a retry. It records the failed attempt's row
+		// (charged nothing: the provider saw nothing, or refused before any
+		// output) and reports whether the call goes on.
+		retry := func(status int, after time.Duration) bool {
+			lease.Fail(after)
+			if !kept || attempt >= rt.MaxAttempts || r.Context().Err() != nil || terminatedBy(upCtx) != nil {
+				return false
 			}
-			refuse(w, h.Dialect, c, "the provider failed before its response began (its first event was an error); retry shortly", providerRetryAfter(resp.Header))
+			next, nl, _ := pick(hl, rt, tried)
+			if next == nil {
+				return false
+			}
+			if !hl.Retry(rt.Alias) {
+				nl.Release()
+				return false
+			}
+			c := contract.UpstreamUnavailable
+			call.Ended, call.Status = time.Now(), cmp.Or(status, c.Status)
+			call.Outcome, call.ErrorOrigin, call.ErrorCode = "failed", string(c.Origin), c.Name
+			h.Telemetry.Retried(ctx, call)
+			call.ProviderRequestID, call.Outcome, call.ErrorOrigin, call.ErrorCode = "", "", "", ""
+			target, lease = next, nl
+			return true
+		}
+
+		up, ub := upstreamRequest(upCtx, r, target, out, h.Dialect.forwardRequest())
+		var err error
+		resp, err = target.Transport.RoundTrip(up)
+		if err != nil {
+			ub.Close()
+			if !reachedProvider(err) && retry(0, 0) {
+				continue
+			}
+			lease.Fail(0)
+			c, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(upCtx)) // the cause as the call failed
+			ended := terminatedBy(upCtx)
+			if ended != nil && r.Context().Err() == nil { // the headers not yet sent: the dialect's error
+				c, msg = ended.code, ended.message()
+			}
+			call.Ended, call.Status = time.Now(), c.Status
+			cost := chargeUnanswered(&call, err, r.Context().Err() != nil, ended, requestBytes, req, pr)
+			h.Telemetry.Ended(ctx, call)
+			if cost == 0 {
+				acct.complete(0) // the provider never had it
+			} else {
+				acct.cancel(cost)
+			}
+			Refuse(w, h.Dialect, c, msg)
 			return
 		}
-		upBody = &ex.first
+		lim.gotHeaders()
+		call.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
+		if retryable(resp.StatusCode) && retry(resp.StatusCode, providerRetryAfter(resp)) {
+			resp.Body.Close()
+			continue
+		}
+		streamed = req.stream && resp.StatusCode == http.StatusOK
+		upBody = lim.bodyOf(resp.Body)
+		if streamed {
+			// Nothing is written until the first event (commit.go): one that
+			// is an error is an attempt that failed before commit, retried or
+			// refused as retryable, the provider billing nothing for it.
+			if ex.first.await(h.Dialect, upBody, ex.buf) {
+				resp.Body.Close()
+				if retry(0, providerRetryAfter(resp)) {
+					continue
+				}
+				c := contract.UpstreamUnavailable
+				call.Ended, call.Status = time.Now(), c.Status
+				call.Outcome, call.ErrorOrigin, call.ErrorCode = "failed", string(c.Origin), c.Name
+				h.Telemetry.Ended(ctx, call)
+				acct.complete(0)
+				if h.record != nil {
+					h.record(r, Result{RequestID: reqID, Principal: principal, Target: target, Status: c.Status})
+				}
+				refuse(w, h.Dialect, c, "the provider failed before its response began (its first event was an error); retry shortly", providerRetryAfter(resp))
+				return
+			}
+			upBody = &ex.first
+		}
+		break
+	}
+	// Committed: this attempt's response is the caller's. The deployment
+	// answered (a provider's 4xx included: the request's fault, not its
+	// health), and the caller's body is let go.
+	defer resp.Body.Close()
+	if retryable(resp.StatusCode) || resp.StatusCode >= 500 {
+		lease.Fail(providerRetryAfter(resp))
+	} else {
+		lease.Commit()
+	}
+	if in != nil {
+		putBody(in)
+		in, body = nil, nil
 	}
 	copyHeaders(w.Header(), resp.Header, forwardResponse)
 	w.WriteHeader(resp.StatusCode)

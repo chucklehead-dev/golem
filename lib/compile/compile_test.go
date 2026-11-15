@@ -176,3 +176,22 @@ func TestRouteTimeouts(t *testing.T) {
 		t.Fatalf("refused %v: an unparsable idle, and headers past the whole call", bad)
 	}
 }
+
+// TestRouteRetries: a route's attempts default to DefaultMaxAttempts, and
+// one outside 1..MaxAttempts is refused, the default kept.
+func TestRouteRetries(t *testing.T) {
+	var bad []string
+	report := func(msg string) { bad = append(bad, msg) }
+	if n := maxAttempts(nil, report); n != DefaultMaxAttempts || bad != nil {
+		t.Fatalf("default %d %v", n, bad)
+	}
+	if n := maxAttempts(&v1.RouteRetries{MaxAttempts: 1}, report); n != 1 || bad != nil {
+		t.Fatalf("one attempt (no retries): %d %v", n, bad)
+	}
+	for _, v := range []int{-1, MaxAttempts + 1} {
+		bad = nil
+		if n := maxAttempts(&v1.RouteRetries{MaxAttempts: v}, report); n != DefaultMaxAttempts || len(bad) != 1 {
+			t.Fatalf("%d: got %d %v, want refused", v, n, bad)
+		}
+	}
+}

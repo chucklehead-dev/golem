@@ -229,7 +229,10 @@ func deployments(obj string, ds []v1.Deployment, standalone bool, add adder) []s
 		if msg := checkURL(d.URL, standalone); msg != "" {
 			add(obj, at+".url", "%s", msg)
 		}
-		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model})
+		if d.MaxInFlight < 0 {
+			add(obj, at+".maxInFlight", "must not be negative (0: no ceiling)")
+		}
+		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, MaxInFlight: max(d.MaxInFlight, 0)})
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out
@@ -276,6 +279,7 @@ func compileRoutes(srcs []v1.Source[v1.ModelRoute], cat catalog, add adder) ([]s
 		}
 		sr := snapshot.Route{Alias: r.Spec.Alias, Agent: r.Spec.Agent, ApprovedBetas: slices.Clone(r.Spec.ApprovedBetas)}
 		sr.MaxDurationMs, sr.HeadersMs, sr.IdleMs = timeouts(r.Spec.Timeouts, func(field, msg string) { add(obj, "spec.timeouts."+field, "%s", msg) })
+		sr.MaxAttempts = maxAttempts(r.Spec.Retries, func(msg string) { add(obj, "spec.retries.maxAttempts", "%s", msg) })
 		sr.Dialect, sr.Pool = pool(obj, r.Spec.Pool, cat, add)
 		routes = append(routes, sr)
 	}
@@ -386,6 +390,27 @@ const (
 	DefaultMaxDuration = 30 * time.Minute
 	DefaultIdle        = 5 * time.Minute
 )
+
+// DefaultMaxAttempts is a route's attempts per call unless it says: one
+// retry, on the pool's next deployment where it has one. MaxAttempts is
+// the most a route may ask for (each attempt is a provider's round trip
+// before the caller sees a byte).
+const (
+	DefaultMaxAttempts = 2
+	MaxAttempts        = 5
+)
+
+// maxAttempts reads a route's attempts per call, with the default.
+func maxAttempts(r *v1.RouteRetries, bad func(msg string)) int {
+	if r == nil || r.MaxAttempts == 0 {
+		return DefaultMaxAttempts
+	}
+	if r.MaxAttempts < 1 || r.MaxAttempts > MaxAttempts {
+		bad(fmt.Sprintf("%d: give 1 (no retries) to %d", r.MaxAttempts, MaxAttempts))
+		return DefaultMaxAttempts
+	}
+	return r.MaxAttempts
+}
 
 // timeouts reads a route's call bounds, with the defaults, in milliseconds.
 func timeouts(t *v1.RouteTimeouts, bad func(field, msg string)) (maxMs, headersMs, idleMs int64) {

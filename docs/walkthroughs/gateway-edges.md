@@ -44,7 +44,7 @@ durability lives in the collector), [ADR 0044](../adr/0044-budgets-are-controls-
 ## 1. Authentication (`gateway/auth`)
 
 Everything is decided from the snapshot, without a network call. When a
-snapshot is applied, `Holder.compileAuth` (`gateway/snapshot/holder.go:253`)
+snapshot is applied, `Holder.compileAuth` (`gateway/snapshot/holder.go:254`)
 calls `auth.Compile` (`gateway/auth/auth.go:93`), which builds a `Keys`:
 
 - `compileScopes` (`auth.go:117`): each scope's `rights`, its allowed
@@ -62,7 +62,7 @@ calls `auth.Compile` (`gateway/auth/auth.go:93`), which builds a `Keys`:
 the local key (`RequireLocalKey`).
 
 `Keys.Authenticate` (`auth.go:207`) is called once per request by
-`proxy.Handler.authenticate` (`gateway/proxy/proxy.go:376`). Its order:
+`proxy.Handler.authenticate` (`gateway/proxy/proxy.go:474`). Its order:
 
 1. `credential` (`auth.go:317`) reads `Authorization: Bearer` and
    `x-api-key`. Two different credentials are refused rather than one
@@ -174,15 +174,15 @@ the checkpoints before anything is applied, and follows each apply.
 Compilation (`compile`, `holder.go:151`) resolves each backend's
 credential through `Secrets`, makes a `route.Target` per deployment
 (`targets`, `holder.go:195`), and builds the routes over them
-(`compileRoute`, `holder.go:230`). Each deployment's `http.Transport` is
+(`compileRoute`, `holder.go:231`). Each deployment's `http.Transport` is
 kept across snapshots by its `transportKey` (backend, deployment, scheme,
 host, private grant), so connections survive a swap; transports that left
 the config have their idle connections closed (`holder.go:167`).
-`upstreamTransport` (`holder.go:288`) sets every pool setting deliberately
+`upstreamTransport` (`holder.go:289`) sets every pool setting deliberately
 (no proxy from the environment, per-host idle limits, HTTP/2 pings, no
 response-header timeout) and checks every dial's resolved address in the
-dialer's `ControlContext` (`holder.go:290`) with `checkDestination`
-(`holder.go:319`): cloud metadata, link-local, unspecified and multicast
+dialer's `ControlContext` (`holder.go:291`) with `checkDestination`
+(`holder.go:320`): cloud metadata, link-local, unspecified and multicast
 addresses are refused always; loopback, private and CGNAT addresses
 unless the backend is granted `allowPrivateAddresses` (golem#5). Because
 the check runs on the connection, a name that later re-resolves somewhere
@@ -308,12 +308,12 @@ compares every gateway's applied publication and floor with the model's.
 
 ## 3. Telemetry (`gateway/telemetry`)
 
-`Telemetry.Start` (`telemetry.go:168`) opens the request's server span;
-`Ended` (`telemetry.go:183`) names it "chat <alias>", sets the GenAI and
+`Telemetry.Start` (`telemetry.go:182`) opens the request's server span;
+`Ended` (`telemetry.go:197`) names it "chat <alias>", sets the GenAI and
 golem attributes, records the token and duration histograms and writes
-the ledger row; `Refused` (`telemetry.go:216`) marks the span with the
+the ledger row; `Refused` (`telemetry.go:230`) marks the span with the
 contract code and counts the refusal. Attribute sets are built once per
-route, frontend and refusal code (`cached`, `telemetry.go:110`), so a
+route, frontend and refusal code (`cached`, `telemetry.go:124`), so a
 call allocates little and a 429 storm nothing for its counter. Every
 method is a no-op on a nil `*Telemetry`.
 

@@ -104,9 +104,10 @@ func isErrorEvent(d Dialect, event, data []byte) bool {
 	return bytes.HasPrefix(data, []byte(`"error"`))
 }
 
-// providerRetryAfter is a provider's Retry-After in seconds, or 0.
-func providerRetryAfter(h http.Header) time.Duration {
-	s, err := strconv.Atoi(h.Get("Retry-After"))
+// providerRetryAfter is a provider's response's Retry-After in seconds,
+// or 0.
+func providerRetryAfter(resp *http.Response) time.Duration {
+	s, err := strconv.Atoi(resp.Header.Get("Retry-After"))
 	if err != nil || s <= 0 {
 		return 0
 	}

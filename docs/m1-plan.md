@@ -180,10 +180,23 @@ Status:
     budget bound (the call bills twice), not only one answer per caller and
     the provider's work within the slots.
 
+- **Code: built, but for the connect tests and the storm simulation.**
+  The loop (`gateway/proxy`, ServeHTTP; `attempt.go`), deployment health
+  and retry budgets (`gateway/route/health.go`), a route's
+  `spec.retries.maxAttempts` (default 2, at most 5) and a deployment's
+  `maxInFlight`. A row per attempt, each its own event. Tests, each
+  ablated: `TestFailover` (529, a 200 then an overloaded event, a failed
+  dial), `TestFinalAttempts` (uncertain, a cut after the commit, 400, 502:
+  no retry), `TestAttemptBudgets` (the call's attempts; the route's retry
+  budget), `TestCeilingFailsOver`, `TestKeptBound`, and route's
+  `TestEjection`, `TestProbeAbandoned`, `TestCeiling`, `TestRetryBudget`.
+  Sixteen ablations, each failing its test. Allocations per admitted call
+  unchanged (`BenchmarkHandlerAdmitted`).
+
 Done when:
 - ~~the model's exhaustive check holds, and finds each mutant~~ (done);
+- ~~each mutant's code counterpart fails a test (ablated)~~ (done);
 - connect-driven tests run the proxy's loop against the model;
-- each mutant's code counterpart fails a test (ablated);
 - the storm simulation holds its bound;
 - two stubs, one killed under load, show calls succeeding and one ledger
   row per attempt.

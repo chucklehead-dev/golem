@@ -71,7 +71,7 @@ path reads only what those decisions need and forwards bytes unchanged:
 | `gateway/canon` | `Usage`, the one canonical type the path needs so far |
 
 `proxy` is imported only by the binary (`internal/archtest` checks it).
-The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:311`),
+The binary mounts one `Handler` per dialect (`cmd/golem-gateway/main.go:312`),
 each wrapped by the lifecycle's drain tracking and, in standalone mode
 only, by `localOnly` (`cmd/golem-gateway/guard.go:24`), which refuses
 non-loopback hosts, cross-origin browser requests and non-JSON bodies.
@@ -82,18 +82,18 @@ Follow `POST /v1/chat/completions` with
 `{"model":"team-chat","stream":true,"max_tokens":100,"messages":[...]}`
 from a key whose scope has a budget, through to the ledger.
 
-**Identity and configuration.** `ServeHTTP` (`proxy.go:104`) starts the
-span and mints a UUIDv7 request ID (`newRequestID`, `proxy.go:279`,
+**Identity and configuration.** `ServeHTTP` (`proxy.go:117`) starts the
+span and mints a UUIDv7 request ID (`newRequestID`, `proxy.go:278`,
 formatted into a stack buffer), set on the response at once
-(`proxy.go:109`), so every refusal carries it. `authenticate`
-(`proxy.go:400`) takes the current snapshot once, used to the end of the
+(`proxy.go:122`), so every refusal carries it. `authenticate`
+(`proxy.go:498`) takes the current snapshot once, used to the end of the
 call (gateway.md §1): an expired lease refuses with
 `gateway.authorization_expired`, a missing snapshot with
 `gateway.not_ready`, and a snapshot with keys hands the headers to
 `Keys.Authenticate` (`gateway/auth/auth.go:207`).
 
 **The body.** `getExchange` (`exchange.go:68`) takes the pooled working
-memory, and `readBody` (`proxy.go:419`) reads into a pooled buffer sized
+memory, and `readBody` (`proxy.go:517`) reads into a pooled buffer sized
 from `Content-Length` in one allocation, under a read deadline
 (`BodyTimeout`, default 30 s, so a trickling client cannot hold a buffer
 before admission) and `MaxBody` (zero means the default, 32 MiB; the
@@ -108,28 +108,28 @@ absent. `stream_options` and its `include_usage` are located by
 flags; unknown members are counted. `store` must be a boolean or null: any
 other value (`"true"`, `1`) is refused as `request.invalid` naming it
 (`ErrStore`), since read as not storing it would let the storage policy
-fail open on a wrong type (TestScanStore, TestStoreNotBoolean). `route` (`proxy.go:441`) looks the
+fail open on a wrong type (TestScanStore, TestStoreNotBoolean). `route` (`proxy.go:539`) looks the
 alias up without allocating (`route/route.go:54`), refuses an alias of the
 other dialect, and checks the principal may use it. `features`
-(`proxy.go:458`) applies restricted mode: unknown members are refused
+(`proxy.go:415`) applies restricted mode: unknown members are refused
 unless the route is an agent route or the scope compatible, and
 `Dialect.restrictedHeaders` (`dialect.go:63`) checks the dialect's own
 feature headers, which for OpenAI is none (an Anthropic call's betas must
 be the route's, its `anthropic-version` one of `approvedVersions`,
-`dialect.go:57`). `policy` (`proxy.go:480`) applies the scope's ceilings
+`dialect.go:57`). `policy` (`proxy.go:578`) applies the scope's ceilings
 and storage rule (`store: true` is rewritten to `false` where storage is
 forbidden).
 
 **Admission.** `rt.Pick` takes the first deployment. `price.Worst`
 (`price/price.go:33`) prices the declared worst case (every input byte a
 token, the output cap times `n`); a product that would overflow is refused.
-`admit` (`proxy.go:511`) fills an `admission.Call` with the scope's limits
+`admit` (`proxy.go:609`) fills an `admission.Call` with the scope's limits
 and calls the `Admitter`: golem's is `Limiter.Admitter`
 (`gateway/limit/limit.go:765`). A `*admission.Refusal` is rendered with its
 code and Retry-After; an error with the caller gone is a silent end. The
-admitted ticket goes into a `settlement` (`proxy.go:169`, type at
-`proxy.go:314`) with a context that is never cancelled, and a deferred
-guard (`proxy.go:176`) cancels it at its worst case if a panic gets there
+admitted ticket goes into a `settlement` (`proxy.go:197`, type at
+`proxy.go:412`) with a context that is never cancelled, and a deferred
+guard (`proxy.go:177`) cancels it at its worst case if a panic gets there
 before its end.
 
 **The upstream request.** `ex.rewrite` (`dialect.go:118`) runs
@@ -137,10 +137,10 @@ before its end.
 the caller did not ask for usage, `usageEdit` (`chat.go:258`) adds
 `"stream_options":{"include_usage":true}` after it (or fills in an
 existing `stream_options`). The caller's body goes back to its pool at
-once (`proxy.go:187`): a long stream must not hold a 200 KB agent request.
-The row's fields are gathered into a `telemetry.Call` (`proxy.go:190`).
+once (`proxy.go:215`): a long stream must not hold a 200 KB agent request.
+The row's fields are gathered into a `telemetry.Call` (`proxy.go:218`).
 `lim.bound` (`bounds.go:114`) derives the upstream context and arms the
-call's and the headers' alarms; `upstreamRequest` (`proxy.go:516`) builds
+call's and the headers' alarms; `upstreamRequest` (`proxy.go:521`) builds
 the request with the dialect's allowlisted caller headers
 (`Dialect.forwardRequest`, `dialect.go:38`: `OpenAI-Organization` here,
 never an `anthropic-*` header) and the target's credential, its body an
@@ -160,22 +160,41 @@ reads the cause. A call withdrawn as it registers (`add` rechecks one that
 authenticated before a sweep it missed) is refused with that code at once
 and costs nothing: the provider never had it.
 
-**If the round trip fails** (`proxy.go:206-219`), `chargeUnanswered`
-(`proxy.go:305`) decides what the provider may have seen: a DNS, dial or TLS
-failure (`reachedProvider`, `proxy.go:385`) is free and completes the
+**If the round trip fails** (`proxy.go:235-219`), `chargeUnanswered`
+(`proxy.go:308`) decides what the provider may have seen: a DNS, dial or TLS
+failure (`reachedProvider`, `proxy.go:483`) is free and completes the
 ticket at zero; a caller who left first is charged its input; anything else
 is `uncertain`, charged its worst case (with 8192 output tokens if it set no
 `max_tokens`) and its slot held for the provider's tail. The row is written
 before the ticket ends, and the caller gets `upstream.unavailable`, naming
-the route's timeout if one fired (`unavailableMessage`, `proxy.go:351`).
+the route's timeout if one fired (`unavailableMessage`, `proxy.go:309`).
 A round trip a sweep cancelled (the call withdrawn while it waited for the
 provider's headers) is ended as a caller gone is, charged its input and
 its slot held for the tail, its row's outcome `terminated` with the
 refusal's code; the caller gets that refusal in its dialect's error shape
 (`auth.key_revoked`, `authz.scope_not_member` or `auth.denied`).
 
-**The response.** `gotHeaders` (`bounds.go:127`) stops the headers alarm
-and arms the idle one, whose clock every read stamps (`bounds.go:154`).
+**The attempts.** The call is admitted once, at its first deployment, and
+then makes up to `Route.MaxAttempts` attempts (default 2) before one
+commits (`proxy.go:267`), the design model/attempts.md checks. `pick`
+(`attempt.go:28`) takes the pool in order, a deployment not yet tried
+first, each only if `route.Health` (`gateway/route/health.go`) gives it a
+lease: under its `maxInFlight` ceiling, and not ejected (one probe at a
+time once its ejection is over). An attempt the provider never saw (a
+dial, DNS or TLS failure), or refused before any output (429, 500, 503,
+529, or a 200 whose first event is an error), is free: its lease reports
+the failure, its row is written (`Telemetry.Retried`, its own
+`attempt_id` and `event_id`, cost 0), and the call goes on, if its body
+was kept (`Handler.MaxKept`), it has attempts left, its caller is there,
+nothing withdrew it, and the route's retry budget (a fifth of its calls,
+`Health.Retry`) has one. An attempt that may have reached the provider
+and got no answer ends the call, as does a 4xx, a 502 or 504, or a cut
+after the commit. Enough failures in a row eject a deployment, for longer
+each time (or the provider's longer Retry-After); a committed attempt
+readmits it.
+
+**The response.** `gotHeaders` (`bounds.go:138`) stops the headers alarm
+and arms the idle one, whose clock every read stamps (`bounds.go:165`).
 A stream is not committed yet: `firstEvent.await` (`commit.go:47`) holds
 its bytes, at most 64 KiB, until its first event is complete. A provider
 that answered 200 and then an error as that event (Anthropic's
@@ -185,7 +204,7 @@ Retry-After), charged nothing, its slot freed (`TestFailedBeforeCommit`).
 Otherwise the held bytes are replayed ahead of the body. This is where the
 attempt loop will retry (m1-plan.md step 2). Then allowlisted headers are
 copied and the status written. `relay`
-(`proxy.go:564`) is the copy loop. For this request `startStream`
+(`proxy.go:563`) is the copy loop. For this request `startStream`
 (`dialect.go:129`) sees that golem injected `include_usage` and routes the
 stream through `ex.filter`, whose `Drop` is `dropUsageOnly`
 (`exchange.go:139`, over `chat.UsageOnly`): the usage-only chunk is read
@@ -215,7 +234,7 @@ records `errResponseUnread` instead of reading the copy, and the call is
 estimated.
 
 **Usage, estimate, cost.** The caller is gone if a write failed or its
-request ended (`proxy.go:231`); the response was cut if `relay` returned an
+request ended (`proxy.go:257`); the response was cut if `relay` returned an
 `errUpstreamCut` (a provider error, an idle or duration bound, or more
 than `MaxResponse` bytes, default 64 MiB). For a 200, `ex.estimate`
 (`dialect.go:193`) keeps the provider's report if it was final; otherwise
@@ -223,23 +242,23 @@ output is every byte received, capped at `max_tokens × n`, and input, if
 unreported, every request byte; `EstimatedFraction` records the estimated
 share of the cost. `price.Cost` (`price.go:14`) prices it.
 
-**The row and the ticket.** `outcome` (`proxy.go:565`) names the ledger
+**The row and the ticket.** `outcome` (`proxy.go:663`) names the ledger
 outcome (`completed`, `failed`, `cancelled`, or `terminated` for a cut a
 sweep made: `Result.Terminated`) with its error origin and code.
-`Telemetry.Ended` (`gateway/telemetry/telemetry.go:182`) records the span
+`Telemetry.Ended` (`gateway/telemetry/telemetry.go:196`) records the span
 and metrics and writes the `golem.spend` row (`Ledger.Ended`,
 `telemetry/ledger.go:36`). Only then does the ticket end
-(`proxy.go:254-264`): `complete` with the cost, or, for an abandoned or cut
+(`proxy.go:415-427`): `complete` with the cost, or, for an abandoned or cut
 response, `cancel` with the cost seen and the slot held for `ProviderTail`
 (default 2 minutes, at most to the call's deadline: `settlement.cancel`,
-`proxy.go:331`), because the provider may go on working after the
+`proxy.go:429`), because the provider may go on working after the
 connection closes. The row's end is stamped before the counter's minute,
 so a snapshot's boundary puts the call on one side only (ADR 0048).
 
 **A cut stream.** If the provider's response was cut and the caller is
 still there, the stream gets the contract's `upstream.stream_failed` event
 (`streamError`, `dialect.go:248`) and the handler panics with
-`http.ErrAbortHandler` (`proxy.go:299`): the connection is reset, not ended,
+`http.ErrAbortHandler` (`proxy.go:397`): the connection is reset, not ended,
 so no client can mistake a short answer for a whole one (contracts.md §1).
 A call the gateway ended (its authorization withdrawn) takes the same path,
 cancel and abort included, but its stream's event carries the refusal's
@@ -259,19 +278,19 @@ are checked in restricted mode and forwarded.
 
 | Invariant | Enforced | Tested |
 |---|---|---|
-| Every admitted ticket ends exactly once, whatever ends the call (a panic included) | `settlement` and its deferred guard (`proxy.go:169-180`); `admission.Ticket`'s contract | `TestAdmitterContract` (`limits_test.go:69`), `TestConcurrencyAndCancel` (`auth_test.go:125`) |
-| The row is written before the ticket numbers its event | `Telemetry.Ended` before `complete`/`cancel` (`proxy.go:211`, `proxy.go:253`) | `TestLedgerRows` (`telemetry_test.go:20`) |
+| Every admitted ticket ends exactly once, whatever ends the call (a panic included) | `settlement` and its deferred guard (`proxy.go:197-180`); `admission.Ticket`'s contract | `TestAdmitterContract` (`limits_test.go:69`), `TestConcurrencyAndCancel` (`auth_test.go:125`) |
+| The row is written before the ticket numbers its event | `Telemetry.Ended` before `complete`/`cancel` (`proxy.go:239`, `proxy.go:261`) | `TestLedgerRows` (`telemetry_test.go:20`) |
 | Golem routes by exactly what the provider will read | `jsonscan.Object`: whole document, unescaped names, duplicates and trailing data refused | `TestObject` (`jsonscan_test.go:27`), `FuzzObject`, `TestRefusals` (`proxy_test.go:163`), `messages`' `TestScan` (`messages_test.go:13`) and `chat`'s `TestScanMaxTokens`, `TestScanPolicyFields` |
 | A null `stream` or `max_tokens` is the member absent | the dialects' `Scan` | `TestScan`'s null case (`messages_test.go:38`) |
 | Work the provider may have done is never free; estimates err high | `chargeUnanswered`, `estimate` | `TestEstimates` (`estimate_test.go:65`), `TestUncertainUpstream` (`uncertain_test.go:23`) |
 | A whole response's usage is read from all of it or not at all | `forward`'s `overflow`, `readWhole`'s `errResponseUnread` | `TestKeptNotSpliced` (`exchange_test.go:14`) |
-| A cut response is never taken for whole | `streamError` and the abort (`proxy.go:290-278`) | `TestUpstreamCut` (`proxy_test.go:266`) |
+| A cut response is never taken for whole | `streamError` and the abort (`proxy.go:388-278`) | `TestUpstreamCut` (`proxy_test.go:266`) |
 | A call whose key is revoked, or whose key or principal is denied, ends within seconds in its dialect's error (an event, a refusal, a cut), as a caller gone is charged and held, its row `terminated`; other calls, the lease's expiry, a key's own expiry and a scope losing a model end none (by decision: they stop new requests only) | `InFlight` (`inflight.go`), `terminatedBy`, `outcome`, `chargeUnanswered` | `TestTerminateStream`, `TestTerminateWhole`, `TestLeaseExpiryEndsNoCall`, `TestTerminateRace` (`terminate_test.go`) |
-| An ambiguous end holds the slot for the provider's tail, at most to the deadline | `settlement.cancel` (`proxy.go:331`) | `TestTailClampedToDeadline` (`settlement_test.go:21`), `TestConcurrencyAndCancel`, `TestUncertainUpstream` |
+| An ambiguous end holds the slot for the provider's tail, at most to the deadline | `settlement.cancel` (`proxy.go:429`) | `TestTailClampedToDeadline` (`settlement_test.go:21`), `TestConcurrencyAndCancel`, `TestUncertainUpstream` |
 | The injected usage chunk never reaches the caller | `startStream` and `sse.Filter` | `TestInjectedUsageWithheld` (`proxy_test.go:135`), `TestFilter` (`sse/filter_test.go:24`) |
-| Only allowlisted headers cross, each API's own; golem's never reach the provider | `Dialect.forwardRequest` (`dialect.go:38`), `forwardResponse` (`proxy.go:85`), `copyHeaders` | `TestHeaders` (`proxy_test.go:61`), `TestOpenAIHeaders` (`proxy_test.go:90`) |
-| Refusals use contract codes, in the caller's dialect, with the request ID | `fail`, `refuse` (`proxy.go:637`, `proxy.go:622`), `appendError` (`dialect.go:225`) | `TestRefusals` (`proxy_test.go:163`), `TestWrongFrontend` (`proxy_test.go:237`) |
-| A body cap of zero is the default (32 MiB), not "no body" | `readBody` (`proxy.go:420`) | `TestRefusals`' two default-cap cases |
+| Only allowlisted headers cross, each API's own; golem's never reach the provider | `Dialect.forwardRequest` (`dialect.go:38`), `forwardResponse` (`proxy.go:87`), `copyHeaders` | `TestHeaders` (`proxy_test.go:61`), `TestOpenAIHeaders` (`proxy_test.go:90`) |
+| Refusals use contract codes, in the caller's dialect, with the request ID | `fail`, `refuse` (`proxy.go:735`, `proxy.go:627`), `appendError` (`dialect.go:225`) | `TestRefusals` (`proxy_test.go:163`), `TestWrongFrontend` (`proxy_test.go:237`) |
+| A body cap of zero is the default (32 MiB), not "no body" | `readBody` (`proxy.go:518`) | `TestRefusals`' two default-cap cases |
 | A slow client or a silent provider is bounded | write deadlines in `send`; `bounds` | `TestStalledClient`, `TestSilentProviderKeepsClient`, `TestRouteBounds` (`proxy_test.go:337-485`), `TestRequestBoundary` (`boundary_test.go:70`) |
 | A fired alarm never cancels a later call | `alarm.disarm`, `stopAlarm` replaces a fired one | `TestBoundsReuse`, `TestBoundsRace`, `TestIdleAlarm` (`bounds_test.go`) |
 | Policy: ceilings, storage, server tools, restricted features | `policy`, `features`, `restrictedHeaders`, the dialects' flags | `TestPolicy`, `TestStoreOff`, `TestPolicyUnits` (`policy_test.go`), `TestFeatureModes` (`boundary_test.go:18`), `TestOpenAIHeaders` |
@@ -344,10 +363,12 @@ dialect-free. To add one:
 
 ## Known gaps
 
-- One attempt only: no retries or failover before the commit (the first
-  event), no
-  request hooks, and `Route.Pick` takes the first deployment
-  (gateway.md §3 steps 4, 5 and 7).
+- No request hooks; the pool is taken in order, with no weights,
+  least-in-flight or affinity (gateway.md §3 steps 4 and 5).
+- A call's final 503 carries its own Retry-After (the provider's, or the
+  default), not the earliest of the pools it tried.
+- Retries are not yet driven by the attempt model (connect), nor its storm
+  bound simulated (m1-plan.md step 2).
 - No cross-dialect conversion: a route speaks its frontend's dialect or is
   refused (`route.wrong_frontend`); `canon` holds only `Usage`.
 - A non-streamed response over 1 MiB has its usage unread

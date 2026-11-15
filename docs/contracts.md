@@ -86,7 +86,7 @@ prevent double counting.
 |---|---|---|
 | `schema_version` | UInt16 | this table's contract version |
 | `row_kind` | Enum: `attempt`, `adjustment` | attempt: one per upstream attempt, at its end (`estimated_fraction` > 0 when a cut stream was counted from deltas); adjustment: from provider reconciliation (ADR 0031) |
-| `request_id`, `attempt_id`, `event_id` | UUID | logical request, upstream attempt, stable accounting-event identity (ADR 0029) |
+| `request_id`, `attempt_id`, `event_id` | UUID | logical request, upstream attempt, stable accounting-event identity (ADR 0029). A call's first attempt's ID is its request ID; a retry's is the request ID and its number (`<request_id>.2`): each attempt its own event, so deduplication never merges a call's attempts (model/attempts.md) |
 | `provider_request_id` | String | the provider's own ID, for disputes |
 | `started_at`, `ended_at` | DateTime64(3, UTC) | |
 | `period` | Date | the **start** time's period in the period time zone: a stream crossing a period boundary is charged to the period it started in |

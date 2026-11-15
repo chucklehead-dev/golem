@@ -166,6 +166,9 @@ type Deployment struct {
 	Name  string `json:"name"`
 	URL   string `json:"url"`
 	Model string `json:"model"`
+	// MaxInFlight is each gateway's ceiling on the deployment's calls in
+	// flight; 0: none.
+	MaxInFlight int `json:"maxInFlight,omitempty"`
 }
 
 // Route is an alias and its pool.
@@ -182,6 +185,9 @@ type Route struct {
 	MaxDurationMs int64 `json:"maxDurationMs"`
 	HeadersMs     int64 `json:"headersMs"`
 	IdleMs        int64 `json:"idleMs"`
+	// MaxAttempts is the most attempts a call makes before it commits,
+	// the compiler's default filled in (ModelRoute spec.retries).
+	MaxAttempts int `json:"maxAttempts"`
 }
 
 // Target is a pool member.

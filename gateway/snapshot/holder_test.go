@@ -39,10 +39,10 @@ func TestHolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, err := h.Current()
-	if err != nil || c.Routes.Lookup([]byte("claude")).Pick().Header.Get("X-Api-Key") != "sk" {
+	if err != nil || c.Routes.Lookup([]byte("claude")).Pool[0].Header.Get("X-Api-Key") != "sk" {
 		t.Fatalf("current %v %v", c, err)
 	}
-	tr := c.Routes.Lookup([]byte("claude")).Pick().Transport
+	tr := c.Routes.Lookup([]byte("claude")).Pool[0].Transport
 
 	// The floor: a replay or a stale publisher's snapshot is refused, and
 	// so is the applied one again.
@@ -60,7 +60,7 @@ func TestHolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, _ = h.Current()
-	if c.Hash != "h6" || c.Routes.Lookup([]byte("claude")).Pick().Transport != tr {
+	if c.Hash != "h6" || c.Routes.Lookup([]byte("claude")).Pool[0].Transport != tr {
 		t.Fatal("the transport did not survive the swap")
 	}
 	// Past the lease, nothing new is served.
@@ -116,7 +116,7 @@ spec: {alias: local, pool: [{backend: local, deployment: qwen}]}
 		t.Fatal(err)
 	}
 	c, _ := h.Current()
-	if got := c.Routes.Lookup([]byte("local")).Pick().Header.Get("Authorization"); got != "Bearer k" {
+	if got := c.Routes.Lookup([]byte("local")).Pool[0].Header.Get("Authorization"); got != "Bearer k" {
 		t.Fatalf("auth header %q", got)
 	}
 	// A broken edit keeps the previous config.

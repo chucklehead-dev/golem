@@ -41,6 +41,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/proxy"
+	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
@@ -337,8 +338,11 @@ func startSource(ctx context.Context, o options, holder *snapshot.Holder) (src i
 // calls while in flight; and the probes.
 func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry, calls *proxy.InFlight) *http.ServeMux {
 	mux := http.NewServeMux()
+	// One view of the deployments' health and the routes' retry budgets for
+	// both dialects' calls, as they share deployments.
+	health := &route.Health{}
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat} {
-		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel, InFlight: calls}
+		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health}
 		if o.standalone != "" {
 			h = localOnly(d, h)
 		}

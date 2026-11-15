@@ -86,6 +86,11 @@ type Deployment struct {
 	URL string `json:"url"`
 	// Model is the provider's name for the model.
 	Model string `json:"model"`
+	// MaxInFlight is this gateway's ceiling on the deployment's calls in
+	// flight (its share of the provider's quota, or a local box's static
+	// concurrency): an attempt past it is not sent, and the call fails over
+	// to another deployment of its pool. 0: none.
+	MaxInFlight int `json:"maxInFlight,omitempty"`
 }
 
 // ModelRoute maps an alias callers name to a pool of deployments.
@@ -100,6 +105,9 @@ type ModelRouteSpec struct {
 	Alias    string         `json:"alias"`
 	Pool     []PoolMember   `json:"pool"`
 	Timeouts *RouteTimeouts `json:"timeouts,omitempty"`
+	// Retries bound the attempts a call makes before it commits
+	// (model/attempts.md); the defaults are lib/compile's.
+	Retries *RouteRetries `json:"retries,omitempty"`
 	// Agent marks a coding-agent route: compatible feature mode by default
 	// (ADR 0041 §7.1), under the platform's standing approval.
 	Agent bool `json:"agent,omitempty"`
@@ -120,6 +128,16 @@ type RouteTimeouts struct {
 	// Idle bounds a provider's silence once a response has begun: longer
 	// than a model's reasoning pause, shorter than a hung connection.
 	Idle string `json:"idle,omitempty"`
+}
+
+// RouteRetries bound a call's attempts on a route. Only an attempt the
+// provider refused or never saw is retried (unreached, 429, 503, 529, or
+// an error as the stream's first event); one that may have reached it and
+// got no answer ends the call.
+type RouteRetries struct {
+	// MaxAttempts is the most attempts one call makes, the first included
+	// (1: no retries; at most 5).
+	MaxAttempts int `json:"maxAttempts,omitempty"`
 }
 
 // PoolMember is a deployment in a route's pool.

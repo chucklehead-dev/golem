@@ -123,6 +123,17 @@ func (b *bounds) bound(ctx context.Context, started time.Time, rt *route.Route) 
 	return ctx
 }
 
+// nextAttempt readies the bounds for another attempt of the call: the
+// last one's idle alarm off, the headers' armed afresh (the call's alarm
+// runs on, over all its attempts).
+func (b *bounds) nextAttempt(rt *route.Route) {
+	stopAlarm(&b.idle)
+	stopAlarm(&b.headers)
+	if rt.Headers > 0 && (rt.MaxDuration == 0 || rt.Headers < rt.MaxDuration) {
+		b.headers.arm(b.cancel, rt.Headers, nil)
+	}
+}
+
 // gotHeaders ends the wait for headers and arms the idle alarm.
 func (b *bounds) gotHeaders() {
 	stopAlarm(&b.headers)

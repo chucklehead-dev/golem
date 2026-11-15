@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,19 @@ type Call struct {
 	// OverBudget: admitted over its scope's budget in observe or warn mode,
 	// a call enforce would have refused (PRD §9.1, ADR 0050).
 	OverBudget bool
+	// Attempt is the call's attempt the row records, from 1 (0 is 1): each
+	// attempt is its own ledger event (AttemptID), so a retried call's
+	// rows are never deduplicated into one.
+	Attempt int
+}
+
+// AttemptID is the attempt's ID, its ledger event's: the request ID for a
+// call's first attempt, then the request ID and the attempt's number.
+func (c *Call) AttemptID() string {
+	if c.Attempt <= 1 {
+		return c.RequestID
+	}
+	return c.RequestID + "." + strconv.Itoa(c.Attempt)
 }
 
 // Telemetry records calls. Its methods are safe for concurrent use, and on
@@ -213,6 +227,19 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 	t.tokens.Record(ctx, input, rs.input...)
 	t.tokens.Record(ctx, c.Usage.Output, rs.output...)
 	t.duration.Record(ctx, c.Ended.Sub(c.Started).Seconds(), rs.duration...)
+	t.Ledger.Ended(ctx, c)
+}
+
+// Retried records an attempt that failed before it committed and was
+// retried: its ledger row (charged nothing) and an event on the call's
+// span. The call's last attempt is recorded by Ended.
+func (t *Telemetry) Retried(ctx context.Context, c Call) {
+	if t == nil {
+		return
+	}
+	trace.SpanFromContext(ctx).AddEvent("golem.attempt.retried", trace.WithAttributes(
+		attribute.String("golem.deployment", c.Deployment), attribute.Int("golem.attempt", c.Attempt),
+		attribute.Int("http.response.status_code", c.Status)))
 	t.Ledger.Ended(ctx, c)
 }
 

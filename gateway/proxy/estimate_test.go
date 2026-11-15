@@ -52,6 +52,20 @@ func rowOf(t *testing.T, rows *bytes.Buffer) map[string]any {
 	return row
 }
 
+// rowsOf is every ledger row written, in order: a retried call's attempts
+// first, its last attempt's row last.
+func rowsOf(t *testing.T, rows *bytes.Buffer) []map[string]any {
+	var out []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(rows.Bytes()), []byte("\n")) {
+		var row map[string]any
+		if err := json.Unmarshal(line, &row); err != nil {
+			t.Fatalf("rows %q: %v", rows, err)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 func serveCut(h *Handler, path, body string) {
 	defer func() { recover() }() // the abort of a cut response
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", path, strings.NewReader(body)))
