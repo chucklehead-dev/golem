@@ -76,6 +76,8 @@ var actions = map[string]Class{
 	"role.bind":         Widening,
 	"key.mint":          Widening,
 	"key.revoke":        Restrictive,
+	"member.cap":        Widening, // a cap raised or removed widens
+	"key.cap":           Widening,
 	// control/entrasync: a user created, memberships added; and the
 	// removals and offboarding, written as their own event so they land
 	// when the additions are held back.

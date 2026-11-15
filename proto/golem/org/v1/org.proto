@@ -36,6 +36,10 @@ service OrgService {
   // A scope's members, managers and bound groups: for its members, its
   // managers and admins; not found for anyone else.
   rpc GetScope(GetScopeRequest) returns (GetScopeResponse);
+  // Sets a member's cap in a scope for each period (org-model.md §4.1;
+  // 0 removes it, and the member draws up to the scope's default, its
+  // ScopePolicy's): the scope's managers, or admins.
+  rpc SetMemberCap(SetMemberCapRequest) returns (SetMemberCapResponse);
 }
 
 message CreateScopeRequest {
@@ -138,4 +142,19 @@ message GetScopeResponse {
   repeated string managers = 4;
   // The Entra groups bound to it (object IDs).
   repeated string groups = 5;
+  // Its members' own caps for each period, in micro-units, by principal.
+  map<string, int64> caps = 6;
 }
+
+message SetMemberCapRequest {
+  string scope = 1;
+  string principal = 2;
+  // Micro-units of the currency for each period; 0 removes the member's
+  // own cap.
+  int64 cap_micros = 3;
+  // Checks the change, its authorization and the store\'s invariants, and
+  // writes nothing (golemctl --dry-run).
+  bool validate_only = 4;
+}
+
+message SetMemberCapResponse {}

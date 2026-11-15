@@ -913,7 +913,9 @@ type GetScopeResponse struct {
 	Members  []string               `protobuf:"bytes,3,rep,name=members,proto3" json:"members,omitempty"`
 	Managers []string               `protobuf:"bytes,4,rep,name=managers,proto3" json:"managers,omitempty"`
 	// The Entra groups bound to it (object IDs).
-	Groups        []string `protobuf:"bytes,5,rep,name=groups,proto3" json:"groups,omitempty"`
+	Groups []string `protobuf:"bytes,5,rep,name=groups,proto3" json:"groups,omitempty"`
+	// Its members' own caps for each period, in micro-units, by principal.
+	Caps          map[string]int64 `protobuf:"bytes,6,rep,name=caps,proto3" json:"caps,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -976,6 +978,121 @@ func (x *GetScopeResponse) GetGroups() []string {
 	return nil
 }
 
+func (x *GetScopeResponse) GetCaps() map[string]int64 {
+	if x != nil {
+		return x.Caps
+	}
+	return nil
+}
+
+type SetMemberCapRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Scope     string                 `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	Principal string                 `protobuf:"bytes,2,opt,name=principal,proto3" json:"principal,omitempty"`
+	// Micro-units of the currency for each period; 0 removes the member's
+	// own cap.
+	CapMicros int64 `protobuf:"varint,3,opt,name=cap_micros,json=capMicros,proto3" json:"cap_micros,omitempty"`
+	// Checks the change, its authorization and the store\'s invariants, and
+	// writes nothing (golemctl --dry-run).
+	ValidateOnly  bool `protobuf:"varint,4,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetMemberCapRequest) Reset() {
+	*x = SetMemberCapRequest{}
+	mi := &file_golem_org_v1_org_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetMemberCapRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetMemberCapRequest) ProtoMessage() {}
+
+func (x *SetMemberCapRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_golem_org_v1_org_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetMemberCapRequest.ProtoReflect.Descriptor instead.
+func (*SetMemberCapRequest) Descriptor() ([]byte, []int) {
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SetMemberCapRequest) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *SetMemberCapRequest) GetPrincipal() string {
+	if x != nil {
+		return x.Principal
+	}
+	return ""
+}
+
+func (x *SetMemberCapRequest) GetCapMicros() int64 {
+	if x != nil {
+		return x.CapMicros
+	}
+	return 0
+}
+
+func (x *SetMemberCapRequest) GetValidateOnly() bool {
+	if x != nil {
+		return x.ValidateOnly
+	}
+	return false
+}
+
+type SetMemberCapResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetMemberCapResponse) Reset() {
+	*x = SetMemberCapResponse{}
+	mi := &file_golem_org_v1_org_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetMemberCapResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetMemberCapResponse) ProtoMessage() {}
+
+func (x *SetMemberCapResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_golem_org_v1_org_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetMemberCapResponse.ProtoReflect.Descriptor instead.
+func (*SetMemberCapResponse) Descriptor() ([]byte, []int) {
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{20}
+}
+
 var File_golem_org_v1_org_proto protoreflect.FileDescriptor
 
 const file_golem_org_v1_org_proto_rawDesc = "" +
@@ -1025,12 +1142,23 @@ const file_golem_org_v1_org_proto_rawDesc = "" +
 	"\x12ListScopesResponse\x12\x10\n" +
 	"\x03ids\x18\x01 \x03(\tR\x03ids\"!\n" +
 	"\x0fGetScopeRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"~\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"\xf5\x01\n" +
 	"\x10GetScopeResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\amembers\x18\x03 \x03(\tR\amembers\x12\x1a\n" +
 	"\bmanagers\x18\x04 \x03(\tR\bmanagers\x12\x16\n" +
-	"\x06groups\x18\x05 \x03(\tR\x06groupsJ\x04\b\x02\x10\x03R\x06policy2\xdc\x05\n" +
+	"\x06groups\x18\x05 \x03(\tR\x06groups\x12<\n" +
+	"\x04caps\x18\x06 \x03(\v2(.golem.org.v1.GetScopeResponse.CapsEntryR\x04caps\x1a7\n" +
+	"\tCapsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01J\x04\b\x02\x10\x03R\x06policy\"\x8d\x01\n" +
+	"\x13SetMemberCapRequest\x12\x14\n" +
+	"\x05scope\x18\x01 \x01(\tR\x05scope\x12\x1c\n" +
+	"\tprincipal\x18\x02 \x01(\tR\tprincipal\x12\x1d\n" +
+	"\n" +
+	"cap_micros\x18\x03 \x01(\x03R\tcapMicros\x12#\n" +
+	"\rvalidate_only\x18\x04 \x01(\bR\fvalidateOnly\"\x16\n" +
+	"\x14SetMemberCapResponse2\xb3\x06\n" +
 	"\n" +
 	"OrgService\x12R\n" +
 	"\vCreateScope\x12 .golem.org.v1.CreateScopeRequest\x1a!.golem.org.v1.CreateScopeResponse\x12L\n" +
@@ -1042,7 +1170,8 @@ const file_golem_org_v1_org_proto_rawDesc = "" +
 	"\x06Whoami\x12\x1b.golem.org.v1.WhoamiRequest\x1a\x1c.golem.org.v1.WhoamiResponse\x12O\n" +
 	"\n" +
 	"ListScopes\x12\x1f.golem.org.v1.ListScopesRequest\x1a .golem.org.v1.ListScopesResponse\x12I\n" +
-	"\bGetScope\x12\x1d.golem.org.v1.GetScopeRequest\x1a\x1e.golem.org.v1.GetScopeResponseB9Z7github.com/chucklehead-dev/golem/gen/golem/org/v1;orgv1b\x06proto3"
+	"\bGetScope\x12\x1d.golem.org.v1.GetScopeRequest\x1a\x1e.golem.org.v1.GetScopeResponse\x12U\n" +
+	"\fSetMemberCap\x12!.golem.org.v1.SetMemberCapRequest\x1a\".golem.org.v1.SetMemberCapResponseB9Z7github.com/chucklehead-dev/golem/gen/golem/org/v1;orgv1b\x06proto3"
 
 var (
 	file_golem_org_v1_org_proto_rawDescOnce sync.Once
@@ -1056,7 +1185,7 @@ func file_golem_org_v1_org_proto_rawDescGZIP() []byte {
 	return file_golem_org_v1_org_proto_rawDescData
 }
 
-var file_golem_org_v1_org_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_golem_org_v1_org_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_golem_org_v1_org_proto_goTypes = []any{
 	(*CreateScopeRequest)(nil),   // 0: golem.org.v1.CreateScopeRequest
 	(*CreateScopeResponse)(nil),  // 1: golem.org.v1.CreateScopeResponse
@@ -1077,32 +1206,38 @@ var file_golem_org_v1_org_proto_goTypes = []any{
 	(*ListScopesResponse)(nil),   // 16: golem.org.v1.ListScopesResponse
 	(*GetScopeRequest)(nil),      // 17: golem.org.v1.GetScopeRequest
 	(*GetScopeResponse)(nil),     // 18: golem.org.v1.GetScopeResponse
+	(*SetMemberCapRequest)(nil),  // 19: golem.org.v1.SetMemberCapRequest
+	(*SetMemberCapResponse)(nil), // 20: golem.org.v1.SetMemberCapResponse
+	nil,                          // 21: golem.org.v1.GetScopeResponse.CapsEntry
 }
 var file_golem_org_v1_org_proto_depIdxs = []int32{
 	2,  // 0: golem.org.v1.AddMemberRequest.member:type_name -> golem.org.v1.Member
-	0,  // 1: golem.org.v1.OrgService.CreateScope:input_type -> golem.org.v1.CreateScopeRequest
-	3,  // 2: golem.org.v1.OrgService.AddMember:input_type -> golem.org.v1.AddMemberRequest
-	5,  // 3: golem.org.v1.OrgService.RemoveMember:input_type -> golem.org.v1.RemoveMemberRequest
-	9,  // 4: golem.org.v1.OrgService.BindGroup:input_type -> golem.org.v1.BindGroupRequest
-	11, // 5: golem.org.v1.OrgService.UnbindGroup:input_type -> golem.org.v1.UnbindGroupRequest
-	7,  // 6: golem.org.v1.OrgService.BindManager:input_type -> golem.org.v1.BindManagerRequest
-	13, // 7: golem.org.v1.OrgService.Whoami:input_type -> golem.org.v1.WhoamiRequest
-	15, // 8: golem.org.v1.OrgService.ListScopes:input_type -> golem.org.v1.ListScopesRequest
-	17, // 9: golem.org.v1.OrgService.GetScope:input_type -> golem.org.v1.GetScopeRequest
-	1,  // 10: golem.org.v1.OrgService.CreateScope:output_type -> golem.org.v1.CreateScopeResponse
-	4,  // 11: golem.org.v1.OrgService.AddMember:output_type -> golem.org.v1.AddMemberResponse
-	6,  // 12: golem.org.v1.OrgService.RemoveMember:output_type -> golem.org.v1.RemoveMemberResponse
-	10, // 13: golem.org.v1.OrgService.BindGroup:output_type -> golem.org.v1.BindGroupResponse
-	12, // 14: golem.org.v1.OrgService.UnbindGroup:output_type -> golem.org.v1.UnbindGroupResponse
-	8,  // 15: golem.org.v1.OrgService.BindManager:output_type -> golem.org.v1.BindManagerResponse
-	14, // 16: golem.org.v1.OrgService.Whoami:output_type -> golem.org.v1.WhoamiResponse
-	16, // 17: golem.org.v1.OrgService.ListScopes:output_type -> golem.org.v1.ListScopesResponse
-	18, // 18: golem.org.v1.OrgService.GetScope:output_type -> golem.org.v1.GetScopeResponse
-	10, // [10:19] is the sub-list for method output_type
-	1,  // [1:10] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	21, // 1: golem.org.v1.GetScopeResponse.caps:type_name -> golem.org.v1.GetScopeResponse.CapsEntry
+	0,  // 2: golem.org.v1.OrgService.CreateScope:input_type -> golem.org.v1.CreateScopeRequest
+	3,  // 3: golem.org.v1.OrgService.AddMember:input_type -> golem.org.v1.AddMemberRequest
+	5,  // 4: golem.org.v1.OrgService.RemoveMember:input_type -> golem.org.v1.RemoveMemberRequest
+	9,  // 5: golem.org.v1.OrgService.BindGroup:input_type -> golem.org.v1.BindGroupRequest
+	11, // 6: golem.org.v1.OrgService.UnbindGroup:input_type -> golem.org.v1.UnbindGroupRequest
+	7,  // 7: golem.org.v1.OrgService.BindManager:input_type -> golem.org.v1.BindManagerRequest
+	13, // 8: golem.org.v1.OrgService.Whoami:input_type -> golem.org.v1.WhoamiRequest
+	15, // 9: golem.org.v1.OrgService.ListScopes:input_type -> golem.org.v1.ListScopesRequest
+	17, // 10: golem.org.v1.OrgService.GetScope:input_type -> golem.org.v1.GetScopeRequest
+	19, // 11: golem.org.v1.OrgService.SetMemberCap:input_type -> golem.org.v1.SetMemberCapRequest
+	1,  // 12: golem.org.v1.OrgService.CreateScope:output_type -> golem.org.v1.CreateScopeResponse
+	4,  // 13: golem.org.v1.OrgService.AddMember:output_type -> golem.org.v1.AddMemberResponse
+	6,  // 14: golem.org.v1.OrgService.RemoveMember:output_type -> golem.org.v1.RemoveMemberResponse
+	10, // 15: golem.org.v1.OrgService.BindGroup:output_type -> golem.org.v1.BindGroupResponse
+	12, // 16: golem.org.v1.OrgService.UnbindGroup:output_type -> golem.org.v1.UnbindGroupResponse
+	8,  // 17: golem.org.v1.OrgService.BindManager:output_type -> golem.org.v1.BindManagerResponse
+	14, // 18: golem.org.v1.OrgService.Whoami:output_type -> golem.org.v1.WhoamiResponse
+	16, // 19: golem.org.v1.OrgService.ListScopes:output_type -> golem.org.v1.ListScopesResponse
+	18, // 20: golem.org.v1.OrgService.GetScope:output_type -> golem.org.v1.GetScopeResponse
+	20, // 21: golem.org.v1.OrgService.SetMemberCap:output_type -> golem.org.v1.SetMemberCapResponse
+	12, // [12:22] is the sub-list for method output_type
+	2,  // [2:12] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_golem_org_v1_org_proto_init() }
@@ -1116,7 +1251,7 @@ func file_golem_org_v1_org_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_golem_org_v1_org_proto_rawDesc), len(file_golem_org_v1_org_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

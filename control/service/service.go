@@ -18,11 +18,13 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/key"
+	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 // Caller is who calls, as the transport authenticated them.
@@ -274,8 +276,81 @@ func (s *Service) RemoveMember(ctx context.Context, c Caller, o Options, scope, 
 		if p.Default == scope {
 			p.Default = ""
 		}
+		if _, capped := p.Caps[scope]; capped {
+			p.Caps = maps.Clone(p.Caps)
+			delete(p.Caps, scope)
+		}
 		d.Principals[principal] = p
 		d.Roles = slices.DeleteFunc(slices.Clone(d.Roles), func(r state.RoleBinding) bool { return r.Principal == principal && r.Scope == scope })
+		return nil
+	})
+}
+
+// SetMemberCap sets principal's cap in scope for each period, in
+// micro-units (org-model.md §4.1): 0 removes it, and the member draws up
+// to the scope's default (its ScopePolicy's). The scope's managers, or
+// admins: a cap moves no money, it limits a member within the pool the
+// managers manage.
+func (s *Service) SetMemberCap(ctx context.Context, c Caller, o Options, scope, principal string, capMicros int64) error {
+	return s.apply(ctx, c, o, "member.cap", principal, map[string]string{"scope": scope, "cap_micros": strconv.FormatInt(capMicros, 10)}, func(d *state.Document) error {
+		if err := requireManager(d, c, scope, "set its members' caps"); err != nil {
+			return err
+		}
+		if err := checkCap(capMicros, "cap_micros"); err != nil {
+			return err
+		}
+		p, ok := d.Principals[principal]
+		if !ok || !p.MemberOf(scope) {
+			return notFound("%s is not a member of %s", principal, scope)
+		}
+		p.Caps = maps.Clone(p.Caps) // a clone's principals share the map
+		if capMicros == 0 {
+			delete(p.Caps, scope)
+		} else {
+			if p.Caps == nil {
+				p.Caps = map[string]int64{}
+			}
+			p.Caps[scope] = capMicros
+		}
+		if len(p.Caps) == 0 {
+			p.Caps = nil
+		}
+		d.Principals[principal] = p
+		return nil
+	})
+}
+
+// checkCap refuses a cap outside 0 (none) to snapshot.MaxMicros, the site
+// store's exact sums.
+func checkCap(capMicros int64, field string) error {
+	if capMicros < 0 || capMicros > snapshot.MaxMicros {
+		return invalid(field, "0 (none) to %d micro-units, not %d", int64(snapshot.MaxMicros), capMicros)
+	}
+	return nil
+}
+
+// SetKeyCap sets a key's spend cap for each period, in micro-units (0
+// removes it): its owner, its scope's managers, or admins.
+func (s *Service) SetKeyCap(ctx context.Context, c Caller, o Options, hash string, capMicros int64) error {
+	return s.apply(ctx, c, o, "key.cap", hash, map[string]string{"cap_micros": strconv.FormatInt(capMicros, 10)}, func(d *state.Document) error {
+		k, ok := d.Keys[hash]
+		switch {
+		case !ok:
+			return notFound("key %s", hash)
+		case k.Owner == c.Principal, c.Admin, manages(d, c, k.Scope):
+		case !sees(d, c, k.Scope):
+			return notFound("key %s", hash)
+		default:
+			return denied("a key's cap is set by its owner, its scope's managers or an admin")
+		}
+		if err := checkCap(capMicros, "cap_micros"); err != nil {
+			return err
+		}
+		if !k.RevokedAt.IsZero() {
+			return invalid("key", "key %s is revoked", k.Display)
+		}
+		k.CapMicros = capMicros
+		d.Keys[hash] = k
 		return nil
 	})
 }
@@ -354,6 +429,8 @@ type KeyRequest struct {
 	Scope   string
 	Models  []string // narrows the scope's; empty: all of them
 	Expires time.Time
+	// CapMicros is the key's spend cap for each period; 0: none.
+	CapMicros int64
 }
 
 // Minted is a new key: its plaintext, shown once and never stored, and
@@ -411,6 +488,9 @@ func (s *Service) mintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 		if err := s.narrows(r); err != nil {
 			return err
 		}
+		if err := checkCap(r.CapMicros, "key.cap_micros"); err != nil {
+			return err
+		}
 		expires, err := keyExpiry(owner, r.Expires, s.now())
 		if err != nil {
 			return err
@@ -419,7 +499,7 @@ func (s *Service) mintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 			d.Keys = map[string]state.Key{}
 		}
 		d.Keys[m.Hash] = state.Key{Display: m.Display, Owner: r.Owner, Scope: r.Scope,
-			Models: slices.Clone(r.Models), ExpiresAt: expires.UTC()}
+			Models: slices.Clone(r.Models), ExpiresAt: expires.UTC(), CapMicros: r.CapMicros}
 		return nil
 	})
 	if err != nil || o.ValidateOnly {
@@ -529,6 +609,7 @@ type ScopeView struct {
 	Groups   []string // the Entra groups bound to it
 	Members  []string
 	Managers []string
+	Caps     map[string]int64 // members' own caps, by principal
 }
 
 // ListScopes is the scopes the caller may read, by ID.
@@ -559,8 +640,14 @@ func (s *Service) GetScope(ctx context.Context, c Caller, id string) (ScopeView,
 	}
 	v := ScopeView{ID: id, Groups: sc.Groups}
 	for _, pid := range slices.Sorted(maps.Keys(d.Principals)) {
-		if d.Principals[pid].MemberOf(id) {
+		if p := d.Principals[pid]; p.MemberOf(id) {
 			v.Members = append(v.Members, pid)
+			if c := p.Caps[id]; c > 0 {
+				if v.Caps == nil {
+					v.Caps = map[string]int64{}
+				}
+				v.Caps[pid] = c
+			}
 		}
 	}
 	for _, r := range d.Roles {

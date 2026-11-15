@@ -40,6 +40,8 @@ const (
 	KeyServiceRevokeKeyProcedure = "/golem.keys.v1.KeyService/RevokeKey"
 	// KeyServiceListKeysProcedure is the fully-qualified name of the KeyService's ListKeys RPC.
 	KeyServiceListKeysProcedure = "/golem.keys.v1.KeyService/ListKeys"
+	// KeyServiceSetKeyCapProcedure is the fully-qualified name of the KeyService's SetKeyCap RPC.
+	KeyServiceSetKeyCapProcedure = "/golem.keys.v1.KeyService/SetKeyCap"
 )
 
 // KeyServiceClient is a client for the golem.keys.v1.KeyService service.
@@ -54,6 +56,9 @@ type KeyServiceClient interface {
 	// The keys the caller may see: its own, those of the scopes it manages,
 	// every key for admins. Never the key itself.
 	ListKeys(context.Context, *connect.Request[v1.ListKeysRequest]) (*connect.Response[v1.ListKeysResponse], error)
+	// Sets a key's spend cap for each period (0 removes it): its owner, its
+	// scope's managers, or admins.
+	SetKeyCap(context.Context, *connect.Request[v1.SetKeyCapRequest]) (*connect.Response[v1.SetKeyCapResponse], error)
 }
 
 // NewKeyServiceClient constructs a client for the golem.keys.v1.KeyService service. By default, it
@@ -85,6 +90,12 @@ func NewKeyServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(keyServiceMethods.ByName("ListKeys")),
 			connect.WithClientOptions(opts...),
 		),
+		setKeyCap: connect.NewClient[v1.SetKeyCapRequest, v1.SetKeyCapResponse](
+			httpClient,
+			baseURL+KeyServiceSetKeyCapProcedure,
+			connect.WithSchema(keyServiceMethods.ByName("SetKeyCap")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -93,6 +104,7 @@ type keyServiceClient struct {
 	mintKey   *connect.Client[v1.MintKeyRequest, v1.MintKeyResponse]
 	revokeKey *connect.Client[v1.RevokeKeyRequest, v1.RevokeKeyResponse]
 	listKeys  *connect.Client[v1.ListKeysRequest, v1.ListKeysResponse]
+	setKeyCap *connect.Client[v1.SetKeyCapRequest, v1.SetKeyCapResponse]
 }
 
 // MintKey calls golem.keys.v1.KeyService.MintKey.
@@ -110,6 +122,11 @@ func (c *keyServiceClient) ListKeys(ctx context.Context, req *connect.Request[v1
 	return c.listKeys.CallUnary(ctx, req)
 }
 
+// SetKeyCap calls golem.keys.v1.KeyService.SetKeyCap.
+func (c *keyServiceClient) SetKeyCap(ctx context.Context, req *connect.Request[v1.SetKeyCapRequest]) (*connect.Response[v1.SetKeyCapResponse], error) {
+	return c.setKeyCap.CallUnary(ctx, req)
+}
+
 // KeyServiceHandler is an implementation of the golem.keys.v1.KeyService service.
 type KeyServiceHandler interface {
 	// Mints a key: a member its own, a scope's managers its services', admins
@@ -122,6 +139,9 @@ type KeyServiceHandler interface {
 	// The keys the caller may see: its own, those of the scopes it manages,
 	// every key for admins. Never the key itself.
 	ListKeys(context.Context, *connect.Request[v1.ListKeysRequest]) (*connect.Response[v1.ListKeysResponse], error)
+	// Sets a key's spend cap for each period (0 removes it): its owner, its
+	// scope's managers, or admins.
+	SetKeyCap(context.Context, *connect.Request[v1.SetKeyCapRequest]) (*connect.Response[v1.SetKeyCapResponse], error)
 }
 
 // NewKeyServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -149,6 +169,12 @@ func NewKeyServiceHandler(svc KeyServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(keyServiceMethods.ByName("ListKeys")),
 		connect.WithHandlerOptions(opts...),
 	)
+	keyServiceSetKeyCapHandler := connect.NewUnaryHandler(
+		KeyServiceSetKeyCapProcedure,
+		svc.SetKeyCap,
+		connect.WithSchema(keyServiceMethods.ByName("SetKeyCap")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/golem.keys.v1.KeyService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case KeyServiceMintKeyProcedure:
@@ -157,6 +183,8 @@ func NewKeyServiceHandler(svc KeyServiceHandler, opts ...connect.HandlerOption) 
 			keyServiceRevokeKeyHandler.ServeHTTP(w, r)
 		case KeyServiceListKeysProcedure:
 			keyServiceListKeysHandler.ServeHTTP(w, r)
+		case KeyServiceSetKeyCapProcedure:
+			keyServiceSetKeyCapHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -176,4 +204,8 @@ func (UnimplementedKeyServiceHandler) RevokeKey(context.Context, *connect.Reques
 
 func (UnimplementedKeyServiceHandler) ListKeys(context.Context, *connect.Request[v1.ListKeysRequest]) (*connect.Response[v1.ListKeysResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.keys.v1.KeyService.ListKeys is not implemented"))
+}
+
+func (UnimplementedKeyServiceHandler) SetKeyCap(context.Context, *connect.Request[v1.SetKeyCapRequest]) (*connect.Response[v1.SetKeyCapResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.keys.v1.KeyService.SetKeyCap is not implemented"))
 }

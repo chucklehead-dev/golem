@@ -55,6 +55,8 @@ const (
 	OrgServiceListScopesProcedure = "/golem.org.v1.OrgService/ListScopes"
 	// OrgServiceGetScopeProcedure is the fully-qualified name of the OrgService's GetScope RPC.
 	OrgServiceGetScopeProcedure = "/golem.org.v1.OrgService/GetScope"
+	// OrgServiceSetMemberCapProcedure is the fully-qualified name of the OrgService's SetMemberCap RPC.
+	OrgServiceSetMemberCapProcedure = "/golem.org.v1.OrgService/SetMemberCap"
 )
 
 // OrgServiceClient is a client for the golem.org.v1.OrgService service.
@@ -86,6 +88,10 @@ type OrgServiceClient interface {
 	// A scope's members, managers and bound groups: for its members, its
 	// managers and admins; not found for anyone else.
 	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
+	// Sets a member's cap in a scope for each period (org-model.md §4.1;
+	// 0 removes it, and the member draws up to the scope's default, its
+	// ScopePolicy's): the scope's managers, or admins.
+	SetMemberCap(context.Context, *connect.Request[v1.SetMemberCapRequest]) (*connect.Response[v1.SetMemberCapResponse], error)
 }
 
 // NewOrgServiceClient constructs a client for the golem.org.v1.OrgService service. By default, it
@@ -153,6 +159,12 @@ func NewOrgServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(orgServiceMethods.ByName("GetScope")),
 			connect.WithClientOptions(opts...),
 		),
+		setMemberCap: connect.NewClient[v1.SetMemberCapRequest, v1.SetMemberCapResponse](
+			httpClient,
+			baseURL+OrgServiceSetMemberCapProcedure,
+			connect.WithSchema(orgServiceMethods.ByName("SetMemberCap")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -167,6 +179,7 @@ type orgServiceClient struct {
 	whoami       *connect.Client[v1.WhoamiRequest, v1.WhoamiResponse]
 	listScopes   *connect.Client[v1.ListScopesRequest, v1.ListScopesResponse]
 	getScope     *connect.Client[v1.GetScopeRequest, v1.GetScopeResponse]
+	setMemberCap *connect.Client[v1.SetMemberCapRequest, v1.SetMemberCapResponse]
 }
 
 // CreateScope calls golem.org.v1.OrgService.CreateScope.
@@ -214,6 +227,11 @@ func (c *orgServiceClient) GetScope(ctx context.Context, req *connect.Request[v1
 	return c.getScope.CallUnary(ctx, req)
 }
 
+// SetMemberCap calls golem.org.v1.OrgService.SetMemberCap.
+func (c *orgServiceClient) SetMemberCap(ctx context.Context, req *connect.Request[v1.SetMemberCapRequest]) (*connect.Response[v1.SetMemberCapResponse], error) {
+	return c.setMemberCap.CallUnary(ctx, req)
+}
+
 // OrgServiceHandler is an implementation of the golem.org.v1.OrgService service.
 type OrgServiceHandler interface {
 	// Creates a top-level scope: admins. It can call nothing until its
@@ -243,6 +261,10 @@ type OrgServiceHandler interface {
 	// A scope's members, managers and bound groups: for its members, its
 	// managers and admins; not found for anyone else.
 	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
+	// Sets a member's cap in a scope for each period (org-model.md §4.1;
+	// 0 removes it, and the member draws up to the scope's default, its
+	// ScopePolicy's): the scope's managers, or admins.
+	SetMemberCap(context.Context, *connect.Request[v1.SetMemberCapRequest]) (*connect.Response[v1.SetMemberCapResponse], error)
 }
 
 // NewOrgServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -306,6 +328,12 @@ func NewOrgServiceHandler(svc OrgServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(orgServiceMethods.ByName("GetScope")),
 		connect.WithHandlerOptions(opts...),
 	)
+	orgServiceSetMemberCapHandler := connect.NewUnaryHandler(
+		OrgServiceSetMemberCapProcedure,
+		svc.SetMemberCap,
+		connect.WithSchema(orgServiceMethods.ByName("SetMemberCap")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/golem.org.v1.OrgService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case OrgServiceCreateScopeProcedure:
@@ -326,6 +354,8 @@ func NewOrgServiceHandler(svc OrgServiceHandler, opts ...connect.HandlerOption) 
 			orgServiceListScopesHandler.ServeHTTP(w, r)
 		case OrgServiceGetScopeProcedure:
 			orgServiceGetScopeHandler.ServeHTTP(w, r)
+		case OrgServiceSetMemberCapProcedure:
+			orgServiceSetMemberCapHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -369,4 +399,8 @@ func (UnimplementedOrgServiceHandler) ListScopes(context.Context, *connect.Reque
 
 func (UnimplementedOrgServiceHandler) GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.GetScope is not implemented"))
+}
+
+func (UnimplementedOrgServiceHandler) SetMemberCap(context.Context, *connect.Request[v1.SetMemberCapRequest]) (*connect.Response[v1.SetMemberCapResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("golem.org.v1.OrgService.SetMemberCap is not implemented"))
 }
