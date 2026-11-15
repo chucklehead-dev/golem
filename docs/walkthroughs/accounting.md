@@ -55,6 +55,31 @@ admit script (`valkey.go:317`). Change one, change all three; the
 stores' differential test (§7) catches the Lua drifting from Go, as it
 did once for a negative budget.
 
+**What a budget does is its scope's budget mode** (PRD §9.1, ADR 0050),
+the ScopePolicy's `budgetMode`, which the compiler makes explicit for
+every scope with a budget and the gateway reads into `Call.BudgetMode`
+(`admission.ModeOf`; any value it does not know is `Enforce`, failing
+closed, as is `BudgetMode`'s zero value):
+
+- **observe** (the default, so a rollout cannot stop a team's work on day
+  one): admission never refuses on the budget. The call is admitted and
+  counted, and its ledger row's `over_budget` says it was over.
+- **warn**: as observe, and the response carries `golem-warning:
+  budget.pool_exhausted 104%`, the share of the budget known spend has
+  reached (`budgetWarning`, gateway/proxy).
+- **enforce**: refused, `budget.pool_exhausted` (402).
+
+The limiter asks the store to check a budget only when it is enforced
+(`refusing`, limit.go): otherwise the store checks the slots alone and
+returns the known spend it computed, and `track` checks it against the
+budget with the same `overBudget`, the declared-worst-case check
+included, the ticket answering `OverBudget()`. So the Valkey script is the
+same in every mode, and an outage's local check makes the same decision
+from its last known spend. In-flight limits refuse in every mode.
+`TestBudgetModes` (gateway/limit, on `Mem`, Valkey and an outage;
+gateway/proxy, through the ledger row and the header),
+`TestWorstCaseOverBudget`.
+
 The other half of admission is concurrency: a principal's in-flight limit
 and a scope's (`atLimit`, `store.go:100`). The scope limit matters because
 a scope's pool is shared: without it the scope's exposure is the sum of its
@@ -127,7 +152,9 @@ reads the period's whole total.
 2. `admitted` (`limit.go:221`) takes the answer: the known spend the store
    computed is remembered in `last` (all an outage will leave), and an
    admitted call is tracked (`track`, `limit.go:286`) as a `Ticket`.
-   During the grace after a recovery (§3.4) the ticket is marked waived.
+   During the grace after a recovery (§3.4) the ticket is marked waived;
+   a call admitted over a budget it does not enforce is marked over budget
+   (§1).
 3. If the caller's context ended, that is the caller's error, not an
    outage (TestCallerCancelIsNoOutage). Any other store error is an
    outage: `markDown` (`limit.go:267`), then the local check.
@@ -518,6 +545,7 @@ replica to.
 | Running calls re-registered after an outage | `Recover` → `reacquire` | TestOutage; exposure MBT |
 | A gateway starts with its Valkey unreachable, admits waivers, and recovers once a retried dial connects; an idle gateway is not marked up while Valkey is down | `DialValkey`, `Valkey.Connect`, `MarkDown`, `Recover`'s `Ping` | TestStartWithValkeyDown; TestPoolModeValkeyDown (cmd/golem-gateway) |
 | Outage and grace admissions are waivers | `admitLocally`, `graceUntil` | TestOutage, TestCallerCancelIsNoOutage; MBT waivers |
+| Only an enforced budget refuses; observe and warn admit and mark the call over budget, warn with golem-warning; in-flight limits in every mode | `refusing`, `track`; `Handler.overBudget` (gateway/proxy) | TestBudgetModes (gateway/limit and gateway/proxy), TestWorstCaseOverBudget |
 | A ticket ends once | `claimEnd`, `finish` | TestTicketEndsOnce, TestOutageCounts |
 | A call is counted in the period it started | `Admit`'s period, `Ticket.period` | TestPeriodOfStart, TestPeriodRollover |
 | Held increments bounded and replayed in order | `hold`, `replayBatch` | TestRecoverBatches |
@@ -553,6 +581,10 @@ replica to.
 - **Grace is an assumption.** The model lets grace end only once every
   gateway has recovered; the code ends it after `Grace`, assuming each
   peer notices within a renewal interval.
+- **The models check enforce only.** model/exposure.qnt and the props
+  drive the limiter with its zero mode, enforce; observe and warn never
+  refuse on the budget, so their exposure is unbounded by design (they
+  are rollout and monitoring modes, PRD §9.1).
 - **The models assume the declared worst case bounds every call** and
   have one budget period; real calls can exceed their declared worst case
   (ADR 0044).

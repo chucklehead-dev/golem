@@ -20,11 +20,14 @@ spec:
   prices: [{model: claude-sonnet-4-5, inputPerMTok: 3000000, outputPerMTok: 15000000}]
 ---
 apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude], budgetMicros: 5000000, inFlight: {principal: 2}}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes:
-  - {name: team-a, models: [claude], budgetMicros: 5000000, inFlight: {principal: 2}}
   keys:
   - {key: ` + devKey + `, principal: alice, scope: team-a` + extra + `}
 `
@@ -38,7 +41,8 @@ func TestEntitlements(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := s.Entitlements
-	if e.Implicit || len(e.Scopes) != 1 || e.Scopes[0].PrincipalInFlight != 2 || e.Scopes[0].ScopeInFlight != DefaultScopeInFlight {
+	if e.Implicit || len(e.Scopes) != 1 || e.Scopes[0].PrincipalInFlight != 2 || e.Scopes[0].ScopeInFlight != DefaultScopeInFlight ||
+		e.Scopes[0].BudgetMode != BudgetObserve {
 		t.Fatalf("scopes %+v", e.Scopes)
 	}
 	h := key.Hash(devKey)
@@ -79,14 +83,18 @@ func TestEntitlementProblems(t *testing.T) {
 		{"live key in a file", strings.Replace(identity(""), devKey, key.New(key.Live), 1), standalone, "takes only glm_dev_ keys"},
 		{"mistyped key", strings.Replace(identity(""), devKey, mistype(devKey), 1), standalone, "checksum"},
 		{"key wider than its scope", identity(", models: [claude, gpt]"), standalone, `scope "team-a" does not allow "gpt"`},
-		{"unknown scope", strings.Replace(identity(""), "scope: team-a", "scope: team-b", 1), standalone, `no scope named "team-b"`},
+		{"unknown scope", strings.Replace(identity(""), "scope: team-a", "scope: team-b", 1), standalone, `no scope named "team-b": a standalone scope is a ScopePolicy of that name`},
 		{"unknown alias", strings.Replace(identity(""), "models: [claude]", "models: [claude, opus]", 1), standalone, `no ModelRoute has alias "opus"`},
 		{"unpriced budget", strings.Replace(identity(""), "model: claude-sonnet-4-5,", "model: other,", 1), standalone, "no PriceList prices"},
 		{"budget past the store's exact sums", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMicros: 1125899906842625", 1), standalone, "at most 1125899906842624"},
-		{"negative principal limit", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: -1}", 1), standalone, "spec.scopes[0].inFlight.principal: must not be negative"},
-		{"negative scope limit", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2, scope: -1}", 1), standalone, "spec.scopes[0].inFlight.scope: must not be negative"},
-		{"negative ceiling", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, maxInputBytes: -1", 1), standalone, "spec.scopes[0].maxInputBytes: must not be negative"},
-		{"unknown feature mode", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, features: loose", 1), standalone, `spec.scopes[0].features: restricted or compatible, not "loose"`},
+		{"negative principal limit", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: -1}", 1), standalone, "ScopePolicy/team-a (golem.yaml#5): spec.inFlight.principal: must not be negative"},
+		{"negative scope limit", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2, scope: -1}", 1), standalone, "spec.inFlight.scope: must not be negative"},
+		{"negative ceiling", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, maxInputBytes: -1", 1), standalone, "spec.maxInputBytes: must not be negative"},
+		{"unknown feature mode", strings.Replace(identity(""), "inFlight: {principal: 2}", "inFlight: {principal: 2}, features: loose", 1), standalone, `spec.features: restricted or compatible, not "loose"`},
+		{"unknown budget mode", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMicros: 5000000, budgetMode: strict", 1), standalone, `spec.budgetMode: observe (the default), warn or enforce, not "strict"`},
+		{"budget mode without a budget", strings.Replace(identity(""), "budgetMicros: 5000000", "budgetMode: enforce", 1), standalone, "spec.budgetMode: enforce, but there is no budget: set budgetMicros, or remove budgetMode"},
+		{"two policies for a scope", identity("") + "---\napiVersion: golem.dev/v1alpha1\nkind: ScopePolicy\nmetadata: {name: team-a}\nspec: {}\n", standalone, `ScopePolicy/team-a (golem.yaml#7): metadata.name: ScopePolicy/team-a (golem.yaml#5) is also scope "team-a"'s policy`},
+		{"policies with no LocalIdentity", strings.SplitN(identity(""), "---\napiVersion: golem.dev/v1alpha1\nkind: LocalIdentity", 2)[0], standalone, "there is no LocalIdentity: add one, or remove the ScopePolicies"},
 		{"outside standalone", identity(""), published, "for standalone mode only"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -131,12 +139,12 @@ func TestMembers(t *testing.T) {
 }
 
 func TestScopePolicy(t *testing.T) {
-	y := strings.Replace(identity(""), "inFlight: {principal: 2}}", "inFlight: {principal: 2}, providerStorage: allowed, maxOutputTokens: 4096, maxInputBytes: 1000000}", 1)
+	y := strings.Replace(identity(""), "inFlight: {principal: 2}}", "inFlight: {principal: 2}, providerStorage: allowed, maxOutputTokens: 4096, maxInputBytes: 1000000, budgetMode: warn}", 1)
 	s, err := Compile(objects(t, map[string]string{"golem.yaml": y}), standalone)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sc := s.Entitlements.Scopes[0]; !sc.StorageAllowed || sc.MaxOutputTokens != 4096 || sc.MaxInputBytes != 1000000 {
+	if sc := s.Entitlements.Scopes[0]; !sc.StorageAllowed || sc.MaxOutputTokens != 4096 || sc.MaxInputBytes != 1000000 || sc.BudgetMode != BudgetWarn {
 		t.Fatalf("scope %+v", sc)
 	}
 	bad := strings.Replace(identity(""), "inFlight: {principal: 2}}", "inFlight: {principal: 2}, providerStorage: sometimes}", 1)

@@ -38,7 +38,7 @@ function too, since those move more often.
 
 ## 1. Config CRDs (`lib/api/v1alpha1`)
 
-`types.go` holds four kinds of group `golem.dev/v1alpha1`
+`types.go` holds five kinds of group `golem.dev/v1alpha1`
 (`APIVersion`, `types.go:9`):
 
 - **Backend** (`types.go:38`): a provider or model server: `dialect` (one
@@ -52,9 +52,16 @@ function too, since those move more often.
 - **PriceList** (`types.go:203`): a currency and per-model rates in
   micro-units per million tokens ([contracts.md §4](../contracts.md#4-the-price-model-adr-0025);
   this version has the per-token rates only).
-- **LocalIdentity** (`types.go:135`): standalone mode's stand-in for the
-  state document's entitlements: scopes and their limits, dev keys, Entra
-  users and services. Refused outside standalone mode (ADR 0023).
+- **ScopePolicy**: a scope's policy, named by the scope's ID (ADR 0050):
+  `models` (route aliases), `budgetMicros` and `budgetMode` (observe,
+  the default, warn or enforce), `declaredWorstCaseCheck`, `inFlight`
+  (`principal`, `scope`), `maxOutputTokens`, `maxInputBytes`,
+  `providerStorage` and `features`. The scope itself exists in the state
+  document (created through the control API); in standalone mode, where
+  there is none, each ScopePolicy is a scope.
+- **LocalIdentity**: standalone mode's stand-in for the state document's
+  entitlements: dev keys, Entra users and services, members of the
+  config's ScopePolicies. Refused outside standalone mode (ADR 0023).
 
 The package has no Kubernetes client dependency: the gateway, golemctl and
 golem-control all import it.
@@ -129,13 +136,18 @@ The passes, in order:
    catalogued backend and deployment; weights not negative (zero means 1);
    **one dialect per pool**, the first member's (ADR 0033: conversion is
    explicit, never implied by a mixed pool).
-4. **Entitlements** (`entitlements`, `entitlements.go:26`), below.
-5. **Prices** (`priceList`, `entitlements.go:189`): a three-letter
+4. **Scope policies** (`compilePolicies`, `policy.go`): each ScopePolicy
+   needs a name, once; every alias it names must be routed; its policy is
+   checked by `scopePolicy`, below.
+5. **Entitlements** (`entitlements`, `entitlements.go`), below: the
+   state's, joined with the policies, or a LocalIdentity's.
+6. **Prices** (`priceList`, `entitlements.go`): a three-letter
    currency, one per installation; each model priced once; no negative
    rates.
-6. **Budgets are chargeable** (`checkPriced`, `compile.go:267`): a scope
-   with a budget must reach only priced models, or its budget could never
-   be spent (contracts.md §4).
+7. **Budgets are chargeable** (`checkPriced`, `compile.go`): a
+   ScopePolicy with a budget must reach only priced models, or its budget
+   could never be spent (contracts.md §4). Both are config, so `golemctl
+   config validate` refuses the mistake before it is merged.
 
 With no problems, backends and routes are sorted, so equal configs encode
 to equal bytes (`TestDeterministic`, `compile_test.go:72`), and
@@ -149,38 +161,51 @@ compiled backends and routes.
 | Lease | none: `ValidUntil` zero | required (ADR 0030) |
 | `auth.env` | allowed | refused: use `secretRef` |
 | plain http | to any host | loopback addresses only (ADR 0017) |
-| LocalIdentity | at most one; its entitlements | refused: entitlements come from the state |
+| LocalIdentity | at most one; its entitlements, its scopes the ScopePolicies | refused: entitlements come from the state |
+| ScopePolicy | each is a scope; one with no LocalIdentity is refused (it would apply to no one) | joined by ID with the state's scopes |
 | no identity at all | `Entitlements.Implicit`: one local principal, every route | empty, unless `Options.Entitlements` gives them |
 
 ### Entitlements
 
 A **published** snapshot's entitlements come from the state document
 (`control/state`): golem-control passes `Options.Entitlements`, a function
-told the sorted route aliases that exist (`compile.go:86`); golem-control's
-fills in each scope's known spend (`Controller.entitlements`,
-`control/controller/controller.go:529`). Without one, the snapshot
-authorizes no one. Compile still runs `entitlements` first, so that a
-LocalIdentity in a published config is reported.
+told the sorted route aliases that exist; golem-control's fills in each
+scope's known spend (`Controller.entitlements`). Its scopes are IDs: the
+state holds that a scope exists and its Entra group bindings, never its
+policy. Compile **joins** them with the ScopePolicies by name (`join`,
+`policy.go`): each of the state's scopes takes its policy's fields and
+keeps its own known spend. A scope with no ScopePolicy is published as
+`DefaultScope`: no models, so its members can call nothing (fail
+closed: a policy is what grants anything). A ScopePolicy naming a scope
+the state does not have is not published. Neither is fatal: each is told
+to `Options.Unmatched` and the rest is published, since the state and the
+config change apart (control-plane.md §4). Without `Options.Entitlements`
+(`golemctl config validate`, which has no state) the policies are only
+checked and the snapshot authorizes no one. Compile still runs
+`entitlements` first, so that a LocalIdentity in a published config is
+reported.
 
-A **standalone** LocalIdentity is compiled by three helpers:
+`scopePolicy` (`lib/compile/policy.go`) is the one check of a scope's
+policy, a ScopePolicy's in either mode: a budget not negative and at most
+`snapshot.MaxMicros`; `budgetMode` observe, warn or enforce, and only with
+a budget; in-flight limits and ceilings not negative (the gateway applies
+a limit only above zero, so a negative one would be none); `features`
+restricted or compatible; `providerStorage` forbidden or allowed. Each
+field fails at its own path (`spec.inFlight.scope`), every one reported.
+It returns the snapshot's scope with its defaults explicit: an in-flight
+limit of 0 or unset is `DefaultPrincipalInFlight` (4) or
+`DefaultScopeInFlight` (16), and a budget's mode is `observe` unless set.
 
-- `localScopes` (`entitlements.go:68`): unique names; every model alias
-  routed; and the policy by `scopePolicy` (`lib/compile/policy.go:39`), the
-  one check of a scope's policy, for the coming ScopePolicy CRD too: a
-  budget not negative and at most `snapshot.MaxMicros`; in-flight limits
-  and ceilings not negative (the gateway applies a limit only above zero,
-  so a negative one would be none); `features` restricted or compatible;
-  `providerStorage` forbidden or allowed. Each field fails at its own path
-  (`spec.scopes[0].inFlight.scope`), every one reported. It returns the
-  snapshot's scope with its defaults explicit: an in-flight limit of 0 or
-  unset is `DefaultPrincipalInFlight` (4) or `DefaultScopeInFlight` (16).
-- `localKeys` (`entitlements.go:96`): each key must parse (`key.Parse`)
+A **standalone** LocalIdentity's scopes are the ScopePolicies (there is
+no state to say a scope exists), and it is compiled by two helpers:
+
+- `localKeys` (`entitlements.go`): each key must parse (`key.Parse`)
   and be a `glm_dev_` key (a live key never belongs in a file); its scope
   must exist and its models only narrow the scope's. Only the key's SHA-256
   and its display prefix enter the snapshot (`TestEntitlements` checks the
   key itself does not). Each key's principal becomes a `KeyOwner`, a
   member of its keys' scopes: a key is honoured only for a listed owner.
-- `localMembers` (`entitlements.go:153`): users and services share one
+- `localMembers` (`entitlements.go`): users and services share one
   namespace of Entra IDs, since gateway/auth finds both by it; each needs
   at least one scope, and a default among them (the first if unset).
 
@@ -415,7 +440,7 @@ deployment under one alias, and a ConfigMap.
    takes the default timeouts, and `pool` finds the member in the
    catalog, takes its dialect `anthropic.messages` as the route's and
    weight 1. `Options.Entitlements` supplies the state's scopes, told the
-   route's alias. No problems: the snapshot gets
+   route's alias, and `join` gives each its ScopePolicy. No problems: the snapshot gets
    `ValidUntil = Now + Lease` and its config digest.
 3. **Encode and store.** `PublishAll` (`control/publish/publish.go:107`)
    checks the lease; `prepare` (`publish.go:176`) numbers the publication
@@ -450,7 +475,9 @@ publishing the last good config.
 | Every compile problem names object, field path and fix | `adder` and the passes, `lib/compile` | `TestProblems`, `compile_test.go:86`; `TestEntitlementProblems`, `entitlements_test.go:73` |
 | Equal configs give equal snapshot bytes, whatever their file layout | sorting in `Compile`, `compile.go:94`, and the passes; `Encode` | `TestDeterministic`, `compile_test.go:72` |
 | No secret value or API key reaches a snapshot | `backendAuth`, `compile.go:189`; `localKeys`, `entitlements.go:96` | `TestCompile`, `compile_test.go:51`; `TestEntitlements`, `entitlements_test.go:35` |
-| A scope's policy is refused field by field: a budget above 2^50 micro-units or negative, a negative in-flight limit or ceiling, an unknown `features` or `providerStorage` | `scopePolicy`, `policy.go:39` | `TestScopePolicyCheck`, `policy_test.go:16`; `TestEntitlementProblems`, `entitlements_test.go:73` |
+| A scope's policy is refused field by field: a budget above 2^50 micro-units or negative, an unknown budget mode or one without a budget, a negative in-flight limit or ceiling, an unknown `features` or `providerStorage` | `scopePolicy`, `policy.go` | `TestScopePolicyCheck`, `policy_test.go`; `TestEntitlementProblems`, `entitlements_test.go` |
+| A ScopePolicy names routed aliases, once per scope, and a budget over an unpriced model is the config's problem | `compilePolicies`, `checkPriced` | `TestPolicyProblems`, `policy_test.go` |
+| A state scope with no ScopePolicy can call nothing; a ScopePolicy of no scope is not published; both are reported, neither stops the publication | `join`, `DefaultScope`, `policy.go` | `TestJoin`, `policy_test.go`; `TestRenew`; control/controller's `TestUnmatchedScopes` |
 | An unknown, duplicate or miscased snapshot member, or another schema, is refused; another schema says to upgrade the gateway | `Decode`, `snapshot.go:196` | `TestDecodeFailsClosed`, `lib/snapshot/snapshot_test.go:35` |
 | Only a pointer or checkpoint signed by a trusted key, in its own context, opens | `open`, `pointer.go:110` | `TestPointer`, `lib/snapshot/pointer_test.go:37`; `TestCheckpoint`, `:67`; `TestKMSPointer`, `lib/sign/kmssign/kmssign_test.go:48` |
 | A gateway trusts the keys of its key directory, by Key-ID header or file name, and refuses an empty one, or one key ID given by two files | `LoadKeys`, `lib/sign/keys.go:43` | `TestLoadKeys`, `lib/sign/keys_test.go:53`; `TestLoadKeysRefusesARepeatedID`, `:21` |
@@ -478,4 +505,8 @@ publishing the last good config.
   an expired one).
 - The YAML splitter treats only a bare `---` line as a separator: `---`
   followed by content on the same line is not split.
-- ScopePolicy and Hook, two of ADR 0005's kinds, are not in v1alpha1 yet.
+- Hook, one of ADR 0005's kinds, is not in v1alpha1 yet. ScopePolicy has
+  the policy fields above; ADR 0005's capture ceiling and residency join
+  it with capture.
+- The CRDs' CEL rules (ADR 0005) are not written yet: the compiler is the
+  only check of a ScopePolicy.

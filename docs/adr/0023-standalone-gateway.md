@@ -24,8 +24,10 @@ a bucket, a control plane, Valkey and Kubernetes.
     by the snapshot compiler that `golemctl config validate` and
     golem-control use, and recompiled when the files change;
   - identity: one implicit local principal and scope; optionally a
-    `LocalIdentity` file (keys, scopes, caps), accepted only in standalone
-    mode, for testing authentication and limits;
+    `LocalIdentity` file (keys, users and services), accepted only in
+    standalone mode, for testing authentication and limits, its scopes the
+    config's `ScopePolicy` objects (ADR 0050: there is no state document,
+    so a ScopePolicy is a scope);
   - limits: the in-memory limiter;
   - provider credentials: the developer's own (environment variables, an
     AWS profile), through the normal envelopes;

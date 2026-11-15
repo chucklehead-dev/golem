@@ -96,7 +96,7 @@ shared helpers sit together near the top (service.go:123-156):
 
 - `manages(d, c, scope)`: an admin, or a manager binding on the scope;
 - `sees(d, c, scope)`: that, or a member (granted or synced);
-- `visibleScope(d, c, scope)`: the scope's policy, or `not found` if it
+- `visibleScope(d, c, scope)`: the scope's record, or `not found` if it
   does not exist or `c` does not see it. A scope's existence is not an
   outsider's to learn, so a refusal is never `permission denied` to
   someone who could not see the scope;
@@ -106,16 +106,16 @@ shared helpers sit together near the top (service.go:123-156):
 
 | Method | Who may | Notes |
 |---|---|---|
-| `CreateScope` | admins | top-level scopes only for now |
+| `CreateScope` | admins | top-level scopes only for now; an ID and nothing else. Its policy (models, budget and budget mode, limits) is its ScopePolicy, in the config repository (ADR 0050): until that is merged, the scope is published with no models (`TestCreateScope`) |
 | `AddMember` | the scope's managers, admins (`requireManager`) | who the member is comes from `principalToAdd`: an existing principal, unchanged (a different kind or Entra ID given is `invalid`); else a new one with a kind. A manager may create only a keys-only service: never a user, never an Entra ID (ADR 0047: users come from bound groups, and an Entra ID is bound by the sync or an admin). IDs beginning `entra:` are refused |
 | `RemoveMember` | the scope's managers, admins (`requireManager`); a fellow manager only by admins | removes a membership granted in golem; a synced one is the group's (`invalid`: remove them in Entra or unbind the group). When the principal is no longer a member at all, its keys in the scope are revoked, its default scope cleared and its manager role there dropped; a principal still a member through a bound group keeps its keys and role |
 | `BindGroup`, `UnbindGroup` | admins | an Entra group's members become the scope's at the next sync (control/entrasync); unbinding ends them at the next sync |
 | `BindManager` | admins | `manager` is the only role bound so far; a scope or principal that does not exist is `not found` (`TestBindManager`). The principal need not be a member: managing is its own right (org-model.md §2: a parent team's managers manage its sub-teams), and a manager reads the scope without being one (`TestManagerReadsScope`) |
-| `MintKey` | a member, its own keys; the scope's managers, its services' keys; admins, any (`mayMint`) | owner must be a member; models within the scope's; expiry in the future; a personal (user's) key within 90 days, by default at 90 (`keyExpiry`, `MaxPersonalKeyLife`); a service's key needs no expiry |
+| `MintKey` | a member, its own keys; the scope's managers, its services' keys; admins, any (`mayMint`) | owner must be a member; models within the scope's ScopePolicy's, as golem-control's config gives them (`narrows`, `Service.ScopeModels`; not checked while no config has been read: the gateway intersects a key's models with its scope's anyway, `TestKeyModelsFromConfig`); expiry in the future; a personal (user's) key within 90 days, by default at 90 (`keyExpiry`, `MaxPersonalKeyLife`); a service's key needs no expiry |
 | `RevokeKey` | the key's owner, admins; a service's key, its scope's managers | a manager cannot revoke a member's personal key (they remove the member instead); revoking a revoked key is no change; an outsider gets `not found` |
 | `Whoami` | anyone signed in | |
 | `ListScopes` | lists what the caller `sees` | |
-| `GetScope` | members, managers, admins | anyone else gets `not found` (`visibleScope`) |
+| `GetScope` | members, managers, admins | its members, managers and bound groups; anyone else gets `not found` (`visibleScope`). Its policy is not the API's: `golemctl scopes get` names the ScopePolicy to read |
 | `ListKeys` | the key's owner, its scope's managers, admins | never the key itself |
 
 ## 4. Invariants: where each is enforced and tested
@@ -343,11 +343,9 @@ end against a fake Entra and a real `api.Server`.
 - Most of the org model is still to come: sub-teams and projects, the
   services entity, member and service caps, budgets and grants, capture
   settings, unbinding a manager, and rotating or constraining keys.
-- `CreateScope` stores the policy it is given unchecked: a negative
-  in-flight limit or ceiling would be none at the gateway. Scope policy
-  moves out of the state document into a ScopePolicy CRD, checked by
-  lib/compile's `scopePolicy` as a LocalScope's is; until then, give
-  policies through golemctl with care.
+- A request with fields the API no longer has (a `policy` in
+  `CreateScope`, from before ADR 0050) is not refused: Connect's JSON and
+  binary codecs discard unknown fields. golemctl sends none.
 - Responses carry no etag (control-plane.md §2 step 5) and there are no
   conditional updates by the client.
 - `golemctl` loads its settings before it looks up the command, so an

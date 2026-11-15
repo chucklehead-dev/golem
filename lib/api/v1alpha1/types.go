@@ -1,8 +1,8 @@
 // Package v1alpha1 holds golem's config CRDs (group golem.dev, ADR 0005) as
 // Go types, and reads them from YAML. It has no Kubernetes client
 // dependency, so the gateway, golemctl and golem-control share it
-// (ADR 0023). This version has Backend, ModelRoute, PriceList and
-// LocalIdentity; ScopePolicy and Hook follow.
+// (ADR 0023). This version has Backend, ModelRoute, ScopePolicy,
+// PriceList and LocalIdentity; Hook follows.
 package v1alpha1
 
 // APIVersion is the apiVersion of every golem config object.
@@ -12,6 +12,7 @@ const APIVersion = "golem.dev/v1alpha1"
 const (
 	KindBackend       = "Backend"
 	KindModelRoute    = "ModelRoute"
+	KindScopePolicy   = "ScopePolicy"
 	KindLocalIdentity = "LocalIdentity"
 	KindPriceList     = "PriceList"
 )
@@ -128,19 +129,64 @@ type PoolMember struct {
 	Weight     int    `json:"weight,omitempty"`
 }
 
+// ScopePolicy is a scope's policy (ADR 0005, 0050): what its members may
+// call and within which limits. Its name is the scope's ID. A scope exists
+// in the state document (created through the control API, which holds its
+// memberships, keys and Entra group bindings); its policy is config,
+// reviewed in GitOps. In standalone mode, where there is no state, each
+// ScopePolicy is a scope a LocalIdentity's keys and members can name.
+type ScopePolicy struct {
+	TypeMeta `json:",inline"`
+	Metadata ObjectMeta      `json:"metadata"`
+	Spec     ScopePolicySpec `json:"spec"`
+}
+
+// ScopePolicySpec is a scope's policy. Every field is optional: unset, a
+// scope can call nothing and has no budget, the default in-flight limits,
+// no ceilings, provider storage forbidden and the route's feature mode.
+type ScopePolicySpec struct {
+	// Models are the route aliases the scope's members may call.
+	Models []string `json:"models,omitempty"`
+	// BudgetMicros is the period's budget in micro-units of the currency;
+	// zero is no budget.
+	BudgetMicros int64 `json:"budgetMicros,omitempty"`
+	// BudgetMode is what the budget does at admission (PRD §9.1): observe
+	// (the default: calls over it are admitted and their ledger rows
+	// marked), warn (admitted, marked, and the response carries a
+	// golem-warning header) or enforce (refused, budget.pool_exhausted).
+	BudgetMode string `json:"budgetMode,omitempty"`
+	// DeclaredWorstCaseCheck admits a call only if known spend plus its declared
+	// worst case fits, and refuses calls that declare none (no max_tokens,
+	// server-side tools): a fail-closed admission mode, not a spending
+	// ceiling (ADR 0044).
+	DeclaredWorstCaseCheck bool     `json:"declaredWorstCaseCheck,omitempty"`
+	InFlight               InFlight `json:"inFlight,omitzero"`
+	// Ceilings on a request (ADR 0038): output tokens asked for (max_tokens
+	// times n) and the body's size. Zero is none.
+	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
+	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
+	// ProviderStorage is "forbidden" (the default: golem turns store off and
+	// refuses provider-side state) or "allowed" (ADR 0027).
+	ProviderStorage string `json:"providerStorage,omitempty"`
+	// Features is the request-feature mode (ADR 0037, 0041 §3): restricted
+	// (approved fields, betas and versions only) or compatible (unknown
+	// features forwarded); unset, restricted except on agent routes.
+	Features string `json:"features,omitempty"`
+}
+
 // LocalIdentity is standalone mode's stand-in for the state document's
-// entitlements (ADR 0023): scopes, their limits, and dev keys, for testing
-// authentication, authorization and budgets on one machine. Refused outside
-// standalone mode.
+// entitlements (ADR 0023): dev keys and members of the config's scopes
+// (each a ScopePolicy), for testing authentication, authorization and
+// budgets on one machine. Refused outside standalone mode.
 type LocalIdentity struct {
 	TypeMeta `json:",inline"`
 	Metadata ObjectMeta        `json:"metadata"`
 	Spec     LocalIdentitySpec `json:"spec"`
 }
 
-// LocalIdentitySpec is a LocalIdentity's scopes and keys.
+// LocalIdentitySpec is a LocalIdentity's keys and members. The scopes they
+// name are the config's ScopePolicies.
 type LocalIdentitySpec struct {
-	Scopes   []LocalScope  `json:"scopes"`
 	Keys     []LocalKey    `json:"keys,omitempty"`
 	Users    []LocalMember `json:"users,omitempty"`
 	Services []LocalMember `json:"services,omitempty"`
@@ -153,32 +199,6 @@ type LocalMember struct {
 	Entra   string   `json:"entra"` // oid, or app (client) ID
 	Scopes  []string `json:"scopes"`
 	Default string   `json:"default,omitempty"` // default: the first scope
-}
-
-// LocalScope is a scope: the aliases its members may call and its limits.
-type LocalScope struct {
-	Name   string   `json:"name"`
-	Models []string `json:"models"`
-	// BudgetMicros is the period's budget in micro-units of the currency;
-	// zero is no budget.
-	BudgetMicros int64 `json:"budgetMicros,omitempty"`
-	// DeclaredWorstCaseCheck admits a call only if known spend plus its declared
-	// worst case fits, and refuses calls that declare none (no max_tokens,
-	// server-side tools): a fail-closed admission mode, not a spending
-	// ceiling (ADR 0044).
-	DeclaredWorstCaseCheck bool     `json:"declaredWorstCaseCheck,omitempty"`
-	InFlight               InFlight `json:"inFlight,omitzero"`
-	// ProviderStorage is "forbidden" (the default: golem turns store off and
-	// refuses provider-side state) or "allowed" (ADR 0027).
-	ProviderStorage string `json:"providerStorage,omitempty"`
-	// Ceilings on a request (ADR 0038): output tokens asked for (max_tokens
-	// times n) and the body's size. Zero is none.
-	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
-	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
-	// Features is the request-feature mode (ADR 0037, 0041 §3): restricted
-	// (approved fields, betas and versions only) or compatible (unknown
-	// features forwarded); unset, restricted except on agent routes.
-	Features string `json:"features,omitempty"`
 }
 
 // InFlight is a scope's in-flight limits (ADR 0031, 0041 §7.6).

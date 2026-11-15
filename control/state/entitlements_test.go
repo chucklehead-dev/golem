@@ -2,16 +2,18 @@ package state
 
 import (
 	"errors"
-	"slices"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 func seeded(t *testing.T) *Store {
 	t.Helper()
 	s := &Store{Bucket: open(t)}
 	if _, err := s.Update(t.Context(), func(d *Document) error {
-		d.Scopes = map[string]Scope{"a": {Models: []string{"claude"}}, "b": {Models: []string{"claude", "gpt"}}}
+		d.Scopes = map[string]Scope{"a": {}, "b": {Groups: []string{"g1"}}}
 		d.Principals = map[string]Principal{
 			"alice": {Kind: "user", Entra: "oid-1", Scopes: []string{"a", "b"}, Default: "b"},
 			"ci":    {Kind: "service", Entra: "app-1", Scopes: []string{"b"}},
@@ -63,14 +65,15 @@ func TestEntitlementInvariants(t *testing.T) {
 	}
 }
 
-// TestEntitlements: the snapshot's view: scopes' models limited to the
-// routes that exist, users and services by Entra ID, every principal a
-// key owner of its kind, a revoked key listed revoked.
+// TestEntitlements: the snapshot's view: scopes by ID only (their policy
+// is their ScopePolicy's, which the compiler joins), users and services by
+// Entra ID, every principal a key owner of its kind, a revoked key listed
+// revoked.
 func TestEntitlementsView(t *testing.T) {
 	s := seeded(t)
 	s.Update(t.Context(), func(d *Document) error { return d.Revoke("h2", time.Unix(1, 0)) })
 	e := s.Current().Entitlements([]string{"claude"})
-	if len(e.Scopes) != 2 || !slices.Equal(e.Scopes[1].Models, []string{"claude"}) || e.Scopes[0].PrincipalInFlight != DefaultPrincipalInFlight {
+	if !reflect.DeepEqual(e.Scopes, []snapshot.Scope{{ID: "a"}, {ID: "b"}}) {
 		t.Fatalf("scopes %+v", e.Scopes)
 	}
 	if len(e.Users) != 1 || e.Users[0].ID != "alice" || e.Users[0].Default != "b" || len(e.Services) != 1 || e.Services[0].Default != "b" {

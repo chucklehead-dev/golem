@@ -99,9 +99,10 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		s("error_code", c.ErrorCode),
 		f("estimated_fraction", c.EstimatedFraction),
 		attribute.Bool("waived", c.Waived),
+		attribute.Bool("over_budget", c.OverBudget),
 	}
 }
 
 // ledgerColumns is golem.spend's column count; the row is built in an
 // array of this size, on the stack, not a slice the record copies again.
-const ledgerColumns = 39
+const ledgerColumns = 40

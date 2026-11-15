@@ -86,11 +86,14 @@ func TestAuthAndLimits(t *testing.T) {
 	alice, bob := key.New(key.Dev), key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)} // 2048 input tokens, 4 output
 	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude, haiku], budgetMicros: 100000000, budgetMode: enforce, inFlight: {principal: 1}}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes:
-  - {name: team-a, models: [claude, haiku], budgetMicros: 100000000, inFlight: {principal: 1}}
   keys:
   - {key: `+alice+`, principal: alice, scope: team-a}
   - {key: `+bob+`, principal: bob, scope: team-a, models: [haiku]}
@@ -140,11 +143,14 @@ func TestConcurrencyAndCancel(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: pr}, nil
 	})
 	h, lim := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude, haiku], inFlight: {principal: 1}}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes:
-  - {name: team-a, models: [claude, haiku], inFlight: {principal: 1}}
   keys:
   - {key: `+alice+`, principal: alice, scope: team-a}
 `, slow)
@@ -195,11 +201,14 @@ spec:
 func TestRepeatedCredential(t *testing.T) {
 	alice := key.New(key.Dev)
 	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude], inFlight: {principal: 1}}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes:
-  - {name: team-a, models: [claude], inFlight: {principal: 1}}
   keys:
   - {key: `+alice+`, principal: alice, scope: team-a}
 `, &stub{events: anthropicStream(1)})

@@ -25,7 +25,10 @@ func setup(t *testing.T) *Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { b.Close() })
-	s := &Service{State: &state.Store{Bucket: b}, Now: func() time.Time { return time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC) }}
+	// The config's ScopePolicies, as golem-control reads them.
+	policies := map[string][]string{"team-a": {"claude", "gpt"}, "team-b": {"claude"}}
+	s := &Service{State: &state.Store{Bucket: b}, Now: func() time.Time { return time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC) },
+		ScopeModels: func(scope string) ([]string, bool) { return policies[scope], true }}
 	ctx := t.Context()
 	must := func(err error) {
 		t.Helper()
@@ -33,8 +36,8 @@ func setup(t *testing.T) *Service {
 			t.Fatal(err)
 		}
 	}
-	must(s.CreateScope(ctx, admin, Options{}, "team-a", state.Scope{Models: []string{"claude", "gpt"}}))
-	must(s.CreateScope(ctx, admin, Options{}, "team-b", state.Scope{Models: []string{"claude"}}))
+	must(s.CreateScope(ctx, admin, Options{}, "team-a"))
+	must(s.CreateScope(ctx, admin, Options{}, "team-b"))
 	for _, m := range []struct{ scope, id, kind string }{{"team-a", "mona", "user"}, {"team-b", "bob", "user"}, {"team-a", "alice", "user"}, {"team-a", "ci", "service"}} {
 		must(s.AddMember(ctx, admin, Options{}, m.scope, Member{ID: m.id, Kind: m.kind}))
 	}
@@ -54,7 +57,7 @@ func TestAuthorization(t *testing.T) {
 	}
 	ops := map[string]op{
 		"create a scope": func(s *Service, c Caller) error {
-			return s.CreateScope(t.Context(), c, Options{}, "new", state.Scope{})
+			return s.CreateScope(t.Context(), c, Options{}, "new")
 		},
 		"add a member to team-a": func(s *Service, c Caller) error {
 			return s.AddMember(t.Context(), c, Options{}, "team-a", Member{ID: "zed", Kind: "service"})
@@ -392,31 +395,55 @@ func TestBindGroup(t *testing.T) {
 	}
 }
 
-// TestCreateScopePriced: a scope with a budget whose models the config
-// prices not is refused (validate-only too), with the check's reason; one
-// without a budget is not checked.
-func TestCreateScopePriced(t *testing.T) {
+// TestCreateScope: a scope is created with no policy (its ScopePolicy is
+// config): an ID, an empty record the group bindings will fill, an audit
+// event; a second of the same ID, or none, is invalid.
+func TestCreateScope(t *testing.T) {
 	ctx := t.Context()
 	s := setup(t)
-	var checked []string
-	s.Priced = func(d *state.Document, id string) error {
-		checked = append(checked, id)
-		if _, ok := d.Scopes[id]; !ok {
-			t.Fatalf("checked %s before it is in the document", id)
-		}
-		return errors.New(`alias "x" reaches model "m", which no PriceList prices`)
-	}
-	for _, o := range []Options{{ValidateOnly: true}, {}} {
-		err := s.CreateScope(ctx, admin, o, "team-c", state.Scope{Models: []string{"x"}, BudgetMicros: 1})
-		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "no PriceList prices") {
-			t.Fatalf("validate-only %v: %v, want the unpriced scope refused", o.ValidateOnly, err)
-		}
+	if err := s.CreateScope(ctx, admin, Options{ValidateOnly: true}, "team-c"); err != nil {
+		t.Fatal(err)
 	}
 	if _, ok := s.State.Current().Scopes["team-c"]; ok {
-		t.Fatal("the refused scope was written")
+		t.Fatal("a validate-only create was written")
 	}
-	if err := s.CreateScope(ctx, admin, Options{}, "team-c", state.Scope{Models: []string{"x"}}); err != nil || len(checked) != 2 {
-		t.Fatalf("a scope with no budget: %v, checked %v", err, checked)
+	if err := s.CreateScope(ctx, admin, Options{}, "team-c"); err != nil {
+		t.Fatal(err)
+	}
+	d := s.State.Current()
+	if sc, ok := d.Scopes["team-c"]; !ok || len(sc.Groups) != 0 {
+		t.Fatalf("scope %+v, %v", sc, ok)
+	}
+	if last := d.Audit[len(d.Audit)-1]; last.Action != "scope.create" || last.Target != "team-c" {
+		t.Fatalf("audit %+v", last)
+	}
+	for id, want := range map[string]string{"team-c": `scope.id: scope "team-c" exists`, "": "scope.id: required"} {
+		if err := s.CreateScope(ctx, admin, Options{}, id); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), want) {
+			t.Errorf("create %q: %v, want %s", id, err, want)
+		}
+	}
+}
+
+// TestKeyModelsFromConfig: a key's models are checked against its scope's
+// ScopePolicy as the config gives it (ScopeModels): a scope with no policy
+// allows none; a config that cannot tell checks nothing.
+func TestKeyModelsFromConfig(t *testing.T) {
+	ctx := t.Context()
+	s := setup(t)
+	if err := s.CreateScope(ctx, admin, Options{}, "team-c"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddMember(ctx, admin, Options{}, "team-c", Member{ID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	req := KeyRequest{Owner: "alice", Scope: "team-c", Models: []string{"claude"}}
+	if _, err := s.MintKey(ctx, alice, Options{}, req); !errors.Is(err, ErrInvalid) ||
+		!strings.Contains(err.Error(), `key.models[0]: scope team-c does not allow "claude": a key can only narrow its scope's models, its ScopePolicy's spec.models in the config`) {
+		t.Fatalf("a model of a scope with no ScopePolicy: %v", err)
+	}
+	s.ScopeModels = func(string) ([]string, bool) { return nil, false }
+	if _, err := s.MintKey(ctx, alice, Options{}, req); err != nil {
+		t.Fatalf("a config that cannot tell: %v", err)
 	}
 }
 

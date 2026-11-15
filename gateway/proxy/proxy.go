@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -199,6 +200,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Currency: snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived()}
 	if ticket != nil {
 		call.Period = ticket.Period() // the counter's: one period per call
+		call.OverBudget = h.overBudget(w, principal, ticket)
 	}
 
 	// One attempt. (Retries and failover before the first byte go here; a
@@ -510,7 +512,7 @@ func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c a
 		return nil, &refusal{code: contract.RequestInvalid, msg: "this scope checks each call's declared worst case: set max_tokens, so it can be checked against the budget"}
 	}
 	c.Principal, c.Scope = p.ID, p.Scope
-	c.Budget, c.PrincipalLimit, c.ScopeLimit = lim.BudgetMicros, lim.PrincipalInFlight, lim.ScopeInFlight
+	c.Budget, c.BudgetMode, c.PrincipalLimit, c.ScopeLimit = lim.BudgetMicros, lim.BudgetMode, lim.PrincipalInFlight, lim.ScopeInFlight
 	c.DeclaredWorstCaseCheck = lim.DeclaredWorstCaseCheck
 	t, err := h.Limiter.Admit(ctx, c)
 	if no, ok := errors.AsType[*admission.Refusal](err); ok {
@@ -523,6 +525,33 @@ func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c a
 		return nil, &refusal{code: contract.GatewayInternal, msg: "the limiter failed"}
 	}
 	return t, nil
+}
+
+// overBudget reports whether an admitted call is over its scope's budget
+// (its scope observes or warns rather than enforcing), for its ledger row;
+// in warn mode the response says so in golem-warning, with the share of
+// the budget known spend has reached (contracts.md §1). It is set before
+// the provider's headers are copied, which never include golem's.
+func (h *Handler) overBudget(w http.ResponseWriter, p *auth.Principal, t admission.Ticket) bool {
+	over, known := t.OverBudget()
+	if over && p.Limits.BudgetMode == admission.Warn {
+		w.Header()[contract.HeaderWarning] = []string{budgetWarning(known, p.Limits.BudgetMicros)}
+	}
+	return over
+}
+
+// budgetWarning is warn mode's golem-warning: the refusal's code, and the
+// share of the budget known spend has reached, rounded down.
+func budgetWarning(known, budget int64) string {
+	var pct int64
+	switch {
+	case budget <= 0:
+	case known > math.MaxInt64/100: // past any budget: not worth exactness
+		pct = known / budget * 100
+	default:
+		pct = known * 100 / budget
+	}
+	return contract.BudgetPoolExhausted.Name + " " + strconv.FormatInt(pct, 10) + "%"
 }
 
 // upstreamRequest is the provider's request: the rewritten body, the

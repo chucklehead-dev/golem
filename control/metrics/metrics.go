@@ -30,7 +30,7 @@ const (
 	PublishFailures   = "golem.control.publish.failures"
 	LeaderEpoch       = "golem.control.leader.epoch"
 	Leader            = "golem.control.leader"
-	Unpriced          = "golem.control.unpriced"
+	Unmatched         = "golem.control.scope_policy.unmatched"
 	ConfigRenewing    = "golem.control.config.renewing"
 	SpendAge          = "golem.control.spend.age"
 	SpendStale        = "golem.control.spend.stale"
@@ -54,9 +54,9 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 	failures := r.icounter(m, PublishFailures, "{count}", "Publication attempts that failed or were degraded, by pool and reason")
 	epoch := r.igauge(m, LeaderEpoch, "{count}", "The leadership epoch this replica leads at; 0 when it does not lead")
 	leader := r.igauge(m, Leader, "1", "1 while this replica leads, else 0")
-	unpriced := r.igauge(m, Unpriced, "{count}", "Aliases the last publication left out of scopes whose budgets could not be charged for them")
+	unmatched := r.igauge(m, Unmatched, "{count}", "Scopes with no ScopePolicy (published able to call nothing) and ScopePolicies of no scope, at the last publication")
 	renewing := r.igauge(m, ConfigRenewing, "1", "1 while the config directory is not what is published (it does not compile, or an edit was refused): the last good config is renewed")
-	insts := []metric.Observable{pubTime, pubSeq, validUntil, failures, epoch, leader, unpriced, renewing}
+	insts := []metric.Observable{pubTime, pubSeq, validUntil, failures, epoch, leader, unmatched, renewing}
 
 	var spendAge metric.Float64ObservableGauge
 	var spendStale metric.Int64ObservableGauge
@@ -119,7 +119,7 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 		e := c.Elector.Epoch()
 		o.ObserveInt64(epoch, int64(e))
 		o.ObserveInt64(leader, b2i(e != 0))
-		o.ObserveInt64(unpriced, int64(len(c.Unpriced())))
+		o.ObserveInt64(unmatched, int64(len(c.Unmatched())))
 		o.ObserveInt64(renewing, b2i(c.ConfigRenewing()))
 		if c.Spend != nil {
 			if k, ok := c.Spend.Current(); ok {

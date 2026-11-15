@@ -97,7 +97,7 @@ func TestGolemctl(t *testing.T) {
 		t.Fatalf("the settings file: %v %v", fi, err)
 	}
 	for _, args := range [][]string{
-		{"scopes", "create", "team-a", "--models", "claude,gpt"},
+		{"scopes", "create", "team-a"},
 		{"members", "add", "team-a", "alice", "--kind", "user", "--entra", "oid-a"},
 		{"managers", "add", "team-a", "alice"},
 		{"groups", "bind", "team-a", "group-1"},
@@ -131,7 +131,7 @@ func TestGolemctl(t *testing.T) {
 		if code, out, _ := golemctl("scopes", "list"); code != 0 || strings.TrimSpace(out) != "team-a" {
 			t.Fatalf("scopes list: %d %q", code, out)
 		}
-		if code, out, _ := golemctl("scopes", "get", "team-a"); code != 0 || !strings.Contains(out, "alice") || !strings.Contains(out, "claude, gpt") || !strings.Contains(out, "group-1") {
+		if code, out, _ := golemctl("scopes", "get", "team-a"); code != 0 || !strings.Contains(out, "alice") || !strings.Contains(out, "ScopePolicy/team-a in the config repository") || !strings.Contains(out, "group-1") {
 			t.Fatalf("scopes get: %d %q", code, out)
 		}
 		code, out, _ = golemctl("keys", "list", "--scope", "team-a")

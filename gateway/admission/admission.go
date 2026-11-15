@@ -26,8 +26,12 @@ type Call struct {
 	// shares) key on.
 	Alias, Deployment, Model string
 	Budget                   int64 // the scope's budget in micro-units; 0: none
-	PrincipalLimit           int   // in-flight calls per principal; 0: none
-	ScopeLimit               int   // in-flight calls per scope (ADR 0041 §7.6); 0: none
+	// BudgetMode is what the budget does (PRD §9.1): Enforce refuses a call
+	// over it; Warn and Observe admit it, its ticket saying so (OverBudget).
+	// In-flight limits apply in every mode.
+	BudgetMode     BudgetMode
+	PrincipalLimit int // in-flight calls per principal; 0: none
+	ScopeLimit     int // in-flight calls per scope (ADR 0041 §7.6); 0: none
 	// DeclaredWorstCaseCheck (a scope option): admit only if known spend
 	// plus Worst, the call's declared worst case, fits (ADR 0044); else
 	// known spend below the budget.
@@ -37,6 +41,35 @@ type Call struct {
 	// budget period. Deadline is when it must have ended (the route's
 	// maximum duration); zero: none.
 	Started, Deadline time.Time
+}
+
+// BudgetMode is what a scope's budget does at admission (PRD §9.1, ADR
+// 0050). The zero value is Enforce: a call that names no mode is refused
+// over its budget, failing closed.
+type BudgetMode uint8
+
+// The budget modes.
+const (
+	// Enforce refuses a call over the budget (budget.pool_exhausted).
+	Enforce BudgetMode = iota
+	// Warn admits it, its ticket over budget: the ledger row marks it and
+	// the response carries a golem-warning header.
+	Warn
+	// Observe admits it, its ticket over budget: the ledger row marks it,
+	// and nothing is added to the response.
+	Observe
+)
+
+// ModeOf is a snapshot's budget mode ("observe", "warn", "enforce"); any
+// other is Enforce.
+func ModeOf(s string) BudgetMode {
+	switch s {
+	case "observe":
+		return Observe
+	case "warn":
+		return Warn
+	}
+	return Enforce
 }
 
 // Admitter admits calls. Admit returns a Ticket, or a *Refusal (rendered
@@ -64,6 +97,10 @@ type Ticket interface {
 	Period() string
 	// Waived reports an admission outside the bound (the store was down).
 	Waived() bool
+	// OverBudget reports a call admitted over its scope's budget, in a mode
+	// that admits one (Warn, Observe), and the known spend admission
+	// checked: what Enforce would have refused.
+	OverBudget() (over bool, known int64)
 }
 
 // Refusal is a call admission turned away: rendered with its code, and a

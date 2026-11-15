@@ -22,10 +22,11 @@ import (
 //     a scope or a principal removed (a principal that owns keys is kept,
 //     with no memberships, as key records name their owner), a key minted
 //     since revoked, so no later restore can bring it back.
-//   - What both have takes the narrower of each: models, groups and
-//     memberships intersected, budgets, in-flight limits and ceilings the
-//     lower, storage allowed only if both allow it, the worst-case check
-//     if either has it, a key's expiry the earlier.
+//   - What both have takes the narrower of each: groups, memberships and a
+//     key's models intersected, a key's expiry the earlier.
+//
+// A scope's policy is not in the state (its ScopePolicy is config, ADR
+// 0050), so a restore neither brings back nor narrows it.
 //
 // The fence, the publication records, the revocations and the audit
 // outbox are the current document's, never the backup's (model/
@@ -52,8 +53,8 @@ func Restore(cur, backup *Document, at time.Time) (*Document, Report, error) {
 	return r.next, r.report, nil
 }
 
-// scopes keeps the scopes both documents have, each with the narrower
-// policy.
+// scopes keeps the scopes both documents have, each with the groups both
+// bind.
 func (r *restorer) scopes() {
 	r.next.Scopes = map[string]Scope{}
 	for _, id := range slices.Sorted(maps.Keys(union(r.cur.Scopes, r.backup.Scopes))) {
@@ -65,7 +66,7 @@ func (r *restorer) scopes() {
 		case !inBackup:
 			r.remove("scope %s (created since the backup)", id)
 		default:
-			r.next.Scopes[id] = r.scope(id, b, c)
+			r.next.Scopes[id] = Scope{Groups: r.meetSet("scope "+id+"'s group", b.Groups, c.Groups)}
 		}
 	}
 }
@@ -160,32 +161,6 @@ func (r *restorer) remove(f string, a ...any) {
 	r.report.Removed = append(r.report.Removed, fmt.Sprintf(f, a...))
 }
 
-// scope is the narrower of the backup's and the current policy.
-func (r *restorer) scope(id string, b, c Scope) Scope {
-	m := Scope{
-		Groups:                 r.meetSet("scope "+id+"'s group", b.Groups, c.Groups),
-		Models:                 r.meetSet("scope "+id+"'s model", b.Models, c.Models),
-		BudgetMicros:           r.lower("scope "+id+"'s budget", b.BudgetMicros, c.BudgetMicros, 0),
-		DeclaredWorstCaseCheck: b.DeclaredWorstCaseCheck || c.DeclaredWorstCaseCheck,
-		PrincipalInFlight:      int(r.lower("scope "+id+"'s principal in-flight limit", int64(b.PrincipalInFlight), int64(c.PrincipalInFlight), DefaultPrincipalInFlight)),
-		ScopeInFlight:          int(r.lower("scope "+id+"'s in-flight limit", int64(b.ScopeInFlight), int64(c.ScopeInFlight), DefaultScopeInFlight)),
-		StorageAllowed:         b.StorageAllowed && c.StorageAllowed,
-		MaxOutputTokens:        r.lower("scope "+id+"'s output ceiling", b.MaxOutputTokens, c.MaxOutputTokens, 0),
-		MaxInputBytes:          r.lower("scope "+id+"'s input ceiling", b.MaxInputBytes, c.MaxInputBytes, 0),
-		Features:               features(b.Features, c.Features),
-	}
-	if b.StorageAllowed && !c.StorageAllowed {
-		r.withhold("scope %s's provider storage (forbidden since the backup)", id)
-	}
-	if !b.DeclaredWorstCaseCheck && c.DeclaredWorstCaseCheck {
-		r.withhold("scope %s without the declared worst-case check (on since the backup)", id)
-	}
-	if m.Features != b.Features && b.Features == "compatible" {
-		r.withhold("scope %s's compatible feature mode (restricted since the backup)", id)
-	}
-	return m
-}
-
 // principal is the backup's record, with memberships both have; its
 // identity (kind, Entra ID) is the current one's: only an admin or the
 // group sync binds it (ADR 0047).
@@ -252,46 +227,6 @@ func (r *restorer) meetSet(what string, b, c []string) []string {
 	}
 	slices.Sort(both)
 	return slices.Compact(both)
-}
-
-// lower is the stricter of two limits, where 0 is the default def (0 for
-// none: no limit). Both unset stays unset.
-func (r *restorer) lower(what string, b, c, def int64) int64 {
-	eff := func(v int64) int64 {
-		if v == 0 {
-			return def
-		}
-		return v
-	}
-	switch {
-	case b == 0 && c == 0:
-		return 0
-	case eff(b) == 0: // the backup had none
-		return c
-	case eff(c) == 0:
-		r.remove("%s's removal (back to the backup's %d)", what, b)
-		return b
-	case eff(b) > eff(c):
-		r.withhold("%s %d (lowered since the backup to %d)", what, b, eff(c))
-		return c
-	case eff(b) < eff(c):
-		r.remove("%s %d (raised since the backup; back to %d)", what, eff(c), b)
-		return b
-	}
-	return c
-}
-
-// features is the stricter feature mode: compatible only if both are,
-// restricted if either says so, else unset (restricted, but compatible on
-// agent routes).
-func features(b, c string) string {
-	switch {
-	case b == "compatible" && c == "compatible":
-		return "compatible"
-	case b == "restricted" || c == "restricted":
-		return "restricted"
-	}
-	return ""
 }
 
 // ownsKeys reports whether any key record, revoked or not, names principal

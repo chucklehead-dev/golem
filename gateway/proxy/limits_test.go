@@ -58,8 +58,9 @@ func (t *account) Cancel(_ context.Context, seen int64, until time.Time) {
 	t.end("cancel", seen)
 	t.until = until
 }
-func (t *account) Period() string { return "2026-11" }
-func (t *account) Waived() bool   { return false }
+func (t *account) Period() string            { return "2026-11" }
+func (t *account) Waived() bool              { return false }
+func (t *account) OverBudget() (bool, int64) { return false, 0 }
 
 // TestAdmitterContract: the request path depends only on admission. A
 // refusal is rendered by its code (with its Retry-After), a caller gone
@@ -69,10 +70,14 @@ func (t *account) Waived() bool   { return false }
 func TestAdmitterContract(t *testing.T) {
 	alice := key.New(key.Dev)
 	cfg := `apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}
+spec: {models: [claude]}
+---
+apiVersion: golem.dev/v1alpha1
 kind: LocalIdentity
 metadata: {name: local}
 spec:
-  scopes: [{name: team-a, models: [claude]}]
   keys: [{key: ` + alice + `, principal: alice, scope: team-a}]
 `
 	type served struct {

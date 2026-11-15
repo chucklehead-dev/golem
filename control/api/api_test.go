@@ -53,7 +53,9 @@ func serve(t *testing.T) (*httptest.Server, *state.Store) {
 	}
 	t.Cleanup(func() { b.Close() })
 	st := &state.Store{Bucket: b}
-	srv := httptest.NewServer((&Server{Service: &service.Service{State: st}, Auth: headerAuth{}}).Handler())
+	// team-a's ScopePolicy, as golem-control would read it from the config.
+	models := func(scope string) ([]string, bool) { return map[string][]string{"team-a": {"claude"}}[scope], true }
+	srv := httptest.NewServer((&Server{Service: &service.Service{State: st, ScopeModels: models}, Auth: headerAuth{}}).Handler())
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -78,11 +80,10 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("a non-admin creating a scope: %v", err)
 	}
 	if _, err := org("root").CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: "team-a",
-		Policy: &orgv1.ScopePolicy{Models: []string{"claude"}}, ValidateOnly: true})); err != nil || len(st.Current().Scopes) != 0 {
+		ValidateOnly: true})); err != nil || len(st.Current().Scopes) != 0 {
 		t.Fatalf("validate only: %v, scopes %v", err, st.Current().Scopes)
 	}
-	if _, err := org("root").CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: "team-a",
-		Policy: &orgv1.ScopePolicy{Models: []string{"claude"}}})); err != nil {
+	if _, err := org("root").CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: "team-a"})); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := org("root").AddMember(ctx, connect.NewRequest(&orgv1.AddMemberRequest{Scope: "team-a",
@@ -92,6 +93,10 @@ func TestAPI(t *testing.T) {
 	if _, err := keys("alice").MintKey(ctx, connect.NewRequest(&keysv1.MintKeyRequest{Owner: "alice", Scope: "team-a",
 		Models: []string{"opus"}})); code(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "key.models[0]") {
 		t.Fatalf("a model outside the scope: %v", err)
+	}
+	got, err := org("alice").GetScope(ctx, connect.NewRequest(&orgv1.GetScopeRequest{Id: "team-a"}))
+	if err != nil || got.Msg.Id != "team-a" || strings.Join(got.Msg.Members, ",") != "alice" {
+		t.Fatalf("get: %v %+v", err, got)
 	}
 	// eve can see nothing of team-a: not even that it exists.
 	if _, err := keys("eve").MintKey(ctx, connect.NewRequest(&keysv1.MintKeyRequest{Owner: "alice", Scope: "team-a"})); code(err) != connect.CodeNotFound {
@@ -117,7 +122,7 @@ func TestAPI(t *testing.T) {
 func TestPlainJSON(t *testing.T) {
 	srv, _ := serve(t)
 	req, _ := http.NewRequest("POST", srv.URL+"/golem.org.v1.OrgService/CreateScope",
-		strings.NewReader(`{"id":"team-b","policy":{"models":["claude"],"budgetMicros":"5000000"}}`))
+		strings.NewReader(`{"id":"team-b"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Caller", "root")
 	resp, err := srv.Client().Do(req)

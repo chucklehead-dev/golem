@@ -17,6 +17,7 @@ import (
 type Objects struct {
 	Backends   []Source[Backend]
 	Routes     []Source[ModelRoute]
+	Policies   []Source[ScopePolicy]
 	Identities []Source[LocalIdentity]
 	Prices     []Source[PriceList]
 }
@@ -92,12 +93,14 @@ func (objs *Objects) decode(file string, b []byte) error {
 			err = decodeInto(&objs.Backends, doc, file, n)
 		case KindModelRoute:
 			err = decodeInto(&objs.Routes, doc, file, n)
+		case KindScopePolicy:
+			err = decodeInto(&objs.Policies, doc, file, n)
 		case KindLocalIdentity:
 			err = decodeInto(&objs.Identities, doc, file, n)
 		case KindPriceList:
 			err = decodeInto(&objs.Prices, doc, file, n)
 		default:
-			return fmt.Errorf("%s#%d: kind %q is not a golem config kind (Backend, ModelRoute, PriceList, LocalIdentity)", file, n, tm.Kind)
+			return fmt.Errorf("%s#%d: kind %q is not a golem config kind (Backend, ModelRoute, ScopePolicy, PriceList, LocalIdentity)", file, n, tm.Kind)
 		}
 		if err != nil {
 			return fmt.Errorf("%s#%d: %s: %w", file, n, tm.Kind, err)

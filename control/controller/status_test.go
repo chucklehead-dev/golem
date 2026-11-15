@@ -28,8 +28,9 @@ func TestStatus(t *testing.T) {
 	r1.Audit = &audit.Shipper{State: st, Archive: archive}
 	g := &groupDir{users: []entrasync.User{{ID: "oid-a", UPN: "a@example.com", Enabled: true}, {ID: "oid-b", UPN: "b@example.com", Enabled: true}}}
 	r1.Sync = &entrasync.Sync{State: st, Directory: g, Now: r1.Now, MaxRemovals: 1}
+	w.policy("team-a", "{models: [claude]}")
 	if _, err := st.Update(t.Context(), func(d *state.Document) error {
-		d.Scopes = map[string]state.Scope{"team-a": {Models: []string{"claude"}, Groups: []string{"g1"}}}
+		d.Scopes = map[string]state.Scope{"team-a": {Groups: []string{"g1"}}}
 		d.Audit = append(d.Audit, state.AuditEvent{At: r1.clock, Actor: "root", Action: "scope.create", Target: "team-a"})
 		return nil
 	}); err != nil {
@@ -73,7 +74,7 @@ func TestFailureReason(t *testing.T) {
 		state.ErrFenced:                  ReasonFenced,
 		publish.ErrConflict:              ReasonConflict,
 		state.ErrContended:               ReasonConflict,
-		ErrUnpriced:                      ReasonUnpriced,
+		ErrUnmatched:                     ReasonUnmatched,
 		errors.New("kms: access denied"): ReasonOther,
 	} {
 		if got := FailureReason(err); got != want {

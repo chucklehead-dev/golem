@@ -1,13 +1,16 @@
 syntax = "proto3";
 
 // The org API (architecture.md §3): scopes, memberships and role
-// bindings. Authorization is the service layer's (org-model.md §2).
+// bindings. Authorization is the service layer's (org-model.md §2). A
+// scope's policy (models, budget, limits) is not here: it is config, a
+// ScopePolicy CRD changed by a GitOps pull request (ADR 0050).
 package golem.org.v1;
 
 option go_package = "github.com/chucklehead-dev/golem/gen/golem/org/v1;orgv1";
 
 service OrgService {
-  // Creates a top-level scope: admins.
+  // Creates a top-level scope: admins. It can call nothing until its
+  // ScopePolicy, named by its ID, is in the config.
   rpc CreateScope(CreateScopeRequest) returns (CreateScopeResponse);
   // Adds a member: the scope's managers, or admins. A manager adds a
   // principal that exists or creates a service that uses keys; only an
@@ -30,29 +33,16 @@ service OrgService {
   // The scopes the caller may read: its own and those it manages; every
   // scope for admins.
   rpc ListScopes(ListScopesRequest) returns (ListScopesResponse);
-  // A scope's policy, members and managers: for its members, its managers
-  // and admins; not found for anyone else.
+  // A scope's members, managers and bound groups: for its members, its
+  // managers and admins; not found for anyone else.
   rpc GetScope(GetScopeRequest) returns (GetScopeResponse);
 }
 
-// A scope's policy (org-model.md §3).
-message ScopePolicy {
-  // Route aliases the scope's members may call.
-  repeated string models = 1;
-  int64 budget_micros = 2;
-  bool declared_worst_case_check = 3;
-  int32 principal_in_flight = 4;
-  int32 scope_in_flight = 5;
-  bool storage_allowed = 6;
-  int64 max_output_tokens = 7;
-  int64 max_input_bytes = 8;
-  // restricted, compatible, or empty (by the route's kind).
-  string features = 9;
-}
-
 message CreateScopeRequest {
+  // The scope's ID: its ScopePolicy's name in the config.
   string id = 1;
-  ScopePolicy policy = 2;
+  reserved 2;
+  reserved "policy";
   // Checks the change, its authorization and the store\'s invariants, and
   // writes nothing (golemctl --dry-run).
   bool validate_only = 3;
@@ -142,7 +132,8 @@ message GetScopeRequest {
 
 message GetScopeResponse {
   string id = 1;
-  ScopePolicy policy = 2;
+  reserved 2;
+  reserved "policy";
   repeated string members = 3;
   repeated string managers = 4;
   // The Entra groups bound to it (object IDs).

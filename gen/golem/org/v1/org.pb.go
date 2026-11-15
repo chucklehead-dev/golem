@@ -5,7 +5,9 @@
 // source: golem/org/v1/org.proto
 
 // The org API (architecture.md §3): scopes, memberships and role
-// bindings. Authorization is the service layer's (org-model.md §2).
+// bindings. Authorization is the service layer's (org-model.md §2). A
+// scope's policy (models, budget, limits) is not here: it is config, a
+// ScopePolicy CRD changed by a GitOps pull request (ADR 0050).
 
 package orgv1
 
@@ -24,121 +26,10 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// A scope's policy (org-model.md §3).
-type ScopePolicy struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Route aliases the scope's members may call.
-	Models                 []string `protobuf:"bytes,1,rep,name=models,proto3" json:"models,omitempty"`
-	BudgetMicros           int64    `protobuf:"varint,2,opt,name=budget_micros,json=budgetMicros,proto3" json:"budget_micros,omitempty"`
-	DeclaredWorstCaseCheck bool     `protobuf:"varint,3,opt,name=declared_worst_case_check,json=declaredWorstCaseCheck,proto3" json:"declared_worst_case_check,omitempty"`
-	PrincipalInFlight      int32    `protobuf:"varint,4,opt,name=principal_in_flight,json=principalInFlight,proto3" json:"principal_in_flight,omitempty"`
-	ScopeInFlight          int32    `protobuf:"varint,5,opt,name=scope_in_flight,json=scopeInFlight,proto3" json:"scope_in_flight,omitempty"`
-	StorageAllowed         bool     `protobuf:"varint,6,opt,name=storage_allowed,json=storageAllowed,proto3" json:"storage_allowed,omitempty"`
-	MaxOutputTokens        int64    `protobuf:"varint,7,opt,name=max_output_tokens,json=maxOutputTokens,proto3" json:"max_output_tokens,omitempty"`
-	MaxInputBytes          int64    `protobuf:"varint,8,opt,name=max_input_bytes,json=maxInputBytes,proto3" json:"max_input_bytes,omitempty"`
-	// restricted, compatible, or empty (by the route's kind).
-	Features      string `protobuf:"bytes,9,opt,name=features,proto3" json:"features,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ScopePolicy) Reset() {
-	*x = ScopePolicy{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[0]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ScopePolicy) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ScopePolicy) ProtoMessage() {}
-
-func (x *ScopePolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[0]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ScopePolicy.ProtoReflect.Descriptor instead.
-func (*ScopePolicy) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{0}
-}
-
-func (x *ScopePolicy) GetModels() []string {
-	if x != nil {
-		return x.Models
-	}
-	return nil
-}
-
-func (x *ScopePolicy) GetBudgetMicros() int64 {
-	if x != nil {
-		return x.BudgetMicros
-	}
-	return 0
-}
-
-func (x *ScopePolicy) GetDeclaredWorstCaseCheck() bool {
-	if x != nil {
-		return x.DeclaredWorstCaseCheck
-	}
-	return false
-}
-
-func (x *ScopePolicy) GetPrincipalInFlight() int32 {
-	if x != nil {
-		return x.PrincipalInFlight
-	}
-	return 0
-}
-
-func (x *ScopePolicy) GetScopeInFlight() int32 {
-	if x != nil {
-		return x.ScopeInFlight
-	}
-	return 0
-}
-
-func (x *ScopePolicy) GetStorageAllowed() bool {
-	if x != nil {
-		return x.StorageAllowed
-	}
-	return false
-}
-
-func (x *ScopePolicy) GetMaxOutputTokens() int64 {
-	if x != nil {
-		return x.MaxOutputTokens
-	}
-	return 0
-}
-
-func (x *ScopePolicy) GetMaxInputBytes() int64 {
-	if x != nil {
-		return x.MaxInputBytes
-	}
-	return 0
-}
-
-func (x *ScopePolicy) GetFeatures() string {
-	if x != nil {
-		return x.Features
-	}
-	return ""
-}
-
 type CreateScopeRequest struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	Id     string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Policy *ScopePolicy           `protobuf:"bytes,2,opt,name=policy,proto3" json:"policy,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The scope's ID: its ScopePolicy's name in the config.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Checks the change, its authorization and the store\'s invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
@@ -148,7 +39,7 @@ type CreateScopeRequest struct {
 
 func (x *CreateScopeRequest) Reset() {
 	*x = CreateScopeRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[1]
+	mi := &file_golem_org_v1_org_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -160,7 +51,7 @@ func (x *CreateScopeRequest) String() string {
 func (*CreateScopeRequest) ProtoMessage() {}
 
 func (x *CreateScopeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[1]
+	mi := &file_golem_org_v1_org_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -173,7 +64,7 @@ func (x *CreateScopeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateScopeRequest.ProtoReflect.Descriptor instead.
 func (*CreateScopeRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{1}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *CreateScopeRequest) GetId() string {
@@ -181,13 +72,6 @@ func (x *CreateScopeRequest) GetId() string {
 		return x.Id
 	}
 	return ""
-}
-
-func (x *CreateScopeRequest) GetPolicy() *ScopePolicy {
-	if x != nil {
-		return x.Policy
-	}
-	return nil
 }
 
 func (x *CreateScopeRequest) GetValidateOnly() bool {
@@ -205,7 +89,7 @@ type CreateScopeResponse struct {
 
 func (x *CreateScopeResponse) Reset() {
 	*x = CreateScopeResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[2]
+	mi := &file_golem_org_v1_org_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -217,7 +101,7 @@ func (x *CreateScopeResponse) String() string {
 func (*CreateScopeResponse) ProtoMessage() {}
 
 func (x *CreateScopeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[2]
+	mi := &file_golem_org_v1_org_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -230,7 +114,7 @@ func (x *CreateScopeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateScopeResponse.ProtoReflect.Descriptor instead.
 func (*CreateScopeResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{2}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{1}
 }
 
 type Member struct {
@@ -246,7 +130,7 @@ type Member struct {
 
 func (x *Member) Reset() {
 	*x = Member{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[3]
+	mi := &file_golem_org_v1_org_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -258,7 +142,7 @@ func (x *Member) String() string {
 func (*Member) ProtoMessage() {}
 
 func (x *Member) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[3]
+	mi := &file_golem_org_v1_org_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -271,7 +155,7 @@ func (x *Member) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Member.ProtoReflect.Descriptor instead.
 func (*Member) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{3}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Member) GetId() string {
@@ -308,7 +192,7 @@ type AddMemberRequest struct {
 
 func (x *AddMemberRequest) Reset() {
 	*x = AddMemberRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[4]
+	mi := &file_golem_org_v1_org_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -320,7 +204,7 @@ func (x *AddMemberRequest) String() string {
 func (*AddMemberRequest) ProtoMessage() {}
 
 func (x *AddMemberRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[4]
+	mi := &file_golem_org_v1_org_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -333,7 +217,7 @@ func (x *AddMemberRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddMemberRequest.ProtoReflect.Descriptor instead.
 func (*AddMemberRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{4}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *AddMemberRequest) GetScope() string {
@@ -365,7 +249,7 @@ type AddMemberResponse struct {
 
 func (x *AddMemberResponse) Reset() {
 	*x = AddMemberResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[5]
+	mi := &file_golem_org_v1_org_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -377,7 +261,7 @@ func (x *AddMemberResponse) String() string {
 func (*AddMemberResponse) ProtoMessage() {}
 
 func (x *AddMemberResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[5]
+	mi := &file_golem_org_v1_org_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -390,7 +274,7 @@ func (x *AddMemberResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddMemberResponse.ProtoReflect.Descriptor instead.
 func (*AddMemberResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{5}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{4}
 }
 
 type RemoveMemberRequest struct {
@@ -406,7 +290,7 @@ type RemoveMemberRequest struct {
 
 func (x *RemoveMemberRequest) Reset() {
 	*x = RemoveMemberRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[6]
+	mi := &file_golem_org_v1_org_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -418,7 +302,7 @@ func (x *RemoveMemberRequest) String() string {
 func (*RemoveMemberRequest) ProtoMessage() {}
 
 func (x *RemoveMemberRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[6]
+	mi := &file_golem_org_v1_org_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -431,7 +315,7 @@ func (x *RemoveMemberRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveMemberRequest.ProtoReflect.Descriptor instead.
 func (*RemoveMemberRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{6}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RemoveMemberRequest) GetScope() string {
@@ -463,7 +347,7 @@ type RemoveMemberResponse struct {
 
 func (x *RemoveMemberResponse) Reset() {
 	*x = RemoveMemberResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[7]
+	mi := &file_golem_org_v1_org_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -475,7 +359,7 @@ func (x *RemoveMemberResponse) String() string {
 func (*RemoveMemberResponse) ProtoMessage() {}
 
 func (x *RemoveMemberResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[7]
+	mi := &file_golem_org_v1_org_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -488,7 +372,7 @@ func (x *RemoveMemberResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveMemberResponse.ProtoReflect.Descriptor instead.
 func (*RemoveMemberResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{7}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{6}
 }
 
 type BindManagerRequest struct {
@@ -504,7 +388,7 @@ type BindManagerRequest struct {
 
 func (x *BindManagerRequest) Reset() {
 	*x = BindManagerRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[8]
+	mi := &file_golem_org_v1_org_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -516,7 +400,7 @@ func (x *BindManagerRequest) String() string {
 func (*BindManagerRequest) ProtoMessage() {}
 
 func (x *BindManagerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[8]
+	mi := &file_golem_org_v1_org_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -529,7 +413,7 @@ func (x *BindManagerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindManagerRequest.ProtoReflect.Descriptor instead.
 func (*BindManagerRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{8}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *BindManagerRequest) GetScope() string {
@@ -561,7 +445,7 @@ type BindManagerResponse struct {
 
 func (x *BindManagerResponse) Reset() {
 	*x = BindManagerResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[9]
+	mi := &file_golem_org_v1_org_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -573,7 +457,7 @@ func (x *BindManagerResponse) String() string {
 func (*BindManagerResponse) ProtoMessage() {}
 
 func (x *BindManagerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[9]
+	mi := &file_golem_org_v1_org_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -586,7 +470,7 @@ func (x *BindManagerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindManagerResponse.ProtoReflect.Descriptor instead.
 func (*BindManagerResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{9}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{8}
 }
 
 type BindGroupRequest struct {
@@ -603,7 +487,7 @@ type BindGroupRequest struct {
 
 func (x *BindGroupRequest) Reset() {
 	*x = BindGroupRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[10]
+	mi := &file_golem_org_v1_org_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -615,7 +499,7 @@ func (x *BindGroupRequest) String() string {
 func (*BindGroupRequest) ProtoMessage() {}
 
 func (x *BindGroupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[10]
+	mi := &file_golem_org_v1_org_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -628,7 +512,7 @@ func (x *BindGroupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindGroupRequest.ProtoReflect.Descriptor instead.
 func (*BindGroupRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{10}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *BindGroupRequest) GetScope() string {
@@ -660,7 +544,7 @@ type BindGroupResponse struct {
 
 func (x *BindGroupResponse) Reset() {
 	*x = BindGroupResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[11]
+	mi := &file_golem_org_v1_org_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -672,7 +556,7 @@ func (x *BindGroupResponse) String() string {
 func (*BindGroupResponse) ProtoMessage() {}
 
 func (x *BindGroupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[11]
+	mi := &file_golem_org_v1_org_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -685,7 +569,7 @@ func (x *BindGroupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindGroupResponse.ProtoReflect.Descriptor instead.
 func (*BindGroupResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{11}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{10}
 }
 
 type UnbindGroupRequest struct {
@@ -701,7 +585,7 @@ type UnbindGroupRequest struct {
 
 func (x *UnbindGroupRequest) Reset() {
 	*x = UnbindGroupRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[12]
+	mi := &file_golem_org_v1_org_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -713,7 +597,7 @@ func (x *UnbindGroupRequest) String() string {
 func (*UnbindGroupRequest) ProtoMessage() {}
 
 func (x *UnbindGroupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[12]
+	mi := &file_golem_org_v1_org_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -726,7 +610,7 @@ func (x *UnbindGroupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnbindGroupRequest.ProtoReflect.Descriptor instead.
 func (*UnbindGroupRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{12}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *UnbindGroupRequest) GetScope() string {
@@ -758,7 +642,7 @@ type UnbindGroupResponse struct {
 
 func (x *UnbindGroupResponse) Reset() {
 	*x = UnbindGroupResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[13]
+	mi := &file_golem_org_v1_org_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -770,7 +654,7 @@ func (x *UnbindGroupResponse) String() string {
 func (*UnbindGroupResponse) ProtoMessage() {}
 
 func (x *UnbindGroupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[13]
+	mi := &file_golem_org_v1_org_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -783,7 +667,7 @@ func (x *UnbindGroupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnbindGroupResponse.ProtoReflect.Descriptor instead.
 func (*UnbindGroupResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{13}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{12}
 }
 
 type WhoamiRequest struct {
@@ -794,7 +678,7 @@ type WhoamiRequest struct {
 
 func (x *WhoamiRequest) Reset() {
 	*x = WhoamiRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[14]
+	mi := &file_golem_org_v1_org_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -806,7 +690,7 @@ func (x *WhoamiRequest) String() string {
 func (*WhoamiRequest) ProtoMessage() {}
 
 func (x *WhoamiRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[14]
+	mi := &file_golem_org_v1_org_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -819,7 +703,7 @@ func (x *WhoamiRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WhoamiRequest.ProtoReflect.Descriptor instead.
 func (*WhoamiRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{14}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{13}
 }
 
 type WhoamiResponse struct {
@@ -836,7 +720,7 @@ type WhoamiResponse struct {
 
 func (x *WhoamiResponse) Reset() {
 	*x = WhoamiResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[15]
+	mi := &file_golem_org_v1_org_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -848,7 +732,7 @@ func (x *WhoamiResponse) String() string {
 func (*WhoamiResponse) ProtoMessage() {}
 
 func (x *WhoamiResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[15]
+	mi := &file_golem_org_v1_org_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -861,7 +745,7 @@ func (x *WhoamiResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WhoamiResponse.ProtoReflect.Descriptor instead.
 func (*WhoamiResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{15}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *WhoamiResponse) GetPrincipal() string {
@@ -907,7 +791,7 @@ type ListScopesRequest struct {
 
 func (x *ListScopesRequest) Reset() {
 	*x = ListScopesRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[16]
+	mi := &file_golem_org_v1_org_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +803,7 @@ func (x *ListScopesRequest) String() string {
 func (*ListScopesRequest) ProtoMessage() {}
 
 func (x *ListScopesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[16]
+	mi := &file_golem_org_v1_org_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +816,7 @@ func (x *ListScopesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListScopesRequest.ProtoReflect.Descriptor instead.
 func (*ListScopesRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{16}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{15}
 }
 
 type ListScopesResponse struct {
@@ -944,7 +828,7 @@ type ListScopesResponse struct {
 
 func (x *ListScopesResponse) Reset() {
 	*x = ListScopesResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[17]
+	mi := &file_golem_org_v1_org_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -956,7 +840,7 @@ func (x *ListScopesResponse) String() string {
 func (*ListScopesResponse) ProtoMessage() {}
 
 func (x *ListScopesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[17]
+	mi := &file_golem_org_v1_org_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -969,7 +853,7 @@ func (x *ListScopesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListScopesResponse.ProtoReflect.Descriptor instead.
 func (*ListScopesResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{17}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListScopesResponse) GetIds() []string {
@@ -988,7 +872,7 @@ type GetScopeRequest struct {
 
 func (x *GetScopeRequest) Reset() {
 	*x = GetScopeRequest{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[18]
+	mi := &file_golem_org_v1_org_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1000,7 +884,7 @@ func (x *GetScopeRequest) String() string {
 func (*GetScopeRequest) ProtoMessage() {}
 
 func (x *GetScopeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[18]
+	mi := &file_golem_org_v1_org_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1013,7 +897,7 @@ func (x *GetScopeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetScopeRequest.ProtoReflect.Descriptor instead.
 func (*GetScopeRequest) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{18}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GetScopeRequest) GetId() string {
@@ -1026,7 +910,6 @@ func (x *GetScopeRequest) GetId() string {
 type GetScopeResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Id       string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Policy   *ScopePolicy           `protobuf:"bytes,2,opt,name=policy,proto3" json:"policy,omitempty"`
 	Members  []string               `protobuf:"bytes,3,rep,name=members,proto3" json:"members,omitempty"`
 	Managers []string               `protobuf:"bytes,4,rep,name=managers,proto3" json:"managers,omitempty"`
 	// The Entra groups bound to it (object IDs).
@@ -1037,7 +920,7 @@ type GetScopeResponse struct {
 
 func (x *GetScopeResponse) Reset() {
 	*x = GetScopeResponse{}
-	mi := &file_golem_org_v1_org_proto_msgTypes[19]
+	mi := &file_golem_org_v1_org_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1049,7 +932,7 @@ func (x *GetScopeResponse) String() string {
 func (*GetScopeResponse) ProtoMessage() {}
 
 func (x *GetScopeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_org_v1_org_proto_msgTypes[19]
+	mi := &file_golem_org_v1_org_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1062,7 +945,7 @@ func (x *GetScopeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetScopeResponse.ProtoReflect.Descriptor instead.
 func (*GetScopeResponse) Descriptor() ([]byte, []int) {
-	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{19}
+	return file_golem_org_v1_org_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GetScopeResponse) GetId() string {
@@ -1070,13 +953,6 @@ func (x *GetScopeResponse) GetId() string {
 		return x.Id
 	}
 	return ""
-}
-
-func (x *GetScopeResponse) GetPolicy() *ScopePolicy {
-	if x != nil {
-		return x.Policy
-	}
-	return nil
 }
 
 func (x *GetScopeResponse) GetMembers() []string {
@@ -1104,21 +980,10 @@ var File_golem_org_v1_org_proto protoreflect.FileDescriptor
 
 const file_golem_org_v1_org_proto_rawDesc = "" +
 	"\n" +
-	"\x16golem/org/v1/org.proto\x12\fgolem.org.v1\"\xf6\x02\n" +
-	"\vScopePolicy\x12\x16\n" +
-	"\x06models\x18\x01 \x03(\tR\x06models\x12#\n" +
-	"\rbudget_micros\x18\x02 \x01(\x03R\fbudgetMicros\x129\n" +
-	"\x19declared_worst_case_check\x18\x03 \x01(\bR\x16declaredWorstCaseCheck\x12.\n" +
-	"\x13principal_in_flight\x18\x04 \x01(\x05R\x11principalInFlight\x12&\n" +
-	"\x0fscope_in_flight\x18\x05 \x01(\x05R\rscopeInFlight\x12'\n" +
-	"\x0fstorage_allowed\x18\x06 \x01(\bR\x0estorageAllowed\x12*\n" +
-	"\x11max_output_tokens\x18\a \x01(\x03R\x0fmaxOutputTokens\x12&\n" +
-	"\x0fmax_input_bytes\x18\b \x01(\x03R\rmaxInputBytes\x12\x1a\n" +
-	"\bfeatures\x18\t \x01(\tR\bfeatures\"|\n" +
+	"\x16golem/org/v1/org.proto\x12\fgolem.org.v1\"W\n" +
 	"\x12CreateScopeRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x121\n" +
-	"\x06policy\x18\x02 \x01(\v2\x19.golem.org.v1.ScopePolicyR\x06policy\x12#\n" +
-	"\rvalidate_only\x18\x03 \x01(\bR\fvalidateOnly\"\x15\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
+	"\rvalidate_only\x18\x03 \x01(\bR\fvalidateOnlyJ\x04\b\x02\x10\x03R\x06policy\"\x15\n" +
 	"\x13CreateScopeResponse\"B\n" +
 	"\x06Member\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -1160,13 +1025,12 @@ const file_golem_org_v1_org_proto_rawDesc = "" +
 	"\x12ListScopesResponse\x12\x10\n" +
 	"\x03ids\x18\x01 \x03(\tR\x03ids\"!\n" +
 	"\x0fGetScopeRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"\xa3\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"~\n" +
 	"\x10GetScopeResponse\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x121\n" +
-	"\x06policy\x18\x02 \x01(\v2\x19.golem.org.v1.ScopePolicyR\x06policy\x12\x18\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\amembers\x18\x03 \x03(\tR\amembers\x12\x1a\n" +
 	"\bmanagers\x18\x04 \x03(\tR\bmanagers\x12\x16\n" +
-	"\x06groups\x18\x05 \x03(\tR\x06groups2\xdc\x05\n" +
+	"\x06groups\x18\x05 \x03(\tR\x06groupsJ\x04\b\x02\x10\x03R\x06policy2\xdc\x05\n" +
 	"\n" +
 	"OrgService\x12R\n" +
 	"\vCreateScope\x12 .golem.org.v1.CreateScopeRequest\x1a!.golem.org.v1.CreateScopeResponse\x12L\n" +
@@ -1192,56 +1056,53 @@ func file_golem_org_v1_org_proto_rawDescGZIP() []byte {
 	return file_golem_org_v1_org_proto_rawDescData
 }
 
-var file_golem_org_v1_org_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_golem_org_v1_org_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_golem_org_v1_org_proto_goTypes = []any{
-	(*ScopePolicy)(nil),          // 0: golem.org.v1.ScopePolicy
-	(*CreateScopeRequest)(nil),   // 1: golem.org.v1.CreateScopeRequest
-	(*CreateScopeResponse)(nil),  // 2: golem.org.v1.CreateScopeResponse
-	(*Member)(nil),               // 3: golem.org.v1.Member
-	(*AddMemberRequest)(nil),     // 4: golem.org.v1.AddMemberRequest
-	(*AddMemberResponse)(nil),    // 5: golem.org.v1.AddMemberResponse
-	(*RemoveMemberRequest)(nil),  // 6: golem.org.v1.RemoveMemberRequest
-	(*RemoveMemberResponse)(nil), // 7: golem.org.v1.RemoveMemberResponse
-	(*BindManagerRequest)(nil),   // 8: golem.org.v1.BindManagerRequest
-	(*BindManagerResponse)(nil),  // 9: golem.org.v1.BindManagerResponse
-	(*BindGroupRequest)(nil),     // 10: golem.org.v1.BindGroupRequest
-	(*BindGroupResponse)(nil),    // 11: golem.org.v1.BindGroupResponse
-	(*UnbindGroupRequest)(nil),   // 12: golem.org.v1.UnbindGroupRequest
-	(*UnbindGroupResponse)(nil),  // 13: golem.org.v1.UnbindGroupResponse
-	(*WhoamiRequest)(nil),        // 14: golem.org.v1.WhoamiRequest
-	(*WhoamiResponse)(nil),       // 15: golem.org.v1.WhoamiResponse
-	(*ListScopesRequest)(nil),    // 16: golem.org.v1.ListScopesRequest
-	(*ListScopesResponse)(nil),   // 17: golem.org.v1.ListScopesResponse
-	(*GetScopeRequest)(nil),      // 18: golem.org.v1.GetScopeRequest
-	(*GetScopeResponse)(nil),     // 19: golem.org.v1.GetScopeResponse
+	(*CreateScopeRequest)(nil),   // 0: golem.org.v1.CreateScopeRequest
+	(*CreateScopeResponse)(nil),  // 1: golem.org.v1.CreateScopeResponse
+	(*Member)(nil),               // 2: golem.org.v1.Member
+	(*AddMemberRequest)(nil),     // 3: golem.org.v1.AddMemberRequest
+	(*AddMemberResponse)(nil),    // 4: golem.org.v1.AddMemberResponse
+	(*RemoveMemberRequest)(nil),  // 5: golem.org.v1.RemoveMemberRequest
+	(*RemoveMemberResponse)(nil), // 6: golem.org.v1.RemoveMemberResponse
+	(*BindManagerRequest)(nil),   // 7: golem.org.v1.BindManagerRequest
+	(*BindManagerResponse)(nil),  // 8: golem.org.v1.BindManagerResponse
+	(*BindGroupRequest)(nil),     // 9: golem.org.v1.BindGroupRequest
+	(*BindGroupResponse)(nil),    // 10: golem.org.v1.BindGroupResponse
+	(*UnbindGroupRequest)(nil),   // 11: golem.org.v1.UnbindGroupRequest
+	(*UnbindGroupResponse)(nil),  // 12: golem.org.v1.UnbindGroupResponse
+	(*WhoamiRequest)(nil),        // 13: golem.org.v1.WhoamiRequest
+	(*WhoamiResponse)(nil),       // 14: golem.org.v1.WhoamiResponse
+	(*ListScopesRequest)(nil),    // 15: golem.org.v1.ListScopesRequest
+	(*ListScopesResponse)(nil),   // 16: golem.org.v1.ListScopesResponse
+	(*GetScopeRequest)(nil),      // 17: golem.org.v1.GetScopeRequest
+	(*GetScopeResponse)(nil),     // 18: golem.org.v1.GetScopeResponse
 }
 var file_golem_org_v1_org_proto_depIdxs = []int32{
-	0,  // 0: golem.org.v1.CreateScopeRequest.policy:type_name -> golem.org.v1.ScopePolicy
-	3,  // 1: golem.org.v1.AddMemberRequest.member:type_name -> golem.org.v1.Member
-	0,  // 2: golem.org.v1.GetScopeResponse.policy:type_name -> golem.org.v1.ScopePolicy
-	1,  // 3: golem.org.v1.OrgService.CreateScope:input_type -> golem.org.v1.CreateScopeRequest
-	4,  // 4: golem.org.v1.OrgService.AddMember:input_type -> golem.org.v1.AddMemberRequest
-	6,  // 5: golem.org.v1.OrgService.RemoveMember:input_type -> golem.org.v1.RemoveMemberRequest
-	10, // 6: golem.org.v1.OrgService.BindGroup:input_type -> golem.org.v1.BindGroupRequest
-	12, // 7: golem.org.v1.OrgService.UnbindGroup:input_type -> golem.org.v1.UnbindGroupRequest
-	8,  // 8: golem.org.v1.OrgService.BindManager:input_type -> golem.org.v1.BindManagerRequest
-	14, // 9: golem.org.v1.OrgService.Whoami:input_type -> golem.org.v1.WhoamiRequest
-	16, // 10: golem.org.v1.OrgService.ListScopes:input_type -> golem.org.v1.ListScopesRequest
-	18, // 11: golem.org.v1.OrgService.GetScope:input_type -> golem.org.v1.GetScopeRequest
-	2,  // 12: golem.org.v1.OrgService.CreateScope:output_type -> golem.org.v1.CreateScopeResponse
-	5,  // 13: golem.org.v1.OrgService.AddMember:output_type -> golem.org.v1.AddMemberResponse
-	7,  // 14: golem.org.v1.OrgService.RemoveMember:output_type -> golem.org.v1.RemoveMemberResponse
-	11, // 15: golem.org.v1.OrgService.BindGroup:output_type -> golem.org.v1.BindGroupResponse
-	13, // 16: golem.org.v1.OrgService.UnbindGroup:output_type -> golem.org.v1.UnbindGroupResponse
-	9,  // 17: golem.org.v1.OrgService.BindManager:output_type -> golem.org.v1.BindManagerResponse
-	15, // 18: golem.org.v1.OrgService.Whoami:output_type -> golem.org.v1.WhoamiResponse
-	17, // 19: golem.org.v1.OrgService.ListScopes:output_type -> golem.org.v1.ListScopesResponse
-	19, // 20: golem.org.v1.OrgService.GetScope:output_type -> golem.org.v1.GetScopeResponse
-	12, // [12:21] is the sub-list for method output_type
-	3,  // [3:12] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	2,  // 0: golem.org.v1.AddMemberRequest.member:type_name -> golem.org.v1.Member
+	0,  // 1: golem.org.v1.OrgService.CreateScope:input_type -> golem.org.v1.CreateScopeRequest
+	3,  // 2: golem.org.v1.OrgService.AddMember:input_type -> golem.org.v1.AddMemberRequest
+	5,  // 3: golem.org.v1.OrgService.RemoveMember:input_type -> golem.org.v1.RemoveMemberRequest
+	9,  // 4: golem.org.v1.OrgService.BindGroup:input_type -> golem.org.v1.BindGroupRequest
+	11, // 5: golem.org.v1.OrgService.UnbindGroup:input_type -> golem.org.v1.UnbindGroupRequest
+	7,  // 6: golem.org.v1.OrgService.BindManager:input_type -> golem.org.v1.BindManagerRequest
+	13, // 7: golem.org.v1.OrgService.Whoami:input_type -> golem.org.v1.WhoamiRequest
+	15, // 8: golem.org.v1.OrgService.ListScopes:input_type -> golem.org.v1.ListScopesRequest
+	17, // 9: golem.org.v1.OrgService.GetScope:input_type -> golem.org.v1.GetScopeRequest
+	1,  // 10: golem.org.v1.OrgService.CreateScope:output_type -> golem.org.v1.CreateScopeResponse
+	4,  // 11: golem.org.v1.OrgService.AddMember:output_type -> golem.org.v1.AddMemberResponse
+	6,  // 12: golem.org.v1.OrgService.RemoveMember:output_type -> golem.org.v1.RemoveMemberResponse
+	10, // 13: golem.org.v1.OrgService.BindGroup:output_type -> golem.org.v1.BindGroupResponse
+	12, // 14: golem.org.v1.OrgService.UnbindGroup:output_type -> golem.org.v1.UnbindGroupResponse
+	8,  // 15: golem.org.v1.OrgService.BindManager:output_type -> golem.org.v1.BindManagerResponse
+	14, // 16: golem.org.v1.OrgService.Whoami:output_type -> golem.org.v1.WhoamiResponse
+	16, // 17: golem.org.v1.OrgService.ListScopes:output_type -> golem.org.v1.ListScopesResponse
+	18, // 18: golem.org.v1.OrgService.GetScope:output_type -> golem.org.v1.GetScopeResponse
+	10, // [10:19] is the sub-list for method output_type
+	1,  // [1:10] is the sub-list for method input_type
+	1,  // [1:1] is the sub-list for extension type_name
+	1,  // [1:1] is the sub-list for extension extendee
+	0,  // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_golem_org_v1_org_proto_init() }
@@ -1255,7 +1116,7 @@ func file_golem_org_v1_org_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_golem_org_v1_org_proto_rawDesc), len(file_golem_org_v1_org_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   20,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

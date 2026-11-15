@@ -54,6 +54,34 @@ effective = scope policy                 (models/aliases, dialects, routes, data
 So a key loses rights the moment its owner leaves the scope or the scope's
 policy narrows; it can never be wider than its owner.
 
+**Where a scope's policy lives** (ADR 0050). A scope's policy is config:
+a `ScopePolicy` CRD named after the scope, in the GitOps repository,
+changed by a reviewed pull request (ADR 0005), with its models (route
+aliases), budget and budget mode, the declared-worst-case check,
+in-flight limits, request ceilings, provider storage and feature mode.
+The scope itself, its memberships, the Entra groups bound to it (an
+admin's act in the control API, ADR 0047), its keys and its role
+bindings are entitlements, in the state document. golem-control joins
+the two by the scope's ID when it compiles a snapshot: a scope with no
+ScopePolicy can call nothing, and a ScopePolicy of no scope applies to no
+one; either is reported until they match.
+
+```yaml
+apiVersion: golem.dev/v1alpha1
+kind: ScopePolicy
+metadata: {name: team-a}        # the scope's ID
+spec:
+  models: [chat, coder]          # route aliases
+  budgetMicros: 500000000        # this period's budget, micro-units
+  budgetMode: observe            # observe (default) | warn | enforce
+  declaredWorstCaseCheck: false
+  inFlight: {principal: 4, scope: 16}
+  maxOutputTokens: 32000
+  maxInputBytes: 4000000
+  providerStorage: forbidden     # forbidden (default) | allowed
+  features: restricted           # restricted | compatible; unset: by route
+```
+
 Key constraints, all optional:
 
 - models or aliases (subset of the scope's), dialects/endpoints;
@@ -166,8 +194,12 @@ admission and monitoring control: the provider's bill, reconciled, is the
 record, and the provider account's spending limit the backstop (ADR 0044).
 
 What happens at a limit depends on the scope's enforcement mode (PRD
-§9.1): `observe` records the refusal it would have made, `warn` allows it
-with a warning header and a notification, `enforce` refuses.
+§9.1), its ScopePolicy's `budgetMode`: `observe` (the default, so that
+rollouts start there) admits the call and records the refusal it would
+have made (the ledger row's `over_budget`), `warn` does that and adds a
+`golem-warning` header (a notification follows with notifications, M2),
+`enforce` refuses. Moving a scope from observe to enforce is a pull
+request to its ScopePolicy. In-flight limits refuse in every mode.
 
 At completion the call's actual cost is added to known spend. Team pools are not charged for a sub-team's or a project's spend: the
 grant already moved that money. Thresholds (e.g. 50/80/100%) at every level emit an

@@ -90,11 +90,10 @@ var apiCommands = map[string]apiCommand{ // read-only
 		if err != nil {
 			return err
 		}
-		m, p := res.Msg, res.Msg.GetPolicy()
+		m := res.Msg
 		return rows(c.out,
 			"scope", m.Id,
-			"models", joined(p.GetModels(), ", ", "-"),
-			"budget", fmt.Sprintf("%d micros", p.GetBudgetMicros()),
+			"policy", "ScopePolicy/"+m.Id+" in the config repository",
 			"members", joined(m.Members, ", ", "-"),
 			"managers", joined(m.Managers, ", ", "-"),
 			"groups", joined(m.Groups, ", ", "-"))
@@ -122,15 +121,11 @@ var apiCommands = map[string]apiCommand{ // read-only
 			return tw.Flush()
 		}
 	}},
-	"scopes create": {args: 1, flags: func(fs *flag.FlagSet) runFunc {
-		models := fs.String("models", "", "the route aliases its members may call, comma-separated")
-		budget := fs.Int64("budget-micros", 0, "the period's budget in micro-units of the currency")
-		return func(ctx context.Context, c *call) error {
-			_, err := c.org.CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: c.pos[0], ValidateOnly: c.dry,
-				Policy: &orgv1.ScopePolicy{Models: splitList(*models), BudgetMicros: *budget}}))
-			return c.done(err, "scope "+c.pos[0]+" created")
-		}
-	}},
+	"scopes create": {args: 1, flags: noFlags(func(ctx context.Context, c *call) error {
+		_, err := c.org.CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: c.pos[0], ValidateOnly: c.dry}))
+		return c.done(err, "scope "+c.pos[0]+" created; it can call nothing until ScopePolicy/"+c.pos[0]+
+			" (its models, budget and limits) is merged in the config repository")
+	})},
 	"members add": {args: 2, flags: func(fs *flag.FlagSet) runFunc {
 		kind := fs.String("kind", "user", "user or service")
 		entra := fs.String("entra", "", "the user's Entra object ID, or the service's app ID (admins only; users usually come from bound groups)")

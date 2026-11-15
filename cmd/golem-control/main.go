@@ -313,7 +313,7 @@ func run() error {
 	var failed error // a component's failure, which stops the rest
 	wg.Go(func() { st.Run(ctx) })
 	if o.listen != "" {
-		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, &service.Service{State: st, Priced: c.CheckScope})
+		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, &service.Service{State: st, ScopeModels: c.ScopeModels})
 		if err != nil {
 			return fmt.Errorf("-listen: %w", err)
 		}

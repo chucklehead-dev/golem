@@ -38,8 +38,13 @@ retry pointlessly and users wait through backoff before seeing why.
   Anthropic's `type: error`), with golem's `code`, a message that says what
   to do next and who can change it (the scope's managers, a budget
   manager), and the request ID.
-- `warn` mode lets the request through and adds `golem-warning:
-  budget.member_cap 92%`; `observe` adds nothing to the response.
+- A scope's budget mode is its ScopePolicy's `budgetMode` (PRD §9.1, ADR
+  0050), `observe` unless set. `warn` lets a request over the budget
+  through and adds `golem-warning: budget.pool_exhausted 104%` (the code
+  `enforce` would have refused with, and the share of the budget known
+  spend has reached, rounded down); `observe` lets it through and adds
+  nothing to the response. Both mark its ledger row `over_budget` (§3).
+  In-flight limits (`limit.concurrency`) refuse in every mode.
 - The codes are a stable, documented list: this table, defined as code in
   `lib/contract` (the gateway can send no other), and checked against the
   table by a test in both directions. The ledger's DDL
@@ -93,6 +98,7 @@ prevent double counting.
 | `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away), `failed`, or `uncertain` (the call failed after the provider may have received it: charged its worst case as an estimate until reconciliation, golem#4); the failure's §2 origin and §1 code |
 | `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), each side is charged by rules chosen to err high, not an average: output every byte of the response received a token (whatever its fields or framing), at most the request's `max_tokens × n`; input, if not reported, every byte of the request a token (as the declared worst case; an estimate, not a bound on real spend: ADR 0044). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
+| `over_budget` | Bool | admitted over its scope's budget because the scope's budget mode is `observe` or `warn` (§1, ADR 0050): a call `enforce` would have refused |
 
 - Known spend (ADR 0048): a snapshot carries, per scope and period, a
   boundary B (a minute, an ingestion allowance before the snapshot's
@@ -187,7 +193,7 @@ API stores responses by default (`store: true`), and file and batch APIs
 keep uploads. Data stored there escapes golem's capture and retention
 rules.
 
-- A `ScopePolicy` sets `provider_storage: forbidden | allowed`, default
+- A `ScopePolicy` sets `providerStorage: forbidden | allowed`, default
   `forbidden`.
 - When forbidden, golem sets `store: false` on Responses requests (and
   equivalents) and refuses file and batch uploads with

@@ -5,6 +5,11 @@ and "strict with `L = 1` is a hard ceiling"), [0038](0038-accounting-refinements
 ("the bound shown to budget owners is a known number") and
 [0012](0012-limits-and-accounting.md). Renames the strict check.
 
+Amended by [ADR 0050](0050-scope-policy-is-config.md): what a budget
+does is its scope's budget mode, `observe` (the default: admitted, the
+ledger row marked over budget), `warn` (admitted, with `golem-warning`)
+or `enforce` (refused, as described here).
+
 ## Context
 
 ADR 0031 made budgets soft, but kept a stated overshoot bound (`L × W`

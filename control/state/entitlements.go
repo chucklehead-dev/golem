@@ -13,8 +13,10 @@ import (
 )
 
 // The entitlements part of the state (control-plane.md §3.1): principals,
-// their memberships, scopes and their policy, keys by hash, and the
-// append-only revocations that a restore must preserve (ADR 0041 §5).
+// their memberships, scopes and the Entra groups bound to them, keys by
+// hash, and the append-only revocations that a restore must preserve (ADR
+// 0041 §5). A scope's policy is config, not state: its ScopePolicy (ADR
+// 0050), which the snapshot compiler joins with the scopes here by ID.
 
 // Principal is a user or a service.
 //
@@ -50,20 +52,14 @@ func (p Principal) MemberOf(scope string) bool {
 // principal created now cannot be inherited by that person later.
 const ReservedPrefix = "entra:"
 
-// Scope is a scope's policy (org-model.md §3).
+// Scope is a scope as the state knows it (org-model.md §3): that it
+// exists, so memberships, keys and roles can name it, and the Entra groups
+// bound to it. Its policy (models, budget, limits) is its ScopePolicy's, in
+// the config (ADR 0050).
 type Scope struct {
 	// Groups are the Entra groups (object IDs) whose members, transitively,
 	// are the scope's synced members (ADR 0047): bound by admins.
-	Groups                 []string `json:"groups,omitempty"`
-	Models                 []string `json:"models"` // route aliases its members may call
-	BudgetMicros           int64    `json:"budgetMicros,omitempty"`
-	DeclaredWorstCaseCheck bool     `json:"declaredWorstCaseCheck,omitempty"`
-	PrincipalInFlight      int      `json:"principalInFlight,omitempty"`
-	ScopeInFlight          int      `json:"scopeInFlight,omitempty"`
-	StorageAllowed         bool     `json:"storageAllowed,omitempty"`
-	MaxOutputTokens        int64    `json:"maxOutputTokens,omitempty"`
-	MaxInputBytes          int64    `json:"maxInputBytes,omitempty"`
-	Features               string   `json:"features,omitempty"`
+	Groups []string `json:"groups,omitempty"`
 }
 
 // Key is a key's record: its hash (never the key), its owner and scope.
@@ -107,13 +103,6 @@ type AuditEvent struct {
 func (d *Document) Has(principal, role, scope string) bool {
 	return slices.Contains(d.Roles, RoleBinding{principal, role, scope})
 }
-
-// Default in-flight limits when a state document's scope sets none.
-// lib/compile's defaults for a config CRD's scope are its own (4 and 16).
-const (
-	DefaultPrincipalInFlight = 8
-	DefaultScopeInFlight     = 64
-)
 
 // checkEntitlements is what every write keeps of the entitlements and the
 // audit outbox.
@@ -242,8 +231,9 @@ func (d *Document) RevokeOutside(principal string, p Principal, at time.Time) {
 // Entitlements is the snapshot's view of the state: keys revoked are
 // listed revoked (a gateway refuses them by name), principals with an
 // Entra ID are users or services, and every principal is a key owner of
-// its kind. aliases are the routes that exist: a scope's models outside
-// them are dropped (it cannot call a route that is not there).
+// its kind. Its scopes are IDs only: the snapshot compiler gives each its
+// ScopePolicy's policy. aliases are the routes that exist: a key's models
+// outside them are dropped (it cannot call a route that is not there).
 func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 	var e snapshot.Entitlements
 	known := func(ms []string) []string {
@@ -257,13 +247,7 @@ func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 		return in
 	}
 	for _, id := range slices.Sorted(maps.Keys(d.Scopes)) {
-		s := d.Scopes[id]
-		e.Scopes = append(e.Scopes, snapshot.Scope{ID: id, Models: known(s.Models), BudgetMicros: s.BudgetMicros,
-			DeclaredWorstCaseCheck: s.DeclaredWorstCaseCheck,
-			PrincipalInFlight:      cmp.Or(s.PrincipalInFlight, DefaultPrincipalInFlight),
-			ScopeInFlight:          cmp.Or(s.ScopeInFlight, DefaultScopeInFlight),
-			StorageAllowed:         s.StorageAllowed, MaxOutputTokens: s.MaxOutputTokens, MaxInputBytes: s.MaxInputBytes,
-			Features: s.Features})
+		e.Scopes = append(e.Scopes, snapshot.Scope{ID: id})
 	}
 	for _, id := range slices.Sorted(maps.Keys(d.Principals)) {
 		p := d.Principals[id]

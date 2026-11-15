@@ -174,11 +174,13 @@ revokes every live key whose owner is no longer a member of its scope:
   removed, except that a principal that owns keys is kept with no
   memberships (key records name their owner), and a key minted since is
   revoked rather than removed, so no later restore can revive it;
-- what both have takes the narrower of each (`scope`, `principal`, `key`,
-  `restore.go:164`-`214`): lists intersected (`meetSet`), limits the
-  lower (`lower`, where 0 means the default), storage only if both allow
-  it, the worst-case check if either has it, the stricter feature mode, a
-  key's earlier expiry; a principal's identity is always the current one's.
+- what both have takes the narrower of each (`principal`, `key`): bound
+  groups, memberships and a key's models intersected (`meetSet`), a key's
+  earlier expiry; a principal's identity is always the current one's.
+
+A scope's policy is not in the document (its ScopePolicy is config, ADR
+0050), so a restore has none to bring back or narrow: a scope's record is
+its bound groups, intersected like any other list.
 
 The fence, the publication records, the revocations and the outbox are
 always the current document's (model/leadership.md's "preserve" restore):
@@ -361,27 +363,29 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    principals, scopes, keys and revocations (`entitlementsSum`,
    `controller.go:710`). The state version is not hashed: the publisher's
    own record write moves it at every publication.
-3. **Config compile** (`load`, `controller.go:552`): hash the config
-   directory; if it changed, decode it and trial-compile it (`trial`) with
-   the state's entitlements, as it will be published. A config that
-   compiles becomes the **last good config**; one that does not is
-   reported (`cfgErr`) and the last good one stays in use, so a broken edit
-   cannot let every gateway's authorization lapse. That includes an edit
-   that, against the state's scopes, leaves a budgeted scope reaching a
-   model no PriceList prices where the last good config priced it (a price
-   removed, a route moved): the edit is the config's mistake.
+3. **Config compile** (`load`): hash the config directory; if it
+   changed, decode it and trial-compile it with the state's entitlements,
+   as it will be published. A config that compiles becomes the **last good
+   config**; one that does not is reported (`cfgErr`) and the last good one
+   stays in use, so a broken edit cannot let every gateway's authorization
+   lapse. That includes a ScopePolicy whose budget reaches a model no
+   PriceList prices (a price removed, a route moved, a budget added): both
+   are config, so the edit is the config's mistake, and `golemctl config
+   validate` finds it before it is merged.
    **Until some config has compiled** since this replica started (a
    restart, or a takeover, while the directory is broken), the last good
    config is the published one: `loadPublished` reads each pool's current
    pointer and snapshot once, verified as a gateway verifies them
    (`Publisher.Published`: the pointer's signature and pool, the
    snapshot's hash and sequence), and each publication renews it
-   (`compile.Renew`). A published snapshot decomposes exactly: its
-   backends, routes, currency and prices are the config's alone (its
-   entitlements are always the state's, a `LocalIdentity` being refused
-   outside standalone mode), so `Renew` keeps them as published and gives
-   the publication a new sequence, lease and the current entitlements,
-   checked for unpriced scopes as `Compile` checks them. The step's error
+   (`compile.Renew`). A published snapshot decomposes: its backends,
+   routes, currency and prices are the config's alone, and each scope's
+   policy is its ScopePolicy's (a `LocalIdentity` being refused outside
+   standalone mode), so `Renew` keeps them as published and gives the
+   publication a new sequence, lease and the current entitlements, each of
+   the state's scopes joined with the policy it was published with (a
+   scope created since has none: it is published as `DefaultScope` and
+   reported, as `Compile` reports it). The step's error
    says so (`renewing the published config: the config directory does not
    compile`, with the directory's problems) every step until the
    directory compiles; then that config is published. With nothing
@@ -404,8 +408,9 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
 6. **Publish** every pool (`publish`, `controller.go:473`), in sorted order,
    through one `PublishAll` with the same snapshot built by
    `compile.Compile` from the good config (or `compile.Renew`, step 3) and
-   `entitlements` (`controller.go:529`): the state's `Document.Entitlements` (scopes'
-   models limited to routes that exist) with known spend laid over it.
+   `entitlements`: the state's `Document.Entitlements` (scopes by ID, keys'
+   models limited to routes that exist) with known spend laid over it,
+   which the compile joins with the ScopePolicies (below).
    Only the due pools are published. Each that succeeded records its
    publication and clears its failures; each that failed counts one more
    failure and waits its backoff. Before this, a publication was
@@ -414,26 +419,29 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    published, and the document written, every second rather than every
    minute. `TestFailingPoolBacksOff`.
 
-**A problem of the state's degrades one scope, not the publication.** A
-scope with a budget is charged by price, so a scope that reaches a model
-no PriceList prices could not be charged (`checkPriced`,
-`lib/compile/compile.go`). A config that causes it is refused at step 3.
-When the state causes it (a budgeted scope created, or given a model,
-over an unpriced alias), the compile is told by `Options.Unpriced`: the
-scope is published **without that alias** (`withoutUnpriced`), so it
-fails closed (its members cannot call what it could not be charged for;
-a key narrowed to that alias calls nothing, since the gateway intersects
-a key's models with its scope's), and every other scope and pool is
-published as usual. Each such alias is the operator's status
-(`Controller.Unpriced`) and is reported with every step's error
-(`ErrUnpriced`, naming the scope, alias and model, and the fix: price the
-model, or take the alias out of the scope) until it is fixed. Before
-this, one such scope failed every pool's compile on every step, and every
-gateway's authorization lapsed within its lease. The control API refuses
-the mistake where it is made: `Service.CreateScope` checks a budgeted
-scope with `Service.Priced`, which golem-control sets to
-`Controller.CheckScope` (the last good config, or on a replica where none
-has compiled, the directory's). `TestUnpricedScope`, `TestCreateScopePriced`.
+**A mismatch of state and config degrades one scope, not the
+publication.** A scope exists in the state (an admin created it through
+the control API) and its policy is its ScopePolicy, in the config (ADR
+0050); the compile joins them by ID (`join`, `lib/compile/policy.go`).
+The two change apart (an admin creates a scope, a pull request adds its
+policy, in either order), so neither order may stop a publication. A
+scope of the state's with no ScopePolicy is published as
+`compile.DefaultScope`: **no models**, so its members can call nothing
+(it fails closed; a policy is what grants anything). A ScopePolicy naming
+a scope the state does not have is left out. Both go to
+`Options.Unmatched`: the operator's status (`Controller.Unmatched`),
+reported with every step's error (`ErrUnmatched`, naming each and the
+fix: add the ScopePolicy, or create the scope) until they match, and
+counted as `scope_policy_unmatched` against the pools attempted; every
+other scope and pool is published as usual. `TestUnmatchedScopes`,
+`TestUnpricedPolicy`, `lib/compile`'s `TestJoin`.
+
+The control API checks a key's models against its scope's ScopePolicy
+where the key is minted: `Service.MintKey` asks `Service.ScopeModels`,
+which golem-control sets to `Controller.ScopeModels` (the last good
+config, or on a replica where none has compiled, the directory's; a
+scope with no policy allows none, and a directory that does not compile
+checks nothing). `TestScopeModels`, `TestKeyModelsFromConfig`.
 
 ### 4.1 Known spend
 
@@ -474,12 +482,12 @@ instruments, read when the meter collects:
   cannot read the state counts its reason against every pool, every second
   it fails; an attempted publication (a due step) also counts
   `config_renewing` while the directory is not what is published and
-  `unpriced` while scopes are published without aliases (`degraded`,
-  `controller.go:197`), against the pools it attempted. Steps with nothing
+  `scope_policy_unmatched` while scopes and ScopePolicies do not match
+  (`degraded`), against the pools it attempted. Steps with nothing
   due count nothing, so a pool that keeps failing counts once per retry
   of its backoff: at least once a renewal interval.
 - **The config's state**: `ConfigRenewing` (the last step found the
-  directory not compiling, or an edit refused) and `Unpriced`.
+  directory not compiling, or an edit refused) and `Unmatched`.
 - **The jobs**: the last audit step and group sync that succeeded
   (`ShippedAt`, `SyncedAt`, set in `tick` and `syncStep`), and the sync's
   removal guard tripping (`GuardTrips`); the outbox's length is the
@@ -492,7 +500,7 @@ instruments, read when the meter collects:
 | `golem.control.publish.time`, `.seq`, `.valid_until` {pool} | `Controller.Publications` |
 | `golem.control.publish.failures` {pool, reason} | `Controller.Failures` (every pool and reason, from zero) |
 | `golem.control.leader`, `golem.control.leader.epoch` | `Elector.Epoch` |
-| `golem.control.unpriced`, `golem.control.config.renewing` | `Controller.Unpriced`, `ConfigRenewing` |
+| `golem.control.scope_policy.unmatched`, `golem.control.config.renewing` | `Controller.Unmatched`, `ConfigRenewing` |
 | `golem.control.spend.age`, `.stale` {period} | `spend.Job.Current`, `Age`, `Stale` |
 | `golem.control.entra_sync.time`, `.guard_trips` | `Controller.SyncedAt`, `GuardTrips` |
 | `golem.control.audit.outbox`, `golem.control.audit.shipped.time` | `Store.OutboxLen`, `Controller.ShippedAt` |
@@ -695,8 +703,10 @@ path with a real gateway source over one bucket.
   broken edit renews the last good config, a paused leader is fenced), the
   revocation path (`TestEntitlements`), the group sync reaching the
   gateway (`TestGroupSync`), known spend reaching it (`TestKnownSpend`),
-  an unpriced budgeted scope failing closed alone while every pool is
-  published, an edit leaving one unpriced refused (`TestUnpricedScope`),
+  a scope with no ScopePolicy failing closed alone while every pool is
+  published (`TestUnmatchedScopes`), an unpriced budget refused as a
+  config (`TestUnpricedPolicy`), a key's models checked against the
+  config (`TestScopeModels`),
   and a leader started over a broken directory renewing the published
   config (`TestRestartOverBrokenConfig`; `lib/compile`'s `TestRenew`:
   a renewal is what compiling the config again would publish).
@@ -747,13 +757,15 @@ path with a real gateway source over one bucket.
   pools' checkpoints and pointers. A deletion of the document together
   with all of those (or a deployment whose `-pools` names none that were
   published) is taken for a first start.
-- **An unpriced scope's status is a log line and a count**: a budgeted
-  scope published without its unpriced aliases is reported in the step's
-  error (logged at error level once until it changes), by
-  `Controller.Unpriced` and as `golem.control.unpriced`; no CRD status or
-  API field names the scope yet. `CreateScope` refuses the mistake, but
-  nothing else writes a scope's models or budget yet; when something does
-  (a scope update), it needs the same check.
+- **A mismatch's status is a log line and a count**: a scope with no
+  ScopePolicy, or a policy of no scope, is reported in the step's error
+  (logged at error level once until it changes), by `Controller.Unmatched`
+  and as `golem.control.scope_policy.unmatched`; no CRD status names the
+  ScopePolicy yet (the CRD watch, with its status, comes later), and
+  `golemctl config validate` cannot see it (it has no state).
+- **A renewal knows only the policies it published**: while no config has
+  compiled since a replica started, a scope created meanwhile is renewed
+  with no models even if the directory has its ScopePolicy.
 - **Metrics need `-telemetry`**: without a collector the loop's record is
   kept but not exported. The failure counter counts attempts, not
   incidents: a pool that keeps failing counts at each retry of its

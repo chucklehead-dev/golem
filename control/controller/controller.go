@@ -6,7 +6,8 @@
 //
 // This slice reads config CRDs from a directory and gives every pool the
 // same snapshot, its entitlements the state document's (principals,
-// scopes, keys and revocations); a change to them is published at the next
+// scopes, keys and revocations), each scope with its ScopePolicy's policy
+// from the config (ADR 0050); a change to either is published at the next
 // step. Pool selectors and the CRD watch come later.
 package controller
 
@@ -67,12 +68,13 @@ type Controller struct {
 
 	synced  time.Time // when the group sync last ran
 	mu      sync.Mutex
-	good    v1.Objects // the last config that compiled; written under mu (CheckScope reads it from the API's goroutines)
+	good    v1.Objects // the last config that compiled; written under mu (ScopeModels reads it from the API's goroutines)
 	goodSum [32]byte
-	// unpriced is what the last publication left out of scopes, by
-	// Options.Unpriced (under mu): each scope's aliases that reach a model
-	// no PriceList prices.
-	unpriced []compile.Problem
+	// unmatched is what the last publication found of scopes and
+	// ScopePolicies that do not match (under mu, by
+	// compile.Options.Unmatched): a scope of the state's with no policy,
+	// published able to call nothing, and a policy of no scope.
+	unmatched []compile.Problem
 	// renewing is each pool's publication as found in the bucket, renewed
 	// (compile.Renew) while no config has compiled since this replica
 	// started; nil once one has.
@@ -142,9 +144,10 @@ const (
 	// ReasonConflict: another writer won the record or the document
 	// (publish.ErrConflict, state.ErrContended).
 	ReasonConflict = "conflict"
-	// ReasonUnpriced: the publication left aliases out of scopes their
-	// budgets could not be charged for (ErrUnpriced).
-	ReasonUnpriced = "unpriced"
+	// ReasonUnmatched: the publication found a scope of the state's with no
+	// ScopePolicy (published able to call nothing), or a ScopePolicy of no
+	// scope (ErrUnmatched).
+	ReasonUnmatched = "scope_policy_unmatched"
 	// ReasonConfigRenewing: the config directory does not compile, or an
 	// edit was refused: the last good config (or the bucket's) is renewed
 	// instead, or nothing can be.
@@ -155,7 +158,7 @@ const (
 )
 
 // Reasons are every Reason, in a fixed order.
-var Reasons = []string{ReasonTampered, ReasonRegressed, ReasonFenced, ReasonConflict, ReasonUnpriced, ReasonConfigRenewing, ReasonOther} // read-only
+var Reasons = []string{ReasonTampered, ReasonRegressed, ReasonFenced, ReasonConflict, ReasonUnmatched, ReasonConfigRenewing, ReasonOther} // read-only
 
 // FailureReason classifies a publication's error by the sentinel errors it
 // wraps.
@@ -169,8 +172,8 @@ func FailureReason(err error) string {
 		return ReasonFenced
 	case errors.Is(err, publish.ErrConflict), errors.Is(err, state.ErrContended):
 		return ReasonConflict
-	case errors.Is(err, ErrUnpriced):
-		return ReasonUnpriced
+	case errors.Is(err, ErrUnmatched):
+		return ReasonUnmatched
 	}
 	return ReasonOther
 }
@@ -192,14 +195,14 @@ func (c *Controller) count(reason string, pools ...string) {
 }
 
 // degraded counts, against the pools attempted, what made a publication
-// attempt less than the directory's config with every scope whole: a
-// config not applied (cfgErr), and aliases left out of scopes.
+// attempt less than the directory's config with every scope its policy: a
+// config not applied (cfgErr), and scopes and policies unmatched.
 func (c *Controller) degraded(cfgErr error, pools ...string) {
 	if cfgErr != nil {
 		c.count(ReasonConfigRenewing, pools...)
 	}
-	if len(c.Unpriced()) > 0 {
-		c.count(ReasonUnpriced, pools...)
+	if len(c.Unmatched()) > 0 {
+		c.count(ReasonUnmatched, pools...)
 	}
 }
 
@@ -282,9 +285,10 @@ func (c *Controller) log() *slog.Logger {
 // change, a new epoch, or the renewal interval. A config that does not
 // compile is reported, and the last one that did is renewed, so a broken
 // edit cannot let every gateway's authorization lapse. A scope of the
-// state's whose budget reaches an unpriced model is published without
-// that model's alias and reported (ErrUnpriced), every step until it is
-// fixed; the other scopes and pools are published as usual.
+// state's with no ScopePolicy is published able to call nothing, and a
+// ScopePolicy of no scope is left out, both reported (ErrUnmatched) every
+// step until they match; the other scopes and pools are published as
+// usual.
 //
 // Each pool is due on its own: a pool that fails (a tampered checkpoint, a
 // regressed record) is retried with backoff (Retry, doubling up to Renew)
@@ -336,7 +340,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		}
 	}
 	if len(due) == 0 {
-		return false, errors.Join(append(waiting, cfgErr, c.unpricedErr())...)
+		return false, errors.Join(append(waiting, cfgErr, c.unmatchedErr())...)
 	}
 	var spendErr error
 	if c.Spend != nil {
@@ -359,7 +363,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		ps.retryAt = now.Add(c.backoff(ps.failures))
 		errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
 	}
-	return published, errors.Join(append(append(errs, waiting...), cfgErr, spendErr, c.unpricedErr())...)
+	return published, errors.Join(append(append(errs, waiting...), cfgErr, spendErr, c.unmatchedErr())...)
 }
 
 // pool is pool's publishing state, created on first use.
@@ -393,15 +397,18 @@ func (c *Controller) backoff(n int) time.Duration {
 	return d - time.Duration(rand.Int64N(int64(d)/4+1))
 }
 
-// ErrUnpriced: a scope of the state's with a budget can reach a model no
-// PriceList prices, so it is published without that alias (it fails
-// closed) while every other scope and pool is published as usual.
-var ErrUnpriced = errors.New("scopes published without the aliases their budgets could not be charged for")
+// ErrUnmatched: the state's scopes and the config's ScopePolicies do not
+// match. A scope with no policy is published able to call nothing (it fails
+// closed), a policy of no scope is not published, and every other scope and
+// pool is published as usual: the two change apart (an admin creates a
+// scope, a pull request adds its policy), so neither order stops a
+// publication.
+var ErrUnmatched = errors.New("scopes and ScopePolicies do not match")
 
-// unpricedErr is ErrUnpriced naming each alias the last publication left
-// out, and what to do; nil if it left none out.
-func (c *Controller) unpricedErr() error {
-	ps := c.Unpriced()
+// unmatchedErr is ErrUnmatched naming each mismatch the last publication
+// found, and what to do; nil if it found none.
+func (c *Controller) unmatchedErr() error {
+	ps := c.Unmatched()
 	if len(ps) == 0 {
 		return nil
 	}
@@ -409,49 +416,45 @@ func (c *Controller) unpricedErr() error {
 	for i, p := range ps {
 		lines[i] = p.String()
 	}
-	return fmt.Errorf("%w; their members cannot call them until a PriceList prices the model or the alias is removed from the scope:\n  %s",
-		ErrUnpriced, strings.Join(lines, "\n  "))
+	return fmt.Errorf("%w; add a ScopePolicy named after each scope to the config (a pull request), or create the scope a policy names (golemctl scopes create):\n  %s",
+		ErrUnmatched, strings.Join(lines, "\n  "))
 }
 
-// Unpriced is what the last publication left out of scopes because their
-// budgets could not be charged for it: each scope and alias, and the
-// unpriced model it reaches. The operator's status; Step reports it too.
-func (c *Controller) Unpriced() []compile.Problem {
+// Unmatched is what the last publication found of the state's scopes and
+// the config's ScopePolicies that do not match: a scope with no policy,
+// and a policy of no scope. The operator's status; Step reports it too.
+func (c *Controller) Unmatched() []compile.Problem {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return slices.Clone(c.unpriced)
+	return slices.Clone(c.unmatched)
 }
 
-// CheckScope refuses scope id of d if its budget can reach a model the
-// config prices not: the control API's check when a scope is created
-// (service.Service.Priced), so the mistake is refused where it is made
-// rather than published as a scope that fails closed. It checks against
-// the last good config, or, on a replica where none has compiled (one
-// that does not lead), the directory's. With neither, or a config that
-// does not compile, it checks nothing: the publisher's rule still applies.
-func (c *Controller) CheckScope(d *state.Document, id string) error {
+// ScopeModels is the route aliases scope's ScopePolicy allows, for the
+// control API's check that a key only narrows its scope
+// (service.Service.ScopeModels): from the last good config, or, on a
+// replica where none has compiled (one that does not lead), the
+// directory's. A scope with no ScopePolicy allows none. ok is false with
+// neither, or a config that does not compile: the API checks nothing, and
+// the gateway still intersects a key's models with its scope's.
+func (c *Controller) ScopeModels(scope string) (models []string, ok bool) {
 	c.mu.Lock()
-	objs, ok := c.good, c.goodSum != ([32]byte{})
+	objs, good := c.good, c.goodSum != ([32]byte{})
 	c.mu.Unlock()
-	if !ok {
+	if !good {
 		var err error
 		if objs, err = c.decodeDir(); err != nil {
-			return nil
+			return nil, false
+		}
+		if _, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease()}); err != nil {
+			return nil, false
 		}
 	}
-	var bad []string
-	if _, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease(),
-		Entitlements: d.Entitlements, Unpriced: func(p compile.Problem) {
-			if p.Object == "scope "+id {
-				bad = append(bad, p.Msg)
-			}
-		}}); err != nil {
-		return nil
+	for _, p := range objs.Policies {
+		if p.Object.Metadata.Name == scope {
+			return slices.Clone(p.Object.Spec.Models), true
+		}
 	}
-	if len(bad) > 0 {
-		return fmt.Errorf("%s; price those models in a PriceList first, or leave the aliases out of the scope", strings.Join(bad, "; "))
-	}
-	return nil
+	return nil, true
 }
 
 // due reports whether a pool's publication is due at now with content
@@ -475,12 +478,12 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	for _, pool := range pools {
 		pubs = append(pubs, c.Publishers[pool])
 	}
-	built, unpriced := false, map[string]compile.Problem{} // every pool's build leaves out the same
-	validUntil := map[string]time.Time{}                   // each pool's lease, as built
+	built, unmatched := false, map[string]compile.Problem{} // every pool's build finds the same
+	validUntil := map[string]time.Time{}                    // each pool's lease, as built
 	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, fence, doc.StateVersion, pubs,
 		func(p *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
 			o := compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
-				Entitlements: c.entitlements(doc), Unpriced: func(q compile.Problem) { unpriced[q.String()] = q }}
+				Entitlements: c.entitlements(doc), Unmatched: func(q compile.Problem) { unmatched[q.String()] = q }}
 			var s *snapshot.Snapshot
 			var err error
 			switch prev, renewing := c.renewing[p.Pool]; {
@@ -499,11 +502,11 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 		})
 	if built {
 		var ps []compile.Problem
-		for _, k := range slices.Sorted(maps.Keys(unpriced)) {
-			ps = append(ps, unpriced[k])
+		for _, k := range slices.Sorted(maps.Keys(unmatched)) {
+			ps = append(ps, unmatched[k])
 		}
 		c.mu.Lock()
-		c.unpriced = ps
+		c.unmatched = ps
 		c.mu.Unlock()
 	}
 	for _, pool := range pools {
@@ -542,13 +545,12 @@ func (c *Controller) entitlements(doc *state.Document) func(aliases []string) sn
 }
 
 // load reads the directory, keeping it as the good config if it compiles
-// with doc's entitlements, as it will be published. A config that leaves a
-// budgeted scope of doc's unpriced where the last good one did not (a
-// price removed, a route moved to an unpriced model) is refused as a
-// config: the edit is what broke it, and the last good config is renewed.
-// What the state alone breaks (a budgeted scope created over an unpriced
-// alias) is not the config's: that scope fails closed when published
-// (compile.Options.Unpriced). An unchanged directory costs a content hash.
+// with doc's entitlements, as it will be published; one that does not (a
+// ScopePolicy's budget over an unpriced model among its problems) is
+// refused, and the last good config is renewed. A mismatch of the state's
+// scopes and the ScopePolicies is not a reason to refuse it: it is
+// published, and reported (compile.Options.Unmatched). An unchanged
+// directory costs a content hash.
 func (c *Controller) load(doc *state.Document) error {
 	root, err := os.OpenRoot(c.Dir)
 	if err != nil {
@@ -567,22 +569,9 @@ func (c *Controller) load(doc *state.Document) error {
 	if err != nil {
 		return fmt.Errorf("config not applied, the last good one is published: %w", err)
 	}
-	unpriced, err := c.trial(objs, doc)
-	if err != nil {
+	if _, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease(),
+		Entitlements: c.entitlements(doc)}); err != nil {
 		return fmt.Errorf("config not applied, the last good one is published: %w", err)
-	}
-	if c.goodSum != ([32]byte{}) {
-		before, _ := c.trial(c.good, doc)
-		var added []string
-		for _, p := range unpriced {
-			if !slices.ContainsFunc(before, func(q compile.Problem) bool { return q.String() == p.String() }) {
-				added = append(added, p.String())
-			}
-		}
-		if len(added) > 0 {
-			return fmt.Errorf("config not applied, the last good one is published: with the state's scopes it leaves %d alias(es) unpriced that the last good config prices; price the models in a PriceList, or remove the aliases from those scopes first:\n  %s",
-				len(added), strings.Join(added, "\n  "))
-		}
 	}
 	c.mu.Lock()
 	c.good, c.goodSum = objs, sum
@@ -616,15 +605,6 @@ func (c *Controller) loadPublished(ctx context.Context) error {
 	}
 	c.renewing = found
 	return nil
-}
-
-// trial compiles objs with doc's entitlements, returning what it would
-// leave out of scopes for want of a price.
-func (c *Controller) trial(objs v1.Objects, doc *state.Document) ([]compile.Problem, error) {
-	var unpriced []compile.Problem
-	_, err := compile.Compile(objs, compile.Options{PublishSeq: 1, Now: c.now().UTC(), Lease: c.lease(),
-		Entitlements: c.entitlements(doc), Unpriced: func(p compile.Problem) { unpriced = append(unpriced, p) }})
-	return unpriced, err
 }
 
 // decodeDir decodes the config directory.
