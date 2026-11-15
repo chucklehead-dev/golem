@@ -42,6 +42,13 @@ type ledger map[string]int64
 
 func (l ledger) Spend(context.Context, string, time.Time) (map[string]int64, error) { return l, nil }
 
+// Latest: site eu's rows are two minutes behind the rig's start, us's
+// ten (past the five-minute allowance).
+func (l ledger) Latest(context.Context) (map[string]time.Time, error) {
+	start := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
+	return map[string]time.Time{"eu": start.Add(-2 * time.Minute), "us": start.Add(-10 * time.Minute)}, nil
+}
+
 // rig is one golem-control replica over a directory bucket, its clock
 // set by the test, and its metrics read by a manual reader.
 type rig struct {
@@ -179,6 +186,20 @@ func TestMetrics(t *testing.T) {
 	}
 	if v := value(t, got, SpendStale, period); v != 0 {
 		t.Errorf("%s = %v, want 0", SpendStale, v)
+	}
+	// Each site's ingestion: eu within the allowance, us behind it.
+	for _, c := range []struct {
+		site   string
+		lag    float64
+		behind float64
+	}{{"eu", 120, 0}, {"us", 600, 1}} {
+		site := attribute.String("site", c.site)
+		if v := value(t, got, IngestionLag, site); v != c.lag {
+			t.Errorf("%s{%s} = %v, want %v", IngestionLag, c.site, v, c.lag)
+		}
+		if v := value(t, got, IngestionBehind, site); v != c.behind {
+			t.Errorf("%s{%s} = %v, want %v", IngestionBehind, c.site, v, c.behind)
+		}
 	}
 	if v := value(t, got, Unpriced); v != 0 {
 		t.Errorf("%s = %v", Unpriced, v)

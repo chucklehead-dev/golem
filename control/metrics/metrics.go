@@ -34,6 +34,8 @@ const (
 	ConfigRenewing    = "golem.control.config.renewing"
 	SpendAge          = "golem.control.spend.age"
 	SpendStale        = "golem.control.spend.stale"
+	IngestionLag      = "golem.control.spend.ingestion_lag"
+	IngestionBehind   = "golem.control.spend.ingestion_behind"
 	SyncTime          = "golem.control.entra_sync.time"
 	SyncGuardTrips    = "golem.control.entra_sync.guard_trips"
 	AuditOutbox       = "golem.control.audit.outbox"
@@ -58,10 +60,14 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 
 	var spendAge metric.Float64ObservableGauge
 	var spendStale metric.Int64ObservableGauge
+	var ingestLag metric.Float64ObservableGauge
+	var ingestBehind metric.Int64ObservableGauge
 	if c.Spend != nil {
 		spendAge = r.fgauge(m, SpendAge, "s", "How far known spend's boundary is behind now (spend.Job.Age), by period")
 		spendStale = r.igauge(m, SpendStale, "1", "1 while known spend's result is stale (spend.Job.Stale), by period")
-		insts = append(insts, spendAge, spendStale)
+		ingestLag = r.fgauge(m, IngestionLag, "s", "How far each site's ledger rows are behind now (spend.Job.Lags), by site; none for a site with no rows")
+		ingestBehind = r.igauge(m, IngestionBehind, "1", "1 while a site's rows are later than the allowance, or gone (spend.Job.Lags), by site")
+		insts = append(insts, spendAge, spendStale, ingestLag, ingestBehind)
 	}
 	var syncTime metric.Float64ObservableGauge
 	var guard metric.Int64ObservableCounter
@@ -122,6 +128,13 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 					o.ObserveFloat64(spendAge, age.Seconds(), opt)
 				}
 				o.ObserveInt64(spendStale, b2i(c.Spend.Stale()), opt)
+			}
+			for site, l := range c.Spend.Lags() {
+				opt := metric.WithAttributes(attribute.String("site", site))
+				if !l.NoRows {
+					o.ObserveFloat64(ingestLag, l.Lag.Seconds(), opt)
+				}
+				o.ObserveInt64(ingestBehind, b2i(l.Behind), opt)
 			}
 		}
 		if c.Sync != nil {
