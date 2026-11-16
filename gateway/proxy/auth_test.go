@@ -157,7 +157,9 @@ spec:
   keys:
   - {key: `+alice+`, principal: alice, scope: team-a}
 `, slow)
-	h.ProviderTail = 100 * time.Millisecond
+	// Long enough that the held-slot check below runs inside it even on a
+	// loaded machine under -race.
+	h.ProviderTail = time.Second
 	gw := httptest.NewServer(h)
 	defer gw.Close()
 	body := `{"model":"haiku","max_tokens":10,"stream":true,"messages":[]}`
@@ -175,21 +177,24 @@ spec:
 	if w := send(h, alice, body); w.Code != 429 || errorCode(t, w) != "limit.concurrency" || w.Header().Get("Retry-After") == "" {
 		t.Fatalf("a second call in flight: %d %s", w.Code, w.Body)
 	}
-	// The caller goes away: the call is cancelled, and its slot freed once
-	// the upstream connection has closed.
+	// The caller goes away: the call is cancelled, and the provider's stream
+	// ends with its request's context. release stays open until the test
+	// ends: closing it here would race the cancellation and could end the
+	// stream cleanly first, a completed call with no tail.
+	defer close(release)
 	cancel()
-	close(release)
 	// Its slot is held for the provider's tail, then freed.
 	if w := send(h, alice, body); w.Code != 429 {
 		t.Fatalf("during the provider's tail the slot is held: %d %s", w.Code, w.Body)
 	}
-	time.Sleep(h.ProviderTail) // the tail's timer: real time
+	// The tail's timer runs in real time, and the handler sees the
+	// cancellation over a real connection: wait for both, within a bound.
+	time.Sleep(h.ProviderTail)
 	var w *httptest.ResponseRecorder
-	for range 100 { // and the handler's seeing the cancellation over a real connection
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		if w = send(h, alice, body); w.Code != 429 {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	if w.Code == 429 {
 		t.Fatalf("after the provider's tail the slot is free: %d %s", w.Code, w.Body)
