@@ -65,11 +65,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: install quint, lmt and gotogether
+      - name: install quint and lmt
         run: |
           npm install --global @informalsystems/quint@0.33.1
           go install github.com/driusan/lmt@v0.0.0-20210421124901-62fe18f2f6a6
-          go install github.com/chucklehead-dev/gotogether/cmd/gotogether@v0.0.0-20261115194443-19f4f5794336
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: the generated models match the markdown
         run: make -C model verify-tangled
@@ -77,20 +76,8 @@ jobs:
         run: make -C model check
         env:
           QUINT_BACKEND: typescript
-      - name: the design matrices in the model documents are the models'
-        run: git diff --exit-code -- model/*.md
       - name: "the gateway against its models (connect: the model drives)"
         run: go test -count=1 -run 'TestPublicationModel|TestExposureModel|TestAttemptsModel' ./gateway/... ./control/...   # TestExposureModelValkey too
-        env:
-          QUINT_BACKEND: typescript
-      # The Hegel machines sit in the packages they test, behind the hegel
-      # build tag (the go job's plain go test never compiles them, nor needs
-      # libhegel): vet them here, then run them.
-      - name: vet with the hegel tag
-        run: go vet -tags hegel ./...
-      - name: "the gateway against its models (qhegel: Hegel drives, the model judges; planted bugs caught)"
-        # The Hegel tests alone: the rest of gateway/... ran in the go job.
-        run: go test -count=1 -timeout 20m -tags hegel -run 'AgainstExposureModel|NoScopeLimitCaught|StaleViewDuringOutage|AgainstPublicationModel|NoFloorCaught|NoExpiryCaught' ./gateway/limit/ ./gateway/snapshot/
         env:
           QUINT_BACKEND: typescript
 

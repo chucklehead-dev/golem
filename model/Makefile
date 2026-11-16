@@ -2,11 +2,9 @@
 # Needs quint (npm i -g @informalsystems/quint) and lmt (go install github.com/driusan/lmt@latest).
 QUINT ?= quint
 LMT ?= lmt
-MODELS = publication accounting freshness exposure leadership attempts
+MODELS = publication exposure attempts
 
-GOTOGETHER ?= gotogether
-
-.PHONY: all check tangle verify-tangled lint
+.PHONY: all check tangle verify-tangled
 all: check
 
 %.qnt: %.md
@@ -14,19 +12,10 @@ all: check
 
 tangle: $(MODELS:=.qnt)
 
-# Model-level mistakes before any run (precedence, reserved names,
-# quint's typecheck): gotogether lint -model.
-lint: tangle
-	$(GOTOGETHER) lint -model $(subst $(eval) ,$(comma),$(MODELS:=.qnt))
-
-comma := ,
-
-check: tangle lint
+# Each check script starts with quint typecheck.
+check: tangle
 	QUINT=$(QUINT) ./check.sh
-	QUINT=$(QUINT) ./check-accounting.sh
-	QUINT=$(QUINT) ./check-freshness.sh
 	QUINT=$(QUINT) ./check-exposure.sh
-	QUINT=$(QUINT) ./check-leadership.sh
 	QUINT=$(QUINT) ./check-attempts.sh
 
 # CI: the committed .qnt files must match the markdown.

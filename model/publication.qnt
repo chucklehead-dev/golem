@@ -367,8 +367,3 @@ module noExpiry {
     PRESERVE_ON_RESTORE = true, CHECK_EXPIRY = false,
   ).*
 }
-
-module small {
-  import publication(REPLICAS = Set("r1", "r2"), GATEWAYS = Set("g1"), KEYS = Set("k1"), LEASE = 2, MAX_TIME = 4,
-    FENCE = true, LEASE_FROM_SOURCE = true, TRUSTED_FLOOR = true, PRESERVE_ON_RESTORE = true, CHECK_EXPIRY = true).*
-}

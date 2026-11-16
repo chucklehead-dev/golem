@@ -8,25 +8,29 @@ be run without lmt; `make verify-tangled` checks they match.
 | Model | Question it answers |
 |---|---|
 | [publication.md](publication.md) | After a revocation is acknowledged, how long can any gateway keep serving the key, and what must hold for that bound? |
-| [freshness.md](freshness.md) | With two sources (the state document and the config CRDs), stale watch caches, Git rollbacks, leader changes and restores, is every restriction from either source honoured within one lease (ADR 0041 §5, §7.2)? |
-| [accounting.md](accounting.md) | With soft budgets (ADR 0031), is the overshoot within the stated bound, is anything counted twice, and do the books match the provider's bill after a crash? |
 | [attempts.md](attempts.md) | When a call is retried or fails over before it commits, does each caller get one answer, is every attempt charged once, does the budget bound hold, do retries stay within the slots, quotas and budgets, and does an ejected deployment see only its probe? |
 | [exposure.md](exposure.md) | For a scope shared by several principals on several gateways, with late ingestion, Valkey outages and cancelled calls, does the scope stay within a stated bound, and is the rest of the exposure recorded (ADR 0041 §6)? |
 
-Each model is checked two ways (`make check`): random simulation of a
-mid-sized instance, and an exhaustive search of a small one
-(`<model>.small.yaml`, gotogether's `simulate -graph`, which `make check`
-runs when gotogether is installed): every run up to a depth, each broken
-design's shortest counterexample, and dead actions reported. The
-exhaustive search is a proof for its instance and depth only.
+`make check` type-checks each model and runs a random simulation of a
+mid-sized instance: the design holding every property, every scenario
+reached, and each broken design caught. Simulation samples behaviours; it
+is not a proof. The Go code is checked against publication, exposure and
+attempts by connect (`TestPublicationModel`, `TestExposureModel`,
+`TestAttemptsModel`: the model's traces drive the code).
 
-The small instance's designs are its binding's `simulate.variants`: each
-with the mechanism it turns off, what it must hold and exactly what it
-breaks. `simulate -matrix` searches every one and writes the table, the
-properties by the designs, into the model's document (its "The small
-instance" section); CI fails if a committed table is not the model's.
-Each variant may bound its own search (leadership's broken designs stop a
-step or two past their counterexamples), and a design that breaks nothing
-lists the actions its switches leave dead (`dead:`).
+## Retired models
+
+Removed in the commit after dc20b0c (`git show dc20b0c:model/<name>.md`
+reads them); they are no longer checked or maintained.
+
+- **accounting.md**: soft budgets (ADR 0031): the overshoot bound, no
+  double count, the books matching the provider's bill after a crash. Its
+  ground is covered by exposure.md, which extends it.
+- **freshness.md**: config freshness with two sources (the state document
+  and the config CRDs; ADR 0041 §5, §7.2). It modelled a CRD watch that
+  M1 does not build.
+- **leadership.md**: compared placements of the lease and the fence and
+  chose ADR 0049's. Its counterexamples are Go tests now:
+  control/publish's `TestGuard` and control/lead's tests.
 
 Planned (testing.md §3): approvals and grants.

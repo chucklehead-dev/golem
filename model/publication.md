@@ -42,12 +42,7 @@ you can turn one off and watch the bound break.
   replays a bug's story (§8).
 - Simulation samples behaviours; it is not a proof. The sizes are small
   (two replicas, two gateways, two keys, a short clock) because the
-  interesting interleavings are already there. Each model also has a
-  smaller instance (`<model>.small.yaml`) that the check script explores
-  exhaustively with gotogether's state-graph search: every run up to a
-  depth, the design holding in all of them and each broken design's
-  shortest counterexample found. That is a proof for that instance and
-  depth, and still not for every size. `check.sh` uses a fixed
+  interesting interleavings are already there. `check.sh` uses a fixed
   seed so CI is deterministic; `SEED=random SAMPLES=50000 ./check.sh`
   searches wider. It uses Quint's TypeScript backend by default
   (`QUINT_BACKEND=rust` for the faster one, where it is installed).
@@ -117,8 +112,9 @@ has something to restore.
 Here the Lease is one atomic value: who leads, at which epoch. In golem it
 is the state document's fence, claimed by a replica that has first
 acquired the lease object (ADR 0049); how the lease object, the claim and
-rollbacks of either fit together is model/leadership.md's question, and
-this model takes its answer as given.
+rollbacks of either fit together was decided by ADR 0049 (its
+counterexamples are control/publish's TestGuard and control/lead's tests),
+and this model takes that answer as given.
 
 Leadership is one holder and an epoch that increases
 when it changes hands. The crucial detail is `believes`: what each replica
@@ -242,8 +238,7 @@ it may serve from.
 The first leader is `r1`. The replicas are interchangeable, so choosing
 it loses no behaviour (every run that starts with `r2` is the same run with
 the names swapped), and it means a recorded run of the real gateway
-replays from `init` without a search for which replica led first
-(gateway/snapshot's Hegel test, publication_hegel_test.go).
+replays from `init` without a search for which replica led first.
 
 Every action below changes a few variables and leaves the rest alone.
 These helpers say "the rest stays as it is" for each group, so each action
@@ -860,33 +855,3 @@ faults (paused leaders, partitions, empty disks, replayed objects), and
 validate recorded runs against `safe`. The broken designs become planted
 mutants of the code, which the checks must catch.
 
-## The small instance
-
-The instance the exhaustive search explores (publication.small.yaml, run by
-check.sh where it has one): the design at sizes small enough to
-search every run to a depth. The binding names this module rather than
-repeating its constants. Its variants (`simulate.variants`) are the
-designs, each with the mechanism it turns off, what it must hold and
-what it must break; `gotogether simulate -matrix` searches every run of
-each to the binding's depth and writes this table, the properties by the
-designs (a cell "breaks in N steps" is its shortest counterexample):
-
-<!-- gotogether:matrix -->
-| | design | no fence | lease from the gateway | no trusted floor | restore replaces | expiry unchecked |
-|---|---|---|---|---|---|---|
-| safe | holds to depth 8 | breaks in 5 steps | breaks in 6 steps | breaks in 4 steps | breaks in 2 steps | breaks in 3 steps |
-| revocationBounded | holds to depth 8 | holds to depth 8 | breaks in 6 steps | holds to depth 8 | breaks in 8 steps | breaks in 4 steps |
-| noExpiredServe | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 | breaks in 3 steps |
-| noRollback | holds to depth 8 | breaks in 7 steps | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 |
-| noRollbackBelowCheckpoint | holds to depth 8 | holds to depth 8 | holds to depth 8 | breaks in 4 steps | holds to depth 8 | holds to depth 8 |
-| publicationsOrdered | holds to depth 8 | breaks in 5 steps | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 |
-| revocationsSurviveRestore | holds to depth 8 | holds to depth 8 | holds to depth 8 | holds to depth 8 | breaks in 2 steps | holds to depth 8 |
-<!-- /gotogether:matrix -->
-
-```quint publication.qnt +=
-
-module small {
-  import publication(REPLICAS = Set("r1", "r2"), GATEWAYS = Set("g1"), KEYS = Set("k1"), LEASE = 2, MAX_TIME = 4,
-    FENCE = true, LEASE_FROM_SOURCE = true, TRUSTED_FLOOR = true, PRESERVE_ON_RESTORE = true, CHECK_EXPIRY = true).*
-}
-```

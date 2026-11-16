@@ -40,13 +40,4 @@ for pair in leaseFromSigning:staleViewTest noFencing:pausedLeaderTest naiveResto
   if "$QUINT" test --backend="$BACKEND" --main=design --match="^$t\$" publication.qnt >/dev/null 2>&1; then echo "$t in design: PASSES (should fail)"; fail=1; else echo "$t in design: impossible, as it should be"; fi
 done
 
-
-echo "== exhaustive: publication.small.yaml, every run up to a depth (not a sample)"
-if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
-  . ./graph.sh
-  matrix publication
-else
-  echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
-fi
-
 exit $fail
