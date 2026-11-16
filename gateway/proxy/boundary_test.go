@@ -116,7 +116,8 @@ func TestClaimedLengthNotTrusted(t *testing.T) {
 	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude"}`))
 	r.ContentLength = 32 << 20
 	in := make([]byte, 0, 16)
-	h.readBody(httptest.NewRecorder(), r, &in) // a test request does not hold the body to its claim
+	br, _ := h.reading().start("")
+	h.readBody(httptest.NewRecorder(), r, &in, h.MaxBody, br) // a test request does not hold the body to its claim
 	if cap(in) > preallocMax {
 		t.Fatalf("buffer of %d bytes for a claimed %d: want at most %d", cap(in), r.ContentLength, preallocMax)
 	}

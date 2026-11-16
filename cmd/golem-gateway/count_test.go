@@ -90,3 +90,19 @@ spec:
 		t.Fatalf("a count on a deployment the calls ejected: %d %s; want upstream.unavailable", code, b)
 	}
 }
+
+// TestReadingFlags: the bound on request bodies being read at once is
+// on by default (512 MiB, 8 a principal), and 0 turns either off.
+func TestReadingFlags(t *testing.T) {
+	o, err := parse([]string{"-standalone", t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := newReading(o); r.MaxBytes != 512<<20 || r.PerPrincipal != 8 {
+		t.Fatalf("defaults %d bytes, %d a principal", r.MaxBytes, r.PerPrincipal)
+	}
+	o, _ = parse([]string{"-standalone", t.TempDir(), "-max-reading=0", "-max-reading-per-principal=0"})
+	if r := newReading(o); r.MaxBytes >= 0 || r.PerPrincipal >= 0 {
+		t.Fatalf("0: %d bytes, %d a principal; want no bound (negative)", r.MaxBytes, r.PerPrincipal)
+	}
+}

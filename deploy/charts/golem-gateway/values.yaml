@@ -58,6 +58,12 @@ guard:
 
 maxBody: "33554432"   # quoted: a large number would render as 3.3554432e+07
 
+# Request bodies being read at once, before admission (a stalled upload
+# holds its bytes until -max-body's BodyTimeout): the gateway's bytes, and
+# each principal's bodies. Past either, limit.concurrency. 0: no bound.
+maxReading: "536870912"     # 512 MiB; keep it well under resources.limits.memory
+maxReadingPerPrincipal: 8
+
 # The pool's ServiceAccount: the role it assumes (IRSA or Pod Identity)
 # reads the bucket, writes its status/, and invokes Bedrock if a backend
 # uses it (docs/operations.md, Bedrock).

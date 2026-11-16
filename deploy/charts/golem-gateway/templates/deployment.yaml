@@ -59,6 +59,8 @@ spec:
             - -unready={{ .Values.unready }}
             - -drain={{ .Values.drain }}
             - -max-body={{ .Values.maxBody }}
+            - -max-reading={{ .Values.maxReading }}
+            - -max-reading-per-principal={{ .Values.maxReadingPerPrincipal }}
             - -auth-failures={{ .Values.guard.authFailures }}
             - -max-conns={{ .Values.guard.maxConns }}
             {{- with .Values.guard.sourceHeader }}

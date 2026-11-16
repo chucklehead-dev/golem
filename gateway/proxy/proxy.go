@@ -101,15 +101,22 @@ type Handler struct {
 	// until their calls commit (default 256 MiB); a call past it makes one
 	// attempt.
 	MaxKept int64
+	// Reading bounds the request bodies being read at once, before
+	// admission: the gateway's bytes and each principal's bodies (Reading);
+	// the gateway's handlers share one. nil: the handler's own, with the
+	// defaults.
+	Reading *Reading
 	// record, if set, is told each call's result (tests).
 	record func(*http.Request, Result)
 	// beforePick, if set, runs before each attempt's deployment is picked,
 	// the first included (tests: the attempt model's traces drive when).
 	beforePick func(*http.Request)
 
-	healthOnce sync.Once
-	ownHealth  *route.Health
-	kept       atomic.Int64 // bytes of bodies kept for retries
+	healthOnce  sync.Once
+	ownHealth   *route.Health
+	readingOnce sync.Once
+	ownReading  *Reading
+	kept        atomic.Int64 // bytes of bodies kept for retries
 }
 
 // Response headers returned to the caller (contracts.md §5: golem's own
@@ -345,7 +352,20 @@ func (h *Handler) prepare(w http.ResponseWriter, r *http.Request, ex *exchange, 
 	if p.snap, p.principal, no = h.authenticate(r, g); no != nil {
 		return p, no
 	}
-	if p.body, no = h.readBody(w, r, in); no != nil {
+	// Before the body is read: a claimed length past the scope's ceiling is
+	// refused unread, and the bodies being read at once are bounded, the
+	// gateway's bytes and the principal's bodies (Reading).
+	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero is the default, not "no body"
+	if c := p.principal.Limits.MaxInputBytes; c > 0 && r.ContentLength > c {
+		return p, inputCeiling(p.principal, r.ContentLength)
+	}
+	br, no := h.reading().start(p.principal.ID)
+	if no != nil {
+		return p, no
+	}
+	p.body, no = h.readBody(w, r, in, maxBody, br)
+	br.end()
+	if no != nil {
 		return p, no
 	}
 	var err error
@@ -661,9 +681,8 @@ func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compil
 const preallocMax = 1 << 20
 
 // readBody reads the request body into the pooled buffer in, at most
-// MaxBody bytes.
-func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) ([]byte, *refusal) {
-	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero is the default, not "no body"
+// maxBody bytes, counting them in br (the bound on bodies being read).
+func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte, maxBody int64, br *bodyRead) ([]byte, *refusal) {
 	// One allocation, not a doubling series, for a body up to preallocMax:
 	// past it the claimed length is not trusted (a client could claim 32
 	// MiB, send two bytes, and hold the buffer until BodyTimeout), and
@@ -676,9 +695,11 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) (
 	rc := http.NewResponseController(w)
 	rc.SetReadDeadline(time.Now().Add(cmp.Or(h.BodyTimeout, 30*time.Second))) // a test's recorder has none
 	var err error
-	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, maxBody))
+	*in, err = readAll((*in)[:0], br.reader(http.MaxBytesReader(w, r.Body, maxBody)))
 	rc.SetReadDeadline(time.Time{})
 	switch _, tooBig := errors.AsType[*http.MaxBytesError](err); {
+	case errors.Is(err, errReadingFull):
+		return nil, readingFull
 	case tooBig:
 		return nil, &refusal{code: contract.RequestTooLarge, msg: "the request body is larger than this gateway accepts"}
 	case err != nil:

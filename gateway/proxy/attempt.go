@@ -22,6 +22,15 @@ func (h *Handler) health() *route.Health {
 	return h.ownHealth
 }
 
+// reading is the handler's Reading, or its own if none was given.
+func (h *Handler) reading() *Reading {
+	if h.Reading != nil {
+		return h.Reading
+	}
+	h.readingOnce.Do(func() { h.ownReading = &Reading{} })
+	return h.ownReading
+}
+
 // pick is the pool's next deployment for an attempt, in pool order: one
 // the call has not tried, that accepts the request's betas, and whose
 // health takes the attempt. A call is never retried on a deployment it
