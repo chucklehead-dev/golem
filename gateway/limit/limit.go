@@ -289,7 +289,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 		case ctx.Err() != nil:
 			return nil, ctx.Err() // the caller went away: no outage
 		}
-		l.markDown(err) // and fall through to the local check
+		l.MarkDown(err) // and fall through to the local check
 	}
 	return l.admitLocally(c, &ch, period)
 }
@@ -322,7 +322,7 @@ func (l *Limiter) admitted(c Call, ch *charged, period string, r Result) (*Ticke
 		return nil, ErrConcurrency
 	}
 	// In grace, peers may still hold calls Valkey lacks.
-	return l.track(c, ch, period, l.now().Before(l.graceUntil), &r.Known), nil
+	return l.track(c, ch, period, l.now().Before(l.graceUntil), ch.over(c, &r.Known)), nil
 }
 
 // admitLocally is the outage's check: the last known spends and this
@@ -334,14 +334,15 @@ func (l *Limiter) admitLocally(c Call, ch *charged, period string) (*Ticket, err
 	var known [MaxAccounts]int64
 	for i := range ch.n {
 		known[i] = l.last[keyOf{ch.ids[i], period}]
-		if overBudget(known[i], refusing(c, ch.limits[i]), c.DeclaredWorstCaseCheck, c.Worst) {
-			return nil, refusalAt(ch.levels[i])
-		}
+	}
+	over := ch.over(c, &known)
+	if over.Level != admission.NoLevel && c.BudgetMode == admission.Enforce {
+		return nil, refusalAt(over.Level)
 	}
 	if atLimit(l.byPrincipal[c.Principal], c.PrincipalLimit) || atLimit(l.byScope[c.Scope], c.ScopeLimit) {
 		return nil, ErrConcurrency
 	}
-	return l.track(c, ch, period, true, &known), nil
+	return l.track(c, ch, period, true, over), nil
 }
 
 // storeContext bounds a store call: Valkey answers a site's gateways in a
@@ -359,9 +360,11 @@ func (l *Limiter) storeContext(ctx context.Context) (context.Context, context.Ca
 // inProcess marks a store that answers in-process, never over a network.
 type inProcess interface{ inProcess() }
 
-// markDown records an outage: the store failed and the caller is still
-// there. The gateway admits on its own counts until Recover.
-func (l *Limiter) markDown(err error) {
+// MarkDown records an outage: a store call failed (the caller still there),
+// or the store was found unreachable before any call (a gateway starting
+// during a Valkey outage). Calls are admitted on local counts as waivers,
+// increments held, until Run's Recover finds the store answering.
+func (l *Limiter) MarkDown(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.down.Swap(true) {
@@ -369,20 +372,10 @@ func (l *Limiter) markDown(err error) {
 	}
 }
 
-// MarkDown starts the limiter in its outage mode: the store was found
-// unreachable before any call (a gateway starting during a Valkey outage).
-// Calls are admitted on local counts as waivers, increments held, until
-// Run's Recover finds the store answering.
-func (l *Limiter) MarkDown(err error) { l.markDown(err) }
-
-// pinger is a store that can tell whether it answers without changing
-// anything (Valkey's PING).
-type pinger interface{ Ping(context.Context) error }
-
-// track records a running call admitted at its accounts' known spends; mu
-// is held.
-func (l *Limiter) track(c Call, ch *charged, period string, waived bool, known *[MaxAccounts]int64) *Ticket {
-	t := &Ticket{l: l, call: c, period: period, waived: waived, ch: *ch, over: ch.over(c, known)}
+// track records a running call, admitted over the limit of over's account
+// (if any); mu is held.
+func (l *Limiter) track(c Call, ch *charged, period string, waived bool, over admission.Over) *Ticket {
+	t := &Ticket{l: l, call: c, period: period, waived: waived, ch: *ch, over: over}
 	if waived {
 		l.Waived.Add(1)
 	}
@@ -469,7 +462,7 @@ func (l *Limiter) account(ctx context.Context, t *Ticket, cost int64, release bo
 			if err == nil {
 				return
 			}
-			l.markDown(err)
+			l.MarkDown(err)
 		}
 		if l.beforeHold != nil {
 			l.beforeHold()
@@ -517,7 +510,7 @@ func (t *Ticket) Ended(ctx context.Context) {
 	sctx, cancel := l.storeContext(ctx)
 	defer cancel()
 	if err := l.store.Release(sctx, t.slot()); err != nil {
-		l.markDown(err)
+		l.MarkDown(err)
 	}
 }
 
@@ -559,7 +552,7 @@ func (l *Limiter) Renew(ctx context.Context) error {
 		return ErrUnavailable
 	}
 	if err := l.reacquire(ctx); err != nil {
-		l.markDown(err)
+		l.MarkDown(err)
 		return err
 	}
 	return nil
@@ -615,6 +608,10 @@ func (l *Limiter) renewable() []Slot {
 	return slots
 }
 
+// pinger is a store that can tell whether it answers without changing
+// anything (Valkey's PING).
+type pinger interface{ Ping(context.Context) error }
+
 // Recover is called when the store answers again: the held increments are
 // replayed in order, each into its own minute, and every call still
 // running re-registers its slot, so calls that streamed through the outage
@@ -656,7 +653,7 @@ func (l *Limiter) Recover(ctx context.Context) error {
 	for {
 		n, err := l.replayBatch(ctx)
 		if err != nil {
-			l.markDown(err) // what is left stays held for the next Recover
+			l.MarkDown(err) // what is left stays held for the next Recover
 			return err
 		}
 		if n == 0 {
@@ -705,8 +702,9 @@ func (l *Limiter) replayBatch(ctx context.Context) (int, error) {
 // dropReplayed takes a replayed batch off the held increments: every one
 // held by seq last. A batch is the oldest held when it was sent, so those
 // still held are at the front; those gone meanwhile were taken by another
-// replay, or dropped at MaxPending (and counted in Dropped). Only Recover
-// and replayOne take from the front; holds append.
+// replay, or dropped at MaxPending (and counted in Dropped). Only replays
+// (replayBatch, replayOne) and the drop at MaxPending take from the front;
+// holds append.
 func (l *Limiter) dropReplayed(last uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

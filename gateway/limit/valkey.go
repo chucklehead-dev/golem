@@ -25,8 +25,8 @@ import (
 // Slots are sorted sets per principal and per scope, scored by their expiry
 // on the server's clock (TIME), so a gateway's clock cannot extend one.
 //
-// The counter, per scope and budget period, is one hash of minute to spend
-// (ADR 0048): a completion is an HINCRBY of its minute, and known spend
+// The counter, per account (a scope's, or a capped member's or key's) and
+// budget period, is one hash of minute to spend (ADR 0048): a completion is an HINCRBY of its minute, and known spend
 // reads the minutes from the snapshot's boundary to now, one HGET each: a
 // few for a gateway on a current snapshot (its boundary an ingestion
 // allowance back), at most a retention's for one on the oldest. The hash's
@@ -65,9 +65,9 @@ type Valkey struct {
 
 	afterFn func(time.Duration) <-chan time.Time // Connect's waits (tests)
 
-	keys   sync.Map // keyOf -> *scopeKeys, built once
-	cached atomic.Int64
-	args   atomic.Pointer[durArgs]
+	counters sync.Map // keyOf -> the counter's key, built once
+	cached   atomic.Int64
+	args     atomic.Pointer[durArgs]
 }
 
 // durArgs are the scripts' duration arguments, formatted once for the
@@ -92,9 +92,14 @@ func (v *Valkey) durations() *durArgs {
 
 // NewValkey returns the store for site over a client.
 func NewValkey(c valkey.Client, site string) *Valkey {
-	v := &Valkey{prefix: "{golem:" + site + "}:", TTL: 90 * time.Second, Retain: 6 * time.Hour}
+	v := siteStore(site)
 	v.cl.Store(&c)
 	return v
+}
+
+// siteStore is the store for site with its defaults, and no client.
+func siteStore(site string) *Valkey {
+	return &Valkey{prefix: "{golem:" + site + "}:", TTL: 90 * time.Second, Retain: 6 * time.Hour}
 }
 
 // DialValkey returns the store for site over a client dial makes. It dials
@@ -107,7 +112,8 @@ func NewValkey(c valkey.Client, site string) *Valkey {
 // the limiter is to fail open (ADR 0041 §7.3). The error is the first
 // dial's, for the caller to log; the store is never nil.
 func DialValkey(site string, dial func() (valkey.Client, error)) (*Valkey, error) {
-	v := &Valkey{dial: dial, prefix: "{golem:" + site + "}:", TTL: 90 * time.Second, Retain: 6 * time.Hour}
+	v := siteStore(site)
+	v.dial = dial
 	c, err := dial()
 	if err != nil {
 		return v, err
@@ -184,28 +190,24 @@ func (v *Valkey) Ping(ctx context.Context) error {
 	return wrap(c.Do(ctx, c.B().Ping().Build()).Error())
 }
 
-// maxCachedKeys bounds the key cache: scopes times periods in use.
+// maxCachedKeys bounds the counter keys cached: accounts times periods in
+// use.
 const maxCachedKeys = 1 << 14
 
-// scopeKeys are a scope and period's keys. Built once and shared
-// (read-only), so a call builds no strings for them.
-type scopeKeys struct {
-	counter string // the period counter: minute -> spend
-	slots   string // the scope's slots
-}
-
-func (v *Valkey) keysOf(scope, period string) *scopeKeys {
-	k := keyOf{scope, period}
-	if ks, ok := v.keys.Load(k); ok {
-		return ks.(*scopeKeys)
+// counterKey is an account's counter for a period (minute -> spend), built
+// once and cached, so a call builds no string for it.
+func (v *Valkey) counterKey(account, period string) string {
+	k := keyOf{account, period}
+	if c, ok := v.counters.Load(k); ok {
+		return c.(string)
 	}
-	ks := &scopeKeys{counter: v.prefix + "spend:" + scope + ":" + period, slots: v.scopeKey(scope)}
-	if v.cached.Add(1) > maxCachedKeys { // a new month, or many scopes: start again
-		v.keys.Clear()
+	c := v.prefix + "spend:" + account + ":" + period
+	if v.cached.Add(1) > maxCachedKeys { // a new month, or many accounts: start again
+		v.counters.Clear()
 		v.cached.Store(1)
 	}
-	v.keys.Store(k, ks)
-	return ks
+	v.counters.Store(k, c)
+	return c
 }
 
 // script is a Lua script with what a pipelined EVALSHA, or EVAL after
@@ -383,9 +385,6 @@ return since(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]))`)
 
 func (v *Valkey) principalKey(p string) string { return v.prefix + "slots:p:" + p }
 func (v *Valkey) scopeKey(s string) string     { return v.prefix + "slots:s:" + s }
-func (v *Valkey) counterKey(account, period string) string {
-	return v.keysOf(account, period).counter
-}
 
 func (v *Valkey) now() time.Time {
 	if v.Now != nil {

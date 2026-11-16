@@ -32,20 +32,16 @@ func NewLedger(logger otellog.Logger, site, pool string) *Ledger {
 	return &Ledger{logger: logger, site: site, pool: pool, Period: time.UTC}
 }
 
-// Ended writes a finished call's row.
+// Ended writes a finished call's row: a golem.spend event (its name also
+// the body), stamped with the call's end.
 func (l *Ledger) Ended(ctx context.Context, c Call) {
 	var row [ledgerColumns]attribute.KeyValue
 	l.row(&row, &c)
-	l.emit(ctx, c.Ended, "golem.spend", row[:])
-}
-
-// emit writes one log record: the event name, also its body, and attrs.
-func (l *Ledger) emit(ctx context.Context, at time.Time, name string, attrs []attribute.KeyValue) {
 	var r otellog.Record
-	r.SetTimestamp(at)
-	r.SetEventName(name)
-	r.SetBody(attribute.StringValue(name))
-	r.AddAttributes(attrs...)
+	r.SetTimestamp(c.Ended)
+	r.SetEventName("golem.spend")
+	r.SetBody(attribute.StringValue("golem.spend"))
+	r.AddAttributes(row[:]...)
 	l.logger.Emit(ctx, r)
 }
 

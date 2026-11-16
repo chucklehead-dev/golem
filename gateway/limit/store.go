@@ -1,8 +1,9 @@
 // Package limit is the gateway's admission check (ADR 0031, 0038, 0041
-// §7.3 and §7.6, 0048): known spend against a budget, and in-flight limits
-// per principal and per scope, over the site's shared store (Valkey in
-// production). Its rules are the ones model/exposure.md shows necessary,
-// and its connect test checks it against that model.
+// §7.3 and §7.6, 0048): known spend against the key's cap, the member's
+// and the scope's budget, in-flight limits per principal and per scope,
+// and requests-per-minute rate limits (rate.go), over the site's shared
+// store (Valkey in production). Its rules are the ones model/exposure.md
+// shows necessary, and its connect test checks it against that model.
 //
 // Known spend is the snapshot's spend, the ledger's for calls that ended
 // before the snapshot's boundary, plus the site counter's minutes from the
@@ -35,7 +36,7 @@ var ErrUnavailable = errors.New("limit: the site store is unreachable")
 // counters keep amounts, not events; Call is for logs and tests. One
 // increment is one write: every account's counter or none.
 type Increment struct {
-	Accounts []string // Account.ID's; the scope's first
+	Accounts []string // Account.ID's, in admission's order: the scope's last
 	Period   string
 	Call     string
 	Cost     int64
@@ -84,7 +85,7 @@ type Admission struct {
 	Slot
 	Period                 string    // the budget period, e.g. "2026-11": counters are per period
 	Now                    time.Time // the gateway's clock: the read's last minute (zero: the store's)
-	Accounts               []Account // at most MaxAccounts; the scope's first
+	Accounts               []Account // at most MaxAccounts: key, member, scope (charged)
 	DeclaredWorstCaseCheck bool
 	Worst                  int64
 	PrincipalLimit         int // 0: none
@@ -109,8 +110,9 @@ type Result struct {
 	Known   [MaxAccounts]int64
 }
 
-// overBudget is admission's budget check, as Mem and an outage's local
-// check make it (the admit script makes the same in Lua). Under the
+// overBudget is admission's budget check, as Mem, an outage's local check
+// and a ticket's over-budget mark make it (the admit script makes the same
+// in Lua). Under the
 // declared-worst-case check known spend plus the call's declared worst
 // case must fit the budget; under the soft check known spend must be below
 // it, whatever the call then costs (ADR 0031, 0044). A budget of 0 is none.
@@ -129,9 +131,9 @@ func overBudget(known, budget int64, worstCaseCheck bool, worst int64) bool {
 // none).
 func atLimit(n, limit int) bool { return limit > 0 && n >= limit }
 
-// Store is the site's shared state: concurrency slots and the spend
-// counter, per scope, budget period and minute. Each method is one atomic
-// operation and one round trip (one Valkey script).
+// Store is the site's shared state: concurrency slots, the spend counters
+// (per account, budget period and minute) and the rate buckets. Each
+// method is one atomic operation and one round trip (one Valkey script).
 type Store interface {
 	// Admit checks known spend and the limits and, if both allow, takes
 	// the slot. It returns the outcome and the known spends it computed.
@@ -180,7 +182,7 @@ type Mem struct {
 	buckets map[string]*rateBucket // rate buckets (rate.go)
 }
 
-// memCounter is a scope's counter for a period: its minutes, and its
+// memCounter is an account's counter for a period: its minutes, and its
 // whole total, which a snapshot with no boundary reads (Valkey's "total"
 // field).
 type memCounter struct {
@@ -190,7 +192,8 @@ type memCounter struct {
 
 // NewMem returns an empty store.
 func NewMem() *Mem {
-	return &Mem{slots: map[string]Slot{}, counter: map[keyOf]*memCounter{}, Retain: 6 * time.Hour, Now: time.Now}
+	return &Mem{slots: map[string]Slot{}, counter: map[keyOf]*memCounter{}, buckets: map[string]*rateBucket{},
+		Retain: 6 * time.Hour, Now: time.Now}
 }
 
 func (m *Mem) Admit(_ context.Context, a Admission) (Result, error) {

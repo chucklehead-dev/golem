@@ -22,8 +22,8 @@ import (
 type Call struct {
 	ID               string // the request ID: the call's event in the ledger
 	Principal, Scope string
-	// The route chosen: what route-level limits (rates, provider quota
-	// shares) key on.
+	// The route chosen. gateway/limit reads none of them: rate limits and
+	// quota shares are Meters, taken outside admission.
 	Alias, Deployment, Model string
 	Budget                   int64 // the scope's budget in micro-units; 0: none
 	// BudgetMode is what the budget does (PRD §9.1): Enforce refuses a call
@@ -83,10 +83,6 @@ func ModeOf(s string) BudgetMode {
 // with its code), or another error (the admitter failed: a 500, or, if
 // ctx ended, the caller having gone). A nil Ticket with a nil error admits
 // the call uncounted.
-//
-// An implementation that counts spend owes the ledger one numbering record
-// per counted event, a sequence of 0 if the event never reached the
-// counter (ADR 0042, 0043).
 type Admitter interface {
 	Admit(ctx context.Context, c Call) (Ticket, error)
 }
