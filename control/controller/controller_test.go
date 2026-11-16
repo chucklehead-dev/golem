@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/chucklehead-dev/golem/control/entrasync"
-	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/spend"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -75,7 +74,7 @@ func newWorld(t *testing.T) *world {
 		now := func() time.Time { return r.clock }
 		st := &state.Store{Bucket: b}
 		r.Controller = &Controller{Dir: w.dir, Lease: 4 * time.Hour, Now: now,
-			Elector:    &lead.Elector{State: st, ID: id, Duration: 15 * time.Second, Now: now},
+			State: st, ID: id,
 			Publishers: map[string]*publish.Publisher{"internal": {State: st, Bucket: b, Signer: w.signer, Pool: "internal", Now: now}}}
 		w.replicas[id] = r
 	}
@@ -104,12 +103,18 @@ func (w *world) write(name, body string) {
 	}
 }
 
+// lead has the replica claim the fence, as it does when it starts, unless
+// it leads already; it returns the epoch it leads at.
 func (w *world) lead(id string) uint64 {
-	e, err := w.replicas[id].Elector.Try(w.t.Context())
-	if err != nil {
+	r := w.replicas[id]
+	if f, ok := r.Fence(); ok {
+		return f.Epoch
+	}
+	if err := r.Claim(w.t.Context()); err != nil {
 		w.t.Fatal(err)
 	}
-	return e
+	f, _ := r.Fence()
+	return f.Epoch
 }
 
 // step runs a replica's controller once, and has the gateway poll.
@@ -137,7 +142,7 @@ func TestPublishes(t *testing.T) {
 	w := newWorld(t)
 	r1, r2 := w.replicas["r1"], w.replicas["r2"]
 	if p, _ := w.step("r1"); p {
-		t.Fatal("published without the lease")
+		t.Fatal("published without claiming the fence")
 	}
 	if w.lead("r1") != 1 {
 		t.Fatal("r1 leads at epoch 1")
@@ -183,23 +188,23 @@ func TestPublishes(t *testing.T) {
 		}
 		os.Remove(filepath.Join(w.dir, "broken.yaml"))
 	})
-	t.Run("a new leader publishes; the paused one is fenced", func(t *testing.T) {
-		// r1 pauses: its clock and belief stand still. r2 sees the lease,
-		// then sees it unchanged for longer than its duration.
-		if w.lead("r2") != 0 {
-			t.Fatal("r2 took a held lease")
-		}
+	t.Run("a successor publishes; the paused predecessor is deposed", func(t *testing.T) {
+		// r1 pauses: its clock and belief stand still. r2, its successor,
+		// starts and claims the fence.
 		r2.clock = r2.clock.Add(time.Minute)
 		if w.lead("r2") != 2 {
-			t.Fatal("r2 takes the lapsed lease at epoch 2")
+			t.Fatal("r2 claims the fence at epoch 2")
 		}
 		if p, err := w.step("r2"); !p || err != nil {
 			t.Fatalf("r2's first publication: %v %v", p, err)
 		}
 		w.write("opus.yaml", route("opus")) // r1, resuming, sees a change to publish
 		p, err := w.step("r1")
-		if p || !errors.Is(err, publish.ErrFenced) {
-			t.Fatalf("the paused leader: published %v, %v; want it fenced", p, err)
+		if p || !errors.Is(err, ErrDeposed) {
+			t.Fatalf("the paused predecessor: published %v, %v; want it deposed", p, err)
+		}
+		if _, leads := r1.Fence(); leads {
+			t.Fatal("the deposed predecessor still leads")
 		}
 		if seq, aliases, _ := w.applied(); seq != 5 || strings.Join(aliases, ",") != "claude,haiku" {
 			t.Fatalf("the gateway holds %d %v: the fenced leader's change must not reach it", seq, aliases)
@@ -209,6 +214,37 @@ func TestPublishes(t *testing.T) {
 			t.Fatalf("the gateway holds %d %v: the leader's next publication carries the change", seq, aliases)
 		}
 	})
+}
+
+// TestRunExitsWhenDeposed: Run claims the fence as it starts, and returns
+// ErrDeposed at its next step once a successor has claimed over it.
+func TestRunExitsWhenDeposed(t *testing.T) {
+	w := newWorld(t)
+	r1 := w.replicas["r1"]
+	done := make(chan error, 1)
+	go func() { done <- r1.Run(t.Context()) }()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if f, ok := r1.Fence(); ok {
+			if f.Epoch != 1 {
+				t.Fatalf("Run claimed epoch %d, want 1", f.Epoch)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Run did not claim the fence")
+		}
+	}
+	if w.lead("r2") != 2 {
+		t.Fatal("r2 claims the fence at epoch 2")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrDeposed) {
+			t.Fatalf("Run returned %v, want ErrDeposed", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deposed replica's Run did not return")
+	}
 }
 
 // TestEntitlements: a key written to the state reaches the gateway through
@@ -222,7 +258,7 @@ func TestEntitlements(t *testing.T) {
 	h := key.Hash(alice)
 	hash := hex.EncodeToString(h[:])
 	w.policy("team-a", "{models: [claude]}")
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes = map[string]state.Scope{"team-a": {}}
 		d.Principals = map[string]state.Principal{"alice": {Kind: "user", Scopes: []string{"team-a"}}}
 		d.Keys = map[string]state.Key{hash: {Display: key.Display(alice), Owner: "alice", Scope: "team-a"}}
@@ -252,7 +288,7 @@ func TestEntitlements(t *testing.T) {
 		t.Fatalf("scope models %v: want its ScopePolicy's", c.Snapshot.Entitlements.Scopes[0].Models)
 	}
 
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		return d.Revoke(hash, r1.clock)
 	}); err != nil {
 		t.Fatal(err)
@@ -283,9 +319,9 @@ func TestGroupSync(t *testing.T) {
 	r1 := w.replicas["r1"]
 	w.lead("r1")
 	g := &groupDir{users: []entrasync.User{{ID: "oid-alice", UPN: "alice@example.com", Enabled: true}}}
-	r1.Sync = &entrasync.Sync{State: r1.Elector.State, Directory: g, Now: r1.Now}
+	r1.Sync = &entrasync.Sync{State: r1.State, Directory: g, Now: r1.Now}
 	w.policy("team-a", "{models: [claude]}")
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes = map[string]state.Scope{"team-a": {Groups: []string{"g1"}}}
 		return nil
 	}); err != nil {
@@ -332,7 +368,7 @@ func TestKnownSpend(t *testing.T) {
 	r1.Spend = &spend.Job{Ledger: spendLedger{"team-a": 1_250_000}, Now: r1.Now}
 	w.policy("team-a", "{models: [claude]}")
 	w.policy("team-b", "{models: [claude]}")
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes = map[string]state.Scope{"team-a": {}, "team-b": {}}
 		return nil
 	}); err != nil {

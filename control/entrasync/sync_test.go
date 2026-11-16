@@ -440,7 +440,7 @@ func TestFederatedToken(t *testing.T) {
 	}
 }
 
-// deposing is a directory during whose read another replica takes the lease.
+// deposing is a directory during whose read another replica claims the fence.
 type deposing struct {
 	*dir
 	st *state.Store

@@ -20,7 +20,7 @@ func TestMissingDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	installed := []string{"lead/lease.json", "control/internal/checkpoint", "snapshots/internal/current"}
+	installed := []string{"snapshots/edge/current", "control/internal/checkpoint", "snapshots/internal/current"}
 	first := &Store{Bucket: b, Installed: installed}
 	if err := first.Load(ctx); err != nil || first.Current().StateVersion != 0 {
 		t.Fatalf("a first start: %v", err)
@@ -57,7 +57,7 @@ func TestMissingDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b2.Close()
-	b2.Put(ctx, "lead/lease.json", []byte("{}"), "")
+	b2.Put(ctx, "snapshots/edge/current", []byte("{}"), "")
 	s := &Store{Bucket: b2, Installed: installed}
 	d, err := s.Bootstrap(ctx, map[string]uint64{"internal": 7, "edge": 0}, "ops", false)
 	if err != nil {

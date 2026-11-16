@@ -24,7 +24,7 @@ func TestStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { archive.Close() })
-	st := r1.Elector.State
+	st := r1.State
 	r1.Audit = &audit.Shipper{State: st, Archive: archive}
 	g := &groupDir{users: []entrasync.User{{ID: "oid-a", UPN: "a@example.com", Enabled: true}, {ID: "oid-b", UPN: "b@example.com", Enabled: true}}}
 	r1.Sync = &entrasync.Sync{State: st, Directory: g, Now: r1.Now, MaxRemovals: 1}

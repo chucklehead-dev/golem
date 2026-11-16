@@ -77,7 +77,7 @@ func TestUnmatchedScopes(t *testing.T) {
 	w.policy("team-a", "{models: [claude]}")
 	w.policy("team-later", "{models: [claude]}")
 	w.lead("r1")
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes = map[string]state.Scope{"team-a": {}, "team-b": {}}
 		return nil
 	}); err != nil {
@@ -110,7 +110,7 @@ func TestUnmatchedScopes(t *testing.T) {
 
 	// Both fixed: team-b's policy merged, team-later created.
 	w.policy("team-b", "{models: [claude], budgetMicros: 0}")
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes["team-later"] = state.Scope{}
 		return nil
 	}); err != nil {
@@ -133,7 +133,7 @@ func TestUnpricedPolicy(t *testing.T) {
 	pricedConfig(w, true)
 	w.policy("budgeted", "{models: [priced, unpriced], budgetMicros: 5000000}")
 	w.lead("r1")
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes = map[string]state.Scope{"budgeted": {}}
 		return nil
 	}); err != nil {
@@ -191,7 +191,7 @@ func TestRemovedPolicyRefused(t *testing.T) {
 	w.lead("r1")
 	w.policy("team-a", "{models: [claude]}")
 	w.policy("team-z", "{models: [claude]}") // no such scope in the state
-	if _, err := r1.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r1.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes = map[string]state.Scope{"team-a": {}}
 		return nil
 	}); err != nil {

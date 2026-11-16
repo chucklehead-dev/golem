@@ -11,7 +11,7 @@ import (
 
 // TestAPIDrains: at shutdown the control API's call in flight finishes and
 // its answer reaches the caller before serveAPI returns, after which the
-// lease is given up; a call that outlasts the drain is cut.
+// process goes on to exit; a call that outlasts the drain is cut.
 func TestAPIDrains(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +49,7 @@ func TestAPIDrains(t *testing.T) {
 	// that must not happen: the drain itself is not timed.)
 	select {
 	case err := <-done:
-		t.Fatalf("serveAPI returned (%v) with a call in flight: the lease would be released and the call cut", err)
+		t.Fatalf("serveAPI returned (%v) with a call in flight: the process would exit and the call be cut", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	close(release)

@@ -1,6 +1,6 @@
 // Package controller is golem-control's publishing loop (control-plane.md
 // §4, §6): while this replica leads, it compiles the config and publishes
-// every pool's snapshot when the config changes, when it becomes leader,
+// every pool's snapshot when the config changes, when it claims the fence,
 // and every renewal interval to extend the snapshots' authorization lease
 // (ADR 0030).
 //
@@ -29,7 +29,6 @@ import (
 
 	"github.com/chucklehead-dev/golem/control/audit"
 	"github.com/chucklehead-dev/golem/control/entrasync"
-	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/spend"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -39,10 +38,19 @@ import (
 )
 
 // Controller publishes the config in Dir to every pool in Publishers.
+//
+// It is golem-control's one replica (ADR 0053): it claims the state
+// document's fence once, at start (Claim, state.Store.Claim), and leads
+// from then on; every leader-only write it makes is fenced by that claim.
+// A replica claimed over (a predecessor paused or not yet gone when its
+// successor started) is refused at its next fenced write, stops leading,
+// and Run returns ErrDeposed.
 type Controller struct {
-	Dir        string // config CRD YAML
-	Elector    *lead.Elector
-	Publishers map[string]*publish.Publisher // by pool; they share the elector's state store
+	Dir string // config CRD YAML
+	// State is the document; ID this replica's name, the fence's holder.
+	State      *state.Store
+	ID         string
+	Publishers map[string]*publish.Publisher // by pool; they share State
 	// Lease is the published snapshots' authorization (ADR 0030, 0032: four
 	// hours for internal pools); Renew how often they are republished to
 	// extend it (default a minute).
@@ -69,8 +77,14 @@ type Controller struct {
 
 	syncTried time.Time // when the group sync last ran, succeeding or not (status.synced: last succeeded)
 	mu        sync.Mutex
-	good      v1.Objects // the last config that compiled; written under mu (ScopeModels reads it from the API's goroutines)
-	goodSum   [32]byte
+	// fence is this replica's claim (Claim), claimed whether it was made;
+	// deposed is set once the document's fence is another's, for good.
+	// Under mu.
+	fence   state.Fence
+	claimed bool
+	deposed bool
+	good    v1.Objects // the last config that compiled; written under mu (ScopeModels reads it from the API's goroutines)
+	goodSum [32]byte
 	// unmatched is what the last publication found of scopes and
 	// ScopePolicies that do not match (under mu, by
 	// compile.Options.Unmatched): a scope of the state's with no policy,
@@ -282,6 +296,44 @@ func (c *Controller) log() *slog.Logger {
 	return slog.Default()
 }
 
+// ErrDeposed: another replica has claimed the fence since this one did. It
+// leads no more, for good, and Run returns.
+var ErrDeposed = errors.New("controller: another golem-control replica has claimed the fence since this one did: this one leads no more, and stops")
+
+// Claim claims the state document's fence for this replica, at one above
+// its epoch (state.Store.Claim): it leads from then on, until another
+// claims over it. Run claims first unless Claim has been called.
+func (c *Controller) Claim(ctx context.Context) error {
+	f, err := c.State.Claim(ctx, c.ID)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.fence, c.claimed, c.deposed = f, true, false
+	c.mu.Unlock()
+	c.log().Info("golem-control: claimed the fence", "replica", c.ID, "epoch", f.Epoch)
+	return nil
+}
+
+// Fence is the leadership this replica acts under, for its leader-only
+// writes; ok is false before it has claimed and once it is deposed.
+func (c *Controller) Fence() (f state.Fence, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fence, c.claimed && !c.deposed
+}
+
+// notice marks this replica deposed if the document, as last read, holds
+// another's fence, and reports whether it still leads.
+func (c *Controller) notice() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.claimed && !c.deposed && !c.State.Leads(c.fence) {
+		c.deposed = true
+	}
+	return c.claimed && !c.deposed
+}
+
 // Step publishes if this replica leads and a publication is due: a config
 // change, a new epoch, or the renewal interval. A config that does not
 // compile is reported, and the last one that did is renewed, so a broken
@@ -295,20 +347,25 @@ func (c *Controller) log() *slog.Logger {
 // regressed record) is retried with backoff (Retry, doubling up to Renew)
 // while the others publish at their own cadence, and its last failure is
 // in the error of every step until it publishes. It reports whether it
-// published to any pool.
+// published to any pool. A replica that finds itself deposed publishes
+// nothing and returns ErrDeposed.
 func (c *Controller) Step(ctx context.Context) (bool, error) {
-	fence, leads := c.Elector.Fence()
+	fence, leads := c.Fence()
 	if !leads {
 		return false, nil
 	}
 	// The state as of now: a revocation is published within a step of its
 	// write (the store's own loop refreshes it too). The config is
 	// trial-compiled against it.
-	if err := c.Elector.State.Refresh(ctx); err != nil {
+	if err := c.State.Refresh(ctx); err != nil {
 		c.count(FailureReason(err))
 		return false, err
 	}
-	doc := c.Elector.State.Current()
+	if !c.notice() {
+		c.count(ReasonFenced)
+		return false, ErrDeposed
+	}
+	doc := c.State.Current()
 	cfgErr := c.load(doc)
 	if !c.compiled() {
 		// No config has compiled since this replica started: renew what is
@@ -485,7 +542,7 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	}
 	built, unmatched := false, map[string]compile.Problem{} // every pool's build finds the same
 	validUntil := map[string]time.Time{}                    // each pool's lease, as built
-	ptrs, perrs := publish.PublishAll(ctx, c.Elector.State, fence, doc.StateVersion, pubs,
+	ptrs, perrs := publish.PublishAll(ctx, c.State, fence, doc.StateVersion, pubs,
 		func(p *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
 			o := compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
 				Entitlements: c.entitlements(doc), Unmatched: func(q compile.Problem) { unmatched[q.String()] = q }}
@@ -657,23 +714,28 @@ func (c *Controller) decodeDir() (v1.Objects, error) {
 	return v1.DecodeFS(root.FS())
 }
 
-// Run tries for the lease and publishes when due, every second, until
-// ctx ends. It returns once the elector's loop has too, so a Release after
-// it cannot be undone by a renewal still in flight.
-func (c *Controller) Run(ctx context.Context) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	wg.Go(func() { c.Elector.Run(ctx) })
+// Run claims the fence (unless Claim has been called) and publishes when
+// due, every second, until ctx ends (nil) or another replica claims the
+// fence over this one (ErrDeposed: its process should exit, as a
+// predecessor it has no work left).
+func (c *Controller) Run(ctx context.Context) error {
+	if _, leads := c.Fence(); !leads {
+		if err := c.Claim(ctx); err != nil {
+			return err
+		}
+	}
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	var last string // the last error logged: each is logged once until it changes
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-t.C:
 		}
 		switch err := c.tick(ctx); {
+		case errors.Is(err, ErrDeposed):
+			return err
 		case err == nil:
 			last = ""
 		case err.Error() != last:
@@ -684,10 +746,17 @@ func (c *Controller) Run(ctx context.Context) {
 }
 
 // tick is one second's work: a publication if due, then, while this
-// replica leads, the audit outbox shipped and the group sync if due.
-func (c *Controller) tick(ctx context.Context) error {
-	_, err := c.Step(ctx)
-	if fence, leads := c.Elector.Fence(); c.Audit != nil && leads {
+// replica leads, the audit outbox shipped and the group sync if due. A
+// fenced write refused (the store has read the successor's claim) ends
+// this replica's leadership: ErrDeposed.
+func (c *Controller) tick(ctx context.Context) (err error) {
+	_, err = c.Step(ctx)
+	defer func() {
+		if _, leads := c.Fence(); leads && !c.notice() {
+			err = errors.Join(ErrDeposed, err)
+		}
+	}()
+	if fence, leads := c.Fence(); c.Audit != nil && leads {
 		if _, aerr := c.Audit.Step(ctx, fence); aerr != nil {
 			err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
 		} else {
@@ -705,7 +774,7 @@ func (c *Controller) tick(ctx context.Context) error {
 // syncStep runs the group sync if this replica leads and it is due. A
 // failed step is retried at the next interval, not every second.
 func (c *Controller) syncStep(ctx context.Context) error {
-	fence, leads := c.Elector.Fence()
+	fence, leads := c.Fence()
 	if c.Sync == nil || !leads || c.now().Before(c.syncTried.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
 		return nil
 	}

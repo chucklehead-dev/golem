@@ -23,7 +23,7 @@ func TestRestartOverBrokenConfig(t *testing.T) {
 	r2 := w.replicas["r2"]
 	w.policy("team-a", "{models: [claude], inFlight: {principal: 3}}")
 	w.lead("r1")
-	if _, err := w.replicas["r1"].Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := w.replicas["r1"].State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes = map[string]state.Scope{"team-a": {}}
 		return nil
 	}); err != nil {
@@ -42,13 +42,12 @@ func TestRestartOverBrokenConfig(t *testing.T) {
 	first := current()
 	w.write("broken.yaml", "apiVersion: golem.dev/v1alpha1\nkind: ModelRoute\nmetadata: {name: x}\nspec: {alias: x, pool: [{backend: nowhere, deployment: d}]}\n")
 
-	// r1 is gone; r2 starts and takes the lapsed lease.
-	w.lead("r2")
+	// r1 is gone; r2 starts a minute on and claims the fence.
 	r2.clock = r2.clock.Add(time.Minute)
 	if w.lead("r2") != 2 {
-		t.Fatal("r2 takes the lease")
+		t.Fatal("r2 claims the fence at epoch 2")
 	}
-	if _, err := r2.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r2.State.Update(t.Context(), func(d *state.Document) error {
 		d.Scopes["team-b"] = state.Scope{}
 		return nil
 	}); err != nil {

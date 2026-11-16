@@ -7,7 +7,12 @@ metadata:
   name: golem-control
   labels: {{- include "golem-control.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicas }}
+  # One replica (ADR 0053): it claims the state document's fence as it
+  # starts, and every leader-only write is fenced by it. Recreate stops the
+  # old pod before the new one starts; one that lingers (paused, cut off)
+  # is refused at its next fenced write and exits.
+  replicas: 1
+  strategy: {type: Recreate}
   selector:
     matchLabels: {{- include "golem-control.selector" . | nindent 6 }}
   template:
@@ -21,12 +26,6 @@ spec:
         runAsUser: 65532
         fsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: topology.kubernetes.io/zone
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels: {{- include "golem-control.selector" . | nindent 14 }}
       # The first checkout before golem-control starts, so its first step
       # compiles the config rather than renewing the last publication.
       initContainers:

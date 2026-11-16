@@ -14,7 +14,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/chucklehead-dev/golem/control/controller"
-	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/spend"
 	"github.com/chucklehead-dev/golem/control/state"
@@ -76,7 +75,7 @@ func newRig(t *testing.T) *rig {
 	now := func() time.Time { return r.clock }
 	st := &state.Store{Bucket: b}
 	r.c = &controller.Controller{Dir: dir, Lease: 4 * time.Hour, Now: now,
-		Elector:    &lead.Elector{State: st, ID: "r1", Duration: 15 * time.Second, Now: now},
+		State: st, ID: "r1",
 		Publishers: map[string]*publish.Publisher{"internal": {State: st, Bucket: b, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "internal", Now: now}},
 		Spend:      &spend.Job{Ledger: ledger{"team-a": 1}, Now: now}}
 	if err := Register(sdkmetric.NewMeterProvider(sdkmetric.WithReader(r.reader)), r.c); err != nil {
@@ -85,9 +84,12 @@ func newRig(t *testing.T) *rig {
 	return r
 }
 
-// lead renews (or takes) the lease at the rig's clock.
+// lead claims the fence, unless the controller has.
 func (r *rig) lead() {
-	if _, err := r.c.Elector.Try(r.t.Context()); err != nil {
+	if _, ok := r.c.Fence(); ok {
+		return
+	}
+	if err := r.c.Claim(r.t.Context()); err != nil {
 		r.t.Fatal(err)
 	}
 }
@@ -149,7 +151,7 @@ func TestMetrics(t *testing.T) {
 	r := newRig(t)
 	got := r.collect()
 	if v := value(t, got, Leader); v != 0 {
-		t.Fatalf("leading before taking the lease: %v", v)
+		t.Fatalf("leading before claiming the fence: %v", v)
 	}
 	if _, ok := got[PublishTime]; ok {
 		t.Fatalf("a publication time before any publication: %v", got[PublishTime])
@@ -254,13 +256,20 @@ func TestMetrics(t *testing.T) {
 	})
 
 	t.Run("not leading", func(t *testing.T) {
-		r.clock = r.clock.Add(time.Minute) // past the lease's 15 seconds, unrenewed
+		// A successor claims the fence: this replica's next step finds it
+		// deposed.
+		if _, err := (&state.Store{Bucket: r.bucket}).Claim(t.Context(), "r2"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.c.Step(t.Context()); !errors.Is(err, controller.ErrDeposed) {
+			t.Fatalf("a step after a successor's claim: %v, want ErrDeposed", err)
+		}
 		got := r.collect()
 		if v := value(t, got, Leader); v != 0 {
-			t.Fatalf("%s = %v after the lease lapsed", Leader, v)
+			t.Fatalf("%s = %v once deposed", Leader, v)
 		}
 		if v := value(t, got, LeaderEpoch); v != 0 {
-			t.Fatalf("%s = %v after the lease lapsed", LeaderEpoch, v)
+			t.Fatalf("%s = %v once deposed", LeaderEpoch, v)
 		}
 	})
 }
@@ -269,7 +278,7 @@ func TestMetrics(t *testing.T) {
 // and its bound the store's.
 func TestOutbox(t *testing.T) {
 	r := newRig(t)
-	if _, err := r.c.Elector.State.Update(t.Context(), func(d *state.Document) error {
+	if _, err := r.c.State.Update(t.Context(), func(d *state.Document) error {
 		d.Audit = append(d.Audit, state.AuditEvent{At: r.clock, Actor: "root", Action: "key.revoke"}, state.AuditEvent{At: r.clock, Actor: "root", Action: "membership.remove"})
 		return nil
 	}); err != nil {
@@ -283,7 +292,7 @@ func TestOutbox(t *testing.T) {
 	if v := value(t, got, AuditOutboxMax); v != state.DefaultMaxOutbox {
 		t.Fatalf("%s = %v, want %d", AuditOutboxMax, v, state.DefaultMaxOutbox)
 	}
-	r.c.Elector.State.MaxOutbox = 500
+	r.c.State.MaxOutbox = 500
 	if v := value(t, r.collect(), AuditOutboxMax); v != 500 {
 		t.Fatalf("%s = %v with the bound set to 500", AuditOutboxMax, v)
 	}

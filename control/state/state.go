@@ -4,9 +4,9 @@
 // copy, checks the store's invariants, increments state_version and writes
 // it with If-Match, re-reading and retrying when another writer won.
 //
-// It holds golem-control's leadership fence (control/lead keeps the lease
-// itself in an object of its own), each pool's publication record
-// (control/publish numbers and fences by it), the entitlements
+// It holds golem-control's leadership fence (claimed once at start: Claim),
+// each pool's publication record (control/publish numbers and fences by
+// it), the entitlements
 // (entitlements.go, restored by restore.go) and the audit outbox
 // (control/audit ships it). The rest of the outline in §3.1 joins it as it
 // is built. The encoding is JSON, decoded strictly; the design's protobuf
@@ -44,7 +44,7 @@ type Record struct {
 }
 
 // Fence is a leadership: the replica that leads, and at which epoch. The
-// epoch increases whenever leadership changes hands (control/lead).
+// epoch increases whenever leadership changes hands (Claim).
 type Fence struct {
 	Holder string `json:"holder"`
 	Epoch  uint64 `json:"epoch"`
@@ -55,9 +55,9 @@ type Document struct {
 	Schema       int    `json:"schema"`
 	StateVersion uint64 `json:"stateVersion"`
 	// Fence is golem-control's leadership as the document knows it: who
-	// leads, at which epoch (ADR 0049). The lease itself is an object of
-	// its own (control/lead); a replica leads once it has claimed the fence
-	// here, and every leader-only write checks it (FencedUpdate).
+	// leads, at which epoch (ADR 0049, 0053). golem-control's one replica
+	// claims it at start (Claim), and every leader-only write checks it
+	// (FencedUpdate).
 	Fence *Fence `json:"fence,omitempty"`
 	// Writes names the updates that wrote the last RecentWrites versions,
 	// newest last, so a writer whose compare-and-swap reply was lost can
@@ -130,8 +130,9 @@ var (
 	// neither (adopting would drop every later revocation, the naive
 	// restore model/publication.md shows unsafe) nor writes over it.
 	ErrRegressed = errors.New("state: the document in the bucket went back")
-	// ErrFenced: the document's leadership is not the writer's (it has lost
-	// the lease, or never held it at that epoch). Nothing was written.
+	// ErrFenced: the document's leadership is not the writer's (a later
+	// replica has claimed the fence, or it never held it at that epoch).
+	// Nothing was written.
 	ErrFenced = errors.New("state: fenced: this replica does not lead at that epoch")
 	// ErrMissing: there is no document, but the bucket shows golem-control
 	// has run on it (one of Store.Installed exists): the document was
@@ -147,9 +148,9 @@ type Store struct {
 	// (default 8).
 	Attempts int
 	// Installed are objects whose presence shows golem-control has run on
-	// this bucket (the lease object, the pools' checkpoints and pointers):
-	// a first read that finds no document but one of these is ErrMissing,
-	// not the empty document. Without them a missing document is a first
+	// this bucket (the pools' checkpoints and pointers): a first read that
+	// finds no document but one of these is ErrMissing, not the empty
+	// document. Without them a missing document is a first
 	// start.
 	Installed []string
 	// MaxOutbox bounds the audit outbox (outbox.go; default
@@ -351,6 +352,42 @@ func (s *Store) FencedUpdate(ctx context.Context, f Fence, change func(*Document
 	})
 }
 
+// Claim takes the fence for holder at one above the document's epoch, the
+// one leadership step golem-control's single replica takes, at start (ADR
+// 0053): from then on every leader-only write it makes is fenced by the
+// returned fence (FencedUpdate), and a predecessor still running (a pod
+// paused, or not yet gone) is refused at its next fenced write. A claim
+// whose reply was lost is recognised by its write ID (Update), and not made
+// twice.
+func (s *Store) Claim(ctx context.Context, holder string) (Fence, error) {
+	if holder == "" {
+		return Fence{}, errors.New("state: a fence's holder is required: the replica's name")
+	}
+	var f Fence
+	_, err := s.Update(ctx, func(d *Document) error {
+		f = Fence{Holder: holder, Epoch: 1}
+		if d.Fence != nil {
+			f.Epoch = d.Fence.Epoch + 1
+		}
+		claimed := f
+		d.Fence = &claimed
+		return nil
+	})
+	if err != nil {
+		return Fence{}, fmt.Errorf("claiming the fence for %s: %w", holder, err)
+	}
+	return f, nil
+}
+
+// Leads reports whether f is the document's fence as last read or
+// written: false once another has claimed a later epoch, which f can never
+// regain (checkFence).
+func (s *Store) Leads(f Fence) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cur != nil && s.cur.Fence != nil && *s.cur.Fence == f
+}
+
 // Validate applies change to a copy of the current document and checks the
 // invariants, writing nothing: validate_only (control-plane.md §2).
 func (s *Store) Validate(ctx context.Context, change func(*Document) error) error {
@@ -411,7 +448,7 @@ func check(old, next *Document, outbox int) error {
 }
 
 // checkFence: the fence's epoch never goes back and the fence is never
-// dropped, so a fenced epoch stays fenced (control/lead).
+// dropped, so a fenced epoch stays fenced (Claim).
 func checkFence(old, next *Document) error {
 	if old.Fence != nil && (next.Fence == nil || next.Fence.Epoch < old.Fence.Epoch) {
 		return broken("the fence's epoch goes back")

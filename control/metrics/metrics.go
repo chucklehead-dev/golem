@@ -44,7 +44,7 @@ const (
 )
 
 // Register registers golem-control's instruments on mp, read from c (its
-// elector, publishers and jobs) at each collection. A job c does not run
+// fence, publishers and jobs) at each collection. A job c does not run
 // (no Spend, Sync or Audit) reports nothing of its own.
 func Register(mp metric.MeterProvider, c *controller.Controller) error {
 	m := mp.Meter("golem/control")
@@ -120,9 +120,9 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 		for f, opt := range failureSets {
 			o.ObserveInt64(failures, counts[f], opt)
 		}
-		e := c.Elector.Epoch()
-		o.ObserveInt64(epoch, int64(e))
-		o.ObserveInt64(leader, b2i(e != 0))
+		f, leads := c.Fence()
+		o.ObserveInt64(epoch, int64(f.Epoch)*b2i(leads))
+		o.ObserveInt64(leader, b2i(leads))
 		o.ObserveInt64(unmatched, int64(len(c.Unmatched())))
 		o.ObserveInt64(renewing, b2i(c.ConfigRenewing()))
 		if c.Spend != nil {
@@ -147,8 +147,8 @@ func Register(mp metric.MeterProvider, c *controller.Controller) error {
 			}
 			o.ObserveInt64(guard, c.GuardTrips())
 		}
-		o.ObserveInt64(outbox, int64(c.Elector.State.OutboxLen()))
-		o.ObserveInt64(outboxMax, int64(c.Elector.State.OutboxMax()))
+		o.ObserveInt64(outbox, int64(c.State.OutboxLen()))
+		o.ObserveInt64(outboxMax, int64(c.State.OutboxMax()))
 		if c.Audit != nil {
 			if t := c.ShippedAt(); !t.IsZero() {
 				o.ObserveFloat64(shipped, unix(t))

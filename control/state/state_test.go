@@ -233,6 +233,44 @@ func TestLostReplyOvertaken(t *testing.T) {
 	}
 }
 
+// TestClaim: each claim takes the fence at one above the document's epoch;
+// the replica claimed over is refused at its next fenced write and, once
+// it has read the document, no longer leads; a claim whose reply was lost
+// is made once.
+func TestClaim(t *testing.T) {
+	ctx := t.Context()
+	b := open(t)
+	old, next := &Store{Bucket: b}, &Store{Bucket: b}
+	fo, err := old.Claim(ctx, "r1")
+	if err != nil || fo != (Fence{Holder: "r1", Epoch: 1}) || !old.Leads(fo) {
+		t.Fatalf("the first claim: %+v %v", fo, err)
+	}
+	fn, err := next.Claim(ctx, "r2")
+	if err != nil || fn != (Fence{Holder: "r2", Epoch: 2}) || !next.Leads(fn) {
+		t.Fatalf("the second claim: %+v %v", fn, err)
+	}
+	if _, err := old.FencedUpdate(ctx, fo, put("internal", 1)); !errors.Is(err, ErrFenced) || !strings.Contains(err.Error(), "r2 leads at epoch 2") {
+		t.Fatalf("the predecessor's write: %v, want ErrFenced naming r2", err)
+	}
+	if old.Leads(fo) {
+		t.Fatal("the predecessor still leads after reading the successor's claim")
+	}
+	if _, err := old.Claim(ctx, ""); err == nil {
+		t.Fatal("a claim with no holder")
+	}
+
+	o := &overtaken{Bucket: b, then: func() {
+		if _, err := next.Update(ctx, put("internal", 2)); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	lost := &Store{Bucket: o}
+	f, err := lost.Claim(ctx, "r3")
+	if err != nil || f != (Fence{Holder: "r3", Epoch: 3}) || *lost.Current().Fence != f {
+		t.Fatalf("a claim whose reply was lost: %+v %v, the document's %+v; want epoch 3, once", f, err, lost.Current().Fence)
+	}
+}
+
 // TestDecode: another schema, or a member this reader does not know, is
 // refused.
 func TestDecode(t *testing.T) {

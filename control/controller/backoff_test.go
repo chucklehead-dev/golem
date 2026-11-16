@@ -33,7 +33,7 @@ func TestFailingPoolBacksOff(t *testing.T) {
 	if _, err := r1.Step(t.Context()); !errors.Is(err, publish.ErrTampered) || r1.Publications()["internal"].Seq != 2 {
 		t.Fatalf("the renewal: %v, internal pool at %d; want it published, the edge pool tampered", err, r1.Publications()["internal"].Seq)
 	}
-	st := r1.Elector.State
+	st := r1.State
 	version := func() uint64 {
 		if err := st.Refresh(t.Context()); err != nil {
 			t.Fatal(err)
