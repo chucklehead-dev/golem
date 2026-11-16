@@ -40,6 +40,10 @@ spec:
                     deployment:
                       type: string
                     weight:
+                      description: 'Weight is not used in M1: the gateway tries a
+                        pool''s deployments in order. Unset is 1; 0 is refused, since
+                        it does not take a deployment out of the pool (remove the
+                        member instead).'
                       type: integer
                   type: object
                 type: array

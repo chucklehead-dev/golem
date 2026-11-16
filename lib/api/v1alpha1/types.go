@@ -195,7 +195,10 @@ type RouteRetries struct {
 type PoolMember struct {
 	Backend    string `json:"backend"`
 	Deployment string `json:"deployment"`
-	Weight     int    `json:"weight,omitempty"`
+	// Weight is not used in M1: the gateway tries a pool's deployments in
+	// order. Unset is 1; 0 is refused, since it does not take a deployment
+	// out of the pool (remove the member instead).
+	Weight *int `json:"weight,omitempty"`
 }
 
 // ScopePolicy is a scope's policy (ADR 0005, 0050): what its members may

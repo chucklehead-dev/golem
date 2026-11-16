@@ -404,8 +404,11 @@ func pool(obj string, members []v1.PoolMember, cat catalog, add adder) (dialect 
 		case cat.models[target{m.Backend, m.Deployment}] == nil:
 			add(obj, at+".deployment", "Backend %q has no deployment %q", m.Backend, m.Deployment)
 			continue
-		case m.Weight < 0:
+		case m.Weight != nil && *m.Weight < 0:
 			add(obj, at+".weight", "must not be negative")
+		case m.Weight != nil && *m.Weight == 0:
+			add(obj, at+".weight", "weight 0 does not take %s/%s out of the pool: weights are not used in M1 (the gateway tries the pool in order); remove the member from spec.pool to stop routing to it, or leave a failing deployment to the gateway's ejection",
+				m.Backend, m.Deployment)
 		}
 		// One dialect per route: conversion is explicit, never implied by a
 		// mixed pool (ADR 0033).
@@ -415,7 +418,11 @@ func pool(obj string, members []v1.PoolMember, cat catalog, add adder) (dialect 
 			add(obj, at+".backend", "Backend %q speaks %s, the pool's first member %s: a route's pool has one dialect (ADR 0033)",
 				m.Backend, d, dialect)
 		}
-		out = append(out, snapshot.Target{Backend: m.Backend, Deployment: m.Deployment, Weight: cmp.Or(m.Weight, 1)})
+		weight := 1
+		if m.Weight != nil {
+			weight = *m.Weight
+		}
+		out = append(out, snapshot.Target{Backend: m.Backend, Deployment: m.Deployment, Weight: weight})
 	}
 	return dialect, out
 }
