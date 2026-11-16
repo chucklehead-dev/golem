@@ -57,7 +57,7 @@ func Restore(cur, backup *Document, at time.Time) (*Document, Report, error) {
 // bind.
 func (r *restorer) scopes() {
 	r.next.Scopes = map[string]Scope{}
-	for _, id := range slices.Sorted(maps.Keys(union(r.cur.Scopes, r.backup.Scopes))) {
+	for _, id := range union(r.cur.Scopes, r.backup.Scopes) {
 		c, inCur := r.cur.Scopes[id]
 		b, inBackup := r.backup.Scopes[id]
 		switch {
@@ -76,7 +76,7 @@ func (r *restorer) scopes() {
 // only if it owns keys (their records name it).
 func (r *restorer) principals() {
 	r.next.Principals = map[string]Principal{}
-	for _, id := range slices.Sorted(maps.Keys(union(r.cur.Principals, r.backup.Principals))) {
+	for _, id := range union(r.cur.Principals, r.backup.Principals) {
 		c, inCur := r.cur.Principals[id]
 		b, inBackup := r.backup.Principals[id]
 		switch {
@@ -240,16 +240,14 @@ func ownsKeys(d *Document, principal string) bool {
 	return false
 }
 
-// union is the keys of a and b.
-func union[V any](a, b map[string]V) map[string]bool {
-	u := map[string]bool{}
-	for k := range a {
-		u[k] = true
+// union is the keys of a and b, sorted.
+func union[V any](a, b map[string]V) []string {
+	u := maps.Clone(a)
+	if u == nil {
+		u = map[string]V{}
 	}
-	for k := range b {
-		u[k] = true
-	}
-	return u
+	maps.Copy(u, b)
+	return slices.Sorted(maps.Keys(u))
 }
 
 // Restore brings back backup's entitlements as the function Restore does,

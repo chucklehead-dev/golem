@@ -44,7 +44,7 @@ type Principal struct {
 
 // Members is every scope p is a member of, sorted, once each.
 func (p Principal) Members() []string {
-	return slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(p.Scopes), p.Synced...))))
+	return slices.Compact(slices.Sorted(slices.Values(slices.Concat(p.Scopes, p.Synced))))
 }
 
 // MemberOf reports whether p is a member of scope, by either kind.
@@ -141,7 +141,7 @@ func checkPrincipals(d *Document) error {
 		if strings.HasPrefix(id, ReservedPrefix) {
 			return broken("principal ID %s begins with %q, which names callers with no principal", id, ReservedPrefix)
 		}
-		for _, s := range append(slices.Clone(p.Scopes), p.Synced...) {
+		for _, s := range slices.Concat(p.Scopes, p.Synced) {
 			if _, ok := d.Scopes[s]; !ok {
 				return broken("principal %s is a member of %s, which does not exist", id, s)
 			}
@@ -275,12 +275,6 @@ func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 				members[s] = append(members[s], snapshot.MemberAccount{Principal: id, CapMicros: p.Caps[s]})
 			}
 		}
-	}
-	for _, id := range slices.Sorted(maps.Keys(d.Scopes)) {
-		e.Scopes = append(e.Scopes, snapshot.Scope{ID: id, Members: members[id]})
-	}
-	for _, id := range slices.Sorted(maps.Keys(d.Principals)) {
-		p := d.Principals[id]
 		scopes := p.Members()
 		e.KeyOwners = append(e.KeyOwners, snapshot.Owner{ID: id, Kind: p.Kind, Scopes: scopes})
 		if p.Entra == "" {
@@ -292,6 +286,9 @@ func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 		} else {
 			e.Users = append(e.Users, m)
 		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(d.Scopes)) {
+		e.Scopes = append(e.Scopes, snapshot.Scope{ID: id, Members: members[id]})
 	}
 	byEntra := func(a, b snapshot.Member) int { return cmp.Compare(a.Entra, b.Entra) }
 	slices.SortFunc(e.Users, byEntra)
@@ -321,12 +318,8 @@ func outboxFollows(old, next *Document) bool {
 	if next.AuditSeq < old.AuditSeq {
 		return false
 	}
-	// Kept events (numbered up to old's counter) come first; anything after
-	// the first new event must be new.
-	n := 0
-	for n < len(next.Audit) && next.Audit[n].Seq <= old.AuditSeq {
-		n++
-	}
+	// Kept events come first; anything after the first new event must be new.
+	n := keptLen(old, next)
 	kept, added := next.Audit[:n], next.Audit[n:]
 	want := old.AuditSeq + 1 // the first new event's number
 	if len(kept) > 0 {
@@ -355,4 +348,14 @@ func outboxFollows(old, next *Document) bool {
 		want++
 	}
 	return true
+}
+
+// keptLen is how many of next's events lead its outbox numbered up to old's
+// counter: those kept from old's; the rest are the write's.
+func keptLen(old, next *Document) int {
+	n := 0
+	for n < len(next.Audit) && next.Audit[n].Seq <= old.AuditSeq {
+		n++
+	}
+	return n
 }

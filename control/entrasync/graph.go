@@ -29,20 +29,35 @@ type Graph struct {
 	MaxPages int
 }
 
+// graphUser is a user as Graph serves it ($select=id,userPrincipalName,accountEnabled).
+type graphUser struct {
+	ID             string `json:"id"`
+	UPN            string `json:"userPrincipalName"`
+	AccountEnabled *bool  `json:"accountEnabled"`
+}
+
+// user is u as a User. An account whose state Graph does not report is
+// neither enabled nor disabled: a member of nothing, and its removal not
+// taken for offboarding.
+func (u graphUser) user() User {
+	e := u.AccountEnabled
+	return User{ID: u.ID, UPN: u.UPN, Enabled: e != nil && *e, Disabled: e != nil && !*e}
+}
+
+func (g *Graph) base() string {
+	return strings.TrimRight(cmp.Or(g.Base, "https://graph.microsoft.com/v1.0"), "/")
+}
+
 // Members lists group's users, nested groups' included.
 func (g *Graph) Members(ctx context.Context, group string) ([]User, error) {
-	base := strings.TrimRight(cmp.Or(g.Base, "https://graph.microsoft.com/v1.0"), "/")
+	base := g.base()
 	next := base + "/groups/" + url.PathEscape(group) +
 		"/transitiveMembers/microsoft.graph.user?$select=id,userPrincipalName,accountEnabled&$top=999"
 	var users []User
 	for range cmp.Or(g.MaxPages, 1000) {
 		var page struct {
-			Value []struct {
-				ID             string `json:"id"`
-				UPN            string `json:"userPrincipalName"`
-				AccountEnabled *bool  `json:"accountEnabled"`
-			} `json:"value"`
-			Next string `json:"@odata.nextLink"`
+			Value []graphUser `json:"value"`
+			Next  string      `json:"@odata.nextLink"`
 		}
 		if err := g.get(ctx, next, &page); err != nil {
 			if errors.Is(err, errNotFound) {
@@ -51,7 +66,7 @@ func (g *Graph) Members(ctx context.Context, group string) ([]User, error) {
 			return nil, err
 		}
 		for _, u := range page.Value {
-			users = append(users, account(u.ID, u.UPN, u.AccountEnabled))
+			users = append(users, u.user())
 		}
 		if page.Next == "" {
 			return users, nil
@@ -66,29 +81,17 @@ func (g *Graph) Members(ctx context.Context, group string) ([]User, error) {
 	return nil, fmt.Errorf("group %s: more than %d pages", group, cmp.Or(g.MaxPages, 1000))
 }
 
-// account is a user as Graph reports it. An account whose state Graph does
-// not report is neither enabled nor disabled: a member of nothing, and its
-// removal not taken for offboarding.
-func account(id, upn string, enabled *bool) User {
-	return User{ID: id, UPN: upn, Enabled: enabled != nil && *enabled, Disabled: enabled != nil && !*enabled}
-}
-
 // User looks up the account with object ID id: the live user, or failing
 // that the deleted one (Deleted); ErrNoUser if Graph has neither (purged,
 // or not this tenant's). A deletion is taken only from the deleted items,
 // never from a 404 alone, so a lookup failing for every user cannot
 // offboard everyone past the removal guard.
 func (g *Graph) User(ctx context.Context, id string) (User, error) {
-	base := strings.TrimRight(cmp.Or(g.Base, "https://graph.microsoft.com/v1.0"), "/")
-	var u struct {
-		ID             string `json:"id"`
-		UPN            string `json:"userPrincipalName"`
-		AccountEnabled *bool  `json:"accountEnabled"`
-	}
-	const sel = "?$select=id,userPrincipalName,accountEnabled"
-	err := g.get(ctx, base+"/users/"+url.PathEscape(id)+sel, &u)
+	base := g.base()
+	var u graphUser
+	err := g.get(ctx, base+"/users/"+url.PathEscape(id)+"?$select=id,userPrincipalName,accountEnabled", &u)
 	if err == nil {
-		return account(u.ID, u.UPN, u.AccountEnabled), nil
+		return u.user(), nil
 	}
 	if !errors.Is(err, errNotFound) {
 		return User{}, err

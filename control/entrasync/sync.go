@@ -367,15 +367,11 @@ func (r *reconciler) setSynced(id string, p state.Principal, synced []string, di
 	added, removed := diff(p.Synced, synced)
 	p.Synced = synced
 	before := live(d, id)
+	keep := p // the memberships its keys are honoured in
 	if disabled {
-		for _, h := range slices.Sorted(maps.Keys(d.Keys)) {
-			if k := d.Keys[h]; k.Owner == id && k.RevokedAt.IsZero() {
-				d.Revoke(h, r.at)
-			}
-		}
-	} else {
-		d.RevokeOutside(id, p, r.at)
+		keep = state.Principal{} // a member of nothing: every key revoked
 	}
+	d.RevokeOutside(id, keep, r.at)
 	revoked := before - live(d, id)
 	lostDefault := p.Default != "" && !p.MemberOf(p.Default)
 	if len(added)+len(removed)+revoked == 0 && !lostDefault {

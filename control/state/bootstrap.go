@@ -47,6 +47,9 @@ func (s *Store) Bootstrap(ctx context.Context, floors map[string]uint64, actor s
 	at := time.Now().UTC()
 	return s.Update(ctx, func(d *Document) error {
 		raised := map[string]string{}
+		if d.Publications == nil {
+			d.Publications = map[string]Record{}
+		}
 		for _, pool := range slices.Sorted(maps.Keys(floors)) {
 			r, f := d.Publications[pool], floors[pool]
 			if r.Seq >= f {
@@ -54,9 +57,6 @@ func (s *Store) Bootstrap(ctx context.Context, floors map[string]uint64, actor s
 			}
 			raised[pool] = fmt.Sprintf("%d to %d", r.Seq, f)
 			r.Seq = f
-			if d.Publications == nil {
-				d.Publications = map[string]Record{}
-			}
 			d.Publications[pool] = r
 		}
 		if len(raised) == 0 {

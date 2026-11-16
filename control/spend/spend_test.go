@@ -75,14 +75,14 @@ func TestJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	k, _ := j.Current()
-	if want := time.Date(2026, 11, 14, 9, 55, 0, 0, time.UTC); !k.Since.Equal(want) || k.Period != "2026-11" || k.Spend["team-a"] != 7 {
+	if want := time.Date(2026, 11, 14, 9, 55, 0, 0, time.UTC); !k.Since.Equal(want) || k.Period != "2026-11" || k.Scopes["team-a"] != 7 {
 		t.Fatalf("known %+v, want since %v", k, want)
 	}
 	l.fail = errors.New("connection refused")
 	if err := j.Step(t.Context()); err == nil {
 		t.Fatal("a failed read reported nothing")
 	}
-	if k2, ok := j.Current(); !ok || k2.Spend["team-a"] != 7 {
+	if k2, ok := j.Current(); !ok || k2.Scopes["team-a"] != 7 {
 		t.Fatal("the last result was not kept through a failure")
 	}
 	now = time.Date(2026, 12, 1, 0, 3, 0, 0, time.UTC) // a new month, B still in November
@@ -90,14 +90,14 @@ func TestJob(t *testing.T) {
 	if err := j.Step(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if k, _ := j.Current(); k.Period != "2026-12" || len(k.Spend) != 0 || len(l.asked) != asked {
+	if k, _ := j.Current(); k.Period != "2026-12" || len(k.Scopes) != 0 || len(l.asked) != asked {
 		t.Fatalf("at a period's start: %+v, ledger asked %d more times", k, len(l.asked)-asked)
 	}
 	now = time.Date(2026, 12, 1, 0, 20, 0, 0, time.UTC)
 	if err := j.Step(t.Context()); err == nil {
 		t.Fatal("the ledger still fails")
 	}
-	if k, ok := j.Current(); ok && k.Period == "2026-12" && k.Spend["team-a"] == 7 {
+	if k, ok := j.Current(); ok && k.Period == "2026-12" && k.Scopes["team-a"] == 7 {
 		t.Fatal("November's spend was kept as December's")
 	}
 }
@@ -129,14 +129,14 @@ func TestJobReportsStaleResult(t *testing.T) {
 	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "the last result is kept)") {
 		t.Fatalf("an hour into the outage: %v", err)
 	}
-	if k, ok := j.Current(); !ok || k.Spend["team-a"] != 7 || j.Stale() {
+	if k, ok := j.Current(); !ok || k.Scopes["team-a"] != 7 || j.Stale() {
 		t.Fatalf("an hour into the outage: %+v, %v, stale %v", k, ok, j.Stale())
 	}
 	now = now.Add(time.Hour)
 	if err := j.Step(t.Context()); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("two hours into the outage: %v", err)
 	}
-	if k, ok := j.Current(); !ok || k.Spend["team-a"] != 7 || !j.Stale() {
+	if k, ok := j.Current(); !ok || k.Scopes["team-a"] != 7 || !j.Stale() {
 		t.Fatalf("two hours into the outage: %+v, %v, stale %v: want the result kept, and reported stale", k, ok, j.Stale())
 	}
 	// The ledger answers: fresh again.
