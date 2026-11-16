@@ -112,6 +112,9 @@ type Handler struct {
 	// beforePick, if set, runs before each attempt's deployment is picked,
 	// the first included (tests: the attempt model's traces drive when).
 	beforePick func(*http.Request)
+	// beforeSend, if set, runs before each attempt's round trip, given the
+	// upstream context (tests: a context that ends before the send).
+	beforeSend func(context.Context)
 
 	healthOnce  sync.Once
 	ownHealth   *route.Health
@@ -286,6 +289,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lim.nextAttempt(rt)
 		}
 		up, ub := upstreamRequest(c.attemptContext(), r, t, out, h.Dialect.forwardRequest())
+		if h.beforeSend != nil {
+			h.beforeSend(c.upCtx)
+		}
+		if c.upCtx.Err() != nil {
+			// The call's context ended (a route's alarm, the caller, a sweep)
+			// before this attempt was sent: the provider never had it. Sent,
+			// the transport would fail at once with the context's error,
+			// which reads as a request that may have gone out.
+			ub.Close()
+			c.endUnanswered(errUnsent)
+			return
+		}
 		var err error
 		resp, err = t.Transport.RoundTrip(up)
 		if err != nil {
@@ -448,12 +463,13 @@ func (c *callState) endWithdrawn(t *errTerminated) {
 // endUnanswered ends a call whose last round trip failed (err): charged
 // what the provider may have seen (chargeUnanswered), and refused as
 // upstream.unavailable, naming the route's timeout if one cut it, or with
-// the refusal of the sweep that withdrew it.
+// the refusal of the sweep that withdrew it. An attempt never sent
+// (errUnsent) says nothing of its deployment: its lease is released.
 func (c *callState) endUnanswered(err error) {
 	callerLeft := c.r.Context().Err() != nil
 	code, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(c.upCtx)) // the cause as the call failed
 	ended := terminatedBy(c.upCtx)
-	c.endLease(0, callerLeft || ended != nil)
+	c.endLease(0, callerLeft || ended != nil || err == errUnsent)
 	if ended != nil && !callerLeft { // the headers not yet sent: the dialect's error
 		code, msg = ended.code, ended.message()
 	}
@@ -624,6 +640,9 @@ func chargeUnanswered(call *telemetry.Call, err error, callerLeft bool, ended *e
 	var cost int64
 	switch {
 	case !reachedProvider(err):
+		if callerLeft { // free, and the caller's doing, not the provider's
+			call.Outcome, call.ErrorOrigin, call.ErrorCode = outcomeCancelled, string(contract.OriginClient), ""
+		}
 	case callerLeft: // the caller left first: its input, at least, was read
 		call.Outcome, call.ErrorOrigin, call.ErrorCode = outcomeCancelled, string(contract.OriginClient), ""
 		cost = price.Cost(canon.Usage{Input: requestBytes}, pr) // a token a byte, as Worst bounds it
@@ -651,6 +670,10 @@ func unavailableMessage(cause error) string {
 	return "the provider could not be reached; retry shortly"
 }
 
+// errUnsent is an attempt not sent: the call's upstream context had ended
+// before its round trip began.
+var errUnsent = errors.New("the call ended before the attempt was sent")
+
 // uncertainOutput is the output assumed of an uncertain call that set no
 // max_tokens (OpenAI's is optional): a long answer.
 const uncertainOutput = 8192
@@ -661,7 +684,7 @@ const uncertainOutput = 8192
 // left the gateway (envelope.ErrNotSent: unsigned, unreadable) certainly
 // did not.
 func reachedProvider(err error) bool {
-	if errors.Is(err, envelope.ErrNotSent) {
+	if errors.Is(err, envelope.ErrNotSent) || err == errUnsent {
 		return false
 	}
 	if _, ok := errors.AsType[*net.DNSError](err); ok {
