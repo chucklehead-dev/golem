@@ -1,13 +1,12 @@
-// Package limit is the gateway's admission check (ADR 0031, 0038, 0041
-// §7.3 and §7.6, 0052): the snapshot's known spend against the scope's
-// budget, in-flight limits per principal and per scope, and
-// requests-per-minute rate limits (rate.go), over the site's shared store
-// (Valkey in production). Its rules are the ones model/exposure.md shows
-// necessary, and its connect test checks it against that model.
+// Package limit is the gateway's admission check. It checks the snapshot's
+// known spend against the scope's budget, the in-flight limits per
+// principal and per scope, and the rate limits (rate.go). Its shared state
+// lives in the site's store, Valkey in production. model/exposure.md shows
+// why each rule is needed, and a connect test checks the code against it.
 //
-// Known spend is the snapshot's alone (ADR 0052): the ledger's spend for
+// Known spend comes from the snapshot alone. It is the ledger's spend for
 // the scope's period, which golem-control publishes about every minute.
-// The site store keeps slots and rate buckets, no spend.
+// The site store keeps slots and rate buckets, never spend. ADR 0031.
 package limit
 
 import (
@@ -25,17 +24,17 @@ type Slot struct {
 	Call, Principal, Scope string
 }
 
-// ErrUnavailable is a store that cannot be reached.
+// ErrUnavailable means the store cannot be reached.
 var ErrUnavailable = errors.New("limit: the site store is unreachable")
 
-// Admission is one admission's check, done atomically by the store: the
-// scope's known spend against its budget, then the slots.
+// Admission is one admission's check, which the store makes atomically. It
+// checks the scope's known spend against its budget, then takes the slot.
 type Admission struct {
 	Slot
-	Known          int64 // the snapshot's known spend for the call's period
-	Budget         int64 // the budget refused over; 0: none
-	PrincipalLimit int   // 0: none
-	ScopeLimit     int   // 0: none
+	KnownSpend     int64 // the snapshot's known spend for the call's period
+	Budget         int64 // budget to refuse at; 0 skips the budget check (observe and warn modes)
+	PrincipalLimit int   // the principal's in-flight limit in the scope; 0 is none
+	ScopeLimit     int   // the scope's in-flight limit; 0 is none
 }
 
 // Outcome is an admission's result.
@@ -47,17 +46,17 @@ const (
 	OverConcurrency
 )
 
-// overBudget is admission's budget check, as Mem, the admit script, an
-// outage's local check and a ticket's over-budget mark make it: known
-// spend must be below the budget, whatever the call then costs (ADR 0031,
-// 0044). A budget of 0 is none.
-func overBudget(known, budget int64) bool { return budget != 0 && known >= budget }
+// overBudget is admission's budget check. Mem, the admit script, an
+// outage's local check and a ticket's over-budget mark all use it. Known
+// spend must be below the budget, whatever the call then costs. A budget
+// of 0 is none. ADR 0031.
+func overBudget(spend, budget int64) bool { return budget != 0 && spend >= budget }
 
-// atLimit reports whether n calls in flight fill an in-flight limit (0:
-// none).
+// atLimit reports whether n calls in flight fill an in-flight limit. A
+// limit of 0 is none.
 func atLimit(n, limit int) bool { return limit > 0 && n >= limit }
 
-// Store is the site's shared state: concurrency slots and the rate
+// Store is the site's shared state, the concurrency slots and the rate
 // buckets. Each method is one atomic operation and one round trip.
 type Store interface {
 	// Admit checks known spend and the limits and, if both allow, takes
@@ -65,20 +64,19 @@ type Store interface {
 	Admit(ctx context.Context, a Admission) (Outcome, error)
 	// Release frees a call's slot.
 	Release(ctx context.Context, s Slot) error
-	// Reacquire registers (or renews) slots for calls still running: the
-	// renewal every 30 seconds (ADR 0038), and after an outage in which
-	// their TTLs lapsed. It does not check limits: the calls are already
-	// running.
+	// Reacquire registers or renews the slots of calls still running. The
+	// limiter calls it every 30 seconds, and after an outage in which the
+	// slots' TTLs lapsed. It checks no limits, since the calls already run.
 	Reacquire(ctx context.Context, slots []Slot) error
 	// Take takes a request from every rate bucket of ms or from none
-	// (rate.go), reporting the first without room and the wait until it
-	// has.
+	// (rate.go). It reports the first bucket without room and the wait
+	// until it has some.
 	Take(ctx context.Context, ms []Meter) (ok bool, over int, wait time.Duration, err error)
 }
 
-// Mem is an in-memory Store: the standalone gateway's, and the tests'. Its
-// fault models Valkey's: SetDown makes it unreachable (and, as an outage
-// longer than the slots' TTL would, loses every slot).
+// Mem is an in-memory Store, for the standalone gateway and the tests. Its
+// fault models Valkey's. SetDown makes it unreachable and loses every
+// slot, as an outage longer than the slots' TTL would.
 type Mem struct {
 	mu    sync.Mutex
 	down  bool
@@ -100,7 +98,7 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, error) {
 	if m.down {
 		return 0, ErrUnavailable
 	}
-	if overBudget(a.Known, a.Budget) {
+	if overBudget(a.KnownSpend, a.Budget) {
 		return OverBudget, nil
 	}
 	if !m.acquire(a.Slot, a.PrincipalLimit, a.ScopeLimit) {
@@ -109,8 +107,8 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, error) {
 	return Admitted, nil
 }
 
-// acquire takes a slot if the principal's and the scope's limits allow;
-// mu is held.
+// acquire takes a slot if the principal's and the scope's limits allow.
+// The caller holds mu.
 func (m *Mem) acquire(s Slot, principalLimit, scopeLimit int) bool {
 	byPrincipal, byScope := 0, 0
 	for _, o := range m.slots {

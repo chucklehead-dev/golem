@@ -89,7 +89,7 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			{"none", 1 << 50, 0, Admitted},
 			{"negative", 0, -1, OverBudget},
 		} {
-			o, err := st.Admit(ctx, Admission{Slot: Slot{tc.name, tc.name, "s"}, Known: tc.known, Budget: tc.budget})
+			o, err := st.Admit(ctx, Admission{Slot: Slot{tc.name, tc.name, "s"}, KnownSpend: tc.known, Budget: tc.budget})
 			if err != nil || o != tc.want {
 				t.Errorf("%s: %v %v; want %v", tc.name, o, err, tc.want)
 			}
@@ -248,10 +248,10 @@ func TestValkeyStore(t *testing.T) {
 	})
 }
 
-// TestWrap: a transport failure is ErrUnavailable and keeps its cause, so a
+// TestTransportFailureIsUnavailable: a transport failure is ErrUnavailable and keeps its cause, so a
 // caller can tell a deadline from a refused connection; a server's reply
 // is not unavailability.
-func TestWrap(t *testing.T) {
+func TestTransportFailureIsUnavailable(t *testing.T) {
 	err := wrap(context.DeadlineExceeded)
 	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("%v: want both ErrUnavailable and its cause", err)

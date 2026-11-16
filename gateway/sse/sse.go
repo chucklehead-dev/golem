@@ -1,7 +1,6 @@
 // Package sse splits a server-sent event stream into events as it passes
-// through the gateway, whatever the chunking: the response is copied to the
-// caller as it arrives and the same bytes are written here (gateway.md §3
-// step 8).
+// through the gateway, whatever the chunking. The response is copied to the
+// caller as it arrives, and the same bytes are written here.
 package sse
 
 import "bytes"

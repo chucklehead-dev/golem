@@ -17,13 +17,13 @@ import (
 	"github.com/chucklehead-dev/golem/lib/key"
 )
 
-// Denylist is a site's emergency denylist (control-plane.md §5, ADR 0041
-// §1): credentials and callers refused at this site's gateways whatever the
-// snapshot says, for when a revocation cannot wait for the control plane or
-// the bucket. A site admin edits it (a ConfigMap mounted as a file) and
-// clears it once the control plane has the revocation.
+// Denylist is a site's emergency denylist (control-plane.md). It lists
+// credentials and callers this site's gateways refuse, whatever the snapshot
+// says. It is for a revocation that cannot wait for the control plane. A
+// site admin edits it, as a mounted ConfigMap, and clears it once the
+// control plane has the revocation. ADR 0041.
 //
-// One entry a line, # comments:
+// It has one entry a line, and # starts a comment:
 //
 //	key <hex SHA-256 of the key>
 //	key-prefix <a key's display prefix, at least 16 characters>
@@ -36,7 +36,7 @@ type Denylist struct {
 	entra      map[string]bool
 }
 
-// minPrefix keeps a prefix entry from denying many keys by mistake: a key's
+// minPrefix keeps a prefix entry from denying many keys by mistake. A key's
 // display prefix is longer than its fixed part.
 const minPrefix = 16
 
@@ -46,10 +46,8 @@ func ParseDenylist(b []byte) (*Denylist, error) {
 	d := &Denylist{keys: map[[32]byte]bool{}, principals: map[string]bool{}, entra: map[string]bool{}}
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for n := 1; sc.Scan(); n++ {
-		line := strings.TrimSpace(sc.Text())
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = strings.TrimSpace(line[:i])
-		}
+		line, _, _ := strings.Cut(sc.Text(), "#")
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}

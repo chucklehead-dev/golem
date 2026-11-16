@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.opentelemetry.io/otel/attribute"
-	otellog "go.opentelemetry.io/otel/log"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	otellog "go.opentelemetry.io/otel/log"
 
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
@@ -190,7 +191,7 @@ func (p *partial) ForceFlush(context.Context) error { return nil }
 // TestLedgerQueuePartialDelivery: a batch the collector took but did not
 // acknowledge is sent again, whole, each row with its own event_id, so the
 // ledger's deduplication by event (golem.spend_dedup, from which a
-// snapshot's spend is summed) counts it once (golem#4).
+// snapshot's spend is summed) counts it once.
 func TestLedgerQueuePartialDelivery(t *testing.T) {
 	exp := &partial{seen: map[string]int{}}
 	q := NewLedgerQueue(exp, 100, 10, time.Hour)
@@ -266,7 +267,7 @@ func TestLedgerQueueShutdownRaces(t *testing.T) {
 
 // TestLedgerQueueEmitDuringShutdown: a row whose emission had passed the
 // closed check when Shutdown began is delivered or counted, not queued
-// after the worker's last drain (golem#4). The emission is held between
+// after the worker's last drain. The emission is held between
 // its check and its enqueue while Shutdown runs.
 func TestLedgerQueueEmitDuringShutdown(t *testing.T) {
 	exp := &counting{}

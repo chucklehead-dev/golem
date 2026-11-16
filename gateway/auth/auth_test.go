@@ -66,7 +66,7 @@ func TestAuthenticate(t *testing.T) {
 		// Fail closed: never a zero (unlimited) budget for a missing scope.
 		{"its scope is gone", http.Header{"X-Api-Key": {orphan}}, contract.AuthzScopeNotMember.Name},
 		{"its principal left the scope", http.Header{"X-Api-Key": {departed}}, contract.AuthzScopeNotMember.Name},
-		// golem#5: a key is honoured only for a listed owner of its kind.
+		// a key is honoured only for a listed owner of its kind.
 		{"its owner is not listed", http.Header{"X-Api-Key": {unowned}}, contract.AuthKeyRevoked.Name},
 		{"its owner is of another kind", http.Header{"X-Api-Key": {wrongKind}}, contract.AuthKeyRevoked.Name},
 		{"two different credentials", http.Header{"Authorization": {"Bearer " + good}, "X-Api-Key": {narrow}}, contract.AuthMissing.Name},
@@ -94,8 +94,7 @@ func TestAuthenticate(t *testing.T) {
 }
 
 // TestImplicit: standalone's implicit principal takes the gateway's own
-// local key and nothing else; it never exists for a live installation
-// (golem#5).
+// local key and nothing else; it never exists for a live installation.
 func TestImplicit(t *testing.T) {
 	local := key.New(key.Dev)
 	k := Compile(snapshot.Entitlements{Implicit: true}, key.Dev, time.Now, nil)

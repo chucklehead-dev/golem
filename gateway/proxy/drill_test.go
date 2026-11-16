@@ -18,7 +18,7 @@ import (
 	libsnapshot "github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// TestFailoverDrill is m1-plan.md step 2's drill in small: two providers
+// TestFailoverDrill is m1-plan.md's failover drill in small: two providers
 // over real HTTP, the gateway in front of them (its own HTTP server), callers
 // streaming steadily, and the first provider killed mid-run (its listener
 // closed and its connections cut). It shows:
@@ -33,7 +33,7 @@ import (
 //   - the dead provider ejected, so later calls stop trying it first.
 //
 // The real drill (a Bedrock region, a local box) runs on the install
-// (m1-plan.md step 6); this one runs in CI.
+// (m1-plan.md); this one runs in CI.
 func TestFailoverDrill(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a two-second load")

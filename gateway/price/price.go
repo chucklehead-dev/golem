@@ -1,4 +1,4 @@
-// Package price prices a call's usage (contracts.md §4): micro-units from
+// Package price prices a call's usage (contracts.md): micro-units from
 // integer token counts and rates in micro-units per million tokens, rounded
 // half-even once, at the end.
 package price
@@ -30,10 +30,10 @@ func Cost(u canon.Usage, p snapshot.Price) int64 {
 const MaxCost = math.MaxInt64 / 1024
 
 // Worst is a call's declared worst-case cost, charged to a call whose usage
-// is uncertain (ADR 0031, 0038, 0044): every input byte a token at the full input rate,
-// and the output cap at the output rate, no cache discount. Bytes bound
-// text tokens from above; they do not bound images, audio or files, or
-// units billed outside tokens: a declaration, not a ceiling.
+// is uncertain. Every input byte counts as a token at the full input rate,
+// and the output cap at the output rate, with no cache discount. Bytes
+// bound text tokens from above, but not images, audio, files, or units
+// billed outside tokens. So it is a declaration, not a ceiling. ADR 0031.
 func Worst(inputBytes, maxOutput, completions int64, p snapshot.Price) (cost int64, ok bool) {
 	output, ok := product(maxOutput, completions)
 	if !ok {

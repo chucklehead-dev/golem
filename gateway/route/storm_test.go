@@ -8,7 +8,7 @@ import (
 	"github.com/chucklehead-dev/gotogether/qload"
 )
 
-// Retry storms (m1-plan.md step 2; testing.md §3.2): an SDK's retries on
+// Retry storms (m1-plan.md; testing.md): an SDK's retries on
 // top of the gateway's, against a provider whose capacity drops for a
 // while (a brownout). The gateway's retries are route.Health's, run on
 // qload's virtual time: each client attempt is a gateway call (Called),

@@ -1,7 +1,7 @@
 // Package jsonscan reads the top-level members of a request body without
-// decoding it: the routing fields a dialect needs, their byte positions for
-// splicing, and nothing else. Every dialect's pass-through scan is built on
-// it (gateway.md §3 step 2, ADR 0001).
+// decoding it. It finds the routing fields a dialect needs and their byte
+// positions for splicing, and nothing else. Every dialect's pass-through
+// scan is built on it. ADR 0001.
 package jsonscan
 
 import (
@@ -98,10 +98,9 @@ func (d *Decoder) release() {
 }
 
 // Object scans body, which must be exactly one JSON object, calling visit
-// for each top-level member. The whole document is read: a body with
-// duplicate names at any depth, invalid UTF-8, or trailing data is refused,
-// because an upstream parser could read such a body differently from golem
-// (ADR 0037).
+// for each top-level member. It reads the whole document. It refuses
+// duplicate names at any depth, invalid UTF-8 and trailing data, because an
+// upstream parser could read such a body differently from golem. ADR 0037.
 func Object(body []byte, visit Visitor) error {
 	d := decoder(body)
 	defer d.release()

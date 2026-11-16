@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"math/rand/v2"
@@ -11,13 +12,15 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
-// LedgerQueue is the ledger rows' log processor. The SDK's batch processor,
-// when its queue is full, overwrites the oldest records and says so only in
-// its own log: for billing rows that loss must be counted, alerted on and
-// bounded by a queue sized for a collector stall. LedgerQueue exports in
-// batches from a bounded queue and counts every row it could not deliver,
-// shutdown included. Durability through outages is the collector's
-// (ADR 0043): the gateway's queue only bridges a node-local agent's restart.
+// LedgerQueue is the ledger rows' log processor. When its queue is full,
+// the SDK's batch processor overwrites the oldest records and says so only
+// in its own log. Billing rows need that loss counted, alerted on, and
+// bounded by a queue sized for a collector stall.
+//
+// LedgerQueue exports in batches from a bounded queue and counts every row
+// it could not deliver, at shutdown too. The collector provides durability
+// through outages. This queue only bridges a node-local agent's restart.
+// ADR 0043.
 type LedgerQueue struct {
 	exp    sdklog.Exporter
 	q      chan sdklog.Record
@@ -25,12 +28,11 @@ type LedgerQueue struct {
 	every  time.Duration
 	flush  chan chan struct{} // a flush's request, answered once its rows are exported
 	stop   chan context.Context
-	exited chan struct{} // closed when the worker returns: no flush is answered after
-	// mu orders rows against the shutdown: OnEmit holds it shared from
-	// its check of closed to its enqueue, Shutdown exclusively to set
-	// closed. Every row OnEmit accepted is then queued before the worker
-	// drains, and every later one is refused and counted: none is queued
-	// with no worker left to deliver or count it (golem#4).
+	exited chan struct{} // closed when the worker returns; no flush is answered after
+	// mu orders rows against the shutdown. OnEmit holds it shared from its
+	// check of closed to its enqueue, and Shutdown holds it to set closed.
+	// So every row OnEmit accepted is queued before the worker drains. Every
+	// later row is refused and counted, never queued with no worker left.
 	mu     sync.RWMutex
 	closed bool
 	// emitting, if set, runs inside OnEmit's critical section (a test's
@@ -45,8 +47,12 @@ type LedgerQueue struct {
 	// Failed, rows the exporter did not take after its retries, or the
 	// shutdown's deadline left undelivered; Retried, the exports retried.
 	Dropped, Failed, Retried atomic.Int64
-	backoff                  atomic.Int64 // the first retry's wait (SetBackoff)
+	// Log is where lost rows are logged; nil logs to slog.Default().
+	Log     *slog.Logger
+	backoff atomic.Int64 // the first retry's wait (SetBackoff)
 }
+
+func (q *LedgerQueue) log() *slog.Logger { return cmp.Or(q.Log, slog.Default()) }
 
 // exportTimeout bounds one export while running; a shutdown's deadline
 // bounds its own.
@@ -85,7 +91,7 @@ func (q *LedgerQueue) OnEmit(_ context.Context, r *sdklog.Record) error {
 // drop counts a refused row, and says so at the 1st, 2nd, 4th, 8th...
 func (q *LedgerQueue) drop(why string) {
 	if n := q.Dropped.Add(1); n&(n-1) == 0 {
-		slog.Error("telemetry: "+why+"; ledger rows are being dropped (golem.ledger.dropped)", "dropped", n, "size", cap(q.q))
+		q.log().Error("telemetry: "+why+"; ledger rows are being dropped (golem.ledger.dropped)", "dropped", n, "size", cap(q.q))
 	}
 }
 
@@ -117,7 +123,7 @@ func (q *LedgerQueue) run() {
 			buf = q.drain(ctx, buf, -1)          // no row is queued after the shutdown
 			if n := len(buf) + len(q.q); n > 0 { // the deadline passed
 				q.Failed.Add(int64(n))
-				slog.Error("telemetry: ledger rows undelivered at shutdown (golem.ledger.failed)", "rows", n)
+				q.log().Error("telemetry: ledger rows undelivered at shutdown (golem.ledger.failed)", "rows", n)
 			}
 			return
 		}
@@ -142,8 +148,8 @@ func (q *LedgerQueue) drain(ctx context.Context, buf []sdklog.Record, n int) []s
 }
 
 // export delivers a batch, retrying a failure with backoff: a collector
-// restarting is a few seconds, and its rows must not be dropped for it
-// (golem#4). A batch the collector may have partly taken is sent whole
+// restarting is a few seconds, and its rows must not be dropped for it.
+// A batch the collector may have partly taken is sent whole
 // again; the ledger deduplicates by event (golem.spend_dedup). After the
 // last attempt, or at the shutdown's deadline, its rows are counted as
 // failed.
@@ -161,7 +167,7 @@ func (q *LedgerQueue) export(ctx context.Context, buf []sdklog.Record) []sdklog.
 		}
 		if attempt == exportAttempts || ctx.Err() != nil {
 			q.Failed.Add(int64(len(buf)))
-			slog.Error("telemetry: ledger rows not delivered (golem.ledger.failed)", "rows", len(buf), "attempts", attempt, "err", err)
+			q.log().Error("telemetry: ledger rows not delivered (golem.ledger.failed)", "rows", len(buf), "attempts", attempt, "err", err)
 			break
 		}
 		q.Retried.Add(1)

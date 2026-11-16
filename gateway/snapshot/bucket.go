@@ -19,13 +19,12 @@ import (
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// Bucket is the published source (control-plane.md §4): the pool's signed
-// pointer, polled with a conditional get, and the snapshot it names. A
-// pointer is applied only if its signature verifies, it is the gateway's
-// pool, and its sequence is at least the floor and above what the gateway
-// holds (Holder.Apply, model/publication.md's poll); the snapshot object
-// must hash to the pointer's hash and carry its sequence. An old signed
-// pointer copied back into the bucket is refused by the floor.
+// Bucket is the published source (control-plane.md). It polls the pool's
+// signed pointer with a conditional get, and reads the snapshot it names.
+// A pointer is applied only if its signature verifies, it names this pool,
+// and its sequence is at least the floor and above the one held. The
+// snapshot must hash to the pointer's hash and carry its sequence. The
+// floor refuses an old signed pointer copied back into the bucket.
 type Bucket struct {
 	Bucket  bucket.Bucket
 	Keys    sign.Verifier
@@ -35,49 +34,47 @@ type Bucket struct {
 	// Checkpoint, if set, is a file on the gateway's own disk holding the
 	// last sequence applied, written atomically after each apply. Start
 	// raises the floor to it and to the pool's trusted checkpoint in the
-	// bucket (snapshot.CheckpointKey, which only golem-control writes): a
-	// restart with an empty disk still has the publisher's floor.
+	// bucket, which only golem-control writes. So a restart with an empty
+	// disk still has the publisher's floor.
 	Checkpoint string
 	// LastGood, if set, is a file on the same disk holding the last
-	// publication applied, its signed pointer and snapshot, written before
-	// the checkpoint. Start applies it, verified as a publication read from
-	// the bucket is, so a gateway restarted while the bucket is
-	// unreachable serves until the snapshot's lease ends (gateway.md §6).
+	// publication applied, written before the checkpoint. Start verifies and
+	// applies it as it would a publication from the bucket. A gateway
+	// restarted while the bucket is unreachable then serves until the lease
+	// ends.
 	LastGood string
-	// GatewayID, if set, names the status object written after each apply
-	// (status/<pool>/<id>): diagnostic only, never trusted (anyone with the
-	// pool's credentials can overwrite it).
+	// GatewayID, if set, names the status object written after each apply,
+	// status/<pool>/<id>. It is diagnostic only and never trusted, since
+	// anyone with the pool's credentials can overwrite it.
 	GatewayID string
 	Interval  time.Duration // default one second
-	// Timeout bounds each poll, and Start, with every bucket call they
-	// make (default 30 seconds): a bucket that accepts a request and never
-	// answers must not stall polling for good, while the lease runs out.
+	// Timeout bounds each poll and Start, with every bucket call they make
+	// (default 30 seconds). A bucket that never answers must not stall
+	// polling while the lease runs out.
 	Timeout time.Duration
 	// ApplyRetry is how often a verified publication that failed to apply
 	// is tried again while it is current (default 30 seconds).
 	ApplyRetry time.Duration
 	// MaxSkew is how far the publisher's clock may run ahead of this
-	// gateway's (default 2 minutes): a pointer issued further in the
-	// gateway's future is refused (security-and-correctness.md §3).
+	// gateway's (default 2 minutes). A pointer issued further in the future
+	// is refused (security-and-correctness.md).
 	MaxSkew time.Duration
 	// MaxLease is the longest authorization lease the pool's publisher
-	// grants (default 4 hours, golem-control's -lease default and an
-	// internal pool's maximum, ADR 0032). A snapshot whose ValidUntil is
-	// more than MaxLease plus MaxSkew ahead is refused, not clamped: a
-	// publisher's clock a day ahead must not grant a day-long lease, and a
-	// lease the gateway cannot trust is no lease at all (it fails closed:
-	// the gateway keeps what it holds, until that expires).
+	// grants (default 4 hours, golem-control's default). A snapshot whose
+	// ValidUntil is more than MaxLease plus MaxSkew ahead is refused, not
+	// clamped. A publisher's clock a day ahead must not grant a day-long
+	// lease. The gateway then keeps what it holds until that expires. ADR
+	// 0030.
 	MaxLease time.Duration
-	// PeriodZone is this gateway's budget periods' time zone (its
-	// -period-zone, an IANA name). A snapshot stating another
-	// (snapshot.PeriodZone, golem-control's -period-zone) is refused,
-	// naming both: known spend's month and this gateway's would disagree
-	// near midnight at a month's end. "": not checked.
+	// PeriodZone is this gateway's budget-period time zone, an IANA name. A
+	// snapshot that states another zone is refused, naming both. Otherwise
+	// known spend's month and this gateway's would disagree near a month's
+	// end. Empty skips the check.
 	PeriodZone string
 	Log        *slog.Logger
 
-	tag   string    // the entity tag of the last pointer judged (Poll)
-	retry time.Time // when to read a pointer whose publication failed to apply again
+	tag   string    // the entity tag of the last pointer judged by Poll
+	retry time.Time // when to read again a pointer whose publication failed to apply
 	// pending is the last-good file as Start read it, while it failed to
 	// apply for a reason that may pass (an applyError: a Secret not yet
 	// mounted) and nothing has applied since; Poll tries it again at

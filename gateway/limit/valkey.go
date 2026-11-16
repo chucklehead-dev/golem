@@ -1,6 +1,7 @@
 package limit
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -12,24 +13,24 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
-// Valkey is the site store (ADR 0012, 0031, 0052): one Valkey (ElastiCache
-// for Valkey, or the site's own) shared by the site's gateways. Each
+// Valkey is the site store, one Valkey shared by the site's gateways. Each
 // operation is one Lua script or pipeline, so it is atomic. Every key
-// carries the hash tag {golem:<site>}: in cluster mode they share a slot,
-// as the scripts need.
+// carries the hash tag {golem:<site>}, so in cluster mode all keys share
+// the hash slot the scripts need.
 //
-// Slots are sorted sets per principal in a scope and per scope, scored by
-// their expiry on the server's clock (TIME), so a gateway's clock cannot
-// extend one.
-// It keeps no spend: known spend is the snapshot's (ADR 0052).
+// Slots are sorted sets per principal in a scope and per scope. They are
+// scored by their expiry on the server's clock (TIME), so a gateway's
+// clock cannot extend one. The store keeps no spend. ADR 0031.
 type Valkey struct {
-	// cl is the client, nil until DialValkey's dial has made one: every
-	// operation fails as ErrUnavailable until then (the limiter's outage).
+	// cl is the client, nil until DialValkey's dial has made one. Until
+	// then every operation fails as ErrUnavailable, an outage to the limiter.
 	cl     atomic.Pointer[valkey.Client]
 	dial   func() (valkey.Client, error)
 	prefix string
-	// TTL is a slot's life without renewal (ADR 0038: 90 seconds).
+	// TTL is how long a slot lives without renewal (default 90 seconds).
 	TTL time.Duration
+	// Log is where Connect logs its dials; nil logs to slog.Default().
+	Log *slog.Logger
 
 	afterFn func(time.Duration) <-chan time.Time // Connect's waits (tests)
 
@@ -64,14 +65,15 @@ func siteStore(site string) *Valkey {
 	return &Valkey{prefix: "{golem:" + site + "}:", TTL: 90 * time.Second}
 }
 
-// DialValkey returns the store for site over a client dial makes. It dials
-// once now; if that fails (Valkey unreachable as the gateway starts), the
-// store is returned all the same, every operation failing as
-// ErrUnavailable, so the limiter runs in its outage mode (waivers) until Connect's retries make a client and Limiter.Recover
-// finds the store answering. A gateway that refused to start without its
-// Valkey would turn an outage plus any pod churn into lost capacity, where
-// the limiter is to fail open (ADR 0041 §7.3). The error is the first
-// dial's, for the caller to log; the store is never nil.
+// DialValkey returns the store for site over a client that dial makes. It
+// dials once now. If that fails, it still returns the store, whose every
+// operation fails as ErrUnavailable. The limiter then admits as in an
+// outage until Connect makes a client and Recover finds the store.
+//
+// A gateway that refused to start without Valkey would turn an outage plus
+// pod churn into lost capacity, where the limiter should fail open. The
+// error is the first dial's, for the caller to log. The store is never
+// nil. ADR 0041.
 func DialValkey(site string, dial func() (valkey.Client, error)) (*Valkey, error) {
 	v := siteStore(site)
 	v.dial = dial
@@ -113,7 +115,7 @@ func (v *Valkey) Connect(ctx context.Context) {
 		c, err := v.dial()
 		if err != nil {
 			wait = min(2*wait, 30*time.Second)
-			slog.Warn("limit: Valkey still unreachable; admitting on local counts, recorded as waivers", "retry_in", wait, "err", err)
+			v.log().Warn("limit: Valkey still unreachable; admitting on local counts, recorded as waivers", "retry_in", wait, "err", err)
 			continue
 		}
 		if ctx.Err() != nil {
@@ -121,9 +123,11 @@ func (v *Valkey) Connect(ctx context.Context) {
 			return
 		}
 		v.cl.Store(&c)
-		slog.Info("limit: connected to Valkey; the limiter recovers at its next renewal")
+		v.log().Info("limit: connected to Valkey; the limiter recovers at its next renewal")
 	}
 }
+
+func (v *Valkey) log() *slog.Logger { return cmp.Or(v.Log, slog.Default()) }
 
 // after is time.After, or a test's.
 func (v *Valkey) after(d time.Duration) <-chan time.Time {
@@ -227,7 +231,7 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, error) {
 		return 0, err
 	}
 	o, err := admitScript.Exec(ctx, c, []string{v.principalKey(a.Scope, a.Principal), v.scopeKey(a.Scope)},
-		[]string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.ttlMs(), i64(a.Known), i64(a.Budget)}).AsInt64()
+		[]string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.ttlMs(), i64(a.KnownSpend), i64(a.Budget)}).AsInt64()
 	if err != nil {
 		return 0, wrap(err)
 	}

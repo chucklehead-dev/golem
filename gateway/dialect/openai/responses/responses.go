@@ -1,13 +1,16 @@
 // Package responses is OpenAI's Responses API (POST /v1/responses): the
 // pass-through scan and splice of a request, and usage from its response.
 //
-// M1 serves stateless responses only (security-and-correctness.md §4,
-// ADR 0027): store is false whatever the caller or scope asks (an absent
-// store, which the provider takes as true, is written false); a request
-// that needs state the provider keeps (previous_response_id, a
+// M1 serves stateless responses only (security-and-correctness.md). Store
+// is false whatever the caller or scope asks. An absent store, which the
+// provider takes as true, is written as false.
+//
+// Scan reports, by Stateful, a request that needs state the provider keeps,
+// and the gateway refuses it. Such state includes previous_response_id, a
 // conversation, background execution, a stored prompt, an earlier item by
-// reference, a provider-managed file or vector store) is refused, as Scan
-// reports by Stateful.
+// reference, and a provider-managed file or vector store. ADR 0027.
+//
+// Package variables marked read-only are never written after init.
 package responses
 
 import (
@@ -19,8 +22,9 @@ import (
 	usage "github.com/chucklehead-dev/golem/gateway/dialect/internal/openaiusage"
 )
 
-// known lists the request members golem forwards without comment; others
-// are forwarded and counted (restricted mode refuses them, ADR 0037).
+// known lists the request members golem forwards as they are. Other
+// members are forwarded and counted, and restricted mode refuses them.
+// ADR 0037.
 var known = map[string]bool{ // read-only
 	"model": true, "input": true, "instructions": true, "stream": true, "stream_options": true,
 	"max_output_tokens": true, "store": true, "metadata": true, "tools": true, "tool_choice": true,
@@ -30,8 +34,8 @@ var known = map[string]bool{ // read-only
 	"previous_response_id": true, "conversation": true, "background": true, "prompt": true,
 }
 
-// serverTools are the tool types the provider runs itself: egress, units
-// billed beyond tokens (ADR 0044).
+// serverTools are the tool types the provider runs itself. They mean
+// egress, and units billed beyond tokens. ADR 0031.
 var serverTools = map[string]bool{ // read-only
 	"web_search": true, "web_search_preview": true, "file_search": true, "code_interpreter": true,
 	"mcp": true, "image_generation": true, "computer_use_preview": true, "local_shell": true,
@@ -258,7 +262,3 @@ func (u *StreamUsage) Response(body []byte) {
 
 var usageNames = usage.Names{Input: "input_tokens", Output: "output_tokens", // read-only
 	InputDetails: "input_tokens_details", OutputDetails: "output_tokens_details"}
-
-// IsError reports a stream event that is the response's failure before
-// any output: an error event (the commit point refuses it).
-func IsError(event []byte) bool { return string(event) == "error" }

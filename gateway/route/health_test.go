@@ -32,7 +32,7 @@ func TestEjection(t *testing.T) {
 		l.Fail(0)
 	}
 	if l, until := h.Acquire(d, ""); l != nil || !until.Equal(now.Add(10*time.Second)) {
-		t.Fatalf("lease %v until %v: two failures in a row eject for 10 s", l, until)
+		t.Fatalf("hold %v until %v: two failures in a row eject for 10 s", l, until)
 	}
 	now = now.Add(10 * time.Second)
 	probe, _ := h.Acquire(d, "")
@@ -108,12 +108,13 @@ func TestRetryBudget(t *testing.T) {
 	for range 10 {
 		h.Called("a") // capped at the burst
 	}
-	if !h.Retry("a") || !h.Retry("a") || h.Retry("a") {
+	first, second, third := h.Retry("a"), h.Retry("a"), h.Retry("a")
+	if !first || !second || third {
 		t.Fatal("want two retries, then none")
 	}
 	h.Called("a")
 	h.Called("a")
-	if !h.Retry("a") || h.Retry("b") == false {
+	if credited, other := h.Retry("a"), h.Retry("b"); !credited || !other {
 		t.Fatal("two calls credit one retry; another route has its own budget")
 	}
 }

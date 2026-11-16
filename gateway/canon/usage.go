@@ -4,7 +4,7 @@
 package canon
 
 // Usage is what a call consumed, as the provider reported it: the input to
-// pricing (contracts.md §4).
+// pricing (contracts.md).
 type Usage struct {
 	Input      int64 // uncached input tokens
 	Output     int64 // output tokens, reasoning included

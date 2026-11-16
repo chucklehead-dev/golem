@@ -13,10 +13,10 @@ import (
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// Dir is the standalone source (ADR 0023): the CRD YAML in a directory,
-// compiled in-process by lib/compile and re-applied when the files change.
-// The directory is opened with os.Root, so a symlink cannot lead the
-// gateway outside it.
+// Dir is the standalone source. It reads the config YAML in a directory,
+// compiles it in-process with lib/compile, and applies it again when the
+// files change. The directory is opened with os.Root, so a symlink cannot
+// lead the gateway outside it. ADR 0023.
 type Dir struct {
 	Path     string
 	Holder   *Holder

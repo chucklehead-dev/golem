@@ -57,7 +57,7 @@ var (
 // approvedVersions are the anthropic-version values restricted mode
 // forwards. 2026-10-21 (the default of the SDKs' 2026-10 majors) was
 // reviewed against what golem reads and enforces: it changes no usage,
-// stop or stream field, and no policy field of contracts.md §8; its
+// stop or stream field, and no policy field of contracts.md; its
 // removals (temperature, top_p, top_k; documents in assistant turns;
 // citations in user turns) are the provider's refusals, forwarded as such.
 // Its SDKs send the key as Authorization: Bearer, which auth accepts.
@@ -94,13 +94,13 @@ type scanned struct {
 	stream    bool
 	maxTokens int64
 	hasMax    bool
-	// What the scope's policy weighs (contracts.md §8).
+	// What the scope's policy weighs (contracts.md).
 	n       int64 // completions asked for
 	store   bool  // OpenAI's store: true (rewritten off where forbidden)
 	state   bool  // provider-side state with no off switch (an Anthropic container)
 	unknown int   // members golem does not know (restricted mode refuses them)
 	// stateful names a member needing state the provider keeps, which M1
-	// refuses whatever the scope allows (security-and-correctness.md §4):
+	// refuses whatever the scope allows (security-and-correctness.md):
 	// a Responses continuation, conversation, background run, stored
 	// prompt or provider file; storeTrue, a store: true asked by name.
 	stateful  string
@@ -126,8 +126,8 @@ func (ex *exchange) scan(d Dialect, body []byte) (scanned, error) {
 		n: ex.chat.N, store: ex.chat.Store, unknown: ex.chat.Unknown}, err
 }
 
-// forbidStorage turns the request's provider-side storage off (OpenAI's
-// store: true becomes false, ADR 0027).
+// forbidStorage turns off the request's provider-side storage, so OpenAI's
+// store: true becomes false. ADR 0027.
 func (ex *exchange) forbidStorage(d Dialect) {
 	if d == OpenAIChat {
 		ex.chat.ForbidStorage()
@@ -213,17 +213,17 @@ func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
 }
 
 // estimate completes a response's usage when the provider's report is
-// missing (a stream cut, or a response without its usage), by rules chosen
-// to err high rather than to average: no text tokenizer golem serves makes
-// a token of less than a byte, and every output token the provider sent is
-// in the response's bytes, so output is every byte received, whatever its
-// framing or fields, at most the request's output ceiling (max_tokens × n);
-// input, if the provider gave none, every byte of the request (as
-// price.Worst). It can still be low (a provider's work past a cut, input
-// that bytes do not bound): an estimate, not a guarantee (ADR 0044). It
-// replaces no count the provider gave; reconciliation corrects it (ADR
-// 0031). It returns the usage to charge and the estimated part of it (zero
-// when the report was whole).
+// missing, as in a cut stream. Its rules err high rather than average. No
+// tokenizer golem serves makes a token of less than a byte.
+//
+// So output is every byte received, at most the request's output ceiling
+// (max_tokens × n). Input, if the provider gave none, is every byte of the
+// request, as in price.Worst. The estimate can still be low, for example
+// for work past a cut. It replaces no count the provider gave, and
+// reconciliation corrects it.
+//
+// It returns the usage to charge and its estimated part, zero when the
+// report was whole. ADR 0031.
 func (ex *exchange) estimate(d Dialect, requestBytes, ceiling int64) (total, estimated canon.Usage) {
 	u, final, _ := ex.reported(d)
 	if final {
@@ -255,7 +255,7 @@ func outputCeiling(req scanned) int64 {
 
 // appendError appends a dialect's error object for a contract code, with
 // golem's code, a message that says what to do next, and the request ID
-// (contracts.md §1).
+// (contracts.md).
 func appendError(b []byte, d Dialect, c contract.Code, msg, reqID string) []byte {
 	if d == AnthropicMessages {
 		b = append(b, `{"type":"error","error":{"type":"`...)

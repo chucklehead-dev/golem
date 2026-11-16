@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/admission"
@@ -14,10 +15,10 @@ func scopeCall(id, principal string) Call {
 	return Call{ID: id, Principal: principal, Scope: "s", Budget: 10, PrincipalLimit: 1, ScopeLimit: 2}
 }
 
-// TestSoft: known spend is the snapshot's (ADR 0052), checked below the
-// budget whatever the call then costs (the accepted risk); a call's cost
-// is its ledger row's, not counted here.
-func TestSoft(t *testing.T) {
+// TestKnownSpendIsTheSnapshots: known spend is the snapshot's (ADR 0031),
+// checked below the budget whatever the call then costs (the accepted risk); a
+// call's cost is its ledger row's, not counted here.
+func TestKnownSpendIsTheSnapshots(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
 	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
@@ -27,7 +28,7 @@ func TestSoft(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk.Complete(ctx, 80)
-	if got := l.Known("s"); got != 0 {
+	if got := l.KnownSpend("s"); got != 0 {
 		t.Fatalf("known %d before a snapshot counts the call: the gateway counts no spend", got)
 	}
 	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 9})
@@ -38,12 +39,14 @@ func TestSoft(t *testing.T) {
 	if _, err := l.Admit(ctx, scopeCall("c", "p2")); !errors.Is(err, ErrBudget) {
 		t.Fatalf("at the budget: %v, want ErrBudget", err)
 	}
-	if got := l.Known("s"); got != 10 {
+	if got := l.KnownSpend("s"); got != 10 {
 		t.Fatalf("known %d, want the snapshot's 10", got)
 	}
 }
 
-func TestLimits(t *testing.T) {
+// TestInFlightLimits: the principal's and the scope's in-flight limits refuse,
+// and a cancelled call keeps its slot until its upstream ends.
+func TestInFlightLimits(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
 	a, _ := l.Admit(ctx, scopeCall("a", "p1"))
@@ -212,7 +215,7 @@ func TestPeriodRollover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a new period: %v", err)
 	}
-	if got := l.Known("s"); got != 0 || tk.Period() != "2026-12" {
+	if got := l.KnownSpend("s"); got != 0 || tk.Period() != "2026-12" {
 		t.Fatalf("December's known spend %d, period %s: want 0, 2026-12", got, tk.Period())
 	}
 }
@@ -364,41 +367,42 @@ func TestTicketEndsOnce(t *testing.T) {
 
 // TestAdmitter: the request path's view. A nil limiter is no admitter at
 // all; Cancel holds the slot until the time given, then frees it, and
-// Finish stops the tails still held (their slots expire by TTL).
+// Finish stops the tails still held (their slots expire by TTL). The
+// tail's timer runs on synctest's clock.
 func TestAdmitter(t *testing.T) {
 	var none *Limiter
 	if none.Admitter() != nil {
 		t.Fatal("a nil limiter's Admitter must be a nil interface (admit everything uncounted)")
 	}
-	ctx := t.Context()
-	l := New(NewMem())
-	a := l.Admitter()
-	tk, err := a.Admit(ctx, scopeCall("a", "p1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tk.Cancel(ctx, 1, time.Now().Add(50*time.Millisecond))
-	if _, err := a.Admit(ctx, scopeCall("b", "p1")); !errors.Is(err, ErrConcurrency) {
-		t.Fatalf("during the tail: %v, want the slot still held", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := a.Admit(ctx, scopeCall("b", "p1")); err == nil {
-			break
-		} else if time.Now().After(deadline) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		l := New(NewMem())
+		a := l.Admitter()
+		tk, err := a.Admit(ctx, scopeCall("a", "p1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tk.Cancel(ctx, 1, time.Now().Add(50*time.Millisecond))
+		time.Sleep(49 * time.Millisecond)
+		synctest.Wait()
+		if _, err := a.Admit(ctx, scopeCall("b", "p1")); !errors.Is(err, ErrConcurrency) {
+			t.Fatalf("during the tail: %v, want the slot still held", err)
+		}
+		time.Sleep(time.Millisecond)
+		synctest.Wait() // the tail's timer has fired and freed the slot
+		if _, err := a.Admit(ctx, scopeCall("b", "p1")); err != nil {
 			t.Fatalf("after the tail: %v", err)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	held, _ := a.Admit(ctx, scopeCall("c", "p2"))
-	held.Cancel(ctx, 1, time.Now().Add(time.Hour))
-	l.Finish(ctx)
-	l.mu.Lock()
-	n := len(l.tails)
-	l.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("%d tails still timed after Finish", n)
-	}
+		held, _ := a.Admit(ctx, scopeCall("c", "p2"))
+		held.Cancel(ctx, 1, time.Now().Add(time.Hour))
+		l.Finish(ctx)
+		l.mu.Lock()
+		n := len(l.tails)
+		l.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("%d tails still timed after Finish", n)
+		}
+	})
 }
 
 // TestMetersFailOpen: meters are taken and refused through the store; with

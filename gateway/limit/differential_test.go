@@ -33,7 +33,7 @@ func (d *expDriver) Observe() (any, error) {
 	}
 	o := observed{State: st.(expState), Known: map[string]int64{}}
 	for _, g := range slices.Sorted(maps.Keys(d.gws)) {
-		o.Known[g] = d.gws[g].Known(scope)
+		o.Known[g] = d.gws[g].KnownSpend(scope)
 	}
 	return o, nil
 }

@@ -1,5 +1,5 @@
 // Package guard bounds what a caller can make the gateway do before it
-// knows who is calling (security-and-correctness.md §8): requests and failed
+// knows who is calling (security-and-correctness.md): requests and failed
 // authentications per source, and connections. Authenticated callers'
 // limits are the limiter's (gateway/limit); this is the floor beneath them,
 // for a flood of requests, or of invalid keys and tokens, that never
@@ -209,9 +209,10 @@ func (g *Guard) fillFail(s *source, now time.Time) {
 }
 
 // source is src's buckets; at MaxSources, once a second, the sources whose
-// buckets have refilled are forgotten (among at most sweepBatch looked at) (a forgotten source starts full, as
-// it would be), and if none were, src has none (nil): it is not limited,
-// rather than sharing a bucket any one source could drain for all.
+// buckets have refilled are forgotten (among at most sweepBatch looked at) (a
+// forgotten source starts full, as it would be), and if none were, src has none
+// (nil): it is not limited, rather than sharing a bucket any one source could
+// drain for all.
 func (g *Guard) source(src string, now time.Time) *source {
 	if s := g.sources[src]; s != nil {
 		return s

@@ -2,6 +2,7 @@ package jsonscan
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -114,7 +115,7 @@ func TestRequestDepth(t *testing.T) {
 	if err := Request(nest(MaxDepth), skip); err != nil {
 		t.Fatalf("at MaxDepth: %v", err)
 	}
-	if err := Request(nest(MaxDepth+1), skip); err != ErrTooDeep {
+	if err := Request(nest(MaxDepth+1), skip); !errors.Is(err, ErrTooDeep) {
 		t.Fatalf("past MaxDepth: %v", err)
 	}
 	inString := []byte(`{"model":"m","x":"` + strings.Repeat(`[{\"`, 500) + `"}`)
@@ -123,7 +124,7 @@ func TestRequestDepth(t *testing.T) {
 	}
 	// A string ending in an escaped backslash ends there: what follows nests.
 	after := []byte(`{"model":"m\\\\","x":` + strings.Repeat("[", MaxDepth) + strings.Repeat("]", MaxDepth) + `}`)
-	if err := Request(after, skip); err != ErrTooDeep {
+	if err := Request(after, skip); !errors.Is(err, ErrTooDeep) {
 		t.Fatalf("nesting after an escaped backslash: %v", err)
 	}
 }

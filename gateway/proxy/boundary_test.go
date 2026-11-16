@@ -14,7 +14,7 @@ import (
 
 // TestFeatureModes: restricted mode (the default) forwards approved
 // members, betas and versions only; an agent route, or a compatible scope,
-// forwards unknown ones (ADR 0037, 0041 §3, §7.1).
+// forwards unknown ones (ADR 0037, 0041).
 func TestFeatureModes(t *testing.T) {
 	h := handler(AnthropicMessages, &stub{events: anthropicStream(1)}, nil)
 	c, _ := h.Snapshots.Current()
@@ -70,7 +70,7 @@ func TestFeatureModes(t *testing.T) {
 }
 
 // TestRequestBoundary: a body that does not arrive in time is refused
-// before any admission, and a response past MaxResponse is cut (golem#5).
+// before any admission, and a response past MaxResponse is cut.
 func TestRequestBoundary(t *testing.T) {
 	t.Run("a trickling body", func(t *testing.T) {
 		h := handler(AnthropicMessages, &stub{events: anthropicStream(1)}, nil)

@@ -10,18 +10,19 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/sse"
 )
 
-// The commit point (m1-plan.md step 1). A streamed attempt is committed to
-// its caller when its first event is written, not when its provider's
-// headers arrive: a provider may answer 200 and then send an error as its
-// first event (Anthropic's overloaded_error, a rate limit), and an attempt
-// that failed so has produced nothing and told the caller nothing. Until
-// then the gateway writes nothing; the attempt can still be refused
-// cleanly, and (with the attempt loop) retried. Every envelope delivers its
-// dialect's own framing, a failure before output included as the dialect's
-// error event, so this is the one place an attempt's commitment is decided.
+// The commit point. A streamed attempt commits to its caller when its first
+// event is written, not when the provider's headers arrive. A provider may
+// answer 200 and then send an error as its first event, such as Anthropic's
+// overloaded_error. Such an attempt has produced nothing and told the
+// caller nothing.
 //
-// Only the first event is held (bounded by maxFirst; past it the attempt is
-// committed whatever it holds): nothing else of a stream is buffered.
+// Until the commit the gateway writes nothing, so the attempt can still be
+// refused cleanly or retried. Every envelope delivers its dialect's own
+// framing, including the error event of a failure before output. So this
+// is the one place an attempt's commitment is decided.
+//
+// Only the first event is held, up to maxFirst bytes. Past that the attempt
+// commits whatever it holds. Nothing else of a stream is buffered.
 
 // maxFirst bounds the bytes held while the first event is awaited: a first
 // event is small (Anthropic's message_start, OpenAI's role chunk).

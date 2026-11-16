@@ -16,8 +16,8 @@ import (
 	"github.com/chucklehead-dev/golem/lib/key"
 )
 
-// TestUncertainUpstream: absent response bytes are not absent work
-// (golem#4). Only a failure the provider cannot have seen is free and
+// TestUncertainUpstream: absent response bytes are not absent work.
+// Only a failure the provider cannot have seen is free and
 // frees its slot at once (on a pool of one, with no deployment to fail
 // over to, it is not retried: ADR 0051); otherwise the call is charged an
 // estimate, its slot held for the provider's tail, and it is never

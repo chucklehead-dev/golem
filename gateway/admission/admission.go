@@ -1,13 +1,11 @@
 // Package admission is the request path's contract with whatever admits
-// calls against budgets and limits (ADR 0031, 0044; gateway.md step 6).
-// It is a leaf: the proxy depends on it, gateway/limit implements it, and
-// another backend or a test double needs nothing else.
+// calls against budgets and limits. It is a leaf. The proxy depends on it,
+// gateway/limit implements it, and a test double needs nothing else.
 //
-// Admission is a fixed stage after routing, not a hook: ADR 0014's hooks
-// have no phase after routing, are stateless per phase, and may drop
-// Complete work, while an admitted call holds a slot across its whole life
-// (renewed, held through the provider's tail) and its cost must be
-// counted exactly once.
+// Admission is a fixed stage after routing, not a hook. Hooks have no
+// phase after routing, are stateless per phase, and may drop work. An
+// admitted call holds a slot for its whole life, through the provider's
+// tail, and its cost must be counted exactly once. ADR 0014, ADR 0031.
 package admission
 
 import (
@@ -17,30 +15,30 @@ import (
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
-// Call is one request as admission sees it: who, under which limits, to
-// which deployment.
+// Call is one request as admission sees it. It says who calls, under which
+// limits, and to which deployment.
 type Call struct {
-	ID               string // the request ID: the call's event in the ledger
+	ID               string // the request ID, the call's event in the ledger
 	Principal, Scope string
-	// The route chosen. gateway/limit reads none of them: rate limits are
-	// Meters, taken outside admission.
+	// The route chosen. gateway/limit reads none of these, since rate limits
+	// are Meters, taken outside admission.
 	Alias, Deployment, Model string
-	Budget                   int64 // the scope's budget in micro-units; 0: none
-	// BudgetMode is what the budget does (PRD §9.1): Enforce refuses a call
-	// over it; Warn and Observe admit it, its ticket saying so (OverBudget).
+	Budget                   int64 // the scope's budget in micro-units; 0 is none
+	// BudgetMode is what the budget does. Enforce refuses a call over it.
+	// Warn and Observe admit it, and its ticket says so (OverBudget).
 	// In-flight limits apply in every mode.
 	BudgetMode     BudgetMode
-	PrincipalLimit int // in-flight calls per principal; 0: none
-	ScopeLimit     int // in-flight calls per scope (ADR 0041 §7.6); 0: none
-	// Started is when the call began (the request's arrival): it fixes the
-	// budget period. Deadline is when it must have ended (the route's
-	// maximum duration); zero: none.
+	PrincipalLimit int // in-flight calls per principal; 0 is none
+	ScopeLimit     int // in-flight calls per scope; 0 is none
+	// Started is when the request arrived, which fixes the budget period.
+	// Deadline is when it must have ended, from the route's maximum
+	// duration. Zero is none.
 	Started, Deadline time.Time
 }
 
-// BudgetMode is what a scope's budget does at admission (PRD §9.1, ADR
-// 0050). The zero value is Enforce: a call that names no mode is refused
-// over its budget, failing closed.
+// BudgetMode is what a scope's budget does at admission. The zero value is
+// Enforce, so a call that names no mode is refused over its budget,
+// failing closed. ADR 0050.
 type BudgetMode uint8
 
 // The budget modes.
@@ -81,23 +79,24 @@ type Ticket interface {
 	// Complete records the call's cost and frees its slot.
 	Complete(ctx context.Context, cost int64)
 	// Cancel records the cost seen of a call abandoned or cut, and holds
-	// its slot until until (the provider's tail: it may go on working,
-	// and billing, after the connection closes; ADR 0041 §7.6).
+	// its slot until the given time. The provider may go on working and
+	// billing after the connection closes. ADR 0041.
 	Cancel(ctx context.Context, seen int64, until time.Time)
 	// Period is the budget period the call is counted in, for its row.
 	Period() string
-	// Waived reports an admission outside the bound (the store was down).
+	// Waived reports an admission made without the store's check, because
+	// the store was down.
 	Waived() bool
-	// OverBudget reports a call admitted over its scope's budget, in a
-	// mode that admits one (Warn, Observe): what Enforce would have
-	// refused; and the known spend admission read.
-	OverBudget() (over bool, known int64)
+	// OverBudget reports a call admitted over its scope's budget, which only
+	// Warn and Observe allow. It also returns the known spend admission
+	// read.
+	OverBudget() (over bool, knownSpend int64)
 }
 
-// Meter is one per-minute bucket of requests a request is charged to: a
-// member's or a scope's rate limit (PRD §5.5), each shared by a site's
-// gateways. Requests only: tokens are the provider's 429s to enforce and
-// budgets' to account (ADR 0044).
+// Meter is one per-minute bucket of requests that a request is charged to,
+// a member's or a scope's rate limit. A site's gateways share each one. It
+// counts requests only. Providers enforce tokens with their own 429s, and
+// budgets account for them.
 type Meter struct {
 	Key       string // MemberRateMeter, ScopeRateMeter
 	PerMinute int64
@@ -107,11 +106,11 @@ type Meter struct {
 func MemberRateMeter(scope, principal string) string { return "rm:" + scope + "/" + principal }
 func ScopeRateMeter(scope string) string             { return "rs:" + scope }
 
-// Meters takes requests from meters: a call's rate limits, once.
+// Meters takes a call's request from its rate limits, once per call.
 type Meters interface {
-	// Take takes a request from every meter of ms, or from none, reporting
-	// the first without room (its index) and how long until it has; an
-	// unreachable store admits (rate limits fail open, PRD §5.5).
+	// Take takes a request from every meter of ms, or from none. It reports
+	// the index of the first meter without room and how long until it has
+	// some. An unreachable store admits, since rate limits fail open.
 	Take(ctx context.Context, ms []Meter) (ok bool, over int, wait time.Duration)
 }
 

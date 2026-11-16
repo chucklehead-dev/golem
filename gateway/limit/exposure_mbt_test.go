@@ -25,8 +25,8 @@ const scope = "s"
 
 // The model has one budget period: the driver's clock stays in it.
 var (
-	inPeriod = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
-	period   = "2026-11"
+	inPeriod  = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	thePeriod = "2026-11"
 )
 
 func call(request string) Call {
@@ -96,7 +96,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 			if err := itf.Decode(s.Get("snaps"), &snaps); err != nil {
 				return err
 			}
-			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Period: period, Spend: snaps[gw()]})
+			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Period: thePeriod, Spend: snaps[gw()]})
 			return nil
 		},
 		"valkeyDown": func(*connect.Step) error {
@@ -148,7 +148,7 @@ func (d *expDriver) CheckStep(s *connect.Step) error {
 		return err
 	}
 	for _, g := range slices.Sorted(maps.Keys(d.gws)) {
-		if got := d.gws[g].Known(scope); got != snaps[g] {
+		if got := d.gws[g].KnownSpend(scope); got != snaps[g] {
 			return fmt.Errorf("gateway %s: known spend %d, the model's %d", g, got, snaps[g])
 		}
 	}

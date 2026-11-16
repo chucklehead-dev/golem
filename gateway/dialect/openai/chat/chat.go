@@ -2,6 +2,8 @@
 // the pass-through scan and splice of a request, and usage from its
 // response. A streamed request must ask for usage
 // (stream_options.include_usage); golem adds it when the caller did not.
+//
+// Package variables marked read-only are never written after init.
 package chat
 
 import (
@@ -15,7 +17,7 @@ import (
 	usage "github.com/chucklehead-dev/golem/gateway/dialect/internal/openaiusage"
 )
 
-// Flags mark policy-relevant members present in a request (contracts.md §8).
+// Flags mark policy-relevant members present in a request (contracts.md).
 type Flags uint32
 
 const (
@@ -25,8 +27,9 @@ const (
 	FlagAudio                       // audio: another modality and price
 )
 
-// known lists the request members golem forwards without comment; others
-// are forwarded and counted (restricted mode refuses them, ADR 0037).
+// known lists the request members golem forwards as they are. Other
+// members are forwarded and counted, and restricted mode refuses them.
+// ADR 0037.
 var known = map[string]bool{ // read-only
 	"model": true, "messages": true, "stream": true, "stream_options": true, "max_tokens": true,
 	"max_completion_tokens": true, "n": true, "store": true, "metadata": true, "tools": true,
@@ -107,7 +110,8 @@ func (r *Request) Scan(body []byte) error {
 			if !ok || n < 0 {
 				return ErrField
 			}
-			// max_completion_tokens supersedes max_tokens, whichever comes first.
+			// max_completion_tokens supersedes max_tokens, whichever comes
+			// first.
 			if completion || !hasCompletionTokens {
 				r.MaxTokens, r.HasMaxTokens = n, true
 			}
@@ -172,8 +176,8 @@ func (r *Request) Scan(body []byte) error {
 // and its include_usage lie, for Rewrite to ask for usage.
 func (r *Request) scanStreamOptions(v jsontext.Value, span jsonscan.Span) error {
 	if v.Kind() == 'n' {
-		// Recorded, so Rewrite replaces it rather than adding a second
-		// stream_options member (a duplicate, ADR 0037).
+		// Record it, so Rewrite replaces it rather than adding a duplicate
+		// stream_options member. ADR 0037.
 		r.streamOptions, r.optionsNull = span, true
 		return nil
 	}
@@ -230,8 +234,8 @@ func UsageOnly(data []byte) bool {
 	return err == nil && emptyChoices && usage
 }
 
-// ForbidStorage makes Rewrite turn a store: true into false: provider-side
-// retention the scope forbids (ADR 0027).
+// ForbidStorage makes Rewrite turn store: true into false, for a scope
+// that forbids provider-side retention. ADR 0027.
 func (r *Request) ForbidStorage() { r.noStore = r.Store }
 
 // Rewrite appends body to dst with the model replaced and, for a stream,

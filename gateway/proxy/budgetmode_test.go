@@ -15,9 +15,9 @@ import (
 	"github.com/chucklehead-dev/golem/lib/period"
 )
 
-// TestBudgetModes: a scope's budget in each mode (PRD §9.1, ADR 0050),
+// TestBudgetModes: a scope's budget in each mode (prd.md, ADR 0050),
 // spent past by calls of 6,204,000 micro-units against a budget of
-// 10,000,000, each counted by a snapshot before the next (ADR 0052): the
+// 10,000,000, each counted by a snapshot before the next (ADR 0031): the
 // third is over it. observe admits it and marks its
 // ledger row, adding nothing to the response; warn admits it, marks it and
 // says so in golem-warning; enforce refuses it as budget.pool_exhausted,

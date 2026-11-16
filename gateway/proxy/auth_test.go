@@ -114,7 +114,7 @@ spec:
 	if w := send(h, alice, stream); w.Code != 200 {
 		t.Fatalf("alice: %d %s", w.Code, w.Body)
 	}
-	// Known spend is the snapshot's (ADR 0052): the budget of 100,000,000
+	// Known spend is the snapshot's (ADR 0031): the budget of 100,000,000
 	// admits calls while it is below, and refuses them once a snapshot
 	// says it is reached.
 	now := period.Of(time.Now(), time.UTC)
@@ -179,7 +179,7 @@ spec:
 	// the upstream connection has closed.
 	cancel()
 	close(release)
-	// Its slot is held for the provider's tail (golem#4), then freed.
+	// Its slot is held for the provider's tail, then freed.
 	if w := send(h, alice, body); w.Code != 429 {
 		t.Fatalf("during the provider's tail the slot is held: %d %s", w.Code, w.Body)
 	}

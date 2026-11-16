@@ -2,11 +2,13 @@ package bedrock
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 )
 
 // reframer reads an AWS event stream and yields the Messages SSE it
@@ -28,6 +30,7 @@ type reframer struct {
 	out  []byte // the SSE of the last message
 	off  int    // how much of out has been read
 	done bool
+	log  *slog.Logger // where a refusal of the gateway's credentials is logged
 }
 
 func (f *reframer) Read(p []byte) (int, error) {
@@ -50,7 +53,7 @@ func (f *reframer) Close() error { return f.src.Close() }
 func (f *reframer) next() error {
 	f.out, f.off = f.out[:0], 0
 	err := f.dec.next(f.src, &f.msg)
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		f.done = true
 		return nil
 	}
@@ -78,7 +81,7 @@ func (f *reframer) next() error {
 		}
 		ev := errorJSON(errorType(name), bedrockMessage(m.payload))
 		if credentialsRefused(name) {
-			ev = refusedJSON(errorType(name), name, 0, m.payload)
+			ev = refusedJSON(cmp.Or(f.log, slog.Default()), errorType(name), name, 0, m.payload)
 		}
 		f.out = append(append(append(f.out, "event: error\ndata: "...), ev...), "\n\n"...)
 		f.done = true

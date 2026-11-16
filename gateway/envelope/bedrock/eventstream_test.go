@@ -55,7 +55,7 @@ func TestStreamDecoder(t *testing.T) {
 			t.Fatalf("message %d: %q %q %q %q %q", i, got.messageType, got.eventType, got.exceptionType, got.errorCode, got.payload)
 		}
 	}
-	if err := d.next(src, &got); err != io.EOF {
+	if err := d.next(src, &got); !errors.Is(err, io.EOF) {
 		t.Fatalf("after the last message: %v, want io.EOF", err)
 	}
 

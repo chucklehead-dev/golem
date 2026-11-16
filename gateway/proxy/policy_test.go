@@ -12,7 +12,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/key"
 )
 
-// TestPolicy: each row of contracts.md §8 the gateway enforces, through a
+// TestPolicy: each row of contracts.md the gateway enforces, through a
 // real LocalIdentity's scopes.
 func TestPolicy(t *testing.T) {
 	plain, open, capped := key.New(key.Dev), key.New(key.Dev), key.New(key.Dev)

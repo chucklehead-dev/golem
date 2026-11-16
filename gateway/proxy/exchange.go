@@ -20,7 +20,7 @@ const copyBuffer = 8 << 10 // events are mostly under 1 KB; a burst takes more r
 // pooled: the scan results, the usage readers, the copy buffer. The request
 // bodies are not in it: they go back to their pool as soon as they have been
 // sent, so a long stream holds about the copy buffer and the parser's
-// buffers, not a 200 KB agent request (PRD §7: under 64 KiB per stream).
+// buffers, not a 200 KB agent request (prd.md: under 64 KiB per stream).
 type exchange struct {
 	buf        []byte
 	msg        messages.Request
@@ -116,9 +116,9 @@ func (ex *exchange) startWrites(w http.ResponseWriter, stall time.Duration) {
 	ex.watch.arm(http.NewResponseController(w), stall)
 }
 
-// send writes b to the caller (and flushes it, for a stream). A failed
-// write, or one the caller has not taken within the stall (writeWatch), is
-// the caller gone (ADR 0041 §7.6): send then reports false.
+// send writes b to the caller, flushing it for a stream. It reports false
+// when the caller is gone, meaning the write failed or the caller did not
+// take it within the stall bound (writeWatch). ADR 0041.
 func (ex *exchange) send(b []byte, flush bool) bool {
 	if len(b) == 0 {
 		return true

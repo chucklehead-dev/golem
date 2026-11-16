@@ -190,6 +190,27 @@ var staticCreds = aws.CredentialsProviderFunc(func(context.Context) (aws.Credent
 	return aws.Credentials{AccessKeyID: "AKIDEXAMPLE", SecretAccessKey: "secret", SessionToken: "token"}, nil
 })
 
+// TestBetaNotUTF8: an anthropic-beta value that is not valid UTF-8 is
+// refused at the gateway, naming the header. Bedrock would otherwise get
+// U+FFFD in its place, a beta the caller never sent.
+func TestBetaNotUTF8(t *testing.T) {
+	stub := &bedrockStub{creds: aws.Credentials{AccessKeyID: "AKIDEXAMPLE", SecretAccessKey: "secret", SessionToken: "token"}}
+	h, alice, _ := bedrockHandler(t, stub, staticCreds)
+	for _, beta := range []string{"interleaved-thinking-2025-05-14\xff", "interleaved-thinking-2025-05-14, \xc3("} {
+		r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`))
+		r.Header.Set("X-Api-Key", alice)
+		r.Header.Set("Anthropic-Beta", beta)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest || errorCode(t, w) != "request.invalid" || !strings.Contains(w.Body.String(), "anthropic-beta header") {
+			t.Fatalf("beta %q: %d %s; want request.invalid naming the anthropic-beta header", beta, w.Code, w.Body)
+		}
+	}
+	if len(stub.regions)+len(stub.bad) != 0 {
+		t.Fatalf("the stub saw %v %v: a refused request reaches no deployment", stub.regions, stub.bad)
+	}
+}
+
 // TestBedrockEndToEnd: Claude Code's kind of call, an Anthropic Messages
 // stream with a beta, through the gateway to Claude on Bedrock: compiled
 // from config (a bedrock backend, two regions), signed with SigV4 for each

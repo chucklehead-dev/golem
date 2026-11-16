@@ -9,24 +9,23 @@ import (
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
-// InFlight is a gateway's admitted calls in flight, each with what
-// authenticated it and the cancellation of its upstream request, so a
-// revocation ends the calls it withdraws rather than letting them stream
-// on (security-and-correctness.md §2, ADR 0041 §1). When a snapshot that
-// revokes a key, removes its principal from the key's scope or drops its
-// principal is applied, or the emergency denylist gains an entry, the
-// gateway calls Sweep, and each call its keys no longer honour is ended:
-// a stream with its dialect's error event, a call still waiting for the
-// provider's headers with its dialect's error, a whole response being
-// written by a cut. The authorization lease's expiry is no sweep: it
-// stops new requests only.
+// InFlight is a gateway's admitted calls in flight. Each entry keeps what
+// authenticated the call and the cancellation of its upstream request, so
+// a revocation ends the calls it withdraws rather than letting them stream
+// on (security-and-correctness.md).
 //
-// The request path pays two shard-lock round trips a call and nothing
-// allocated: the entry lives in the call's pooled exchange, on an
-// intrusive list of one of the shards, chosen by the request ID's random
-// bits. A sweep walks every call in flight and asks the current keys
-// about each (auth.Keys.Honours: the rules a new request is refused by),
-// so it is linear in the calls in flight, and cheap per call.
+// The gateway calls Sweep when it applies a snapshot that revokes a key or
+// removes a principal, and when the emergency denylist gains an entry.
+// Each call the keys no longer honour is ended. A stream gets its
+// dialect's error event, a call waiting for headers gets its dialect's
+// error, and a whole response being written is cut. The authorization
+// lease's expiry is not a sweep, since it stops only new requests.
+//
+// The request path pays two shard-lock round trips per call and allocates
+// nothing. The entry lives in the call's pooled exchange, on one shard's
+// intrusive list, chosen by the request ID's random bits. A sweep asks the
+// current keys about every call in flight (auth.Keys.Honours), so it is
+// linear in the calls in flight. ADR 0041.
 type InFlight struct {
 	// Keys is the authentication in force: the applied snapshot's keys,
 	// with the site's denylist (nil keys: nothing is checked).
