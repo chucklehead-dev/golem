@@ -22,9 +22,8 @@ type Checker struct {
 	// Now is the clock (tests set it).
 	Now func() time.Time
 
-	mu       sync.Mutex
-	due      map[string]time.Time // by Target.Key: the next check
-	checking map[string]bool
+	mu  sync.Mutex
+	due map[string]time.Time // by Target.Key: the next check
 }
 
 func (c *Checker) now() time.Time {
@@ -50,30 +49,27 @@ func (c *Checker) Run(ctx context.Context, targets func() []*Target) {
 	}
 }
 
-// Check checks, in parallel, each of ts that has a health check, is due,
-// and has no check in flight, and returns when those checks have ended.
+// Check checks, in parallel, each of ts that has a health check and is due,
+// and returns when those checks have ended. Run calls it once a tick, and
+// Table.Targets lists each deployment once, so no check overlaps another.
 func (c *Checker) Check(ctx context.Context, ts []*Target) {
 	var wg sync.WaitGroup
 	now := c.now()
 	c.mu.Lock()
 	if c.due == nil {
-		c.due, c.checking = map[string]time.Time{}, map[string]bool{}
+		c.due = map[string]time.Time{}
 	}
 	for _, t := range ts {
 		k := t.Key()
-		if t.HealthPath == "" || c.checking[k] || now.Before(c.due[k]) {
+		if t.HealthPath == "" || now.Before(c.due[k]) {
 			continue
 		}
-		c.checking[k] = true
 		c.due[k] = now.Add(t.HealthInterval)
 		wg.Go(func() {
 			ok := c.check(ctx, t)
 			if ctx.Err() == nil { // a check cut short by shutdown says nothing
 				c.Health.Checked(t, ok)
 			}
-			c.mu.Lock()
-			delete(c.checking, k)
-			c.mu.Unlock()
 		})
 	}
 	c.mu.Unlock()
