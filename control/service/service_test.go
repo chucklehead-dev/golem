@@ -603,6 +603,9 @@ func TestCaps(t *testing.T) {
 	if _, err := s.MintKey(ctx, alice, Options{}, KeyRequest{Owner: "alice", Scope: "team-a", CapMicros: -1}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("minted with a negative cap: %v", err)
 	}
+	if err := s.AddMember(ctx, admin, Options{}, "team-a", Member{ID: "dan", Kind: "user"}); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
 		c    Caller
@@ -610,6 +613,7 @@ func TestCaps(t *testing.T) {
 	}{
 		{"an outsider", eve, ErrNotFound},
 		{"another scope's manager", mgrB, ErrNotFound},
+		{"a fellow member", Caller{Principal: "dan"}, ErrPermission},
 		{"the owner", alice, nil},
 		{"the scope's manager", mgrA, nil},
 		{"an admin", admin, nil},

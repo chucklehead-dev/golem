@@ -85,8 +85,8 @@ type OrgServiceClient interface {
 	// The scopes the caller may read: its own and those it manages; every
 	// scope for admins.
 	ListScopes(context.Context, *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error)
-	// A scope's members, managers and bound groups: for its members, its
-	// managers and admins; not found for anyone else.
+	// A scope's members, their own caps, managers and bound groups: for its
+	// members, its managers and admins; not found for anyone else.
 	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
 	// Sets a member's cap in a scope for each period (org-model.md §4.1;
 	// 0 removes it, and the member draws up to the scope's default, its
@@ -258,8 +258,8 @@ type OrgServiceHandler interface {
 	// The scopes the caller may read: its own and those it manages; every
 	// scope for admins.
 	ListScopes(context.Context, *connect.Request[v1.ListScopesRequest]) (*connect.Response[v1.ListScopesResponse], error)
-	// A scope's members, managers and bound groups: for its members, its
-	// managers and admins; not found for anyone else.
+	// A scope's members, their own caps, managers and bound groups: for its
+	// members, its managers and admins; not found for anyone else.
 	GetScope(context.Context, *connect.Request[v1.GetScopeRequest]) (*connect.Response[v1.GetScopeResponse], error)
 	// Sets a member's cap in a scope for each period (org-model.md §4.1;
 	// 0 removes it, and the member draws up to the scope's default, its

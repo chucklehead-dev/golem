@@ -30,7 +30,7 @@ message MintKeyRequest {
   // Narrows the scope's models; empty: all of them.
   repeated string models = 3;
   google.protobuf.Timestamp expires = 4;
-  // Checks the change, its authorization and the store\'s invariants, and
+  // Checks the change, its authorization and the store's invariants, and
   // writes nothing (golemctl --dry-run).
   bool validate_only = 5;
   // The key's spend cap for each period, in micro-units; 0: none.
@@ -48,7 +48,7 @@ message MintKeyResponse {
 
 message RevokeKeyRequest {
   string hash = 1;
-  // Checks the change, its authorization and the store\'s invariants, and
+  // Checks the change, its authorization and the store's invariants, and
   // writes nothing (golemctl --dry-run).
   bool validate_only = 2;
 }
@@ -78,7 +78,7 @@ message SetKeyCapRequest {
   string hash = 1;
   // Micro-units of the currency for each period; 0 removes the cap.
   int64 cap_micros = 2;
-  // Checks the change, its authorization and the store\'s invariants, and
+  // Checks the change, its authorization and the store's invariants, and
   // writes nothing (golemctl --dry-run).
   bool validate_only = 3;
 }

@@ -30,7 +30,7 @@ type CreateScopeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The scope's ID: its ScopePolicy's name in the config.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// Checks the change, its authorization and the store\'s invariants, and
+	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -183,7 +183,7 @@ type AddMemberRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Scope  string                 `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	Member *Member                `protobuf:"bytes,2,opt,name=member,proto3" json:"member,omitempty"`
-	// Checks the change, its authorization and the store\'s invariants, and
+	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -281,7 +281,7 @@ type RemoveMemberRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Scope     string                 `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	Principal string                 `protobuf:"bytes,2,opt,name=principal,proto3" json:"principal,omitempty"`
-	// Checks the change, its authorization and the store\'s invariants, and
+	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -379,7 +379,7 @@ type BindManagerRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Scope     string                 `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	Principal string                 `protobuf:"bytes,2,opt,name=principal,proto3" json:"principal,omitempty"`
-	// Checks the change, its authorization and the store\'s invariants, and
+	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -478,7 +478,7 @@ type BindGroupRequest struct {
 	Scope string                 `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	// The group's object ID in Entra.
 	Group string `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
-	// Checks the change, its authorization and the store\'s invariants, and
+	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -576,7 +576,7 @@ type UnbindGroupRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Scope string                 `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	Group string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
-	// Checks the change, its authorization and the store\'s invariants, and
+	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -992,7 +992,7 @@ type SetMemberCapRequest struct {
 	// Micro-units of the currency for each period; 0 removes the member's
 	// own cap.
 	CapMicros int64 `protobuf:"varint,3,opt,name=cap_micros,json=capMicros,proto3" json:"cap_micros,omitempty"`
-	// Checks the change, its authorization and the store\'s invariants, and
+	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
 	ValidateOnly  bool `protobuf:"varint,4,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields

@@ -33,13 +33,13 @@ store is `EntraAuth`, which looks up a token's principal in the current
 document; it never writes.
 
 `cmd/golem-control` wires it up (`apiServer`,
-cmd/golem-control/main.go:424): an `api.Server` over a `service.Service`
+cmd/golem-control/main.go:435): an `api.Server` over a `service.Service`
 over the shared `state.Store`, with `api.EntraAuth` as the
 authenticator. The API is served only with `-listen`, and refuses to
 start without `-entra-tenant` (`TestAPINeedsTenant`); `-entra-audience`
-(default `api://golem-control`, main.go:254) is the control API
+(default `api://golem-control`, main.go:255) is the control API
 registration's, never the gateway's. The `http.Server` cuts off a slow
-peer (main.go:430): headers within 10 seconds, the whole request within
+peer (main.go:450): headers within 10 seconds, the whole request within
 30, the response within a minute, idle connections after two, headers
 at most 64 KiB.
 
@@ -59,7 +59,7 @@ never read, and the oversized one is refused.
 
 `EntraAuth.Authenticate` (control/api/entra.go:28):
 
-1. reads `Authorization: Bearer <token>` (`bearer`, entra.go:49);
+1. reads `Authorization: Bearer <token>` (`bearer`, entra.go:51);
 2. verifies the token with `lib/entra`'s `Verifier.Verify`: RS256 only,
    golem's tenant and a v2 token, the control API registration's
    audience (`api://golem-control`, ADR 0046; a gateway token's
@@ -92,7 +92,7 @@ Admin is never stored: it comes from the token on every call.
 ## 3. Authorization, per method
 
 The rules are in `control/service/service.go`, one method each. Four
-shared helpers sit together near the top (service.go:123-156):
+shared helpers sit together near the top (service.go:127-158):
 
 - `manages(d, c, scope)`: an admin, or a manager binding on the scope;
 - `sees(d, c, scope)`: that, or a member (granted or synced);
@@ -104,15 +104,21 @@ shared helpers sit together near the top (service.go:123-156):
   then `permission denied` ("only scope X's managers *what*") unless `c`
   manages it.
 
+Two more serve the key methods: `keyToChange` (service.go:580) is
+`RevokeKey`'s and `SetKeyCap`'s check, and `withCap` (service.go:314)
+writes a principal's caps for `SetMemberCap` and `RemoveMember`.
+
 | Method | Who may | Notes |
 |---|---|---|
 | `CreateScope` | admins | top-level scopes only for now; an ID and nothing else. Its policy (models, budget and budget mode, limits) is its ScopePolicy, in the config repository (ADR 0050): until that is merged, the scope is published with no models (`TestCreateScope`) |
 | `AddMember` | the scope's managers, admins (`requireManager`) | who the member is comes from `principalToAdd`: an existing principal, unchanged (a different kind or Entra ID given is `invalid`); else a new one with a kind. A manager may create only a keys-only service: never a user, never an Entra ID (ADR 0047: users come from bound groups, and an Entra ID is bound by the sync or an admin). IDs beginning `entra:` are refused |
-| `RemoveMember` | the scope's managers, admins (`requireManager`); a fellow manager only by admins | removes a membership granted in golem; a synced one is the group's (`invalid`: remove them in Entra or unbind the group). When the principal is no longer a member at all, its keys in the scope are revoked, its default scope cleared and its manager role there dropped; a principal still a member through a bound group keeps its keys and role |
+| `RemoveMember` | the scope's managers, admins (`requireManager`); a fellow manager only by admins | removes a membership granted in golem; a synced one is the group's (`invalid`: remove them in Entra or unbind the group). When the principal is no longer a member at all, its keys in the scope are revoked, its default scope and its cap there cleared and its manager role there dropped; a principal still a member through a bound group keeps its keys, cap and role |
+| `SetMemberCap` | the scope's managers, admins (`requireManager`) | a member's own spend cap in the scope for each period, in micro-units (org-model.md §4.1); 0 removes it and the ScopePolicy's default applies. A cap moves no money: it limits a member within the managers' pool. 0 to `snapshot.MaxMicros` (`checkCap`); a non-member is `not found` |
 | `BindGroup`, `UnbindGroup` | admins | an Entra group's members become the scope's at the next sync (control/entrasync); unbinding ends them at the next sync |
 | `BindManager` | admins | `manager` is the only role bound so far; a scope or principal that does not exist is `not found` (`TestBindManager`). The principal need not be a member: managing is its own right (org-model.md §2: a parent team's managers manage its sub-teams), and a manager reads the scope without being one (`TestManagerReadsScope`) |
-| `MintKey` | a member, its own keys; the scope's managers, its services' keys; admins, any (`mayMint`) | owner must be a member; models within the scope's ScopePolicy's, as golem-control's config gives them (`narrows`, `Service.ScopeModels`; not checked while no config has been read: the gateway intersects a key's models with its scope's anyway, `TestKeyModelsFromConfig`); expiry in the future; a personal (user's) key within 90 days, by default at 90 (`keyExpiry`, `MaxPersonalKeyLife`); a service's key needs no expiry |
-| `RevokeKey` | the key's owner, admins; a service's key, its scope's managers | a manager cannot revoke a member's personal key (they remove the member instead); revoking a revoked key is no change; an outsider gets `not found` |
+| `MintKey` | a member, its own keys; the scope's managers, its services' keys; admins, any (`mayMint`) | owner must be a member; models within the scope's ScopePolicy's, as golem-control's config gives them (`narrows`, `Service.ScopeModels`; not checked while no config has been read: the gateway intersects a key's models with its scope's anyway, `TestKeyModelsFromConfig`); a cap as `SetKeyCap`'s; expiry in the future; a personal (user's) key within 90 days, by default at 90 (`keyExpiry`, `MaxPersonalKeyLife`); a service's key needs no expiry. A new key whose display ID another key has is minted again, up to four times (the display ID names its spend account) |
+| `RevokeKey` | the key's owner, admins; a service's key, its scope's managers (`keyToChange`) | a manager cannot revoke a member's personal key (they remove the member instead); revoking a revoked key is no change; an outsider gets `not found` |
+| `SetKeyCap` | the key's owner, its scope's managers, admins (`keyToChange`) | the key's spend cap for each period, in micro-units, 0 removes it; bounds as `SetMemberCap`'s; a revoked key's is `invalid`; an outsider gets `not found`, a fellow member `permission denied` |
 | `Whoami` | anyone signed in | |
 | `ListScopes` | lists what the caller `sees` | |
 | `GetScope` | members, managers, admins | its members, managers and bound groups; anyone else gets `not found` (`visibleScope`). Its policy is not the API's: `golemctl scopes get` names the ScopePolicy to read |
@@ -125,32 +131,34 @@ shared helpers sit together near the top (service.go:123-156):
 | Every call is authenticated before its body is read | `Server.Handler` (api.go:52) | `TestLimits`, `TestAPI` |
 | A request message is at most 1 MiB | `connect.WithReadMaxBytes` in `Handler` (api.go:53) | `TestLimits` (with a 1 KiB limit) |
 | An internal error's text (bucket, S3) never reaches the caller | `connectError` (api.go:89): logged with an id, answered "internal error <id>" | `TestLimits` |
-| Only control API tokens (`golem.manage`, `api://golem-control`) are accepted; a gateway token is not | `entra.Verifier` with `Scope: entra.ScopeManage` (main.go:419) | `TestEntraAuth` |
-| Each method's callers are exactly those of §3 | the methods, through `manages`, `sees`, `visibleScope`, `requireManager`, `mayMint` | `TestAuthorization` (service_test.go:47), `TestRevokeKey` (:98), `TestBindGroup` (:373) |
-| An outsider learns nothing of a scope or key: `not found`, not `permission denied` | `visibleScope`, `RevokeKey` | `TestAuthorization`, `TestRevokeKey`, `TestReads` (:231) |
-| A manager cannot remove a fellow manager | `RemoveMember` | `TestManagerRules` (:127) |
+| Only control API tokens (`golem.manage`, `api://golem-control`) are accepted; a gateway token is not | `entra.Verifier` with `Scope: entra.ScopeManage` (main.go:439) | `TestEntraAuth` |
+| Each method's callers are exactly those of §3 | the methods, through `manages`, `sees`, `visibleScope`, `requireManager`, `mayMint`, `keyToChange` | `TestAuthorization` (service_test.go:50), `TestRevokeKey` (:101), `TestBindGroup` (:376), `TestCaps` (:560) |
+| An outsider learns nothing of a scope or key: `not found`, not `permission denied` | `visibleScope`, `keyToChange` | `TestAuthorization`, `TestRevokeKey`, `TestReads` (:234), `TestCaps` |
+| A manager cannot remove a fellow manager | `RemoveMember` | `TestManagerRules` (:130) |
 | A manager is bound on a scope and of a principal that exist (`not found` otherwise, before the store's invariant); it need not be a member | `BindManager`; `checkRoles` in control/state | `TestBindManager`, `TestManagerReadsScope` |
-| A manager cannot create a user or bind an Entra ID; no principal ID begins `entra:` | `principalToAdd`, `AddMember`; `checkPrincipals` in control/state | `TestIdentityBinding` (:319), `TestEntitlementInvariants` |
+| A manager cannot create a user or bind an Entra ID; no principal ID begins `entra:` | `principalToAdd`, `AddMember`; `checkPrincipals` in control/state | `TestIdentityBinding` (:322), `TestEntitlementInvariants` |
 | A synced membership is removed only in Entra or by unbinding | `RemoveMember` | `TestIdentityBinding` |
-| A removed member's keys in the scope are revoked, and its role there dropped | `RemoveMember`, `Document.RevokeOutside` | `TestRemoveMember` (:207) |
-| A key narrows its scope's models; its owner is a member; its expiry is in the future | `MintKey`, `keyExpiry`; `checkKeys` for live keys' owners | `TestKeyRules` (:172) |
+| A removed member's keys in the scope are revoked, and its cap and role there dropped | `RemoveMember`, `Document.RevokeOutside`, `withCap` | `TestRemoveMember` (:210), `TestCaps` |
+| A key narrows its scope's models; its owner is a member; its expiry is in the future | `MintKey`, `keyExpiry`; `checkKeys` for live keys' owners | `TestKeyRules` (:175) |
+| A cap is 0 (none) to `snapshot.MaxMicros`, the site store's exact sums; a revoked key's cannot be set | `checkCap`, `SetKeyCap` | `TestCaps` |
+| A new key's display ID is no other key's | `mintKey`'s check, `MintKey`'s retry | none |
 | A personal key lives at most 90 days, by default exactly 90 | `keyExpiry` | `TestManagerRules` |
 | A key's plaintext is never stored or audited, only its hash | `MintKey` stores `state.Key` by hash; the audit target is the display prefix | `TestKeyRules` |
-| A dry run checks everything and writes nothing | `Service.apply` → `state.Store.Validate` | `TestValidateOnly` (:156), `TestGolemctl` |
+| A dry run checks everything and writes nothing | `Service.apply` → `state.Store.Validate` | `TestValidateOnly` (:159), `TestGolemctl` |
 | A change and its audit event are one write | `Service.apply` | `TestKeyRules` (the event is in the document written with the key) |
 | A revocation is never undone | `checkRevocations` in control/state | `TestEntitlementInvariants` |
-| Past 80% of the audit outbox's bound a method that grants (`CreateScope`, `AddMember`, `BindGroup`, `BindManager`, `MintKey`) is refused, `validate_only` too, and the restrictive ones (`RevokeKey`, `RemoveMember`, `UnbindGroup`) land; at the bound all are refused and nothing grows | `checkOutbox` in control/state (`state.ErrOutboxFull`), judged by the events a write adds and its effective diff | `TestOutboxBackpressure`, `TestOutboxFullCode`; control/state's `TestOutboxBound` |
+| Past 80% of the audit outbox's bound a method that grants (`CreateScope`, `AddMember`, `BindGroup`, `BindManager`, `MintKey`, and the cap methods, even lowering one) is refused, `validate_only` too, and the restrictive ones (`RevokeKey`, `RemoveMember`, `UnbindGroup`) land; at the bound all are refused and nothing grows | `checkOutbox` in control/state (`state.ErrOutboxFull`), judged by the events a write adds and its effective diff | `TestOutboxBackpressure`, `TestOutboxFullCode`; control/state's `TestOutboxBound` |
 | A minted key's response is not cached | `keys.MintKey` sets `Cache-Control: no-store` (keys.go:25) | none |
 | golemctl's gateway token cannot call the control API | per-resource tokens in golemctl (`Tokens`, `accessToken`); the audience check above | `TestGolemctl` ("the gateway's token is its own"), `TestEntraAuth` |
 
 ## 5. One change: apply, validate-only, audit
 
-Every mutating method ends in `Service.apply` (service.go:99). It wraps
+Every mutating method ends in `Service.apply` (service.go:102). It wraps
 the method's change in a function that runs the change and appends one
 `state.AuditEvent` (time, actor, action such as `key.mint`, target, and a
-small detail map; service.go:105), then hands it to the store:
+small detail map; service.go:108), then hands it to the store:
 
-- normally to `state.Store.Update` (service.go:111), which applies it to
+- normally to `state.Store.Update` (service.go:114), which applies it to
   a copy of the document, numbers the new audit events, checks the
   invariants (`state.check`), and writes with `If-Match`. When another
   writer won, it re-reads and runs the change again, so a change must
@@ -158,7 +166,7 @@ small detail map; service.go:105), then hands it to the store:
   inside it: every check that needs the document runs in the closure,
   and none of them writes to the variables it captured;
 - with `validate_only` (`Options.ValidateOnly`), to `state.Store.Validate`
-  (service.go:109), which does the same up to the check and writes
+  (service.go:112), which does the same up to the check and writes
   nothing. So a dry run reports the same authorization, validation and
   invariant errors a real run would.
 
@@ -248,18 +256,28 @@ saved. The API commands use the control API's; `golemctl token` prints
 the gateway's, for coding agents' credential helpers, and that token
 cannot call the control API (wrong audience and scope).
 
-**Commands.** `run` (main.go:58) dispatches the offline commands
+**Commands.** `run` (main.go:65) dispatches the offline commands
 (`config validate`, `keys mint --dev`), `login` and `token`, and sends
-everything else to `runAPI` (api.go:196). The API commands are one table,
-`apiCommands` (api.go:64), keyed by their name (`whoami`, or two words
-such as `keys create`). Each entry says how many positional arguments it
-takes, and its `flags` function defines its own flags and returns the
-`runFunc` that runs it. `parse` (api.go:218) reads the positional
+everything else to `runAPI` (api.go:228). The API commands are one table,
+`apiCommands` (api.go:67), keyed by their name (`whoami`, or two words
+such as `keys create`), the reads first and then the changes. Each entry
+says how many positional arguments it takes, and its `flags` function
+defines its own flags and returns the `runFunc` that runs it (`noFlags`
+for a command with none). `parse` (api.go:250) reads the positional
 arguments (they come first), defines `--dry-run` on every command, and
 parses the flags. A `call` carries the clients, the arguments,
 `--dry-run` and the output; a mutating command ends with
-`c.done(err, what)` (api.go:35), which returns the call's error or
+`c.done(err, what)` (api.go:38), which returns the call's error or
 prints what changed.
+
+**Amounts.** Caps are given and shown in the currency, not in
+micro-units: `members cap <scope> <principal> <amount>`, `keys cap <hash>
+<amount>` and `keys create --cap <amount>` read "50" or "12.50" with
+`parseAmount` (api.go:327), exactly (at most six decimal places, never
+negative, at most `snapshot.MaxMicros`' whole units), and `amount`
+(api.go:346) prints micro-units back with trailing zeros dropped. 0
+removes a cap. A bad amount is a usage error (exit 2), checked before
+any call.
 
 **--dry-run** sets the request's `validate_only`; a mutation then prints
 `ok (dry run, nothing written): …`. Reads accept the flag and ignore it.
@@ -271,20 +289,21 @@ usage.
 
 ## 9. Worked example: `golemctl keys create --scope team-a`
 
-1. `run` (cmd/golemctl/main.go:58) finds no offline command and calls
-   `runAPI` (main.go:78; cmd/golemctl/api.go:196).
-2. `runAPI` builds the clients (`clients`, api.go:237): it loads the
+1. `run` (cmd/golemctl/main.go:65) finds no offline command and calls
+   `runAPI` (main.go:85; cmd/golemctl/api.go:228).
+2. `runAPI` builds the clients (`clients`, api.go:269): it loads the
    settings for the API URL and installs an interceptor that, on each
    call, gets the control API's token from `accessToken(ctx, control)`
-   (api.go:244), refreshing it if it has under a minute left, and sets
-   `Authorization: Bearer` (api.go:248).
-3. `runAPI` looks up `keys create` in `apiCommands` (api.go:203); `parse`
-   (api.go:208) defines `--scope`, `--owner`, `--models`, `--expires`
-   (api.go:163) and `--dry-run`, and parses them.
-4. The command checks `--scope` (api.go:169), turns `--expires 30d` into
-   a timestamp (api.go:173), builds a `MintKeyRequest` with no owner (the
-   caller's own key) and calls `KeyService.MintKey` (api.go:180): a
-   Connect POST to `/golem.keys.v1.KeyService/MintKey`.
+   (api.go:276), refreshing it if it has under a minute left, and sets
+   `Authorization: Bearer` (api.go:280).
+3. `runAPI` looks up `keys create` in `apiCommands` (api.go:235); `parse`
+   (api.go:240) defines `--scope`, `--owner`, `--models`, `--expires`,
+   `--cap` (api.go:165) and `--dry-run`, and parses them.
+4. The command checks `--scope` (api.go:171), reads a `--cap` amount
+   (api.go:175), turns `--expires 30d` into a timestamp (api.go:187),
+   builds a `MintKeyRequest` with no owner (the caller's own key) and
+   calls `KeyService.MintKey` (api.go:189): a Connect POST to
+   `/golem.keys.v1.KeyService/MintKey`.
 5. On the server, the handler `Server.Handler` wraps around the routes
    (control/api/api.go:52) calls `EntraAuth.Authenticate`
    (control/api/entra.go:28) before the body is read: the token is
@@ -292,24 +311,29 @@ usage.
    `alice`. Connect then decodes the body, refusing one over 1 MiB.
 6. `keys.MintKey` (control/api/keys.go:16) converts the request to a
    `service.KeyRequest` and calls `Service.MintKey` (keys.go:22;
-   control/service/service.go:372).
-7. `MintKey` defaults the owner to the caller (service.go:373), mints the
-   plaintext with `lib/key` and hashes it (service.go:377), then calls
-   `apply` (service.go:379) with the action `key.mint` and a change that,
+   control/service/service.go:450).
+7. `MintKey` defaults the owner to the caller (service.go:452) and tries
+   `mintKey` up to four times (service.go:457). Each try mints the
+   plaintext with `lib/key` and hashes it (service.go:471), then calls
+   `apply` (service.go:474) with the action `key.mint` and a change that,
    on the document:
-   - finds the scope with `visibleScope` (service.go:380), or `not found`;
-   - finds the owner (service.go:384), or `not found`, and checks it is a
-     member (service.go:388), or `invalid key.owner`;
+   - refuses a display ID another key has (service.go:476), so that
+     `MintKey` tries again with a new key;
+   - finds the scope with `visibleScope` (service.go:480), or `not found`;
+   - finds the owner (service.go:483), or `not found`, and checks it is a
+     member (service.go:487), or `invalid key.owner`;
    - checks the caller may mint for that owner with `mayMint`
-     (service.go:391, defined at :418), or `permission denied`;
-   - checks each model is in the scope's (service.go:394), or `invalid
-     key.models[i]`;
-   - works out the expiry with `keyExpiry` (service.go:399, defined at
-     :426): not in the past, and, because alice is a user, at most 90
+     (service.go:490, defined at :536), or `permission denied`;
+   - checks each model is in the scope's with `narrows` (service.go:493,
+     defined at :518), or `invalid key.models[i]`;
+   - checks the cap with `checkCap` (service.go:496), or `invalid
+     key.cap_micros`;
+   - works out the expiry with `keyExpiry` (service.go:499, defined at
+     :544): not in the past, and, because alice is a user, at most 90
      days away (with no `--expires`, exactly 90);
-   - stores the key's record by its hash (service.go:406), never the
+   - stores the key's record by its hash (service.go:506), never the
      plaintext.
-8. `apply` (service.go:99) appends the audit event (actor `alice`, target
+8. `apply` (service.go:102) appends the audit event (actor `alice`, target
    the key's display prefix, detail owner and scope) and calls
    `state.Store.Update`, which checks the invariants (a live key's owner
    is a member of its scope, among others) and writes the document.
@@ -317,9 +341,9 @@ usage.
    `MintKey` sets `Cache-Control: no-store` (keys.go:25), since the key is
    in it. An error instead goes through `connectError` (api.go:89).
 10. golemctl prints the key once, and its hash, which names it from then
-    on (`keys revoke <hash>`; api.go:184).
+    on (`keys revoke <hash>`, `keys cap <hash> <amount>`; api.go:193).
 
-`TestGolemctl` (cmd/golemctl/golemctl_test.go:74) runs this path end to
+`TestGolemctl` (cmd/golemctl/golemctl_test.go:91) runs this path end to
 end against a fake Entra and a real `api.Server`.
 
 ## 10. Adding a method end to end
@@ -329,9 +353,12 @@ end against a fake Entra and a real `api.Server`.
    call it. Run `buf lint && buf generate` in `proto/` and commit `gen/`.
 2. **Service.** Add the method to `control/service`: take a `Caller` (and
    `Options` if it mutates), check authorization inside the change (with
-   `requireManager`, `visibleScope`, `manages` or `sees` where they fit),
+   `requireManager`, `visibleScope`, `keyToChange`, `manages` or `sees`
+   where they fit),
    validate with `invalid(field, …)`, and go through `apply` with an
-   action name such as `scope.update`. Reads use `read`.
+   action name such as `scope.update`. Class the action in
+   control/state/outbox.go's table, or every write of it is refused.
+   Reads use `read`.
 3. **Tests.** Add the operation to `TestAuthorization`'s tables with the
    callers it allows; add its validation cases. Check that removing the
    rule makes a row fail.
@@ -355,8 +382,12 @@ end against a fake Entra and a real `api.Server`.
   exists as `golem-control restore` on the control plane's host (a dry
   run unless `-apply`; control-plane.md, History).
 - Most of the org model is still to come: sub-teams and projects, the
-  services entity, member and service caps, budgets and grants, capture
-  settings, unbinding a manager, and rotating or constraining keys.
+  services entity and its caps, budgets and grants, capture settings,
+  unbinding a manager, and rotating or constraining keys. Members' and
+  keys' caps are built.
+- Past the audit outbox's reserve a cap change is refused even when it
+  lowers a cap: `member.cap` and `key.cap` are classed as widening
+  (control/state/outbox.go), since a cap raised or removed widens.
 - A request with fields the API no longer has (a `policy` in
   `CreateScope`, from before ADR 0050) is not refused: Connect's JSON and
   binary codecs discard unknown fields. golemctl sends none.

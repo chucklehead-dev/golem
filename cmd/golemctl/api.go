@@ -20,6 +20,7 @@ import (
 	"github.com/chucklehead-dev/golem/gen/golem/keys/v1/keysv1connect"
 	orgv1 "github.com/chucklehead-dev/golem/gen/golem/org/v1"
 	"github.com/chucklehead-dev/golem/gen/golem/org/v1/orgv1connect"
+	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 // call is one run of a command over the control API: the clients, the
@@ -63,7 +64,8 @@ func noFlags(run runFunc) func(*flag.FlagSet) runFunc {
 }
 
 // apiCommands are golemctl's commands over the control API, by name.
-var apiCommands = map[string]apiCommand{ // read-only
+var apiCommands = map[string]apiCommand{
+	// Reads: they take --dry-run and ignore it.
 	"whoami": {flags: noFlags(func(ctx context.Context, c *call) error {
 		res, err := c.org.Whoami(ctx, connect.NewRequest(&orgv1.WhoamiRequest{}))
 		if err != nil {
@@ -124,6 +126,7 @@ var apiCommands = map[string]apiCommand{ // read-only
 			return tw.Flush()
 		}
 	}},
+	// Changes: each sends --dry-run as validate_only.
 	"scopes create": {args: 1, flags: noFlags(func(ctx context.Context, c *call) error {
 		_, err := c.org.CreateScope(ctx, connect.NewRequest(&orgv1.CreateScopeRequest{Id: c.pos[0], ValidateOnly: c.dry}))
 		return c.done(err, "scope "+c.pos[0]+" created; it can call nothing until ScopePolicy/"+c.pos[0]+
@@ -312,6 +315,13 @@ func rows(w io.Writer, kv ...string) error {
 	return tw.Flush()
 }
 
+const (
+	microsPerUnit = 1_000_000
+	// maxWhole is the largest whole amount a cap may be: a cap is at most
+	// snapshot.MaxMicros, the site store's exact sums.
+	maxWhole = snapshot.MaxMicros / microsPerUnit
+)
+
 // parseAmount reads an amount in the currency ("50", "12.50", "0": none)
 // as micro-units, exactly: at most six decimal places, never negative.
 func parseAmount(s string) (int64, error) {
@@ -320,8 +330,8 @@ func parseAmount(s string) (int64, error) {
 		return 0, fmt.Errorf("%q is not an amount such as 50 or 12.50", s)
 	}
 	w, err := strconv.ParseInt(cmp.Or(whole, "0"), 10, 64)
-	if err != nil || w > 1<<50/1_000_000 {
-		return 0, fmt.Errorf("%q is not an amount such as 50 or 12.50, at most %d", s, int64(1<<50/1_000_000))
+	if err != nil || w > maxWhole {
+		return 0, fmt.Errorf("%q is not an amount such as 50 or 12.50, at most %d", s, int64(maxWhole))
 	}
 	f := int64(0)
 	if frac != "" {
@@ -329,13 +339,13 @@ func parseAmount(s string) (int64, error) {
 			return 0, fmt.Errorf("%q is not an amount such as 50 or 12.50", s)
 		}
 	}
-	return w*1_000_000 + f, nil
+	return w*microsPerUnit + f, nil
 }
 
 // amount is micro-units in the currency, its trailing zeros dropped.
 func amount(micros int64) string {
-	s := strconv.FormatInt(micros/1_000_000, 10)
-	if f := micros % 1_000_000; f != 0 {
+	s := strconv.FormatInt(micros/microsPerUnit, 10)
+	if f := micros % microsPerUnit; f != 0 {
 		s += "." + strings.TrimRight(fmt.Sprintf("%06d", f), "0")
 	}
 	return s
