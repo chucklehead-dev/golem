@@ -1,0 +1,112 @@
+# The ledger's collector (ADR 0043, operations.md "The ledger's collector"):
+# an OpenTelemetry Collector, contrib distribution, 0.115.1 (the gateway
+# chart's image; test/ledger runs this file on it), in the gateway's pod.
+# It takes the gateway's OTLP/HTTP on loopback, keeps the golem.spend
+# records (the ledger's rows, contracts.md §3.1) in a pipeline of their
+# own, queues them on node-local disk, and writes them to ClickHouse,
+# retrying until ClickHouse takes them. deploy/clickhouse/spend.sql's views
+# turn them into golem.spend's rows.
+#
+# The gateway's spans, metrics and other log records are taken and dropped
+# (the "other" pipelines' nop exporter), so its exports do not fail;
+# forward.yaml, loaded after this file (--config collector.yaml --config
+# forward.yaml), sends them on to an enterprise collector instead.
+#
+# The gateway chart renders this file from its copy,
+# deploy/charts/golem-gateway/files/otel-collector.yaml (kept identical by
+# internal/crdgen's test), mounted at /etc/otelcol/collector.yaml.
+#
+# Environment (the chart sets the first four):
+#   OTELCOL_QUEUE_DIR          the persistent queue's directory, on node-local
+#                              disk writable by the collector's user (10001 in
+#                              the contrib image): the chart's emptyDir lives as
+#                              long as the pod, a hostPath longer
+#   CLICKHOUSE_ENDPOINT        clickhouse-go's DSN: tcp://host:9000?secure=true,
+#                              or https://host:8443; add async_insert=1 and
+#                              wait_for_async_insert=1 for ClickHouse to batch
+#                              the many pods' small inserts
+#   CLICKHOUSE_USERNAME        default "default"
+#   CLICKHOUSE_PASSWORD        a secret's; default empty
+#   CLICKHOUSE_DATABASE        default golem (the DDL's)
+#   GOLEM_OTLP_LISTEN          the receiver's address; default 127.0.0.1:4318,
+#                              the gateway's telemetry endpoint (plaintext only
+#                              to a literal loopback address, lib/otlp)
+#   GOLEM_OTEL_HEALTH_LISTEN   the health check's (GET /); default 127.0.0.1:13133
+
+extensions:
+  file_storage/ledger:
+    directory: ${env:OTELCOL_QUEUE_DIR}
+    create_directory: true
+    # Each queue write is synced: a crash loses nothing acknowledged to the
+    # gateway. The writes are the gateway's exports, a few a second.
+    fsync: true
+  health_check:
+    endpoint: ${env:GOLEM_OTEL_HEALTH_LISTEN:-127.0.0.1:13133}
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: ${env:GOLEM_OTLP_LISTEN:-127.0.0.1:4318}
+
+processors:
+  # The ledger's pipeline carries golem.spend records alone (the gateway
+  # sets the event's name as the body too, which every collector version
+  # can match): golem-control's audit and any other log record go to the
+  # "other" pipeline, never to the table.
+  filter/ledger:
+    error_mode: propagate
+    logs:
+      log_record:
+        - 'body != "golem.spend"'
+  filter/not-ledger:
+    error_mode: propagate
+    logs:
+      log_record:
+        - 'body == "golem.spend"'
+
+exporters:
+  clickhouse/ledger:
+    endpoint: ${env:CLICKHOUSE_ENDPOINT}
+    username: ${env:CLICKHOUSE_USERNAME:-default}
+    password: ${env:CLICKHOUSE_PASSWORD:-}
+    database: ${env:CLICKHOUSE_DATABASE:-golem}
+    # The landing table spend.sql creates (and its views read): the
+    # exporter must not create its own.
+    logs_table_name: spend_otlp
+    create_schema: false
+    timeout: 10s
+    # Billing rows are never given up on: retried until ClickHouse takes
+    # them, the queue holding the rest meanwhile. A row ClickHouse cannot
+    # convert does not fail its batch (spend.sql's golem.spend_rejected).
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0
+    sending_queue:
+      enabled: true
+      storage: file_storage/ledger
+      num_consumers: 2
+      # Requests: the gateway's exports, up to 512 rows each. 50,000 is
+      # about 25 million rows, hours of a pod's rows, a few GB on disk.
+      queue_size: 50000
+  nop: {}
+
+service:
+  extensions: [file_storage/ledger, health_check]
+  pipelines:
+    logs/ledger:
+      receivers: [otlp]
+      processors: [filter/ledger]
+      exporters: [clickhouse/ledger]
+    logs/other:
+      receivers: [otlp]
+      processors: [filter/not-ledger]
+      exporters: [nop]
+    traces/other:
+      receivers: [otlp]
+      exporters: [nop]
+    metrics/other:
+      receivers: [otlp]
+      exporters: [nop]

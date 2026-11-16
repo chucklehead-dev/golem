@@ -46,3 +46,15 @@ func TestChartDDLCurrent(t *testing.T) {
 		t.Fatalf("deploy/charts/golem-control/files/spend.sql differs from deploy/clickhouse/spend.sql (%v): copy it", err)
 	}
 }
+
+// TestChartCollectorCurrent: the golem-gateway chart's copy of the ledger's
+// collector configuration (its sidecar's) is deploy/otel/collector.yaml.
+func TestChartCollectorCurrent(t *testing.T) {
+	want, err := os.ReadFile("../../deploy/otel/collector.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile("../../deploy/charts/golem-gateway/files/otel-collector.yaml"); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("deploy/charts/golem-gateway/files/otel-collector.yaml differs from deploy/otel/collector.yaml (%v): copy it", err)
+	}
+}

@@ -340,40 +340,47 @@ property golem provides.
 
 ## The ledger's collector
 
-The ledger reaches ClickHouse through an OpenTelemetry Collector beside
-the gateway (ADR 0043), configured by `deploy/otel/` (contracts.md §3.1
-has the record's shape):
+The ledger reaches ClickHouse through an OpenTelemetry Collector in the
+gateway's pod (ADR 0043), configured by `deploy/otel/collector.yaml`
+(contracts.md §3.1 has the record's shape):
 
-- **Image:** `otel/opentelemetry-collector-contrib` (also
-  `ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib`),
-  version 0.163.2, the one `test/ledger` runs the configuration on. A new
-  version is taken only with that test passing: the exporter's insert
-  must match `golem.spend_otlp`'s columns.
-- **Configuration:** `--config ledger.yaml` alone writes the ledger;
-  `--config ledger.yaml --config forward.yaml` also forwards spans,
-  metrics and every other log record to the enterprise collector.
-  Mounted read-only (the files' headers list their variables).
+- **Image:** `otel/opentelemetry-collector-contrib:0.115.1`, the gateway
+  chart's (`collector.image`), the version `test/ledger` runs the
+  configuration on (and 0.163.2, which it also passes on). A new version
+  is taken only with that test passing: the exporter's insert must match
+  `golem.spend_otlp`'s columns.
+- **Configuration:** the chart mounts its copy
+  (`deploy/charts/golem-gateway/files/otel-collector.yaml`, kept identical
+  to `deploy/otel/collector.yaml` by `internal/crdgen`'s test) at
+  `/etc/otelcol/collector.yaml`. Alone, it writes the ledger and drops the
+  gateway's spans, metrics and other logs; with `deploy/otel/forward.yaml`
+  loaded after it (`GOLEM_OTEL_UPSTREAM_ENDPOINT`), it forwards those to
+  the enterprise collector.
 - **Ports:** the OTLP/HTTP receiver on `127.0.0.1:4318`, the gateway's
-  `-telemetry 127.0.0.1:4318` (`GOLEM_OTLP_LISTEN`; a DaemonSet listens on
-  the node's address and adds the receiver's `tls` in a third file, as
-  "Telemetry transport" requires); the health check on `:13133` (`GET
-  /`, for the probes; `GOLEM_OTEL_HEALTH_LISTEN`).
-- **ClickHouse:** `GOLEM_CLICKHOUSE_ENDPOINT` (for example
-  `tcp://clickhouse.golem.svc:9000?secure=true`), `GOLEM_CLICKHOUSE_USER`,
-  and `GOLEM_CLICKHOUSE_PASSWORD` from a secret. The user needs `INSERT`
-  on `golem.spend_otlp` and on the tables its views write
-  (`golem.spend`, `golem.spend_checked`, `golem.spend_rejected`,
-  `golem.spend_by_event`, `golem.ingest_by_site`), nothing else: the
-  exporter's schema creation is off, and spend.sql (the DDL Job) creates
-  every table first.
-- **The queue:** `GOLEM_LEDGER_QUEUE_DIR` (default
-  `/var/lib/golem/otelcol`) on node-local disk writable by uid 10001: a
-  `hostPath` keeps queued rows through the pod's replacement, an
-  `emptyDir` only through the collector's restart. Writes are synced.
-  Exports are retried without end, so a ClickHouse outage fills the
-  queue (50,000 of the gateway's exports, hours of rows) rather than
-  dropping rows; past that the receiver refuses, and the gateway's own
-  queue counts what it loses (`golem.ledger.dropped`).
+  telemetry endpoint (plaintext, loopback; `GOLEM_OTLP_LISTEN` to move it:
+  any other address needs the receiver's `tls`, as "Telemetry transport"
+  requires); the health check on `127.0.0.1:13133` (`GET /`,
+  `GOLEM_OTEL_HEALTH_LISTEN`); the collector's own metrics on
+  `localhost:8888`, its default.
+- **ClickHouse:** `CLICKHOUSE_ENDPOINT` (clickhouse-go's DSN, for example
+  `tcp://clickhouse.golem.svc:9440?secure=true&async_insert=1&wait_for_async_insert=1`:
+  each gateway export is one insert, and async inserts let ClickHouse
+  batch the pods' small ones, acknowledged once written),
+  `CLICKHOUSE_USERNAME`, `CLICKHOUSE_PASSWORD` from a secret, and
+  `CLICKHOUSE_DATABASE` (default `golem`). The user needs `INSERT` on
+  `golem.spend_otlp` and on the tables its views write (`golem.spend`,
+  `golem.spend_checked`, `golem.spend_rejected`, `golem.spend_by_event`,
+  `golem.ingest_by_site`), nothing else: the exporter's schema creation is
+  off, and spend.sql (the DDL Job) creates every table first.
+- **The queue:** `OTELCOL_QUEUE_DIR` (the chart's
+  `/var/lib/otelcol/queue`), writable by uid 10001. The chart's
+  `emptyDir` keeps queued rows through the collector's restarts and a
+  ClickHouse outage while the pod lives, not the pod's deletion (a
+  `hostPath` would). Writes are synced. Exports are retried without end,
+  so an outage fills the queue (50,000 of the gateway's exports, hours of
+  rows) rather than dropping rows; past that the receiver refuses, and
+  the gateway's own queue counts what it loses (`golem.ledger.dropped`,
+  `golem.ledger.failed`).
 - **Alerts:** the collector's `otelcol_exporter_queue_size` near
   `otelcol_exporter_queue_capacity` (ClickHouse is not taking rows), and
   any row in `golem.spend_rejected` (a record that would not convert:

@@ -125,11 +125,14 @@ SELECT site, max(ended_at) AS latest FROM golem.spend GROUP BY site;
 -- into their types. The landing tables are Null: nothing is kept in them,
 -- the views see each inserted block.
 --
--- golem.spend_otlp has the columns the exporter inserts: a collector
--- version that changes them fails its inserts, and the end-to-end test
--- (test/ledger), which runs the version deploy/otel pins.
+-- golem.spend_otlp has the columns the exporter inserts, by name: those of
+-- the gateway chart's version (0.115.1) and later ones' (EventName, from
+-- about 0.120), each defaulted when a version does not send it. A version
+-- that changes them fails its inserts, and the end-to-end test
+-- (test/ledger), which runs the chart's version.
 CREATE TABLE IF NOT EXISTS golem.spend_otlp (
     Timestamp          DateTime64(9),
+    TimestampTime      DateTime DEFAULT toDateTime(Timestamp),
     TraceId            String,
     SpanId             String,
     TraceFlags         UInt8,
@@ -144,12 +147,14 @@ CREATE TABLE IF NOT EXISTS golem.spend_otlp (
     ScopeVersion       LowCardinality(String),
     ScopeAttributes    Map(LowCardinality(String), String),
     LogAttributes      Map(LowCardinality(String), String),
-    EventName          String
+    EventName          String DEFAULT ''
 )
 ENGINE = Null;
 
 -- Each record checked: reason is empty for a row golem.spend can hold
--- exactly, else the first column that would not convert. Such a record
+-- exactly, else the first column that would not convert. A ledger record's
+-- body is its event's name, golem.spend (the exporter's EventName is
+-- newer than the chart's collector). Such a record
 -- must not fail its insert: the collector would retry the whole batch,
 -- every good row in it, for ever (its queue's retries have no end, ADR
 -- 0043). It is kept whole in golem.spend_rejected instead, and alerted on
@@ -157,7 +162,7 @@ ENGINE = Null;
 CREATE TABLE IF NOT EXISTS golem.spend_checked (
     reason        LowCardinality(String),
     Timestamp     DateTime64(9),
-    EventName     String,
+    Body          String,
     LogAttributes Map(LowCardinality(String), String)
 )
 ENGINE = Null;
@@ -165,7 +170,7 @@ ENGINE = Null;
 CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_checked_mv TO golem.spend_checked AS
 SELECT
     multiIf(
-        EventName != 'golem.spend', 'event_name',
+        Body != 'golem.spend', 'body',
         toUInt16OrNull(LogAttributes['schema_version']) IS NULL, 'schema_version',
         LogAttributes['row_kind'] NOT IN ('attempt', 'adjustment'), 'row_kind',
         toUUIDOrNull(LogAttributes['request_id']) IS NULL, 'request_id',
@@ -177,7 +182,7 @@ SELECT
         toInt64OrNull(LogAttributes['cost_micros']) IS NULL, 'cost_micros',
         length(LogAttributes['currency']) != 3, 'currency',
         '') AS reason,
-    Timestamp, EventName, LogAttributes
+    Timestamp, Body, LogAttributes
 FROM golem.spend_otlp;
 
 -- The rows, each column from its attribute. No conversion here can fail
@@ -236,11 +241,11 @@ CREATE TABLE IF NOT EXISTS golem.spend_rejected (
     received_at   DateTime64(3, 'UTC') DEFAULT now64(3),
     reason        LowCardinality(String),
     Timestamp     DateTime64(9),
-    EventName     String,
+    Body          String,
     LogAttributes Map(LowCardinality(String), String)
 )
 ENGINE = MergeTree
 ORDER BY received_at;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_rejected_mv TO golem.spend_rejected AS
-SELECT reason, Timestamp, EventName, LogAttributes FROM golem.spend_checked WHERE reason != '';
+SELECT reason, Timestamp, Body, LogAttributes FROM golem.spend_checked WHERE reason != '';

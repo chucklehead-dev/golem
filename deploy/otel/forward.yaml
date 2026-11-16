@@ -1,24 +1,23 @@
-# Everything but the ledger, forwarded: loaded after ledger.yaml
-# (--config ledger.yaml --config forward.yaml), whose receiver it shares.
-# The gateway's spans and metrics, and every log record that is not a
-# golem.spend row, go on to the enterprise collector (ADR 0015) over
-# OTLP/HTTP, with the exporter's usual in-memory queue: they are not
-# billing data.
+# Everything but the ledger, forwarded: loaded after collector.yaml
+# (--config collector.yaml --config forward.yaml), it replaces the "other"
+# pipelines' nop exporter with the enterprise collector (ADR 0015), over
+# OTLP/HTTP with the exporter's in-memory queue: spans, metrics and log
+# records that are not golem.spend rows are not billing data. The ledger's
+# pipeline is unchanged.
 #
 # Environment:
 #   GOLEM_OTEL_UPSTREAM_ENDPOINT  required: the enterprise collector's base
 #                                 URL, https://collector.example:4318
 #                                 (the exporter adds /v1/traces, ...)
+#   GOLEM_SITE, GOLEM_POOL        the gateway chart's: added to what is
+#                                 forwarded as golem.site and golem.pool
 
 processors:
-  # The complement of ledger.yaml's filter: golem.spend records are the
-  # ledger pipeline's alone.
-  filter/not-ledger:
-    error_mode: propagate
-    logs:
-      log_record:
-        - 'log.event_name == "golem.spend"'
   batch/forward: {}
+  resource/forward:
+    attributes:
+      - {key: golem.site, value: "${env:GOLEM_SITE}", action: upsert}
+      - {key: golem.pool, value: "${env:GOLEM_POOL}", action: upsert}
 
 exporters:
   otlphttp/upstream:
@@ -27,15 +26,15 @@ exporters:
 
 service:
   pipelines:
-    traces/forward:
+    logs/other:
       receivers: [otlp]
-      processors: [batch/forward]
+      processors: [filter/not-ledger, resource/forward, batch/forward]
       exporters: [otlphttp/upstream]
-    metrics/forward:
+    traces/other:
       receivers: [otlp]
-      processors: [batch/forward]
+      processors: [resource/forward, batch/forward]
       exporters: [otlphttp/upstream]
-    logs/forward:
+    metrics/other:
       receivers: [otlp]
-      processors: [filter/not-ledger, batch/forward]
+      processors: [resource/forward, batch/forward]
       exporters: [otlphttp/upstream]
