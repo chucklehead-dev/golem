@@ -54,13 +54,14 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		p = period.Of(c.Started, l.Period)
 	}
 	firstDay := period.FirstDay(p)
+	id := c.AttemptID()
 	s, i, f := attribute.String, attribute.Int64, attribute.Float64
 	*dst = [...]attribute.KeyValue{
 		i("schema_version", SchemaVersion),
 		s("row_kind", "attempt"),
 		s("request_id", c.RequestID),
-		s("attempt_id", c.AttemptID()),
-		s("event_id", c.AttemptID()), // each attempt its own event (model/attempts.md)
+		s("attempt_id", id),
+		s("event_id", id), // each attempt its own event (model/attempts.md)
 		s("provider_request_id", c.ProviderRequestID),
 		s("started_at", c.Started.UTC().Format(time.RFC3339Nano)),
 		s("ended_at", c.Ended.UTC().Format(time.RFC3339Nano)),

@@ -8,12 +8,14 @@ package telemetry
 
 import (
 	"context"
+	"crypto/sha1"
 	"errors"
 	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+	"uuid"
 
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
@@ -73,12 +75,38 @@ type Call struct {
 }
 
 // AttemptID is the attempt's ID, its ledger event's: the request ID for a
-// call's first attempt, then the request ID and the attempt's number.
+// call's first attempt, then AttemptUUID's of the request ID and the
+// attempt's number, a UUID like the request ID's (golem.spend's columns are
+// UUIDs, contracts.md §3).
 func (c *Call) AttemptID() string {
 	if c.Attempt <= 1 {
 		return c.RequestID
 	}
-	return c.RequestID + "." + strconv.Itoa(c.Attempt)
+	return AttemptUUID(c.RequestID, c.Attempt)
+}
+
+// AttemptUUID is attempt n's ID in the call requestID, for n > 1: the
+// name-based UUID, version 5 (RFC 9562 §5.5: SHA-1), whose namespace is the
+// request ID and whose name is n in decimal ("2"), in the canonical
+// lowercase form. Anyone with the request ID can derive it again, and
+// distinct (request, attempt) pairs have distinct IDs. A request ID that is
+// not a UUID (only tests have one) is hashed as the name's prefix
+// instead, under the nil namespace: still a UUID, still deterministic.
+func AttemptUUID(requestID string, n int) string {
+	h := sha1.New()
+	if ns, err := uuid.Parse(requestID); err == nil {
+		h.Write(ns[:])
+	} else {
+		h.Write(make([]byte, 16))
+		h.Write([]byte(requestID + "."))
+	}
+	h.Write(strconv.AppendInt(nil, int64(n), 10))
+	var sum [sha1.Size]byte
+	var id uuid.UUID
+	copy(id[:], h.Sum(sum[:0]))
+	id[6] = id[6]&0x0f | 0x50 // version 5
+	id[8] = id[8]&0x3f | 0x80 // the RFC's variant
+	return id.String()
 }
 
 // Telemetry records calls. Its methods are safe for concurrent use, and on

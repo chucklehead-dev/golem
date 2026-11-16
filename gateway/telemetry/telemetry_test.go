@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -158,5 +159,37 @@ func TestRowPeriodIsTheCounters(t *testing.T) {
 	r.t.Ended(t.Context(), c)
 	if rows := r.ledgerRows(t); len(rows) != 1 || rows[0]["period"] != "2026-10-01" {
 		t.Fatalf("rows %v", rows)
+	}
+}
+
+// TestAttemptIDs: a call's first attempt is its request; a retry's ID is
+// the RFC 9562 name-based UUID (version 5) of its number under the request
+// ID, the value Python's uuid.uuid5(request_id, "2") gives, so it fits
+// golem.spend's UUID columns and can be derived again from the request.
+func TestAttemptIDs(t *testing.T) {
+	const req = "019a8f2e-7c1d-7b3a-9e4f-0123456789ab"
+	c := Call{RequestID: req}
+	for _, n := range []int{0, 1} {
+		if c.Attempt = n; c.AttemptID() != req {
+			t.Fatalf("attempt %d's ID %q, want the request's", n, c.AttemptID())
+		}
+	}
+	c.Attempt = 2
+	if got, want := c.AttemptID(), "d2281828-c339-5118-9712-d9413ddf991f"; got != want {
+		t.Fatalf("attempt 2's ID %q, want %q (uuid5(request_id, \"2\"))", got, want)
+	}
+	seen := map[string]bool{req: true}
+	for n := 2; n < 50; n++ {
+		id := AttemptUUID(req, n)
+		if _, err := uuid.Parse(id); err != nil || seen[id] || id[14] != '5' {
+			t.Fatalf("attempt %d's ID %q: want a new version-5 UUID (%v)", n, id, err)
+		}
+		seen[id] = true
+	}
+	if AttemptUUID("01a2-req", 2) == AttemptUUID("01a2-req", 3) {
+		t.Fatal("a non-UUID request ID's attempts share an ID")
+	}
+	if _, err := uuid.Parse(AttemptUUID("01a2-req", 2)); err != nil {
+		t.Fatal(err)
 	}
 }
