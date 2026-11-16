@@ -151,18 +151,52 @@ type FederatedToken struct {
 	mu      sync.Mutex
 	tok     string
 	expires time.Time
+	// fetching, while a token is being fetched, is closed when the fetch
+	// ends: one fetch at a time, made outside mu, so a caller waiting for
+	// it can give up at its own deadline.
+	fetching chan struct{}
 }
 
-// Token is a current token.
+// Token is a current token: the cached one, or one fetched by this call or
+// by another already fetching.
 func (f *FederatedToken) Token(ctx context.Context) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.tok != "" && time.Until(f.expires) > time.Minute {
-		return f.tok, nil
+	for {
+		f.mu.Lock()
+		if f.tok != "" && time.Until(f.expires) > time.Minute {
+			tok := f.tok
+			f.mu.Unlock()
+			return tok, nil
+		}
+		wait := f.fetching
+		if wait == nil {
+			done := make(chan struct{})
+			f.fetching = done
+			f.mu.Unlock()
+			tok, expires, err := f.fetch(ctx)
+			f.mu.Lock()
+			if err == nil {
+				f.tok, f.expires = tok, expires
+			}
+			f.fetching = nil
+			f.mu.Unlock()
+			close(done)
+			return tok, err
+		}
+		f.mu.Unlock()
+		select { // then the cached token, or this call's own fetch if that one failed
+		case <-wait:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
+}
+
+// fetch asks Entra's token endpoint for a token, with the federated
+// credential as the client assertion.
+func (f *FederatedToken) fetch(ctx context.Context) (string, time.Time, error) {
 	assertion, err := os.ReadFile(cmp.Or(f.TokenFile, os.Getenv("AZURE_FEDERATED_TOKEN_FILE")))
 	if err != nil {
-		return "", fmt.Errorf("the federated token file: %w", err)
+		return "", time.Time{}, fmt.Errorf("the federated token file: %w", err)
 	}
 	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {f.ClientID},
 		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
@@ -171,7 +205,7 @@ func (f *FederatedToken) Token(ctx context.Context) (string, error) {
 	endpoint := strings.TrimRight(cmp.Or(f.Authority, "https://login.microsoftonline.com"), "/") + "/" + url.PathEscape(f.Tenant) + "/oauth2/v2.0/token"
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	c := f.Client
@@ -180,7 +214,7 @@ func (f *FederatedToken) Token(ctx context.Context) (string, error) {
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	defer resp.Body.Close()
 	var tr struct {
@@ -190,11 +224,10 @@ func (f *FederatedToken) Token(ctx context.Context) (string, error) {
 		Description string `json:"error_description"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tr); err != nil {
-		return "", fmt.Errorf("Entra's token endpoint: %s: %w", resp.Status, err)
+		return "", time.Time{}, fmt.Errorf("Entra's token endpoint: %s: %w", resp.Status, err)
 	}
 	if tr.Error != "" || tr.AccessToken == "" {
-		return "", fmt.Errorf("Entra refused the federated credential: %s: %s", cmp.Or(tr.Error, resp.Status), tr.Description)
+		return "", time.Time{}, fmt.Errorf("Entra refused the federated credential: %s: %s", cmp.Or(tr.Error, resp.Status), tr.Description)
 	}
-	f.tok, f.expires = tr.AccessToken, time.Now().Add(time.Duration(tr.ExpiresIn)*time.Second)
-	return f.tok, nil
+	return tr.AccessToken, time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second), nil
 }

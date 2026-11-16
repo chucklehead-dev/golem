@@ -78,8 +78,14 @@ type Holder struct {
 	// deployment's calls fail with what to configure.
 	AWS aws.CredentialsProvider
 
-	mu    sync.Mutex
-	floor uint64
+	// applying serializes Apply, its OnApply included, so the callbacks
+	// see the snapshots in the order they were applied; mu guards the
+	// floor and the transports only, and is not held across OnApply (the
+	// limiter's update and the sweep of every call in flight), so Floor
+	// and RaiseFloor do not wait on it.
+	applying sync.Mutex
+	mu       sync.Mutex
+	floor    uint64
 	// transports by deployment identity, kept across snapshots so
 	// connections and their state survive a swap (gateway.md §6).
 	transports map[transportKey]*http.Transport
@@ -121,32 +127,43 @@ func (h *Holder) RaiseFloor(seq uint64) {
 // newer than the snapshot applied, one whose lease has already expired, or
 // one that does not compile is refused and the previous snapshot kept.
 func (h *Holder) Apply(s *snapshot.Snapshot, hash string, secrets Secrets) error {
+	h.applying.Lock()
+	defer h.applying.Unlock()
+	c, err := h.swap(s, hash, secrets)
+	if err != nil {
+		return err
+	}
+	if h.OnApply != nil {
+		h.OnApply(c)
+	}
+	return nil
+}
+
+// swap is Apply's checks, compilation and swap, under mu.
+func (h *Holder) swap(s *snapshot.Snapshot, hash string, secrets Secrets) (*Compiled, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// No exemption for the first snapshot after a start: the floor may come
 	// from a trusted checkpoint, and a replay below it is exactly what it
 	// is there to refuse (model/publication.md, the trusted floor).
 	if s.PublishSeq < h.floor {
-		return fmt.Errorf("snapshot %d is below the floor %d: refused (a replay or a stale publisher)", s.PublishSeq, h.floor)
+		return nil, fmt.Errorf("snapshot %d is below the floor %d: refused (a replay or a stale publisher)", s.PublishSeq, h.floor)
 	}
 	if c := h.cur.Load(); c != nil && s.PublishSeq <= c.Snapshot.PublishSeq {
-		return fmt.Errorf("snapshot %d is not newer than the applied %d: refused", s.PublishSeq, c.Snapshot.PublishSeq)
+		return nil, fmt.Errorf("snapshot %d is not newer than the applied %d: refused", s.PublishSeq, c.Snapshot.PublishSeq)
 	}
 	if !s.ValidUntil.IsZero() && !h.now().Before(s.ValidUntil) {
-		return fmt.Errorf("snapshot %d expired at %s: refused", s.PublishSeq, s.ValidUntil)
+		return nil, fmt.Errorf("snapshot %d expired at %s: refused", s.PublishSeq, s.ValidUntil)
 	}
 	c, err := h.compile(s, hash, secrets)
 	if err != nil {
 		// Not the publication's fault alone: a secret it names may be
 		// mounted later. The bucket source retries it (applyError).
-		return applyError{err}
+		return nil, applyError{err}
 	}
 	h.floor = s.PublishSeq
 	h.cur.Store(c)
-	if h.OnApply != nil {
-		h.OnApply(c)
-	}
-	return nil
+	return c, nil
 }
 
 func (h *Holder) now() time.Time {

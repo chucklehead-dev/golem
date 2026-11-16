@@ -55,6 +55,27 @@ type Guard struct {
 	swept    time.Time
 	logged   time.Time // the last overflow logged
 	overflow int       // sources unlimited since
+	report   func()    // an overflow to log once mu is released
+	// sweepMax bounds the sources one sweep looks at (default
+	// sweepBatch): the sweep runs on a request's path, under mu.
+	sweepMax int
+}
+
+// sweepBatch is how many sources a sweep looks at, at most: a full table's
+// 65,536 under the lock every request takes would stall them all. Map
+// iteration starts at a random place, so successive sweeps look at
+// different sources.
+const sweepBatch = 4096
+
+// unlock releases mu, then logs an overflow found under it: no request
+// waits on the log's write.
+func (g *Guard) unlock() {
+	report := g.report
+	g.report = nil
+	g.mu.Unlock()
+	if report != nil {
+		report()
+	}
 }
 
 type source struct {
@@ -129,7 +150,7 @@ func (g *Guard) Admit(src string) *Refusal {
 		return nil
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	defer g.unlock()
 	now := g.now()
 	s := g.source(src, now)
 	if s == nil {
@@ -152,7 +173,7 @@ func (g *Guard) Failing(src string) *Refusal {
 		return nil
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	defer g.unlock()
 	now := g.now()
 	s := g.source(src, now)
 	if s == nil {
@@ -172,7 +193,7 @@ func (g *Guard) Failed(src string) {
 		return
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	defer g.unlock()
 	now := g.now()
 	s := g.source(src, now)
 	if s == nil {
@@ -188,7 +209,7 @@ func (g *Guard) fillFail(s *source, now time.Time) {
 }
 
 // source is src's buckets; at MaxSources, once a second, the sources whose
-// buckets have refilled are forgotten (a forgotten source starts full, as
+// buckets have refilled are forgotten (among at most sweepBatch looked at) (a forgotten source starts full, as
 // it would be), and if none were, src has none (nil): it is not limited,
 // rather than sharing a bucket any one source could drain for all.
 func (g *Guard) source(src string, now time.Time) *source {
@@ -202,7 +223,11 @@ func (g *Guard) source(src string, now time.Time) *source {
 	if len(g.sources) >= limit {
 		if now.Sub(g.swept) >= time.Second {
 			g.swept = now
+			n := cmp.Or(g.sweepMax, sweepBatch)
 			for k, s := range g.sources {
+				if n--; n < 0 {
+					break
+				}
 				if s.req.full(now, g.Rate, g.Burst) && s.fail.full(now, g.FailRate, g.FailBurst) {
 					delete(g.sources, k)
 				}
@@ -225,8 +250,11 @@ func (g *Guard) overflowed(now time.Time, limit int) {
 	if now.Sub(g.logged) < time.Minute {
 		return
 	}
-	cmp.Or(g.Log, slog.Default()).Warn("golem-gateway: the guard's source table is full; new sources are not limited before authentication until kept ones refill",
-		"sources", limit, "unlimited", g.overflow)
+	log, unlimited := cmp.Or(g.Log, slog.Default()), g.overflow
+	g.report = func() {
+		log.Warn("golem-gateway: the guard's source table is full; new sources are not limited before authentication until kept ones refill",
+			"sources", limit, "unlimited", unlimited)
+	}
 	g.logged, g.overflow = now, 0
 }
 
