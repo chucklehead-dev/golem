@@ -12,7 +12,7 @@ baseline one, marked in both.
 | [0002](0002-no-replay-after-first-byte.md) | Retries and failover stop at the first response byte |
 | [0003](0003-components-and-layering.md) | Gateway, golem-control (one Deployment, a leader), golemctl, console; layering checked by a test (the operator removed by 0036) |
 | [0004](0004-behind-the-mesh.md) | Behind the enterprise's ingress and mesh, not a Gateway API implementation |
-| [0005](0005-config-crds-and-overrides.md) | Five config CRDs read by golem-control, one validation path, expiring operational overrides |
+| [0005](0005-config-crds-and-overrides.md) | Five config CRDs read by golem-control, one validation path, expiring operational overrides (in M1 the config is a git checkout, no objects in the cluster, and no overrides: 0054) |
 | [0006](0006-state-and-distribution-in-object-storage.md) | Control-plane state as one CAS-updated document in S3; whole snapshots published there and polled by gateways |
 | [0007](0007-bucket-root-of-trust.md) | Signed snapshots, one publish sequence, safe restore, locked writes, offsite backup, audiences, emergency denylist |
 | [0008](0008-sites-and-regions.md) | One control plane and one S3 store for every site; no cross-cluster access; cold-standby second region |
@@ -50,7 +50,7 @@ baseline one, marked in both.
 | [0039](0039-bypass-controls.md) | Block bypass: SCPs for Bedrock, egress blocks, provider key-creation limits, managed agent settings |
 | [0040](0040-argo-cd-and-crossplane.md) | Delivery through Argo CD and Argo Rollouts; cloud resources through the platform's Crossplane (`GolemInstallation`, `GolemSite`) |
 
-| [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, the pool capture boundary and a golem-owned capture collector, request feature modes by route class, delivery privileges, composite publication freshness by consistent reads, narrowed budget claims |
+| [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, the pool capture boundary and a golem-owned capture collector, request feature modes by route class, delivery privileges, composite publication freshness by consistent reads (for M1's git checkout, restated by 0054), narrowed budget claims |
 | [0042](0042-known-spend-by-counter-watermark.md) | Known spend by counter sequence and ledger watermark: O(1) admission, exact under snapshot skew; supersedes the hand-off by event. Superseded by 0048 |
 | [0043](0043-ledger-durability.md) | Ledger durability in a node-local collector's persistent queue, not a gateway spool; rows written at a call's end with their numbers joined later; gaps reconstructed from the site counter before they are declared lost |
 | [0044](0044-budgets-are-controls-not-ceilings.md) | Budgets are admission and monitoring controls, not spending ceilings; provider-account limits are the financial backstop; reconciliation is authoritative; `strict` renamed `declaredWorstCaseCheck`, described by what it closes on |
@@ -63,3 +63,4 @@ baseline one, marked in both.
 | [0051](0051-gateway-retries-are-failovers.md) | The gateway's retries are failovers, of refusals only: an attempt only to a deployment the call has not tried (a pool of one makes one attempt), and only after the provider never saw it or refused it before any output (not 500, 502, 504, a timeout or a cut) |
 | [0052](0052-accounting-for-m1.md) | Accounting for M1: known spend is the snapshot's alone (no site counter, no replays); scope budgets only (no member or key caps, no provider quota shares, no declared-worst-case check); spend within a snapshot's lag is a stated term of the bound |
 | [0053](0053-one-golem-control-replica-for-m1.md) | One golem-control replica for M1 (Recreate, no PDB): it claims the state document's fence once at start and fences every leader-only write by it, a lingering predecessor refused and exiting; no lease object. Supersedes 0049's lease and 0030's 30 s failover; loses sub-minute control-API failover (gateways ride on their lease), removes the hazard of two git-sync checkouts publishing an older config |
+| [0054](0054-m1-config-from-a-git-checkout.md) | M1 config from a git checkout: golem-control compiles git-sync's checkout of the GitOps repository, no config objects in the cluster (CRDs not installed), each snapshot naming its commit; freshness by the last fetch, no lease renewed past `-max-config-age`. Supersedes 0005's in-cluster objects and 0041 §7.2's consistent LIST, for M1 |

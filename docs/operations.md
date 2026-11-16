@@ -9,8 +9,8 @@ Crossplane for cloud resources, and a few golem-control jobs.
 
 | Piece | Delivered as | Notes |
 |---|---|---|
-| Config CRDs (`Backend`, `ModelRoute`, `ScopePolicy`, `Hook`, `PriceList`) | CRD definitions in the chart (first sync wave); objects in the GitOps repository (CODEOWNERS: platform team), synced by Argo CD | Validated by schema CEL rules at `kubectl apply` and by `golemctl config validate` in CI; status written by golem-control (ADR 0005) |
-| golem-control | Helm chart: Deployment (two replicas), Service, PDB, ServiceAccount with workload identity, RBAC to read config CRDs, write their status, hold the leader Lease and update the collector's Langfuse Secret | One installation, on EKS (ADR 0008) |
+| Config (`Backend`, `ModelRoute`, `ScopePolicy`, `PriceList`; `Hook` not built) | YAML in the GitOps repository (CODEOWNERS: platform team), checked out by golem-control's git-sync sidecar and compiled from the checkout (ADR 0054). **Not synced into the cluster**: no Argo Application for the config repository, and the chart's CRDs are not installed (`skipCrds`; kept generated for a later CRD watch) | Validated by `golemctl config validate` in CI (the one compiler; the CRDs carry no CEL rules), and by golem-control at load; no status objects: its log and `golem.control.config.renewing` say whether an edit applied, each snapshot's `configRevision` which commit is published |
+| golem-control | Helm chart: Deployment (one replica, Recreate, ADR 0053), Service, ServiceAccount with workload identity (no Kubernetes RBAC: it reads no cluster objects), a git-sync sidecar with the config repository's deploy key | One installation, on EKS (ADR 0008). Not built in M1: the job updating the capture collector's Langfuse Secret |
 | Gateway pools | Helm chart per pool: Argo Rollout (three replicas across zones), Service, PDB, ServiceAccount, a mount/reference to the separately managed emergency-denylist ConfigMap, provider Secrets mounted for the pool's backends, egress ServiceEntries, the `AuthorizationPolicy` limiting who may reach it | Internal pools and the edge pool (its ingress, WAF and source ranges) |
 | Valkey | ElastiCache, composed by Crossplane per site | In-transit encryption and RBAC: the gateways run with `-valkey-tls` (the system's roots, or `-valkey-ca`) and `-valkey-user`, the password in `$VALKEY_PASSWORD` from a Secret, never a flag |
 | Bucket, KMS keys, IAM roles, SCPs, Entra registrations | Crossplane claims: `GolemInstallation` once, `GolemSite` per remote site (ADR 0040) | Includes the bypass SCP of ADR 0039 and remote sites' Roles Anywhere or federation |
@@ -157,8 +157,9 @@ added to now, or `max by (pool) golem.control.publish.valid_until`.
 
 Each cluster's charts are deployed by Argo CD's ApplicationSet, which
 already knows every cluster; nothing in one cluster reaches another's API server
-(ADR 0008). Remote sites run gateway pools and a Valkey; their config CRDs
-live in the EKS cluster, selected by a `site` label.
+(ADR 0008). Remote sites run gateway pools and a Valkey; their config is
+the same GitOps repository golem-control publishes from (ADR 0054; per-site
+selection by label is not built in M1: every pool gets the same snapshot).
 
 ## Bedrock: the gateway's AWS role
 

@@ -10,6 +10,13 @@
 # out every pool before golem-control. The first install is the other way
 # round (docs/operations.md, First install): golem-control publishes
 # first, else the new gateways have nothing to serve.
+#
+# The config repository is not an Application: nothing in the cluster
+# reads config objects (ADR 0054). golem-control's git-sync checks it out
+# and golem-control compiles it; syncing it into the cluster would make a
+# second copy that is not the one published. For the same reason the
+# chart's CRDs are skipped (skipCrds): they are kept generated for a later
+# CRD watch, and installed by nothing in M1.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -24,6 +31,7 @@ spec:
     targetRevision: main
     path: deploy/charts/golem-control
     helm:
+      skipCrds: true
       valuesObject:
         bucket: s3://golem-state/golem/
         signingKey: kms:arn:aws:kms:us-east-2:123456789012:key/REPLACE

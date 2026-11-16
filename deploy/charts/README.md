@@ -5,9 +5,8 @@ goes gateway pools first, then golem-control (a gateway refuses snapshot
 members it does not know); the first install golem-control first
 (docs/operations.md §4, deploy/argocd/golem.yaml).
 
-- `golem-control`: two replicas (one leads, by a lease in the state
-  bucket), the control API, `/livez` and `/readyz` on `-probes`, and a
-  git-sync sidecar keeping the config repository checked out (an init
+- `golem-control`: one replica (ADR 0053, Recreate), the control API,
+  `/livez` and `/readyz` on `-probes`, and a git-sync sidecar keeping the config repository checked out (an init
   container makes the first checkout). Needs: the bucket, the KMS
   publishing key, the config repository's deploy key (a Secret), the
   control API's Entra tenant; ClickHouse and the Entra group sync are
@@ -38,10 +37,16 @@ and a gateway of another zone refuses it, naming both).
 Each ServiceAccount takes its AWS role by annotation (IRSA or Pod
 Identity).
 
-- The config CRDs are in golem-control's `crds/` (Helm installs them
-  first), generated from `lib/api/v1alpha1` by internal/crdgen, whose test
-  fails when they are not current (`GOLEM_UPDATE_CRDS=1 go test
-  ./internal/crdgen/`).
+- The config is the GitOps repository's checkout, not objects in the
+  cluster (ADR 0054): golem-control's git-sync clones it, golem-control
+  publishes each commit (the snapshot's `configRevision`) and stops
+  renewing leases once git-sync has not fetched for `config.maxAge`.
+  The config CRDs in golem-control's `crds/` are generated from
+  `lib/api/v1alpha1` by internal/crdgen, whose test fails when they are
+  not current (`GOLEM_UPDATE_CRDS=1 go test ./internal/crdgen/`), for a
+  later CRD watch; nothing in M1 reads them, so they are not installed:
+  the Argo sample sets `skipCrds`, and a plain Helm install passes
+  `--skip-crds`.
 - golem-control's `clickhouse.ddl` runs the ledger's DDL as a pre-install
   and pre-upgrade Job (its copy, `files/spend.sql`, is checked against
   deploy/clickhouse/spend.sql).
