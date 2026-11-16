@@ -72,13 +72,15 @@ As built: `gateway/proxy`'s `Handler.ServeHTTP`, a step at a time. The
 code's walk through it, with each step's function, is the
 [orientation](walkthroughs/README.md#2-a-requests-path-through-the-gateway).
 
-1. **Accept.** `net/http.Server` for HTTP/1.1 and HTTP/2 (h2c behind a
-   mesh). Headers bounded to 64 KiB; `ReadHeaderTimeout` 10 s; idle
+1. **Accept.** `net/http.Server` for HTTP/1.1 and HTTP/2 (h2c). The chart
+   has the mesh sidecar connect over HTTP/1.1, which costs about a third of
+   h2c's server CPU per streamed event. Headers bounded to 64 KiB; `ReadHeaderTimeout` 10 s; idle
    keep-alives closed after two minutes; HTTP/2 at most 256 streams per
    connection with pings after 30 s of silence. No `WriteTimeout`
-   (streams are long): each write to the caller has its own deadline
-   (`WriteStall`, 30 s), so a client that stops reading is a caller gone,
-   and none is armed while the provider is silent. Connections are bounded
+   (streams are long): one watchdog per call cuts a write to the caller
+   that has been in progress longer than `WriteStall` (30 s; enforced within
+   1–1.5 times it), so a client that stops reading is a caller gone. Nothing
+   is watched while the provider is silent. Connections are bounded
    by `guard.Listener`: `-max-conns` (8192) open at once, and
    `-max-conns-per-source` (off) from one address.
 2. **The floor before authentication** (`gateway/guard`). Each request is

@@ -15,8 +15,10 @@ metadata:
 spec:
   selector: {{- include "golem-gateway.selector" . | nindent 4 }}
   ports:
-    # h2c behind the mesh (gateway.md §3 step 1).
-    - {name: http, port: {{ .Values.service.port }}, targetPort: http, appProtocol: kubernetes.io/h2c}
+    # HTTP/1.1 from the mesh sidecar: about a third of h2c's server CPU per
+    # streamed event (BenchmarkFront), and loopback connections are cheap.
+    # The gateway still accepts h2c.
+    - {name: http, port: {{ .Values.service.port }}, targetPort: http, appProtocol: http}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
