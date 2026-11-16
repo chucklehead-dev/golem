@@ -53,7 +53,7 @@ func TestS3Publish(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := p.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+		if _, err := p.Publish(t.Context(), state.Fence{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 			return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, ValidUntil: time.Now().Add(time.Hour).UTC()}, nil
 		}); err != nil {
 			t.Fatal(err)
