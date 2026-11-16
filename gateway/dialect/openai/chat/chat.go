@@ -12,7 +12,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
-	"github.com/chucklehead-dev/golem/gateway/dialect/openai/internal/usage"
+	usage "github.com/chucklehead-dev/golem/gateway/dialect/internal/openaiusage"
 )
 
 // Flags mark policy-relevant members present in a request (contracts.md §8).

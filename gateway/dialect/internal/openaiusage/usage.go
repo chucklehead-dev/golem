@@ -1,6 +1,6 @@
 // Package usage reads OpenAI's usage object, which Chat Completions and
 // Responses shape alike under different member names.
-package usage
+package openaiusage
 
 import (
 	"github.com/chucklehead-dev/golem/gateway/canon"

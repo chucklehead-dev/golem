@@ -16,7 +16,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
-	"github.com/chucklehead-dev/golem/gateway/dialect/openai/internal/usage"
+	usage "github.com/chucklehead-dev/golem/gateway/dialect/internal/openaiusage"
 )
 
 // known lists the request members golem forwards without comment; others
