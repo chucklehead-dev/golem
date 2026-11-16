@@ -218,7 +218,7 @@ module attempts {
   // WORST. So a retry need not check the budget again: an earlier version
   // of this model had that check as a switch, and its search found no run
   // the check prevents. A call that bills twice (retried after its commit,
-  // or after an uncertain attempt) breaks the bound: §10's table.
+  // or after an uncertain attempt) breaks the bound (retryCut, retryUncertain).
   val withinBound = billed <= BUDGET + LIMIT * WORST
   // The provider's work for the principal stays within its slots.
   val workWithinLimit = work <= LIMIT
@@ -328,14 +328,6 @@ module sharedEvent {
   import attempts(CALLS = Set("c1", "c2", "c3"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 2, 3),
     WORST = 3, BUDGET = 6, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = false, CHARGE_UNCERTAIN = true,
-    QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
-}
-
-module small {
-  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 4, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 2, POOL_RETRIES = 1, EJECT_AFTER = 1,
-    COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
     EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
 }

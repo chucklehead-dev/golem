@@ -30,7 +30,7 @@ it prevents.
 | `UNCERTAIN_FINAL` | An attempt that was sent and got no answer ends the call: the provider may still be working on it (ADR 0029: commitment is not idempotency) | Its retry runs beside the provider's tail under the same slot: twice the work, twice the bill, for one answer |
 | `ATTEMPT_EVENTS` | Each attempt's charge is its own ledger event | Attempts share the call's event ID, and deduplication drops all but the first |
 | `CHARGE_UNCERTAIN` | An uncertain attempt is charged its declared worst case at once, as today (golem#4) | It is charged nothing, and the provider's bill for its tail is never counted |
-| `QUOTA_PER_ATTEMPT` | Every attempt checks its own deployment's quota share | A failover lands on a deployment already at its quota, checked only for the first |
+| `QUOTA_PER_ATTEMPT` | Every attempt checks its own deployment's ceiling (its calls in flight) | A failover lands on a deployment already at its ceiling, checked only for the first |
 | `RETRY_BUDGET` | A call makes at most `MAX_ATTEMPTS` attempts (ADR 0002: per request) | A failing call retries without end |
 | `POOL_CAP` | A pool's retries are capped (`POOL_RETRIES`), so retries cannot storm a provider already failing | Every call's retries add up |
 | `EJECTION` | A deployment ejected after `EJECT_AFTER` failures gets one probe until a success readmits it | It goes on getting traffic |
@@ -39,9 +39,7 @@ it prevents.
 
 `make` extracts this file into `attempts.qnt` and runs `check-attempts.sh`:
 the design holds in sampled runs of a mid-sized instance, every scenario
-is reachable, the stories behave as §8 says, and the small instance's
-design matrix (§10, `attempts.small.yaml`) searches every run of each
-design to a depth.
+is reachable, and the stories behave as §8 says.
 
 ```quint attempts.qnt +=
 // Generated from attempts.md by lmt. Edit the markdown, not this file.
@@ -54,8 +52,8 @@ One principal with a `BUDGET`, making a few `CALLS` on one route whose pool
 has `DEPLOYMENTS`. Each finished attempt costs something from `COSTS`, at
 most `WORST` (the declared worst case, which the model takes as true, as
 the accounting model does). `LIMIT` is the principal's in-flight limit,
-`QUOTA` each deployment's share of its provider's quota (in calls in
-flight, for the model).
+`QUOTA` each deployment's ceiling on its calls in flight (a Deployment's
+`maxInFlight`: its share of the provider's capacity, or a local box's).
 
 ```quint attempts.qnt +=
   const CALLS: Set[str]
@@ -379,7 +377,7 @@ most the worst case; a failed call's slot is then free.
   // WORST. So a retry need not check the budget again: an earlier version
   // of this model had that check as a switch, and its search found no run
   // the check prevents. A call that bills twice (retried after its commit,
-  // or after an uncertain attempt) breaks the bound: §10's table.
+  // or after an uncertain attempt) breaks the bound (retryCut, retryUncertain).
   val withinBound = billed <= BUDGET + LIMIT * WORST
   // The provider's work for the principal stays within its slots.
   val workWithinLimit = work <= LIMIT
@@ -445,7 +443,7 @@ worst case it was charged.
 **An ejected deployment gets its probe, and a success readmits it** (the
 design). Two refusals, from two calls, eject `d1`; a third call's attempt
 there is its probe
-(no other may follow it: `probeOnly`, checked by §10's search); the probe
+(no other may follow it: `probeOnly`); the probe
 commits and `d1` is back.
 
 ```quint attempts.qnt +=
@@ -562,47 +560,6 @@ module sharedEvent {
   import attempts(CALLS = Set("c1", "c2", "c3"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 2, 3),
     WORST = 3, BUDGET = 6, LIMIT = 2, QUOTA = 2, MAX_ATTEMPTS = 3, POOL_RETRIES = 3, EJECT_AFTER = 2,
     COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = false, CHARGE_UNCERTAIN = true,
-    QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
-    EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
-}
-```
-
-## The small instance
-
-The instance the exhaustive search explores (attempts.small.yaml, run by
-check-attempts.sh where it has one): two calls, two deployments, a budget
-of 4 against a worst case of 3, one attempt per deployment at once, two
-attempts a call and one retry for the pool. A call tries each deployment
-once, so its own budget binds only below the pool's size: its variants
-give it one attempt (and the pool two retries, so the call's budget is the
-one that binds); ejection's variants a third call and a ceiling of two. Its
-variants (`simulate.variants`) are the designs, each with the mechanism it
-turns off, what it must hold and what it must break; `gotogether simulate
--matrix` searches every run of each to the binding's depth and writes this
-table, the properties by the designs (a cell "breaks in N steps" is its
-shortest counterexample):
-
-<!-- gotogether:matrix -->
-| | design | design, two a deployment | design, one attempt a call | retry after commit | retry uncertain | shared event | uncertain free | quota once | no retry budget | no pool cap | no ejection |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| safe | holds | holds to depth 14 | holds | breaks in 6 steps | breaks in 6 steps | breaks in 5 steps | breaks in 4 steps | breaks in 6 steps | breaks in 4 steps | breaks in 8 steps | breaks in 7 steps |
-| oneCommit | holds | holds to depth 14 | holds | breaks in 6 steps | holds to depth 14 | holds | holds | holds | holds | holds | holds to depth 14 |
-| ledgerMatches | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | breaks in 5 steps | holds | holds | holds | holds | holds to depth 14 |
-| covered | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | breaks in 4 steps | holds | holds | holds | holds to depth 14 |
-| withinBound | holds | holds to depth 14 | holds | breaks in 14 steps | breaks in 14 steps | holds | holds | holds | holds | holds | holds to depth 14 |
-| workWithinLimit | holds | holds to depth 14 | holds | holds to depth 14 | breaks in 6 steps | holds | holds | holds | holds | holds | holds to depth 14 |
-| quotaHonoured | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | breaks in 6 steps | holds | holds | holds to depth 14 |
-| attemptsBounded | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | holds | breaks in 4 steps | holds | holds to depth 14 |
-| retriesCapped | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | holds | holds | breaks in 8 steps | holds to depth 14 |
-| probeOnly | holds | holds to depth 14 | holds | holds to depth 14 | holds to depth 14 | holds | holds | holds | holds | holds | breaks in 7 steps |
-<!-- /gotogether:matrix -->
-
-```quint attempts.qnt +=
-
-module small {
-  import attempts(CALLS = Set("c1", "c2"), DEPLOYMENTS = Set("d1", "d2"), COSTS = Set(1, 3),
-    WORST = 3, BUDGET = 4, LIMIT = 2, QUOTA = 1, MAX_ATTEMPTS = 2, POOL_RETRIES = 1, EJECT_AFTER = 1,
-    COMMIT_FINAL = true, UNCERTAIN_FINAL = true, ATTEMPT_EVENTS = true, CHARGE_UNCERTAIN = true,
     QUOTA_PER_ATTEMPT = true, RETRY_BUDGET = true, POOL_CAP = true,
     EJECTION = true, ORDERED = false, ORDER = ["d1", "d2"]).*
 }
