@@ -361,7 +361,7 @@ func TestGraph(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
-			http.Error(w, "no token", 401)
+			http.Error(w, "no token", http.StatusUnauthorized)
 			return
 		}
 		switch {

@@ -11,6 +11,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -34,30 +35,35 @@ var Kinds = []struct {
 // source in dir: "Type.Field" to its text (the comment above the field,
 // else the one after it).
 func Docs(dir string) (map[string]string, error) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
 		return nil, err
 	}
+	fset := token.NewFileSet()
 	out := map[string]string{}
-	for _, p := range pkgs {
-		for _, f := range p.Files {
-			ast.Inspect(f, func(n ast.Node) bool {
-				ts, ok := n.(*ast.TypeSpec)
-				if !ok {
-					return true
-				}
-				if st, ok := ts.Type.(*ast.StructType); ok {
-					for _, fl := range st.Fields.List {
-						text := cmp.Or(fl.Doc.Text(), fl.Comment.Text())
-						for _, n := range fl.Names {
-							out[ts.Name.Name+"."+n.Name] = clean(text)
-						}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			if st, ok := ts.Type.(*ast.StructType); ok {
+				for _, fl := range st.Fields.List {
+					text := cmp.Or(fl.Doc.Text(), fl.Comment.Text())
+					for _, n := range fl.Names {
+						out[ts.Name.Name+"."+n.Name] = clean(text)
 					}
 				}
-				return false
-			})
-		}
+			}
+			return false
+		})
 	}
 	return out, nil
 }

@@ -15,7 +15,7 @@ func TestNewParse(t *testing.T) {
 			t.Fatalf("shape of %s", k)
 		}
 	}
-	if New(Live) == New(Live) {
+	if a, b := New(Live), New(Live); a == b {
 		t.Fatal("two equal keys")
 	}
 }

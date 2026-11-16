@@ -99,9 +99,9 @@ func ClassOf(action string) (c Class, ok bool) {
 // Actions is every audit action golem writes, sorted.
 func Actions() []string { return slices.Sorted(maps.Keys(actions)) }
 
-// ErrOutboxFull: the audit outbox is past its reserve and the write
-// widens access, or at its bound. Nothing was written; it is retryable
-// once the outbox drains.
+// ErrOutboxFull means the audit outbox is at its bound, or past its reserve
+// for a write that widens access. Nothing was written. Retry once the
+// outbox drains.
 var ErrOutboxFull = errors.New("state: the audit outbox is full")
 
 // OutboxFull is ErrOutboxFull: what the outbox holds, its bound, and the

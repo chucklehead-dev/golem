@@ -334,8 +334,8 @@ func bounded(ctx context.Context, d time.Duration, f func(context.Context) error
 	return f(ctx)
 }
 
-// ErrDeposed: another replica has claimed the fence since this one did. It
-// leads no more, for good, and Run returns.
+// ErrDeposed means another replica has claimed the fence since this one
+// did. This one leads no more, for good, and Run returns.
 var ErrDeposed = errors.New("controller: another golem-control replica has claimed the fence since this one did: this one leads no more, and stops")
 
 // Claim claims the state document's fence for this replica, at one above
@@ -496,12 +496,11 @@ func (c *Controller) backoff(n int) time.Duration {
 	return d - time.Duration(rand.Int64N(int64(d)/4+1))
 }
 
-// ErrUnmatched: the state's scopes and the config's ScopePolicies do not
-// match. A scope with no policy is published able to call nothing (it fails
-// closed), a policy of no scope is not published, and every other scope and
-// pool is published as usual: the two change apart (an admin creates a
-// scope, a pull request adds its policy), so neither order stops a
-// publication.
+// ErrUnmatched means the state's scopes and the config's ScopePolicies do
+// not match. A scope with no policy is published able to call nothing. A
+// policy of no scope is not published. Every other scope and pool is
+// published as usual. The two change apart, an admin creating a scope and a
+// pull request adding its policy, so neither order stops a publication.
 var ErrUnmatched = errors.New("scopes and ScopePolicies do not match")
 
 // unmatchedErr is ErrUnmatched naming each mismatch the last publication

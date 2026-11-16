@@ -26,7 +26,8 @@ var (
 	ErrPrecondition = errors.New("bucket: precondition failed")
 )
 
-// Absent, as a put's ifMatch, creates the object only if none exists.
+// Absent is the ifMatch that makes a put create the object only if none
+// exists.
 const Absent = "*"
 
 // Bucket is an object store.

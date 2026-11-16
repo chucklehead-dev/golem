@@ -39,8 +39,8 @@ type Shipper struct {
 	Batch   int            // events a step (default 100)
 }
 
-// ErrMismatch: an event's archived object is not the event. Shipping stops
-// until a person looks: the outbox keeps the event.
+// ErrMismatch means an event's archived object is not the event. Shipping
+// stops until a person looks, and the outbox keeps the event.
 var ErrMismatch = errors.New("audit: an archived event differs from the outbox's")
 
 // Step archives, emits and trims up to Batch events, as the leader at

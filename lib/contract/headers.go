@@ -3,6 +3,7 @@ package contract
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -38,11 +39,4 @@ func CheckSingleHeaders(h http.Header) error {
 	return nil
 }
 
-func isNoList(name string) bool {
-	for _, n := range NoListHeaders {
-		if n == name {
-			return true
-		}
-	}
-	return false
-}
+func isNoList(name string) bool { return slices.Contains(NoListHeaders, name) }

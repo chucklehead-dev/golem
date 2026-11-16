@@ -58,8 +58,8 @@ type Verifier struct {
 	wakeOne sync.Once
 }
 
-// Leeway tolerates clock skew between Entra and the gateway.
-const Leeway = time.Minute
+// leeway tolerates clock skew between Entra and the gateway.
+const leeway = time.Minute
 
 // The delegated scopes a user's token must carry, and the app role a
 // service's must (entra.md #1, #1b; each registration defines its own).
@@ -149,7 +149,7 @@ func (e *Verifier) Verify(raw string) (Identity, error) {
 		Issuer:      "https://login.microsoftonline.com/" + e.Tenant + "/v2.0",
 		AnyAudience: jwt.Audience(e.Audiences),
 		Time:        e.now(),
-	}, Leeway)
+	}, leeway)
 	switch {
 	case errors.Is(err, jwt.ErrExpired):
 		return Identity{}, &Error{Expired: true, Msg: "the Entra token has expired: get a new one (golemctl token)"}

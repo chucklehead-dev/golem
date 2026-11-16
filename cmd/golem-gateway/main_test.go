@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -79,7 +78,7 @@ func newPoolFixture(t *testing.T) *poolFixture {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		if r.Header.Get("X-Api-Key") != "sk-from-the-secret" {
-			http.Error(w, `{"type":"error","error":{"type":"authentication_error","message":"bad key"}}`, 401)
+			http.Error(w, `{"type":"error","error":{"type":"authentication_error","message":"bad key"}}`, http.StatusUnauthorized)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -348,6 +347,6 @@ func startValkey(t *testing.T) string {
 		}
 		time.Sleep(20 * time.Millisecond) // the server starting: an external process
 	}
-	t.Fatal(fmt.Sprintf("Valkey at %s did not start", addr))
+	t.Fatalf("Valkey at %s did not start", addr)
 	return ""
 }

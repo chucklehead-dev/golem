@@ -28,9 +28,9 @@ type Checkout struct {
 	Fetched string
 }
 
-// ErrStale: the config checkout has not been fetched for longer than
-// MaxConfigAge (or its age cannot be read). Leases are not renewed until
-// it is fetched again.
+// ErrStale means the config checkout has not been fetched for longer than
+// MaxConfigAge, or its age cannot be read. Leases are not renewed until it
+// is fetched again.
 var ErrStale = errors.New("the config checkout is stale")
 
 // resolve is dir, which is k's Link or within it, as it is in the worktree

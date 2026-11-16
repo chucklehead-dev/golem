@@ -238,8 +238,8 @@ func setup(t *testing.T) *env {
 	e := &env{db: "golem"}
 	chImage, colImage := cmpEnv("GOLEM_E2E_CLICKHOUSE_IMAGE", clickhouseImage), cmpEnv("GOLEM_E2E_COLLECTOR_IMAGE", collectorImage)
 	for _, img := range []string{chImage, colImage} {
-		if out, err := exec.CommandContext(t.Context(), "docker", "image", "inspect", img).CombinedOutput(); err != nil {
-			if out, err = exec.CommandContext(t.Context(), "docker", "pull", "-q", img).CombinedOutput(); err != nil {
+		if err := exec.CommandContext(t.Context(), "docker", "image", "inspect", img).Run(); err != nil {
+			if out, err := exec.CommandContext(t.Context(), "docker", "pull", "-q", img).CombinedOutput(); err != nil {
 				t.Skipf("cannot pull %s (%v): %s", img, err, firstLine(out))
 			}
 		}
