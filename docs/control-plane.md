@@ -222,8 +222,9 @@ registration (`api://golem-control`, scope `golem.manage`; a gateway token
 is refused, ADR 0046), verified before the body is read; messages are at
 most 1 MiB; an internal error's text is logged, not returned. Until Entra's
 keys have been fetched the API answers `Unavailable`, and publication runs
-regardless. `-probes` serves `/livez` and `/readyz` (ready once the state is
-loaded); `-drain` gives calls in flight 10 s at shutdown.
+regardless. `-probes` serves `/livez` and `/readyz` (ready while this replica
+leads: the state loaded and the fence claimed, until a successor claims
+over it); `-drain` gives calls in flight 10 s at shutdown.
 
 | Method | Who | Effect |
 |---|---|---|

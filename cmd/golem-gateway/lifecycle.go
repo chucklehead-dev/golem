@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,10 @@ type lifecycle struct {
 	// connections, for the endpoints to follow; drain, how long calls in
 	// flight may finish; cut, how long cut calls have to account.
 	unready, drain, cut time.Duration
+	// hurry, if set, ends the readiness window and the drain early when it
+	// is done (a second signal); the cut calls' accounting is still
+	// waited for.
+	hurry context.Context
 }
 
 // track counts h's calls in flight. A call refused once the wait has
@@ -103,8 +108,12 @@ func (lc *lifecycle) readyz(check func() error) http.HandlerFunc {
 // the cut's time is up.
 func (lc *lifecycle) shutdown() {
 	lc.draining.Store(true)
-	time.Sleep(lc.unready)
-	drain, cancel := context.WithTimeout(context.Background(), lc.drain)
+	hurry := cmp.Or(lc.hurry, context.Background())
+	select {
+	case <-time.After(lc.unready):
+	case <-hurry.Done():
+	}
+	drain, cancel := context.WithTimeout(hurry, lc.drain)
 	defer cancel()
 	if err := lc.srv.Shutdown(drain); err != nil {
 		// Closing the connections fails the calls' writes and ends their
