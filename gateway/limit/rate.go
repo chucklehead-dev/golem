@@ -14,7 +14,7 @@ import (
 // Rate buckets: requests a minute, refilled continuously and holding at
 // most a minute's worth (as providers meter their quotas). Requests
 // only: tokens are the provider's own 429s to enforce, which the attempt
-// loop fails over on, and budgets' to account (ADR 0044).
+// loop fails over on, and budgets' to account (ADR 0031).
 
 // Meter is a bucket a request is charged to.
 type Meter = admission.Meter
@@ -119,9 +119,9 @@ func (v *Valkey) Take(ctx context.Context, ms []Meter) (bool, int, time.Duration
 	return res[0] == 1, int(res[1]), time.Duration(res[2]) * time.Millisecond, nil
 }
 
-// Take takes a request from every meter of ms or none (admission.Meters).
-// While the store is unreachable it admits: a rate limit fails open (PRD
-// §5.5), and a provider's own 429 is the backstop.
+// Take takes a request from every meter of ms or none (admission.Meters). While
+// the store is unreachable it admits: a rate limit fails open (prd.md), and a
+// provider's own 429 is the backstop.
 func (l *Limiter) Take(ctx context.Context, ms []Meter) (bool, int, time.Duration) {
 	if len(ms) == 0 || l.Down() {
 		return true, 0, 0

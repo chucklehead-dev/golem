@@ -57,7 +57,7 @@ var (
 // approvedVersions are the anthropic-version values restricted mode
 // forwards. 2026-10-21 (the default of the SDKs' 2026-10 majors) was
 // reviewed against what golem reads and enforces: it changes no usage,
-// stop or stream field, and no policy field of contracts.md §8; its
+// stop or stream field, and no policy field of contracts.md; its
 // removals (temperature, top_p, top_k; documents in assistant turns;
 // citations in user turns) are the provider's refusals, forwarded as such.
 // Its SDKs send the key as Authorization: Bearer, which auth accepts.
@@ -94,13 +94,13 @@ type scanned struct {
 	stream    bool
 	maxTokens int64
 	hasMax    bool
-	// What the scope's policy weighs (contracts.md §8).
+	// What the scope's policy weighs (contracts.md).
 	n       int64 // completions asked for
 	store   bool  // OpenAI's store: true (rewritten off where forbidden)
 	state   bool  // provider-side state with no off switch (an Anthropic container)
 	unknown int   // members golem does not know (restricted mode refuses them)
 	// stateful names a member needing state the provider keeps, which M1
-	// refuses whatever the scope allows (security-and-correctness.md §4):
+	// refuses whatever the scope allows (security-and-correctness.md):
 	// a Responses continuation, conversation, background run, stored
 	// prompt or provider file; storeTrue, a store: true asked by name.
 	stateful  string
@@ -220,7 +220,7 @@ func (ex *exchange) usage(d Dialect, cut error) (canon.Usage, error) {
 // framing or fields, at most the request's output ceiling (max_tokens × n);
 // input, if the provider gave none, every byte of the request (as
 // price.Worst). It can still be low (a provider's work past a cut, input
-// that bytes do not bound): an estimate, not a guarantee (ADR 0044). It
+// that bytes do not bound): an estimate, not a guarantee (ADR 0031). It
 // replaces no count the provider gave; reconciliation corrects it (ADR
 // 0031). It returns the usage to charge and the estimated part of it (zero
 // when the report was whole).
@@ -255,7 +255,7 @@ func outputCeiling(req scanned) int64 {
 
 // appendError appends a dialect's error object for a contract code, with
 // golem's code, a message that says what to do next, and the request ID
-// (contracts.md §1).
+// (contracts.md).
 func appendError(b []byte, d Dialect, c contract.Code, msg, reqID string) []byte {
 	if d == AnthropicMessages {
 		b = append(b, `{"type":"error","error":{"type":"`...)

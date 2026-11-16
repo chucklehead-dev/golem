@@ -13,9 +13,9 @@ import (
 	"github.com/chucklehead-dev/golem/lib/period"
 )
 
-// SchemaVersion is golem.spend's contract version (contracts.md §3): 2,
+// SchemaVersion is golem.spend's contract version (contracts.md): 2,
 // rows written at their call's end (ADR 0043), whose ended_at puts them on
-// one side of a snapshot's boundary (ADR 0048).
+// one side of a snapshot's boundary (ADR 0031).
 const SchemaVersion = 2
 
 // Ledger writes the access-log records that are golem.spend's rows, one per

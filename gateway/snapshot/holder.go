@@ -1,6 +1,6 @@
 // Package snapshot holds the gateway's current configuration: a compiled
 // lib/snapshot behind an atomic pointer, taken once per request and used to
-// its end (gateway.md §1, §6). It enforces the rules the publication model
+// its end (gateway.md). It enforces the rules the publication model
 // checks (model/publication.md, and its connect test here): a snapshot is
 // applied only if it is at least the floor and newer than the one applied,
 // and an expired authorization lease serves nothing new.
@@ -65,13 +65,13 @@ type Holder struct {
 	// Entra verifies Entra tokens; nil: the gateway takes golem keys only.
 	Entra *entra.Verifier
 	// LocalKey is the standalone gateway's generated key, the one credential
-	// its implicit principal takes (golem#5).
+	// its implicit principal takes.
 	LocalKey string
 	// OnApply, if set, is called with each snapshot applied (the limiter
 	// takes its known spend).
 	OnApply func(*Compiled)
 	// Deny, if set, is the site's emergency denylist, applied over every
-	// snapshot's entitlements (control-plane.md §5).
+	// snapshot's entitlements (control-plane.md).
 	Deny *auth.DenyFile
 	// AWS signs bedrock deployments' requests (the gateway's role: the AWS
 	// SDK's provider chain, IRSA or Pod Identity); nil: a bedrock
@@ -87,7 +87,7 @@ type Holder struct {
 	mu       sync.Mutex
 	floor    uint64
 	// transports by deployment identity, kept across snapshots so
-	// connections and their state survive a swap (gateway.md §6).
+	// connections and their state survive a swap (gateway.md).
 	transports map[transportKey]*http.Transport
 }
 
@@ -355,7 +355,7 @@ var metadata = []netip.Prefix{netip.MustParsePrefix("100.100.100.200/32"), netip
 // cgnat is shared address space (RFC 6598), private in effect.
 var cgnat = netip.MustParsePrefix("100.64.0.0/10") // read-only
 
-// checkDestination refuses to connect where a provider cannot be (golem#5):
+// checkDestination refuses to connect where a provider cannot be:
 // the address a deployment's name resolved to, checked as the connection
 // is made, so a name that resolves somewhere else later is caught too.
 // Cloud metadata, link-local, unspecified and multicast addresses are

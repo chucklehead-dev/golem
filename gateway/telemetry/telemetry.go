@@ -3,7 +3,7 @@
 // GenAI token and duration metrics, time to first token, counters of calls
 // by outcome and error origin, of attempts by result and of refusals, the
 // deployments' health (ObserveState), and the access-log
-// record that is also the ledger's row (contracts.md §3), all over OTLP to
+// record that is also the ledger's row (contracts.md), all over OTLP to
 // the enterprise collector. Standalone, ledger rows go to stdout as JSON
 // lines instead (ADR 0023).
 package telemetry
@@ -44,7 +44,7 @@ const (
 	metricDuration    = "gen_ai.client.operation.duration"
 )
 
-// golem's request-path instruments (operations.md §2.2). Their attributes
+// golem's request-path instruments (operations.md). Their attributes
 // are bounded by the snapshot's routes and deployments and by the fixed
 // sets of outcomes, origins and attempt results: never a principal or a
 // request.
@@ -63,7 +63,7 @@ const (
 	attrAttemptResult = "golem.attempt.result"
 )
 
-// An attempt's result (model/attempts.md §5), Call.AttemptResult: how the
+// An attempt's result (model/attempts.md), Call.AttemptResult: how the
 // attempt the row records ended.
 const (
 	// AttemptCommitted: the provider answered and its response is the
@@ -127,10 +127,10 @@ type Call struct {
 	// (a cut stream, a missing usage report), not reported: 0 for actual.
 	EstimatedFraction float64
 	// Waived: admitted outside the budget's bound, while the site store was
-	// unreachable or in the grace after a recovery (ADR 0041 §7.3).
+	// unreachable or in the grace after a recovery (ADR 0041).
 	Waived bool
 	// OverBudget: admitted over its scope's budget in observe or warn
-	// mode, a call enforce would have refused (PRD §9.1, ADR 0050).
+	// mode, a call enforce would have refused (prd.md, ADR 0050).
 	OverBudget bool
 	// Attempt is the call's attempt the row records, from 1 (0 is 1): each
 	// attempt is its own ledger event (AttemptID), so a retried call's
@@ -147,7 +147,7 @@ type Call struct {
 	Committed time.Time
 	// Funding is the scope's funding sources and their shares at request
 	// time, and Units its other billed units by name (web_search, ...):
-	// golem.spend's funding and units (contracts.md §3). The request path
+	// golem.spend's funding and units (contracts.md). The request path
 	// fills neither yet; the row carries them as an empty list and map.
 	Funding []Funding
 	Units   map[string]int64
@@ -162,7 +162,7 @@ type Funding struct {
 // AttemptID is the attempt's ID, its ledger event's: the request ID for a
 // call's first attempt, then AttemptUUID's of the request ID and the
 // attempt's number, a UUID like the request ID's (golem.spend's columns are
-// UUIDs, contracts.md §3).
+// UUIDs, contracts.md).
 func (c *Call) AttemptID() string {
 	if c.Attempt <= 1 {
 		return c.RequestID
@@ -171,7 +171,7 @@ func (c *Call) AttemptID() string {
 }
 
 // AttemptUUID is attempt n's ID in the call requestID, for n > 1: the
-// name-based UUID, version 5 (RFC 9562 §5.5: SHA-1), whose namespace is the
+// name-based UUID, version 5 (RFC 9562: SHA-1), whose namespace is the
 // request ID and whose name is n in decimal ("2"), in the canonical
 // lowercase form. Anyone with the request ID can derive it again, and
 // distinct (request, attempt) pairs have distinct IDs. A request ID that is
@@ -255,7 +255,7 @@ func (t *Telemetry) routeSets(c *Call) *routeSets {
 type endKey struct{ alias, deployment, outcome, origin string }
 
 // endSets are golem.calls' options for c's end, made on its first use. The
-// outcomes and origins are the contract's few (contracts.md §2, §3).
+// outcomes and origins are the contract's few (contracts.md).
 func (t *Telemetry) endSets(c *Call) []metric.AddOption {
 	return cached(&t.ends, endKey{c.Alias, c.Deployment, c.Outcome, c.ErrorOrigin}, func() []metric.AddOption {
 		return []metric.AddOption{metric.WithAttributeSet(attribute.NewSet(attribute.String(attrRequestModel, c.Alias),
@@ -356,10 +356,10 @@ func (t *Telemetry) Start(ctx context.Context, frontend string) (context.Context
 }
 
 // Ended records a call that reached a provider: the span's attributes, the
-// metrics (its tokens, duration and time to first token, the call by
-// outcome and its last attempt by result), and the ledger row. ctx is the request's, and may be done:
-// nothing here stops for it (and a context.WithoutCancel would cost an
-// allocation on every lookup through it).
+// metrics (its tokens, duration and time to first token, the call by outcome
+// and its last attempt by result), and the ledger row. ctx is the request's,
+// and may be done: nothing here stops for it (and a context.WithoutCancel would
+// cost an allocation on every lookup through it).
 func (t *Telemetry) Ended(ctx context.Context, c Call) {
 	if t == nil {
 		return

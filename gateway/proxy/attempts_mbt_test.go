@@ -21,7 +21,7 @@ import (
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 )
 
-// The attempt loop against model/attempts.md's gateway instance (§11):
+// The attempt loop against model/attempts.md's gateway instance:
 // its traces drive real calls through the request path to scripted
 // providers. The model chooses what each provider does (an attempt
 // unreached, refused, uncertain, or committed and then ended or cut); the

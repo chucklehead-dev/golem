@@ -10,7 +10,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/sse"
 )
 
-// The commit point (m1-plan.md step 1). A streamed attempt is committed to
+// The commit point (m1-plan.md). A streamed attempt is committed to
 // its caller when its first event is written, not when its provider's
 // headers arrive: a provider may answer 200 and then send an error as its
 // first event (Anthropic's overloaded_error, a rate limit), and an attempt

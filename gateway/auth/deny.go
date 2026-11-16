@@ -17,11 +17,11 @@ import (
 	"github.com/chucklehead-dev/golem/lib/key"
 )
 
-// Denylist is a site's emergency denylist (control-plane.md §5, ADR 0041
-// §1): credentials and callers refused at this site's gateways whatever the
-// snapshot says, for when a revocation cannot wait for the control plane or
-// the bucket. A site admin edits it (a ConfigMap mounted as a file) and
-// clears it once the control plane has the revocation.
+// Denylist is a site's emergency denylist (control-plane.md, ADR 0041):
+// credentials and callers refused at this site's gateways whatever the snapshot
+// says, for when a revocation cannot wait for the control plane or the bucket.
+// A site admin edits it (a ConfigMap mounted as a file) and clears it once the
+// control plane has the revocation.
 //
 // One entry a line, # comments:
 //

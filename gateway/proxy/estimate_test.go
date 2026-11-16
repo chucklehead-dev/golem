@@ -75,7 +75,7 @@ func serveCut(h *Handler, path, body string) {
 // charged by rules that err high, never an average and never zero:
 // every byte received a token, whatever its fields or framing, at most the
 // request's output ceiling; input, if unreported, every request byte. Its
-// row says which share of its cost is estimated (ADR 0012; golem#3).
+// row says which share of its cost is estimated (ADR 0031).
 func TestEstimates(t *testing.T) {
 	openAI := func(t *testing.T, request string, chunks ...[]byte) (*bytes.Buffer, *Result) {
 		h, rows, res := priced(t, OpenAIChat, cutAfter{chunks, 200})

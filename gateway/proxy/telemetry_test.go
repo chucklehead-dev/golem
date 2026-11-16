@@ -15,7 +15,7 @@ import (
 )
 
 // TestLedgerRows: each call that reached a provider writes one ledger row,
-// with the counter number the limiter gave its event (ADR 0042) and its
+// with the counter number the limiter gave its event (ADR 0031) and its
 // outcome; a refusal writes none.
 func TestLedgerRows(t *testing.T) {
 	alice := key.New(key.Dev)

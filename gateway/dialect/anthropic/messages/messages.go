@@ -12,7 +12,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
 )
 
-// Flags mark policy-relevant members present in a request (contracts.md §8).
+// Flags mark policy-relevant members present in a request (contracts.md).
 type Flags uint32
 
 const (
@@ -83,7 +83,7 @@ type Request struct {
 	Unknown      int
 	// Stateful names the first content that refers to state the provider
 	// keeps (a file uploaded to the Files API), which M1 refuses whatever
-	// the scope allows (security-and-correctness.md §4), or is empty.
+	// the scope allows (security-and-correctness.md), or is empty.
 	Stateful string
 }
 

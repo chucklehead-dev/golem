@@ -19,7 +19,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// Bucket is the published source (control-plane.md §4): the pool's signed
+// Bucket is the published source (control-plane.md): the pool's signed
 // pointer, polled with a conditional get, and the snapshot it names. A
 // pointer is applied only if its signature verifies, it is the gateway's
 // pool, and its sequence is at least the floor and above what the gateway
@@ -42,7 +42,7 @@ type Bucket struct {
 	// publication applied, its signed pointer and snapshot, written before
 	// the checkpoint. Start applies it, verified as a publication read from
 	// the bucket is, so a gateway restarted while the bucket is
-	// unreachable serves until the snapshot's lease ends (gateway.md §6).
+	// unreachable serves until the snapshot's lease ends (gateway.md).
 	LastGood string
 	// GatewayID, if set, names the status object written after each apply
 	// (status/<pool>/<id>): diagnostic only, never trusted (anyone with the
@@ -58,11 +58,11 @@ type Bucket struct {
 	ApplyRetry time.Duration
 	// MaxSkew is how far the publisher's clock may run ahead of this
 	// gateway's (default 2 minutes): a pointer issued further in the
-	// gateway's future is refused (security-and-correctness.md §3).
+	// gateway's future is refused (security-and-correctness.md).
 	MaxSkew time.Duration
 	// MaxLease is the longest authorization lease the pool's publisher
 	// grants (default 4 hours, golem-control's -lease default and an
-	// internal pool's maximum, ADR 0032). A snapshot whose ValidUntil is
+	// internal pool's maximum, ADR 0030). A snapshot whose ValidUntil is
 	// more than MaxLease plus MaxSkew ahead is refused, not clamped: a
 	// publisher's clock a day ahead must not grant a day-long lease, and a
 	// lease the gateway cannot trust is no lease at all (it fails closed:

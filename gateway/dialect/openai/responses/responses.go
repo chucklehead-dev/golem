@@ -1,7 +1,7 @@
 // Package responses is OpenAI's Responses API (POST /v1/responses): the
 // pass-through scan and splice of a request, and usage from its response.
 //
-// M1 serves stateless responses only (security-and-correctness.md §4,
+// M1 serves stateless responses only (security-and-correctness.md,
 // ADR 0027): store is false whatever the caller or scope asks (an absent
 // store, which the provider takes as true, is written false); a request
 // that needs state the provider keeps (previous_response_id, a
@@ -31,7 +31,7 @@ var known = map[string]bool{ // read-only
 }
 
 // serverTools are the tool types the provider runs itself: egress, units
-// billed beyond tokens (ADR 0044).
+// billed beyond tokens (ADR 0031).
 var serverTools = map[string]bool{ // read-only
 	"web_search": true, "web_search_preview": true, "file_search": true, "code_interpreter": true,
 	"mcp": true, "image_generation": true, "computer_use_preview": true, "local_shell": true,

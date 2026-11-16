@@ -1,6 +1,6 @@
 // Package route resolves an alias to the deployment that serves it. The
 // table is built from a snapshot and replaced whole; nothing in it changes
-// after it is built, so requests read it without locks (gateway.md §1).
+// after it is built, so requests read it without locks (gateway.md).
 // A call's attempts take the pool in order (failover order), each from a
 // deployment Health admits (health.go); weights and affinity come later.
 package route

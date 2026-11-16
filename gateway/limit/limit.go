@@ -14,7 +14,7 @@ import (
 	budget "github.com/chucklehead-dev/golem/lib/period"
 )
 
-// Refusals (contracts.md §1), matched with errors.Is.
+// Refusals (contracts.md), matched with errors.Is.
 var (
 	ErrBudget = &admission.Refusal{Code: contract.BudgetPoolExhausted,
 		Msg: "the scope's budget for this period is spent; its managers or a budget manager can add to it"}
@@ -25,7 +25,7 @@ var (
 // Call is the call the limiter admits: admission's.
 type Call = admission.Call
 
-// Known is a snapshot's known spend for one scope (ADR 0052), for one
+// Known is a snapshot's known spend for one scope (ADR 0031), for one
 // budget period: the ledger's spend, as golem-control last published it.
 type Known struct {
 	Period string
@@ -46,7 +46,7 @@ type Limiter struct {
 	StoreTimeout time.Duration
 	// Location is the budget periods' time zone (default UTC); a period is
 	// a calendar month there, and a call belongs to the period it starts in
-	// (contracts.md §3).
+	// (contracts.md).
 	Location *time.Location
 	// Now is the clock (tests set it).
 	Now func() time.Time
@@ -96,7 +96,7 @@ type periodName struct {
 }
 
 // renewInterval is how often Run renews the running calls' slots (ADR
-// 0038), well inside their TTL.
+// 0031), well inside their TTL.
 const renewInterval = 30 * time.Second
 
 // probeFirst is the wait before an outage's first recovery probe; each
@@ -145,7 +145,7 @@ func (l *Limiter) claimEnd(t *Ticket) bool {
 
 // Waived reports whether the call was admitted outside the bound: while the
 // store was unreachable, or in the grace after a recovery. Its ledger row
-// says so, the exposure ADR 0041 §7.3 reports.
+// says so, the exposure ADR 0041 reports.
 func (t *Ticket) Waived() bool { return t.waived }
 
 // Period is the budget period the call is counted in: its ledger row's.
@@ -195,7 +195,7 @@ func (l *Limiter) knownLocked(scope, period string) int64 {
 // is one atomic step at the store, one round trip: the scope's known
 // spend (the snapshot's) against its budget, then the slots. While it is
 // not, this gateway's own counts and the snapshot decide, and the call is
-// a waiver of the bound (ADR 0041 §7.3).
+// a waiver of the bound (ADR 0041).
 //
 // Only an enforced budget refuses (c.BudgetMode, the scope's): under warn
 // or observe the store checks the slots alone, and the ticket says whether
@@ -384,7 +384,7 @@ func slotOf(c Call) Slot { return Slot{c.ID, c.Principal, c.Scope} }
 func (t *Ticket) slot() Slot { return slotOf(t.call) }
 
 // Complete frees the call's slot: one round trip. Its cost is the ledger
-// row's, which the snapshots count (ADR 0052); the site keeps no spend. If
+// row's, which the snapshots count (ADR 0031); the site keeps no spend. If
 // the store does not take the release, it is released on recovery.
 func (t *Ticket) Complete(ctx context.Context, _ int64) {
 	if !t.l.claimEnd(t) {
@@ -393,10 +393,10 @@ func (t *Ticket) Complete(ctx context.Context, _ int64) {
 	t.Ended(ctx)
 }
 
-// Cancel ends a call the client abandoned. The slot is kept until Ended:
-// the provider may still be working (and billing) on it, and freeing the
-// slot would let cancel-and-resend escape the in-flight limit (ADR 0041
-// §7.6). What was seen of its cost is the ledger row's.
+// Cancel ends a call the client abandoned. The slot is kept until Ended: the
+// provider may still be working (and billing) on it, and freeing the slot would
+// let cancel-and-resend escape the in-flight limit (ADR 0041). What was seen of
+// its cost is the ledger row's.
 func (t *Ticket) Cancel(_ context.Context, _ int64) { t.cancel() }
 
 // cancel is Cancel, reporting whether it was the ticket's end.
@@ -404,7 +404,7 @@ func (t *Ticket) cancel() bool { return t.l.claimEnd(t) }
 
 // EndAt frees a cancelled call's slot at a time to come: the provider may
 // go on working (and billing) after its response was cut or abandoned, so
-// the slot is held a while longer (ADR 0041 §7.6; golem#4).
+// the slot is held a while longer (ADR 0041).
 func (t *Ticket) EndAt(at time.Time) {
 	l := t.l
 	l.mu.Lock()
@@ -440,9 +440,9 @@ func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
 }
 
 // Renew re-registers the slots of this gateway's running calls; the
-// gateway's renewal loop calls it every 30 seconds (ADR 0038). A failed
+// gateway's renewal loop calls it every 30 seconds (ADR 0031). A failed
 // renewal is an outage: the gateway admits on its own counts until Recover
-// (ADR 0041 §7.3).
+// (ADR 0041).
 func (l *Limiter) Renew(ctx context.Context) error {
 	if l.Down() {
 		return ErrUnavailable
@@ -577,7 +577,7 @@ func (l *Limiter) Known(scope string) int64 { return l.knownFor(scope, l.period(
 // Down reports whether this gateway believes the store unreachable.
 func (l *Limiter) Down() bool { return l.down.Load() }
 
-// Run keeps running calls' slots alive (ADR 0038: every 30 seconds) and,
+// Run keeps running calls' slots alive (ADR 0031: every 30 seconds) and,
 // in an outage, probes for recovery, until ctx ends. A probe follows an
 // outage's start by probeFirst, and each failed one doubles the wait, up
 // to the renewal interval.

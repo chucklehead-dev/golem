@@ -12,7 +12,7 @@ import (
 // InFlight is a gateway's admitted calls in flight, each with what
 // authenticated it and the cancellation of its upstream request, so a
 // revocation ends the calls it withdraws rather than letting them stream
-// on (security-and-correctness.md §2, ADR 0041 §1). When a snapshot that
+// on (security-and-correctness.md, ADR 0041). When a snapshot that
 // revokes a key, removes its principal from the key's scope or drops its
 // principal is applied, or the emergency denylist gains an entry, the
 // gateway calls Sweep, and each call its keys no longer honour is ended:

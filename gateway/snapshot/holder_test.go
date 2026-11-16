@@ -157,7 +157,7 @@ func TestUpstreamTransport(t *testing.T) {
 	}
 }
 
-// TestCheckDestination: where golem dials (golem#5).
+// TestCheckDestination: where golem dials.
 func TestCheckDestination(t *testing.T) {
 	for _, tc := range []struct {
 		addr         string
@@ -202,7 +202,7 @@ func TestDialRefused(t *testing.T) {
 
 // TestDialReresolved: a deployment's name that re-resolves to a forbidden
 // address between connections is refused at the next dial, not trusted
-// for having resolved well once (golem#7). The name first points at the
+// for having resolved well once. The name first points at the
 // provider (a loopback server, granted), then at cloud metadata.
 func TestDialReresolved(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))

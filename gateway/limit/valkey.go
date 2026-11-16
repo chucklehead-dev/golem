@@ -12,7 +12,7 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
-// Valkey is the site store (ADR 0012, 0031, 0052): one Valkey (ElastiCache
+// Valkey is the site store (ADR 0031): one Valkey (ElastiCache
 // for Valkey, or the site's own) shared by the site's gateways. Each
 // operation is one Lua script or pipeline, so it is atomic. Every key
 // carries the hash tag {golem:<site>}: in cluster mode they share a slot,
@@ -21,14 +21,14 @@ import (
 // Slots are sorted sets per principal in a scope and per scope, scored by
 // their expiry on the server's clock (TIME), so a gateway's clock cannot
 // extend one.
-// It keeps no spend: known spend is the snapshot's (ADR 0052).
+// It keeps no spend: known spend is the snapshot's (ADR 0031).
 type Valkey struct {
 	// cl is the client, nil until DialValkey's dial has made one: every
 	// operation fails as ErrUnavailable until then (the limiter's outage).
 	cl     atomic.Pointer[valkey.Client]
 	dial   func() (valkey.Client, error)
 	prefix string
-	// TTL is a slot's life without renewal (ADR 0038: 90 seconds).
+	// TTL is a slot's life without renewal (ADR 0031: 90 seconds).
 	TTL time.Duration
 
 	afterFn func(time.Duration) <-chan time.Time // Connect's waits (tests)
@@ -64,14 +64,14 @@ func siteStore(site string) *Valkey {
 	return &Valkey{prefix: "{golem:" + site + "}:", TTL: 90 * time.Second}
 }
 
-// DialValkey returns the store for site over a client dial makes. It dials
-// once now; if that fails (Valkey unreachable as the gateway starts), the
-// store is returned all the same, every operation failing as
-// ErrUnavailable, so the limiter runs in its outage mode (waivers) until Connect's retries make a client and Limiter.Recover
-// finds the store answering. A gateway that refused to start without its
-// Valkey would turn an outage plus any pod churn into lost capacity, where
-// the limiter is to fail open (ADR 0041 §7.3). The error is the first
-// dial's, for the caller to log; the store is never nil.
+// DialValkey returns the store for site over a client dial makes. It dials once
+// now; if that fails (Valkey unreachable as the gateway starts), the store is
+// returned all the same, every operation failing as ErrUnavailable, so the
+// limiter runs in its outage mode (waivers) until Connect's retries make a
+// client and Limiter.Recover finds the store answering. A gateway that refused
+// to start without its Valkey would turn an outage plus any pod churn into lost
+// capacity, where the limiter is to fail open (ADR 0041). The error is the
+// first dial's, for the caller to log; the store is never nil.
 func DialValkey(site string, dial func() (valkey.Client, error)) (*Valkey, error) {
 	v := siteStore(site)
 	v.dial = dial

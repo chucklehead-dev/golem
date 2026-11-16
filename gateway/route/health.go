@@ -14,7 +14,7 @@ import (
 // ejected deployment nor refills a budget. Safe for concurrent use; the
 // zero value is ready, with the defaults below.
 //
-// Ejection is per gateway, as the model's §9 says: each gateway probes an
+// Ejection is per gateway, as the attempts model says: each gateway probes an
 // ejected deployment on its own, at most one probe at a time.
 type Health struct {
 	// EjectAfter is how many consecutive failures eject a deployment

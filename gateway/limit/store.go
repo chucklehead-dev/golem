@@ -1,11 +1,11 @@
-// Package limit is the gateway's admission check (ADR 0031, 0038, 0041
-// §7.3 and §7.6, 0052): the snapshot's known spend against the scope's
-// budget, in-flight limits per principal and per scope, and
-// requests-per-minute rate limits (rate.go), over the site's shared store
-// (Valkey in production). Its rules are the ones model/exposure.md shows
-// necessary, and its connect test checks it against that model.
+// Package limit is the gateway's admission check (ADR 0031, 0041): the
+// snapshot's known spend against the scope's budget, in-flight limits per
+// principal and per scope, and requests-per-minute rate limits (rate.go), over
+// the site's shared store (Valkey in production). Its rules are the ones
+// model/exposure.md shows necessary, and its connect test checks it against
+// that model.
 //
-// Known spend is the snapshot's alone (ADR 0052): the ledger's spend for
+// Known spend is the snapshot's alone (ADR 0031): the ledger's spend for
 // the scope's period, which golem-control publishes about every minute.
 // The site store keeps slots and rate buckets, no spend.
 package limit
@@ -47,10 +47,10 @@ const (
 	OverConcurrency
 )
 
-// overBudget is admission's budget check, as Mem, the admit script, an
-// outage's local check and a ticket's over-budget mark make it: known
-// spend must be below the budget, whatever the call then costs (ADR 0031,
-// 0044). A budget of 0 is none.
+// overBudget is admission's budget check, as Mem, the admit script, an outage's
+// local check and a ticket's over-budget mark make it: known spend must be
+// below the budget, whatever the call then costs (ADR 0031). A budget of 0 is
+// none.
 func overBudget(known, budget int64) bool { return budget != 0 && known >= budget }
 
 // atLimit reports whether n calls in flight fill an in-flight limit (0:
@@ -66,7 +66,7 @@ type Store interface {
 	// Release frees a call's slot.
 	Release(ctx context.Context, s Slot) error
 	// Reacquire registers (or renews) slots for calls still running: the
-	// renewal every 30 seconds (ADR 0038), and after an outage in which
+	// renewal every 30 seconds (ADR 0031), and after an outage in which
 	// their TTLs lapsed. It does not check limits: the calls are already
 	// running.
 	Reacquire(ctx context.Context, slots []Slot) error

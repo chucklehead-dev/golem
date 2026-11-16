@@ -14,7 +14,7 @@ import (
 // so a box that is down is ejected before a call finds it, and its route
 // fails over at once, and one that answers again is readmitted without a
 // caller's call as its probe. Each gateway checks on its own, as each
-// ejects on its own (model/attempts.md §9).
+// ejects on its own (model/attempts.md).
 type Checker struct {
 	Health *Health
 	// Timeout bounds one check (default 5 s, at most its interval).

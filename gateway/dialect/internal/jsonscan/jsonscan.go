@@ -1,7 +1,7 @@
 // Package jsonscan reads the top-level members of a request body without
 // decoding it: the routing fields a dialect needs, their byte positions for
 // splicing, and nothing else. Every dialect's pass-through scan is built on
-// it (gateway.md §3 step 2, ADR 0001).
+// it (gateway.md, ADR 0001).
 package jsonscan
 
 import (

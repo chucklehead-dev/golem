@@ -1,4 +1,4 @@
-// Package proxy is the request path (gateway.md §3): authenticate, read and
+// Package proxy is the request path (gateway.md): authenticate, read and
 // scan the body, route by alias, admit against the scope's budgets and
 // in-flight limits, splice the model, send upstream (failing over before
 // the commit), and stream the response back through a tee that reads
@@ -38,13 +38,13 @@ import (
 )
 
 // Snapshots gives the configuration a request uses: taken once, at the
-// start, and used to the end (gateway.md §1).
+// start, and used to the end (gateway.md).
 type Snapshots interface {
 	Current() (*snapshot.Compiled, error)
 }
 
 // Result is what a finished call reports: the input to pricing, the
-// ticket and the access log (gateway.md §3 step 9).
+// ticket and the access log (gateway.md).
 type Result struct {
 	RequestID uuid.UUID
 	Principal *auth.Principal
@@ -73,13 +73,13 @@ type Handler struct {
 	Telemetry *telemetry.Telemetry
 	// BodyTimeout bounds reading a request's body (default 30 s);
 	// MaxResponse, the bytes of a provider's response forwarded (default
-	// 64 MiB; past it the response is cut, golem#5).
+	// 64 MiB; past it the response is cut).
 	BodyTimeout time.Duration
 	MaxResponse int64
 	// ProviderTail is how long a call's slot is held after an ambiguous
 	// end (a cut, an abandoned response, an upstream failure the provider
 	// may have seen), bounded by the call's deadline: the provider may still
-	// be working (default 2 minutes; golem#4).
+	// be working (default 2 minutes).
 	ProviderTail time.Duration
 	// WriteStall bounds how long one write to the caller may block (default
 	// 30 s): a client that stops reading would otherwise hold its slot and
@@ -123,7 +123,7 @@ type Handler struct {
 	kept        atomic.Int64 // bytes of bodies kept for retries
 }
 
-// Response headers returned to the caller (contracts.md §5: golem's own
+// Response headers returned to the caller (contracts.md: golem's own
 // are never forwarded); the request headers a caller may pass are its
 // dialect's (Dialect.forwardRequest).
 var forwardResponse = []string{"Content-Type", "Request-Id", "X-Request-Id", "Retry-After"} // read-only
@@ -189,7 +189,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
-	// The call takes a request from its rate limits once (PRD §5.5).
+	// The call takes a request from its rate limits once (prd.md).
 	if no := h.takeRate(c.bg, c.principal); no != nil {
 		h.fail(ctx, w, reqIDs, &p, no)
 		return
@@ -534,7 +534,7 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 	}
 	if resp.StatusCode == http.StatusOK { // a provider bills no error response
 		// A cut or unreported response is charged what was produced, counted
-		// from what was seen (ADR 0012), and its row says how much of its
+		// from what was seen (ADR 0031), and its row says how much of its
 		// cost is estimated; never zero for work the provider did.
 		var estimated canon.Usage
 		res.Usage, estimated = ex.estimate(h.Dialect, c.requestBytes, outputCeiling(c.req))
@@ -554,11 +554,10 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 	switch {
 	case c.acct.ticket == nil: // nothing counted
 	case res.CallerGone || cut:
-		// The response was abandoned or cut (by the provider, or by the
-		// gateway ending the call): what was seen is charged (estimated
-		// where unreported), and the slot is held for the provider's tail,
-		// which may go on working after the connection closes (ADR 0041
-		// §7.6; golem#4).
+		// The response was abandoned or cut (by the provider, or by the gateway
+		// ending the call): what was seen is charged (estimated where
+		// unreported), and the slot is held for the provider's tail, which may
+		// go on working after the connection closes (ADR 0041).
 		resp.Body.Close()
 		c.acct.cancel(res.Cost)
 	default:
@@ -571,7 +570,7 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 		// The provider's response ended early. A clean end would read as a
 		// complete (and shorter) answer: a stream gets the contract's error
 		// event, and then the response is aborted (a reset, not an end), so
-		// no client can take it for whole (contracts.md §1). A call the
+		// no client can take it for whole (contracts.md). A call the
 		// gateway ended gets the refusal its caller would now get, as
 		// that event (a whole response, already begun, is cut alone).
 		if streamed {
@@ -586,7 +585,7 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 }
 
 // newRequestID mints a call's ID, a UUIDv7: time-ordered, so the ledger and
-// logs sort by it (contracts.md §5); and its text.
+// logs sort by it (contracts.md); and its text.
 func newRequestID() (uuid.UUID, string) {
 	id := uuid.NewV7()
 	var buf [36]byte
@@ -626,7 +625,7 @@ func (a *settlement) cancel(seen int64) {
 }
 
 // chargeUnanswered is the cost of a call whose round trip failed, and sets
-// its row's outcome. Absent response bytes are not absent work (golem#4):
+// its row's outcome. Absent response bytes are not absent work:
 // only a failure the provider cannot have seen is free. Else the call is
 // charged an estimate, which reconciliation corrects, and its slot is held
 // for the provider's tail. ended is the sweep that cancelled the call, if
@@ -794,7 +793,7 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte, m
 		*in = make([]byte, 0, min(n+1, preallocMax))
 	}
 	// The body must arrive within BodyTimeout: a client trickling it in
-	// would hold a connection and a buffer before any admission (golem#5).
+	// would hold a connection and a buffer before any admission.
 	rc := http.NewResponseController(w)
 	rc.SetReadDeadline(time.Now().Add(cmp.Or(h.BodyTimeout, 30*time.Second))) // a test's recorder has none
 	var err error
@@ -825,7 +824,7 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 	return rt, nil
 }
 
-// features applies the request-feature mode (ADR 0037, 0041 §3, §7.1):
+// features applies the request-feature mode (ADR 0037, 0041):
 // in restricted mode (the default, but for agent routes) only approved
 // request members, betas and API versions are forwarded; compatible mode
 // forwards unknown ones. Known policy (policy below) applies in both.
@@ -846,8 +845,8 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 	return h.Dialect.restrictedHeaders(hdr, rt, betas)
 }
 
-// policy applies the scope's request policy (contracts.md §8): its
-// ceilings on output asked for and on input size (ADR 0038), provider-side
+// policy applies the scope's request policy (contracts.md): its
+// ceilings on output asked for and on input size (ADR 0031), provider-side
 // storage (ADR 0027: turned off where it can be, refused where it cannot),
 // and the state M1 never keeps at the provider.
 func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
@@ -864,7 +863,7 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 		}
 	}
 	// M1 refers to nothing the provider keeps, whatever the scope allows
-	// (security-and-correctness.md §4): no stored responses, no uploaded
+	// (security-and-correctness.md): no stored responses, no uploaded
 	// files, no item references. A stable, not retryable, policy refusal.
 	switch {
 	case req.stateful != "":
@@ -884,7 +883,7 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 	return nil
 }
 
-// inputCeiling is the scope's ceiling on a request's size (ADR 0038), a
+// inputCeiling is the scope's ceiling on a request's size (ADR 0031), a
 // token count's too.
 func inputCeiling(p *auth.Principal, requestBytes int64) *refusal {
 	if c := p.Limits.MaxInputBytes; c > 0 && requestBytes > c {
@@ -917,12 +916,11 @@ func (h *Handler) admit(ctx context.Context, p *auth.Principal, c admission.Call
 	return t, nil
 }
 
-// overBudget reports whether an admitted call is over its scope's budget
-// (its scope observes or warns rather than enforcing), for its ledger row;
-// in warn mode the response says so in golem-warning, with the refusal's
-// code and the share of the budget known spend has reached (contracts.md
-// §1). It is set before the provider's headers are copied, which never
-// include golem's.
+// overBudget reports whether an admitted call is over its scope's budget (its
+// scope observes or warns rather than enforcing), for its ledger row; in warn
+// mode the response says so in golem-warning, with the refusal's code and the
+// share of the budget known spend has reached (contracts.md). It is set before
+// the provider's headers are copied, which never include golem's.
 func (h *Handler) overBudget(w http.ResponseWriter, p *auth.Principal, t admission.Ticket) bool {
 	over, known := t.OverBudget()
 	if over && p.Limits.BudgetMode == admission.Warn {
@@ -945,9 +943,9 @@ func budgetWarning(known, limit int64) string {
 	return contract.BudgetPoolExhausted.Name + " " + strconv.FormatInt(pct, 10) + "%"
 }
 
-// takeRate takes the call's request from its scope's rate limits (PRD
-// §5.5): its member's and its scope's, those the scope sets, together or
-// not at all; past one, the call is refused, naming which.
+// takeRate takes the call's request from its scope's rate limits (prd.md): its
+// member's and its scope's, those the scope sets, together or not at all; past
+// one, the call is refused, naming which.
 func (h *Handler) takeRate(ctx context.Context, p *auth.Principal) *refusal {
 	var ms []admission.Meter
 	if n := p.Limits.MemberRPM; n > 0 {
@@ -998,7 +996,7 @@ func copyHeaders(dst, src http.Header, names []string) {
 	}
 }
 
-// The ledger outcomes of a call that did not complete (contracts.md §3);
+// The ledger outcomes of a call that did not complete (contracts.md);
 // terminated: the gateway ended it in flight, its authorization withdrawn.
 const (
 	outcomeFailed     = "failed"
@@ -1012,7 +1010,7 @@ func coded(outcome string, c contract.Code) (string, string, string) {
 }
 
 // outcome is a finished call's ledger outcome, and the failure's origin and
-// code (contracts.md §3). cut is a response that ended early, or a stream
+// code (contracts.md). cut is a response that ended early, or a stream
 // that carried its provider's error event after its output began: either
 // is a failure, however much was delivered (and charged) before it.
 func outcome(res Result, cut bool, ended *errTerminated) (outcome, origin, code string) {
@@ -1106,7 +1104,7 @@ func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, reqID string,
 
 // Refuse writes a refusal in a dialect's error shape, with golem's code, a
 // message that says what to do next, and the request ID if the response has
-// one (contracts.md §1). Only contract codes can be sent.
+// one (contracts.md). Only contract codes can be sent.
 func Refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string) { refuse(w, d, c, msg, 0) }
 
 // refuse is Refuse with the refuser's own Retry-After, when it gave one.

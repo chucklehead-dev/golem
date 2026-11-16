@@ -8,7 +8,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/admission"
 )
 
-// TestBudgetModes: the budget in each mode (PRD §9.1, ADR 0050), on each
+// TestBudgetModes: the budget in each mode (prd.md, ADR 0050), on each
 // store and in an outage's local check. With known spend at the budget,
 // enforce refuses; warn and observe admit, the ticket over budget with the
 // known spend checked. A call within the budget is never over, and the

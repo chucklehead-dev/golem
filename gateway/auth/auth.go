@@ -1,5 +1,5 @@
 // Package auth turns a request's credential into a Principal: who is
-// calling, in which scope, with which rights (ADR 0009, org-model.md §3).
+// calling, in which scope, with which rights (ADR 0009, org-model.md).
 // Everything is decided from the snapshot, with no network call: golem keys
 // by their hash, Entra tokens by the tenant's cached signing keys.
 package auth
@@ -37,12 +37,12 @@ type Principal struct {
 type Limits struct {
 	BudgetMicros int64
 	// MemberRPM and ScopeRPM are the scope's rate limits, requests a
-	// minute: each member's, and the whole scope's (PRD §5.5); 0: none.
+	// minute: each member's, and the whole scope's (prd.md); 0: none.
 	MemberRPM, ScopeRPM int64
 	BudgetMode          admission.BudgetMode // the snapshot's; an unknown one is enforce
 	PrincipalInFlight   int
 	ScopeInFlight       int
-	// The scope's request policy (contracts.md §8).
+	// The scope's request policy (contracts.md).
 	StorageAllowed  bool
 	MaxOutputTokens int64  // max_tokens times n; 0: none
 	MaxInputBytes   int64  // 0: none
@@ -50,7 +50,7 @@ type Limits struct {
 }
 
 // Allows reports whether the principal may call an alias: the intersection
-// of the scope's policy and the key's constraints (org-model.md §3).
+// of the scope's policy and the key's constraints (org-model.md).
 func (p *Principal) Allows(alias []byte) bool { return p.models == nil || p.models[string(alias)] }
 
 // Keys authenticates against one snapshot's entitlements: golem keys, and
@@ -96,7 +96,7 @@ type rights struct {
 // budget.
 func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, v *entra.Verifier) *Keys {
 	k := &Keys{env: env, prefix: "glm_" + string(env) + "_", byHash: map[[32]byte]*entry{}, now: now, entra: v, byEntra: map[string]map[string]*Principal{}}
-	if e.Implicit && env == key.Dev { // never for a live installation (golem#5)
+	if e.Implicit && env == key.Dev { // never for a live installation
 		k.implicit = &Principal{ID: "local", Kind: "user", Scope: "local",
 			Limits: Limits{PrincipalInFlight: implicitInFlight}}
 	}
@@ -170,7 +170,7 @@ func keyEntry(sk snapshot.Key, scopes map[string]*rights, owners map[string]owne
 		en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's scope " + sk.Scope + " no longer exists: mint a key for a scope you are in"}
 		return en
 	case !listed || o.kind != cmp.Or(sk.PrincipalKind, "user"):
-		// Fail closed (golem#5): a key whose owner is gone, or is of
+		// Fail closed: a key whose owner is gone, or is of
 		// another kind than the key says, is no key.
 		en.refused = &Refusal{contract.AuthKeyRevoked, "this key's principal is no longer known to golem: mint a new key"}
 		return en
@@ -318,7 +318,7 @@ func keyCred(cred string) string {
 func (k *Keys) principal(cred string, h http.Header, g *Grant) (*Principal, *Refusal) {
 	if k.implicit != nil {
 		// Standalone without a LocalIdentity: the one local principal, for
-		// the gateway's own generated key alone (ADR 0023; golem#5). Its
+		// the gateway's own generated key alone (ADR 0023). Its
 		// browser guard keeps web pages out; the key keeps out other
 		// programs and users of the machine.
 		if sum := key.Hash(cred); k.local != ([32]byte{}) && subtle.ConstantTimeCompare(sum[:], k.local[:]) == 1 {
@@ -370,7 +370,7 @@ func (k *Keys) principal(cred string, h http.Header, g *Grant) (*Principal, *Ref
 }
 
 // token authenticates an Entra token and finds the principal in the scope
-// the golem-scope header names, else its default (contracts.md §5).
+// the golem-scope header names, else its default (contracts.md).
 func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 	if k.entra == nil {
 		return nil, &Refusal{contract.AuthTokenInvalid, "this gateway does not take Entra tokens; use a golem key"}
@@ -404,7 +404,7 @@ func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 
 // credential is the request's credential, from Authorization: Bearer or
 // x-api-key; conflict reports both present and different, which is
-// refused rather than one silently preferred (golem#5).
+// refused rather than one silently preferred.
 func credential(h http.Header) (cred string, conflict bool) {
 	var bearer string
 	if a := h.Get("Authorization"); len(a) > 7 && strings.EqualFold(a[:7], "bearer ") {

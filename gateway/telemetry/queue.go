@@ -30,7 +30,7 @@ type LedgerQueue struct {
 	// its check of closed to its enqueue, Shutdown exclusively to set
 	// closed. Every row OnEmit accepted is then queued before the worker
 	// drains, and every later one is refused and counted: none is queued
-	// with no worker left to deliver or count it (golem#4).
+	// with no worker left to deliver or count it.
 	mu     sync.RWMutex
 	closed bool
 	// emitting, if set, runs inside OnEmit's critical section (a test's
@@ -142,8 +142,8 @@ func (q *LedgerQueue) drain(ctx context.Context, buf []sdklog.Record, n int) []s
 }
 
 // export delivers a batch, retrying a failure with backoff: a collector
-// restarting is a few seconds, and its rows must not be dropped for it
-// (golem#4). A batch the collector may have partly taken is sent whole
+// restarting is a few seconds, and its rows must not be dropped for it.
+// A batch the collector may have partly taken is sent whole
 // again; the ledger deduplicates by event (golem.spend_dedup). After the
 // last attempt, or at the shutdown's deadline, its rows are counted as
 // failed.

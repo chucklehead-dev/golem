@@ -14,7 +14,7 @@ func scopeCall(id, principal string) Call {
 	return Call{ID: id, Principal: principal, Scope: "s", Budget: 10, PrincipalLimit: 1, ScopeLimit: 2}
 }
 
-// TestSoft: known spend is the snapshot's (ADR 0052), checked below the
+// TestSoft: known spend is the snapshot's (ADR 0031), checked below the
 // budget whatever the call then costs (the accepted risk); a call's cost
 // is its ledger row's, not counted here.
 func TestSoft(t *testing.T) {

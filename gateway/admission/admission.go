@@ -1,5 +1,5 @@
 // Package admission is the request path's contract with whatever admits
-// calls against budgets and limits (ADR 0031, 0044; gateway.md step 6).
+// calls against budgets and limits (ADR 0031; gateway.md).
 // It is a leaf: the proxy depends on it, gateway/limit implements it, and
 // another backend or a test double needs nothing else.
 //
@@ -26,19 +26,19 @@ type Call struct {
 	// Meters, taken outside admission.
 	Alias, Deployment, Model string
 	Budget                   int64 // the scope's budget in micro-units; 0: none
-	// BudgetMode is what the budget does (PRD §9.1): Enforce refuses a call
+	// BudgetMode is what the budget does (prd.md): Enforce refuses a call
 	// over it; Warn and Observe admit it, its ticket saying so (OverBudget).
 	// In-flight limits apply in every mode.
 	BudgetMode     BudgetMode
 	PrincipalLimit int // in-flight calls per principal; 0: none
-	ScopeLimit     int // in-flight calls per scope (ADR 0041 §7.6); 0: none
+	ScopeLimit     int // in-flight calls per scope (ADR 0041); 0: none
 	// Started is when the call began (the request's arrival): it fixes the
 	// budget period. Deadline is when it must have ended (the route's
 	// maximum duration); zero: none.
 	Started, Deadline time.Time
 }
 
-// BudgetMode is what a scope's budget does at admission (PRD §9.1, ADR
+// BudgetMode is what a scope's budget does at admission (prd.md, ADR
 // 0050). The zero value is Enforce: a call that names no mode is refused
 // over its budget, failing closed.
 type BudgetMode uint8
@@ -82,7 +82,7 @@ type Ticket interface {
 	Complete(ctx context.Context, cost int64)
 	// Cancel records the cost seen of a call abandoned or cut, and holds
 	// its slot until until (the provider's tail: it may go on working,
-	// and billing, after the connection closes; ADR 0041 §7.6).
+	// and billing, after the connection closes; ADR 0041).
 	Cancel(ctx context.Context, seen int64, until time.Time)
 	// Period is the budget period the call is counted in, for its row.
 	Period() string
@@ -95,9 +95,9 @@ type Ticket interface {
 }
 
 // Meter is one per-minute bucket of requests a request is charged to: a
-// member's or a scope's rate limit (PRD §5.5), each shared by a site's
+// member's or a scope's rate limit (prd.md), each shared by a site's
 // gateways. Requests only: tokens are the provider's 429s to enforce and
-// budgets' to account (ADR 0044).
+// budgets' to account (ADR 0031).
 type Meter struct {
 	Key       string // MemberRateMeter, ScopeRateMeter
 	PerMinute int64
@@ -111,7 +111,7 @@ func ScopeRateMeter(scope string) string             { return "rs:" + scope }
 type Meters interface {
 	// Take takes a request from every meter of ms, or from none, reporting
 	// the first without room (its index) and how long until it has; an
-	// unreachable store admits (rate limits fail open, PRD §5.5).
+	// unreachable store admits (rate limits fail open, prd.md).
 	Take(ctx context.Context, ms []Meter) (ok bool, over int, wait time.Duration)
 }
 

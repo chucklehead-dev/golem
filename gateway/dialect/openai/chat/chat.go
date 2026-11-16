@@ -15,7 +15,7 @@ import (
 	usage "github.com/chucklehead-dev/golem/gateway/dialect/internal/openaiusage"
 )
 
-// Flags mark policy-relevant members present in a request (contracts.md §8).
+// Flags mark policy-relevant members present in a request (contracts.md).
 type Flags uint32
 
 const (
@@ -107,7 +107,8 @@ func (r *Request) Scan(body []byte) error {
 			if !ok || n < 0 {
 				return ErrField
 			}
-			// max_completion_tokens supersedes max_tokens, whichever comes first.
+			// max_completion_tokens supersedes max_tokens, whichever comes
+			// first.
 			if completion || !hasCompletionTokens {
 				r.MaxTokens, r.HasMaxTokens = n, true
 			}
