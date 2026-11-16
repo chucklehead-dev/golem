@@ -10,10 +10,10 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
-// Rate buckets: requests a minute, refilled continuously and holding at
-// most a minute's worth (as providers meter their quotas). Requests
-// only: tokens are the provider's own 429s to enforce, which the attempt
-// loop fails over on, and budgets' to account (ADR 0031).
+// Rate buckets count requests a minute. They refill continuously and hold
+// at most a minute's worth, as providers meter their quotas. They count
+// requests only. Providers enforce tokens with their own 429s, which the
+// attempt loop fails over on, and budgets account for them. ADR 0031.
 
 // Meter is a bucket a request is charged to.
 type Meter = admission.Meter
