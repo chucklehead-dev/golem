@@ -34,7 +34,7 @@ func (k *keySet) RoundTrip(*http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(k.set))), Header: http.Header{}}, nil
 }
 
-func newKeySet(t *testing.T) (*keySet, *rsa.PrivateKey) {
+func newKeySet(t testing.TB) (*keySet, *rsa.PrivateKey) {
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func newKeySet(t *testing.T) (*keySet, *rsa.PrivateKey) {
 	return &keySet{set: set}, pk
 }
 
-func token(t *testing.T, pk *rsa.PrivateKey, kid string) string {
+func token(t testing.TB, pk *rsa.PrivateKey, kid string) string {
 	s, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, (&jose.SignerOptions{}).WithHeader("kid", kid))
 	if err != nil {
 		t.Fatal(err)

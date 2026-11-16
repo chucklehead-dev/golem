@@ -186,7 +186,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 // encode is an event stream of chunks, each an Anthropic event, then the
 // exception given (if any).
-func encode(t *testing.T, events []string, exception string) []byte {
+func encode(t testing.TB, events []string, exception string) []byte {
 	t.Helper()
 	var b bytes.Buffer
 	enc := eventstream.NewEncoder()
