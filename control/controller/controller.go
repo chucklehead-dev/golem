@@ -315,12 +315,7 @@ func (c *Controller) now() time.Time {
 // lease is the snapshots' authorization lease: four hours unless set.
 func (c *Controller) lease() time.Duration { return cmp.Or(c.Lease, 4*time.Hour) }
 
-func (c *Controller) log() *slog.Logger {
-	if c.Log != nil {
-		return c.Log
-	}
-	return slog.Default()
-}
+func (c *Controller) log() *slog.Logger { return cmp.Or(c.Log, slog.Default()) }
 
 // The deadlines of the loop's external calls: a bucket, ClickHouse or
 // Graph that accepts a request and never answers must not hold the loop.

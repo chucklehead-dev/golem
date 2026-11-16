@@ -37,7 +37,7 @@ func collect(t *testing.T, r *sdkmetric.ManualReader) (counts, sums points) {
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			b.WriteString(string(kv.Key) + "=" + kv.Value.Emit())
+			b.WriteString(string(kv.Key) + "=" + kv.Value.String())
 		}
 		p[name][b.String()] += v
 	}

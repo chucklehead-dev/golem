@@ -14,7 +14,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/embedded"
-	"go.opentelemetry.io/otel/log/global"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -36,7 +35,7 @@ func OTLP(ctx context.Context, endpoint string, res *resource.Resource) (Provide
 	p, shutdown := SDK(ex.Spans, sdkmetric.NewPeriodicReader(ex.Metrics), ex.Logs, res)
 	otel.SetTracerProvider(p.Tracer)
 	otel.SetMeterProvider(p.Meter)
-	global.SetLoggerProvider(p.Logger)
+	otel.SetLoggerProvider(p.Logger)
 	return p, shutdown, nil
 }
 
@@ -157,6 +156,6 @@ func writeValue(enc *jsontext.Encoder, v attribute.Value) error {
 		}
 		return errors.Join(err, enc.WriteToken(jsontext.EndObject))
 	default:
-		return enc.WriteToken(jsontext.String(v.Emit()))
+		return enc.WriteToken(jsontext.String(v.String()))
 	}
 }

@@ -336,22 +336,17 @@ func run() error {
 			return fmt.Errorf("-listen: %w", err)
 		}
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// A component's failure stops the rest; the first is the cause.
+	ctx, fail := context.WithCancelCause(ctx)
+	defer fail(nil)
 	var wg sync.WaitGroup
-	var failed error // a component's failure, which stops the rest
-	var failOnce sync.Once
-	fail := func(err error) { failOnce.Do(func() { failed = err }); cancel() }
 	wg.Go(func() { st.Run(ctx) })
 	if o.probes != "" {
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 		mux.HandleFunc("GET /readyz", readyz(c))
 		probes := &http.Server{Addr: o.probes, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-		wg.Go(func() {
-			<-ctx.Done()
-			probes.Close()
-		})
+		defer context.AfterFunc(ctx, func() { probes.Close() })()
 		wg.Go(func() {
 			if err := probes.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fail(fmt.Errorf("-probes: %w", err))
@@ -376,8 +371,8 @@ func run() error {
 		fail(err)
 	}
 	wg.Wait() // the state's loop, and the API drained
-	if failed != nil {
-		return failed
+	if err := context.Cause(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return err
 	}
 	slog.Info("golem-control: stopped")
 	return nil

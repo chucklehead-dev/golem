@@ -179,7 +179,7 @@ func run(ctx context.Context, args []string) int {
 
 	// The background loops live through the drain (renewals keep calls'
 	// slots), and end after it. Every goroutine is owned here.
-	bg, stopBg := context.WithCancel(context.Background())
+	bg, stopBg := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopBg() // also on a failed start
 	var wg sync.WaitGroup
 

@@ -138,7 +138,7 @@ func TestShip(t *testing.T) {
 		t.Fatalf("%d records emitted", len(w.logs.rs))
 	}
 	seen := map[string]string{}
-	w.logs.rs[2].WalkAttributes(func(kv attribute.KeyValue) bool { seen[string(kv.Key)] = kv.Value.Emit(); return true })
+	w.logs.rs[2].WalkAttributes(func(kv attribute.KeyValue) bool { seen[string(kv.Key)] = kv.Value.String(); return true })
 	if seen["golem.audit.seq"] != "3" || seen["golem.audit.target"] != "s2" || seen["golem.audit.detail.n"] != "2" {
 		t.Fatalf("attributes %v", seen)
 	}

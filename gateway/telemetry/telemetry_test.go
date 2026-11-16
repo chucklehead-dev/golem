@@ -73,7 +73,7 @@ func TestEnded(t *testing.T) {
 	}
 	attrs := map[string]string{}
 	for _, a := range got[0].Attributes() {
-		attrs[string(a.Key)] = a.Value.Emit()
+		attrs[string(a.Key)] = a.Value.String()
 	}
 	for k, v := range map[string]string{"gen_ai.operation.name": "chat", "gen_ai.provider.name": "anthropic",
 		"gen_ai.request.model": "claude", "gen_ai.response.model": "claude-sonnet-4-5",
@@ -244,10 +244,10 @@ func TestRowListAndMapTypes(t *testing.T) {
 		got[string(kv.Key)] = kv.Value
 	}
 	if f := got["funding"]; f.Type() != attribute.SLICE || len(f.AsSlice()) != 2 || f.AsSlice()[0].Type() != attribute.MAP {
-		t.Fatalf("funding %v (%v): want a list of maps", f.Emit(), f.Type())
+		t.Fatalf("funding %v (%v): want a list of maps", f.String(), f.Type())
 	}
 	if u := got["units"]; u.Type() != attribute.MAP || len(u.AsMap()) != 2 || u.AsMap()[0].Value.Type() != attribute.INT64 {
-		t.Fatalf("units %v (%v): want a map of integers", u.Emit(), u.Type())
+		t.Fatalf("units %v (%v): want a map of integers", u.String(), u.Type())
 	}
 	r.t.Ended(t.Context(), c)
 	r.t.Ended(t.Context(), call)
