@@ -218,7 +218,7 @@ type options struct {
 	maxConfigAge                          time.Duration
 	trustedKeys                           string
 	authLease                             time.Duration
-	counterRetention                      time.Duration
+	spendStaleAfter                       time.Duration
 	listen, probes                        string
 	drain                                 time.Duration
 	archive, telemetry                    string
@@ -259,7 +259,7 @@ func parseFlags() (options, error) {
 	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships of still-active users one sync may end; a step over it writes only its offboarding of disabled or deleted users (raise it for one run when intended)")
 	flag.StringVar(&o.clickhouse, "clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
 	flag.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
-	flag.DurationVar(&o.counterRetention, "counter-retention", 6*time.Hour, "how long the gateways' site counters keep a minute (their stores' Retain): a known-spend result older than this less the lease is reported stale")
+	flag.DurationVar(&o.spendStaleAfter, "spend-stale-after", spend.DefaultStaleAfter, "a known-spend result whose boundary is older than this is reported stale (it stays published)")
 	flag.DurationVar(&o.allowance, "spend-allowance", 5*time.Minute, "how long after a call's end its ledger row is surely in ClickHouse: known spend's boundary is this far back")
 	flag.StringVar(&o.periodZone, "period-zone", "UTC", "the budget periods' time zone (an IANA name), stated in every snapshot: every gateway's -period-zone must be the same, or it refuses the snapshots")
 	flag.Parse()
@@ -429,7 +429,7 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 	}
 	if o.clickhouse != "" {
 		c.Spend = &spend.Job{Ledger: spend.ClickHouse{URL: o.clickhouse, User: o.clickhouseUser, Password: os.Getenv("CLICKHOUSE_PASSWORD")},
-			Allowance: o.allowance, Location: zone, Lease: o.authLease, Retention: o.counterRetention}
+			Allowance: o.allowance, Location: zone, StaleAfter: o.spendStaleAfter}
 		if err := c.Spend.Validate(); err != nil {
 			return nil, closeAudit, err
 		}

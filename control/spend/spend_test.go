@@ -94,16 +94,13 @@ func TestJob(t *testing.T) {
 }
 
 // TestJobReportsStaleResult: a result kept through a ledger outage stays
-// published (gateways floor known spend at their counter's period total,
-// so a stale result never counts less than none would), but once its
-// boundary is more than MaxAge old (here 6h - 4h - 10m) a gateway on a
-// snapshot carrying it, for its whole lease, reads past its retention:
-// Stale and Step's error say so, for an alert.
+// published, but once its boundary is more than MaxAge old (90 minutes by
+// default) Stale and Step's error say so, for an alert.
 func TestJobReportsStaleResult(t *testing.T) {
 	now := time.Date(2026, 11, 14, 10, 0, 30, 0, time.UTC)
 	l := &fakeLedger{spend: map[string]int64{"team-a": 7}}
 	j := &Job{Ledger: l, Now: func() time.Time { return now }}
-	if j.MaxAge() != 6*time.Hour-4*time.Hour-10*time.Minute || j.Validate() != nil {
+	if j.MaxAge() != 90*time.Minute || j.Validate() != nil {
 		t.Fatalf("max age %v, %v by default", j.MaxAge(), j.Validate())
 	}
 	if j.Stale() {
@@ -136,8 +133,8 @@ func TestJobReportsStaleResult(t *testing.T) {
 		t.Fatalf("%v, stale %v after the ledger answered", err, j.Stale())
 	}
 	// A configuration under which every result is stale.
-	j = &Job{Ledger: l, Now: func() time.Time { return now }, Lease: 6 * time.Hour}
-	if err := j.Validate(); err == nil || !strings.Contains(err.Error(), "shorten the lease") {
+	j = &Job{Ledger: l, Now: func() time.Time { return now }, StaleAfter: 5 * time.Minute}
+	if err := j.Validate(); err == nil || !strings.Contains(err.Error(), "lengthen it") {
 		t.Fatalf("a lease as long as the retention: %v", err)
 	}
 }

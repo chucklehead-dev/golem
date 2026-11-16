@@ -327,9 +327,6 @@ them: [testing.md](../testing.md).
 
 ## 6. Known gaps in the code
 
-- Some package comments still name the retired site counter (`control/spend`,
-  `gateway/limit`'s `Known`) and golem-control keeps a `-counter-retention`
-  flag for the staleness bound; the behaviour is ADR 0052's.
 - The last-good copy's write order and syncs are untested.
 - `MintKey`'s display-ID uniqueness check and the minted key's `no-store`
   header have no test.

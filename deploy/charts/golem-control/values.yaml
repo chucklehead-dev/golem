@@ -70,7 +70,7 @@ clickhouse:
     user: golem_admin
     passwordSecret: {name: golem-clickhouse-admin, key: password}
 spendAllowance: 5m
-counterRetention: 6h
+spendStaleAfter: 90m
 periodZone: UTC   # MUST MATCH every gateway pool's periodZone (lease, above)
 
 # The audit archive: an Object Lock bucket in a separate account.

@@ -1,9 +1,8 @@
 // Package spend is golem-control's known-spend job (ADR 0048,
 // control-plane.md §6): each scope's spend this budget period, from the
 // ledger in ClickHouse, of the calls that ended before a boundary B, a
-// minute an ingestion allowance before now. Snapshots carry it with B, and
-// a gateway adds its site counter's minutes from B on, so each call is
-// counted on one side of B only (contracts.md §3).
+// minute an ingestion allowance before now. Snapshots carry it with B
+// (ADR 0031): a gateway's known spend is the snapshot's alone.
 package spend
 
 import (
@@ -90,27 +89,10 @@ type Job struct {
 	Location *time.Location
 	Now      func() time.Time // the clock (tests set it)
 
-	// A result is kept through failures, but a gateway adds to its spend
-	// only the counter's minutes it still retains: from B, or no further
-	// back than its retention. A gateway may use a snapshot for its lease
-	// after publication, so a result whose boundary is more than
-	// Retention - Lease - Margin old (MaxAge) is stale: the spend between
-	// its boundary and the retention's start is in neither its spend nor
-	// the minutes read. It is still published: a gateway's known spend is
-	// never below its counter's period total, so a stale result counts at
-	// least what none would (this site's calls), and its spend adds the
-	// other sites' calls before its boundary. Stale reports it, for an
-	// alert.
-
-	// Retention is the gateways' counter retention (default six hours,
-	// limit.Mem's and limit.Valkey's Retain).
-	Retention time.Duration
-	// Lease is the snapshots' authorization lease (default four hours,
-	// golem-control's -lease).
-	Lease time.Duration
-	// Margin covers the publication's path to the gateways and their
-	// clocks (default ten minutes).
-	Margin time.Duration
+	// A result is kept through failures and stays published: a gateway's
+	// known spend is then older, never wrong. One whose boundary is more
+	// than StaleAfter old (MaxAge) is reported stale, for an alert.
+	StaleAfter time.Duration // default 90 minutes
 
 	mu     sync.Mutex
 	last   *Known
@@ -119,28 +101,20 @@ type Job struct {
 
 // Defaults of the Job's durations.
 const (
-	DefaultAllowance = 5 * time.Minute
-	DefaultRetention = 6 * time.Hour
-	DefaultLease     = 4 * time.Hour
-	DefaultMargin    = 10 * time.Minute
+	DefaultAllowance  = 5 * time.Minute
+	DefaultStaleAfter = 90 * time.Minute
 )
 
-// MaxAge is how old a result's boundary may be before it is stale:
-// Retention - Lease - Margin.
-func (j *Job) MaxAge() time.Duration {
-	return cmp.Or(j.Retention, DefaultRetention) - cmp.Or(j.Lease, DefaultLease) - cmp.Or(j.Margin, DefaultMargin)
-}
+// MaxAge is how old a result's boundary may be before it is stale.
+func (j *Job) MaxAge() time.Duration { return cmp.Or(j.StaleAfter, DefaultStaleAfter) }
 
 // Validate reports a configuration under which every result is stale: a
-// fresh one is an allowance and a minute old, so a MaxAge no longer than
-// that would alert from the first publication, and gateways at the end of
-// their lease would read past their retention even then. For golem-control
-// to check at start.
+// fresh one is an allowance and a minute old. For golem-control to check
+// at start.
 func (j *Job) Validate() error {
 	allowance := cmp.Or(j.Allowance, DefaultAllowance)
 	if maxAge := j.MaxAge(); maxAge <= allowance+time.Minute {
-		return fmt.Errorf("known spend: the retention %v less the lease %v and the margin %v leaves %v, no more than the allowance %v and a minute: every result would be stale; lengthen the gateways' retention or shorten the lease",
-			cmp.Or(j.Retention, DefaultRetention), cmp.Or(j.Lease, DefaultLease), cmp.Or(j.Margin, DefaultMargin), maxAge, allowance)
+		return fmt.Errorf("known spend: -spend-stale-after %v is no more than the allowance %v and a minute: every result would be stale; lengthen it", maxAge, allowance)
 	}
 	return nil
 }
@@ -215,7 +189,7 @@ func (j *Job) stepSpend(ctx context.Context) error {
 	if err != nil {
 		j.forgetOtherThan(period)
 		if k, ok := j.Current(); ok && k.Age(now) > j.MaxAge() {
-			return fmt.Errorf("known spend for %s: %w (the last result is kept, but stale: its boundary %s is older than %v, so gateways count this site's counter total as a floor and the stale result's spend, and miss other sites' spend since; alert)",
+			return fmt.Errorf("known spend for %s: %w (the last result is kept, but stale: its boundary %s is older than %v, so gateways miss every call since it; alert)",
 				period, err, k.Since.UTC().Format(time.RFC3339), j.MaxAge())
 		}
 		return fmt.Errorf("known spend for %s: %w (the last result is kept)", period, err)
@@ -249,8 +223,7 @@ func (j *Job) forgetOtherThan(period string) {
 }
 
 // Current is the latest result, or false if there is none yet: a snapshot
-// then carries no known spend, and gateways count their site's counter
-// alone. A stale result is still current (Stale).
+// then carries no known spend, and gateways count none. A stale result is still current (Stale).
 func (j *Job) Current() (Known, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -271,9 +244,8 @@ func (j *Job) Age() (time.Duration, bool) {
 }
 
 // Stale reports whether the current result's boundary is older than
-// MaxAge: the gateways' known spend is then this site's counter total at
-// least, and the stale result's spend, but misses other sites' spend
-// since the boundary. For an alert.
+// MaxAge: the gateways' known spend then misses every call since the
+// boundary. For an alert.
 func (j *Job) Stale() bool {
 	age, ok := j.Age()
 	return ok && age > j.MaxAge()

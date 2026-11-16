@@ -77,7 +77,7 @@ spec:
             - -clickhouse-user={{ $.Values.clickhouse.user }}
             {{- end }}
             - -spend-allowance={{ .Values.spendAllowance }}
-            - -counter-retention={{ .Values.counterRetention }}
+            - -spend-stale-after={{ .Values.spendStaleAfter }}
             - -period-zone={{ .Values.periodZone }}
             {{- with .Values.auditArchive }}
             - -audit-archive={{ . }}

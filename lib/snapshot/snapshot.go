@@ -117,8 +117,7 @@ type Scope struct {
 	// KnownSpend is the ledger's spend for Period (a calendar month,
 	// "2026-11") of the calls that ended before Since, a minute
 	// golem-control places an ingestion allowance behind the snapshot's
-	// time; the site counter's minutes from Since on add the rest
-	// (ADR 0048). A gateway counts a snapshot of another period as none: a
+	// time: a gateway's known spend is this alone (ADR 0031). A gateway counts a snapshot of another period as none: a
 	// new month starts from nothing.
 	Period     string    `json:"period,omitempty"`
 	KnownSpend int64     `json:"knownSpend,omitempty"`
