@@ -110,7 +110,8 @@ per dialect, sharing one `InFlight`, `route.Health`, `guard.Guard` and
    - `Handler.route`: the alias within the principal's models.
    - `Handler.features`: the route's feature mode and betas.
 3. **Policy** (`Handler.policy`): `maxOutputTokens`, `maxInputBytes`,
-   provider storage (`exchange.forbidStorage`), server tools.
+   provider storage (`exchange.forbidStorage`). Server-side tools are
+   admitted (ADR 0031).
 4. **Betas** (`incapable`): no deployment that takes the request's betas,
    `route.no_capable_deployment`, before anything is counted.
 5. **Rate limits** (`Handler.takeRate`): the member's and the scope's
@@ -217,7 +218,7 @@ the same process; its writes are ordinary compare-and-swap updates.
 | Only allowlisted headers cross; golem's and `OpenAI-Organization` never reach the provider | `Dialect.forwardRequest`, `copyHeaders` | `TestHeaders`, `TestOpenAIHeaders` |
 | The injected usage chunk never reaches the caller | `startStream`, `sse.Filter` | `TestInjectedUsageWithheld` |
 | A slow client or a silent provider is bounded; a fired alarm cancels no later call | `exchange.send`'s write deadline, `bounds`, `alarm.disarm` | `TestStalledClient`, `TestSilentProviderKeepsClient`, `TestRouteBounds`, `TestBoundsReuse`, `TestBoundsRace` |
-| Policy: ceilings, storage, server tools, feature modes | `Handler.policy`, `Handler.features` | `TestPolicy`, `TestStoreOff`, `TestPolicyUnits`, `TestFeatureModes` |
+| Policy: ceilings, storage, feature modes | `Handler.policy`, `Handler.features` | `TestPolicy`, `TestStoreOff`, `TestPolicyUnits`, `TestFeatureModes` |
 | `count_tokens` is held to a call's checks, short of admission | `ServeCountTokens` | `TestCountTokens`, `TestCountTokensChecks`, `TestCountTokensWiring` |
 | A model list holds only the scope's aliases | `ServeModels` | `TestModels` |
 | Prices are integers, rounded once, never wrap | `price.Cost`, `MaxCost` | `TestCost` |

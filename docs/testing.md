@@ -1,165 +1,79 @@
 # golem: testing
 
-Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
-and [security-and-correctness.md](security-and-correctness.md) govern the
-affected guarantees and release gates. What is built: the code's
-[orientation](walkthroughs/README.md) and the "Built" notes; release
-evidence is tracked in golem#7.
+What testing exists, what each kind is for, and what is still owed. M1's
+evidence is listed in [m1-plan.md](m1-plan.md); each test's invariant and
+the function it checks are in the [orientation](walkthroughs/README.md#4-invariants).
+The effort goes where a bug costs money, leaks data or breaks every caller
+at once: admission, authorization, publication, streaming.
 
-Status: draft. How golem is tested, chosen by value: the most effort where
-a bug costs money, leaks data, or breaks every caller at once (budgets,
-authorization, content capture, streaming, the distribution of config),
-and the least where the compiler and a table test suffice.
+## 1. What runs in CI
 
-## 1. What could hurt, and what catches it
+`.github/workflows/ci.yml`, on every push:
 
-| Risk | Example | Main defence |
+| Job | What |
+|---|---|
+| `go` | `gofmt`; `go vet ./...`; `go test -race -shuffle=on ./...` against a real Valkey and a real ClickHouse (service containers); every benchmark run once; `golemctl config validate` on examples/standalone; ci/fuzz-smoke.sh (each fuzz target for 10 s) |
+| `models` | `make -C model verify-tangled` (the committed `.qnt` match the literate `.md`), `make -C model check` (each model's typecheck, sampled simulation, scenarios and broken designs), then the connect tests: `TestPublicationModel`, `TestExposureModel`, `TestExposureModelValkey`, `TestAttemptsModel` |
+| `compat` | test/compat: the official OpenAI and Anthropic SDKs (Python and Node) through a gateway to a stub provider |
+
+`internal/archtest` (part of `go test`) checks the import rules: the
+gateway links nothing of the control plane and no database, ClickHouse or
+Kubernetes client; golemctl links `lib/` and the generated clients only.
+`lib/contract`'s test fails when the codes and headers drift from
+contracts.md; `internal/crdgen`'s when the chart's CRDs, DDL copy or
+collector config drift from their sources.
+
+## 2. The kinds of test
+
+| Kind | Where it is used |
+|---|---|
+| Table and unit tests | everything with inputs and outputs: scanning, rights, pricing, periods, the compiler's problems, error rendering per dialect, the state's invariants, the control API's authorization |
+| Fault and race tests | the request path against scripted providers (cuts, silence, error events, a provider killed under load: `TestFailoverDrill`); the store under concurrent writers and lost replies; Valkey down at start and mid-call; shutdown with streams in flight |
+| `testing/synctest` | ejection and retry budgets, limiter windows, Entra key refresh, drain |
+| Fuzzing | `FuzzObject` (jsonscan), `FuzzRewrite`, `FuzzChunking` and `FuzzStreamChunking` (dialects: chunking never changes usage), `FuzzFilter` (sse), `FuzzAuthenticate`, `FuzzMayHaveUsage`, `FuzzSingleCharError`; corpora checked in |
+| Store suites | the limiter's stores (`TestMemStore`, `TestValkeyStore`) and their differential test (`TestStoresAgree`, `TestStoresAgreeVaried`); lib/bucket's conformance suite on the directory bucket and S3's client |
+| Integration | ClickHouse: the ledger's DDL and the known-spend query (`TestClickHouseLedger`); test/ledger: real gateway telemetry through deploy/otel/collector.yaml into spend.sql, a duplicate counted once, a malformed row kept aside, a row surviving the collector's kill (skips without Docker and its endpoints) |
+| Binaries | cmd/golem-gateway and cmd/golem-control in-process: pool mode over a directory bucket, Valkey with TLS and an ACL user, Entra down at start, the release gate, the drain; the subcommands (keygen, pubkey, restore, bootstrap) |
+| Benchmarks | `BenchmarkHandler*`, `BenchmarkProduction` (the OTel SDK as production sets it up), `BenchmarkAdmitComplete` (Mem and Valkey); allocation counts are reviewed when they change, not gated |
+| Ablation | every invariant test in m1-security-gates.md and m1-plan.md's Built table was run with its fix removed and seen to fail |
+
+Every failing test names what to do next, as the code's errors do.
+
+## 3. The models
+
+Three literate Quint models in [model/](../model/README.md), each a
+design-level check first (sampled simulation of a mid-sized instance: the
+design holding every property, every scenario reached, each broken design
+caught; simulation, not proof) and then a judge of the code through
+gotogether's connect, the model's traces driving the real code:
+
+| Model | Question | Connect test |
 |---|---|---|
-| Overspend or double charge | concurrent calls past a budget beyond ADR 0031's bound; a duplicate delivery counted twice; crash-lost spend never booked | The accounting model (§3), Hegel state machines against it, simulation with faults |
-| Rights wider than intended | a key outlives its owner's membership; a narrow override widens capture | Hegel properties over random org histories; table tests of the resolution rules |
-| Content in the wrong place | capture on for a scope whose policy forbids it; a trace not deleted at expiry | Properties of capture resolution; an end-to-end test that checks Langfuse and ClickStack for content |
-| Broken streams | usage missed when a stream ends early; a dialect error event malformed; a translated tool call reordered | Goldens from recorded provider streams; fuzzing the SSE parser and scanners; translation properties |
-| Stale or inconsistent config | a gateway misses a change or rolls back to an older snapshot (a stale pointer, a lagging replica); two writers both believing they won | A model of the state CAS and publication; Hegel: a snapshot rebuilt after any sequence of changes equals one built from scratch |
-| Retry storms | failover from a saturated local box to a commercial model amplifies a brownout | Metastability analysis and load simulation (§3.4) |
-| API drift | a provider adds a field or changes an event | Recorded contract fixtures; a nightly live smoke test per provider with tiny prompts |
-| Performance regression | allocations creep onto the fast path | Benchmarks with allocation budgets in CI |
+| [publication.md](../model/publication.md) | after a revocation, how long can a gateway serve the key; no lower publication applied; fencing, restore, lost replies | `TestPublicationModel` (gateway/snapshot): golem-control's `Store.Claim` and `Publisher`, a bucket, each gateway's `Bucket` source |
+| [exposure.md](../model/exposure.md) | a scope shared by principals on several gateways, with snapshot lag, Valkey outages and cancelled calls, within its stated bound (ADR 0031) | `TestExposureModel`, `TestExposureModelValkey` (gateway/limit) |
+| [attempts.md](../model/attempts.md) | one answer per caller, each attempt charged once, retries within the slots, an ejected deployment seen only by its probe (ADR 0051) | `TestAttemptsModel` (gateway/proxy) |
 
-## 2. The regime
+What the models found, kept as tests: a gateway restarted with an empty
+disk refused its own trusted checkpoint (the floor is inclusive); a
+publisher numbering from the pointer instead of the record; a probe left
+standing after a readmission (`TestReadmissionEndsProbes`). Retired models
+(accounting, freshness, leadership) and the exhaustive design matrices
+are described in model/README.md; their ground is covered by exposure.md,
+by ADR 0054's freshness (tested by `TestCheckout`), and by
+control/publish's `TestGuard`.
 
-| Kind | Where | Notes |
-|---|---|---|
-| Table tests | pure logic: body scanning, rights intersection, capture resolution, pricing, period arithmetic, CEL compilation, error rendering per dialect | The default for anything with inputs and outputs |
-| Goldens (`-update` to regenerate, reviewed in diffs) | dialect requests and responses, SSE streams in and out, translations, error bodies, compiled snapshots, CLI output, generated CRDs and API descriptors | Fixtures recorded from real providers, scrubbed; one directory per dialect |
-| Fuzzing (`go test -fuzz`) | JSON body scanner and splicer, SSE parser, each dialect's decoders, request and stream (no panic, output parses, content preserved), key and token parsers, snapshot decoder | Corpora checked in; short runs in CI, long runs nightly; every crash becomes a corpus entry and a table case |
-| Property-based and stateful (Hegel, `hegel.dev/go/hegel`) | adapters (for each dialect, `encode(decode(x))` equals `x` on the supported subset; `decode(encode(c))` equals `c` for canonical values the dialect can express; a feature outside the subset is refused, never dropped), stream adapters (any chunking of the same stream gives the same canonical events), limiter (reserve, reconcile, expire against a simple reference), snapshot apply, router (never an ejected or capped deployment; affinity stable under membership changes), org service (random sequences of org operations keep the org model's invariants), capture resolution (narrow never widens), translation round trips | Hegel's shrinking turns a failure into a minimal sequence |
-| Time | retries, backoff, ejection windows, limiter windows, drain, idle-chunk timeouts, concurrency-slot expiry | `testing/synctest`, no sleeps |
-| Store suite | every state operation, lost CAS races included; the blob adapter's conformance (MinIO and a fake); signature verification and the publish-sequence floor | Per change (control-plane.md §8) |
-| Contract tests | each provider backend against its recorded fixtures; Valkey with the real scripts | Containers in CI |
-| End-to-end | kind with Istio ambient, the Helm charts installing everything, a stub provider, ClickHouse, Langfuse; clients: the OpenAI and Anthropic SDKs, Claude Code, Codex, Copilot CLI with BYOK | Per merge for a smoke set, nightly in full |
-| Performance | `testing.B.Loop` benchmarks with allocation budgets; a load test against a stub upstream that streams with realistic timing; a soak that checks the goroutine-leak profile | Baselines from M0 |
-| Mutation testing | the budget, rights, capture and router packages | Survivors are tests to write; run nightly |
-| Race detector | all packages | CI |
+## 4. Still owed
 
-Every test that fails names what to do next, as the code's errors do.
-
-Hegel tests live in the package they test, as internal tests in
-`*_hegel_test.go` files behind `//go:build hegel` (gateway/limit's
-exposure and stale-view tests, gateway/snapshot's publication test), their
-bindings beside them. They reach the package's internals, so nothing is
-exported for them alone. A plain `go test ./...` does not compile them and
-needs no libhegel; `go mod tidy` keeps hegel and qhegel in go.mod as
-test-only requirements, never linked into the binaries. Run them with
-`QUINT_BACKEND=typescript go test -tags hegel ./gateway/...`; CI's models
-job does, after `go vet -tags hegel ./...`. Editors need the tag too
-(gopls's `buildFlags: ["-tags=hegel"]`).
-
-## 3. gotogether: what to model, what to trial
-
-gotogether (github.com/chucklehead-dev/gotogether) checks Go code against
-Quint models: model-based tests (`connect`), Hegel runs judged by a model
-(`qhegel`), recorded or production runs validated against a model
-(`qobs`, `binding`, `validate`, `convert` for OTel spans), and
-deterministic simulation with fault-injecting doubles (`qenv`, `qtest`).
-Its value for golem is in the protocols, not the plumbing.
-
-### 3.1 Worth a Quint model
-
-| Model | State and actions | Properties |
-|---|---|---|
-| **Accounting** (ADR 0031; written: [model/accounting.md](../model/accounting.md), [model/exposure.md](../model/exposure.md)) | admissions under the soft and declared-worst-case checks, concurrency limits, completions, crashes, Valkey loss, duplicate delivery, reconciliation | overshoot within the stated bound; never counted twice; books match after reconciliation; the declared-worst-case check with one in flight stays within the budget apart from crash losses while every call costs at most its declared worst case (the model's assumption, not the world's: ADR 0044) |
-| **State and distribution** (control-plane.md §3–4; written: [model/publication.md](../model/publication.md), [model/freshness.md](../model/freshness.md)) | writers racing with `If-Match` (lost responses included), leader changes, signed publication with a publish sequence, gateway polls and restarts with empty disks, restore | every acknowledged write is in a snapshot every gateway applies; no gateway applies a lower publish sequence or an unsigned snapshot; no write is lost to a race; a restore never revives a revoked key; revocation within the bound after a settle |
-| **Attempt loop** (ADR 0002) | attempts, first byte, failover, retry budget, ejection | no retry after the first byte; retries bounded by the budget; an ejected deployment receives nothing until probed back |
-| **Approvals and grants** (org-model §4.3; when built, ADR 0034) | request, approve, reject, withdraw, expire, period rollover | a grant takes effect exactly once; no approval of one's own request; withdrawal and approval cannot both win |
-
-Each starts small (two regions, two gateways, one pool) and stays a
-design-level check: the model alone first (scenarios, safety, then
-liveness), before any code is bound to it.
-
-### 3.2 Where gotogether can be trialled during development
-
-1. **The limiter in simulation (M1; not yet tried: the limiter is checked
-   by connect and qhegel against model/exposure.md instead, see Built so
-   far).** Run the limiter (known-spend
-   checks, concurrency slots, the declared-worst-case check) on `qenv` with a
-   `qenv.Store`-backed double of Valkey (scripts as atomic transactions),
-   gateways crashing and Valkey failing over; `qtest.System.Explore` judged
-   by the accounting model. This is where a bug costs the most and is hardest to
-   find otherwise.
-2. **The state document under races (M1).** golem-control replicas on
-   `qenv` against a blob double with `If-Match` semantics (lost races,
-   slow PUTs, lost responses: a PUT that succeeded but whose 200 never
-   arrived), judged by the state-and-distribution model. Ablation: a
-   double that ignores `If-Match` must make the tests fail on lost
-   updates, which shows the CAS is load-bearing.
-3. **The attempt loop over simulated providers (M1).** The gateway's
-   upstream calls through `qenv/qhttp`, with lost responses, slow first
-   bytes, 429s and mid-stream cuts as faults, judged by the attempt-loop
-   model.
-4. **Distribution (M1–M2).** The leader publishing and gateways polling in
-   one simulation, leader changes, replayed old pointers and slow storage as
-   faults; a settle checks revocation latency.
-5. **Production traces (M2).** golem already emits OTel spans for each
-   check, attempt and completion; `convert` rules turn them into model
-   steps, so staging and production runs can be validated against the
-   accounting model offline, without new instrumentation.
-6. **Metastability (M2).** `qmeta` and `qload` on the failover policy:
-   capped local boxes overflowing to a commercial pool, retries under a
-   provider brownout, `qhegel.FindTrigger` for the smallest spike that
-   does not recover. Informs the retry budget and the overflow queue's
-   bound.
-7. **Configuration coverage.** `qsweep` covering arrays over dialect ×
-   backend × stream × translation × hooks × capture setting, so the
-   end-to-end suite covers every pair without the full product.
-8. **A grist spike for the budget domain (optional).** Grants, allocations
-   and approvals are naturally event-sourced and audit-heavy; a branch that
-   builds them as a grist app (its model generated from the catalog,
-   explored with `gristsim`) would show whether grist's guarantees are worth
-   adopting for golem-control. It runs on its own stores (Postgres via
-   `sqlstore`), so it is a trial, not a dependency, until
-   it proves itself.
-
-The trial is judged as any test is: by what it catches. Each model's
-checks are proved by planted mutants (a check that skips the concurrency
-limit, a balance that sums duplicates, a publisher that skips the pointer's version check, a stale leader that publishes after losing leadership) that the
-model must reject; a model whose mutants survive is not worth keeping.
-
-## Built so far
-
-The first model checks against real code (docs/spikes and ADR 0041's
-gates name what is still owed):
-
-| Code | Model | How | Found |
-|---|---|---|---|
-| `gateway/snapshot.Holder`, `.Bucket` and `control/publish` | model/publication.md | `connect`: the model's traces drive the real publisher (numbered and fenced by the record), a bucket, and each gateway's Bucket source; replayPointer copies an old signed pointer back; an empty-disk restart takes its floor from the record; the record, the pointer and each gateway's applied publication and floor compared after every step (leadership and the state remain the environment) | the floor was strict where the model's is inclusive: a gateway restarted with an empty disk refused its own trusted checkpoint and could not become ready while the publisher was down. A publisher numbering from the pointer instead of the record fails right after a replay (numbered 2, the model 3) |
-| the same | the same | `qhegel` (`gateway/snapshot/publication_hegel_test.go`, `-tags hegel`): Hegel drives the Holder with a stand-in publisher and an attacker replaying any old publication; the model judges each run | planted bugs (no floor check, no expiry check) caught and shrunk to four steps; neither is visible to the connect test, since the model never asks for a forbidden step |
-| `gateway/limit.Limiter` | model/exposure.md | `connect`: one Limiter per gateway over one store; slots, waivers, held increments and known spend compared | the model's rules shown necessary by ablation (cancel holding its slot, re-acquiring, the hand-off by boundary, recording waivers, replaying increments into their own minutes); recovery converging under load and a completion racing recovery each have a test (`TestRecoverUnderLoad`, `TestCompletionRacingRecovery`) |
-| the same | the same | `qhegel` (`gateway/limit/exposure_hegel_test.go`, `-tags hegel`): Hegel drives the limiters, a late ledger, snapshots, outages and failovers | **the model was wrong**: during an outage it judged by the true counter, which no gateway can read; it now keeps each gateway's view. A missing scope limit is caught and shrunk to three steps |
-| the same | the same | a benchmark of the admitted path, then the model | **the design was wrong, twice hidden by an atomic model**: matching counter events to snapshots cost O(window) per admission, and deleting included events lost them for gateways still on an older snapshot. ADR 0042 replaced it (numbered counter, ledger watermark: O(1), exact under skew), and ADR 0048 that (minute counters and a time boundary, once budgets were controls, ADR 0044); the model now applies snapshots and recovers per gateway, which also exposed admissions next to unrecovered peers' calls (now waived for a grace period). 32 µs and 23 allocations per admitted request, flat |
-| the request path, profiled | — | a performance review: `BenchmarkProduction` (the OTel SDK as production sets it up), `BenchmarkAdmitComplete` (Mem and Valkey), pprof, escape analysis | as production runs it, 75 µs and 89 allocations a call, now 44 µs and 42 (the SDK deduplicated the ledger row's keys, attribute sets were rebuilt per call); OpenAI chunks were scanned in full twice (2.3 µs, now 171 ns); an 8 MiB body pinned 16 MiB per P in the scanner's pool; ledger rows were dropped silently on a full queue; `WAIT` acknowledged nothing; the upstream idle pool was capped at 100 connections in all; a client that stopped reading held its call for ever. Over Valkey a call adds 21 allocations, above the 50 target: next to measure |
-| `gateway/dialect/...`, `gateway/sse` | — | fuzzing: scan acceptance equals `encoding/json`'s, rewrites change one field, usage independent of chunking | a split `\r\n` across an empty write |
-| the gateway end to end | — | `test/compat`: the official SDKs through it to a stub provider | the injected OpenAI usage chunk crashed the SDKs' usual loops |
-| the same, reviewed | — | a Go specialist's and an architect's review, each fix with a test | admission read and acquired in two round trips (now one script); counters spanned months, so every budgeted scope was refused from the second; standalone could be driven by any web page; a cut provider response reached the caller as a clean, shorter one; the filtered OpenAI stream dropped keep-alives; shutdown cut every stream; a key with a missing scope was unlimited |
-| `gateway/sse.Filter` | — | fuzzing: dropping nothing is the identity, however the stream is chunked | a `\r\n` split across writes was attributed to the next event, dropped with it |
-
-## Review acceptance gates
-
-The evidence matrix in [security-and-correctness.md](security-and-correctness.md#10-required-evidence-and-review-traceability)
-is required at its stated milestones. The models cover fenced publication
-and authorization freshness (model/publication.md), composite freshness of
-state and config CRDs under stale caches, rollbacks, leader changes and
-restore (model/freshness.md), and the soft-budget
-bound, deduplication and reconciliation (model/accounting.md).
-
-## Second security review gates (ADR 0041)
-
-[ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) adds negative tests for denylist persistence under Argo
-sync/self-heal/prune/upgrade/restart; both audit capacity thresholds; capture
-sender impersonation, pool-boundary routing and operational-exporter fan-out;
-inherited-project readers; restricted/compatible request features and hostile
-field-name logging; and Argo/Crossplane privilege escalation. The model side
-of CRD freshness, deletion and rollback and of restrictive changes from
-either source is model/freshness.md; the implementation tests remain.
-The model side of counter handoff, multi-principal scope exposure, failed
-renewal and continued billing after cancellation is model/exposure.md
-(ADR 0041 §7.6); the implementation tests remain.
-These tests and model extensions are required evidence, not completed work.
+- **ADR 0041's M1 gates** that need a deployment: the denylist surviving
+  Argo sync, prune and restarts; the restore and freshness tests for the
+  git checkout against the real install (security-and-correctness.md §10).
+- **Against real services**: S3 and KMS in the target account with the
+  bucket policy that denies other writers; real Bedrock
+  (docs/acceptance/m1-bedrock.md); a real vLLM box (m1-vllm.md); OTLP TLS
+  to the real collector (golem#7).
+- **Alerts** firing against recorded metrics, and the drills of m1-plan.md
+  step 6.
+- **Later** (M2): approvals and grants as a model when grants are built
+  (ADR 0034); translation round-trip properties and goldens (M1.5); capture
+  routing's negative tests (ADR 0041 §2); an end-to-end kind cluster with
+  the charts.

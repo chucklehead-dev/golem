@@ -60,8 +60,8 @@ deployment requirement (operations.md), not a check golem makes.
 - request size (the body limit, a scope's `maxInputBytes`) and declared
   output (`maxOutputTokens` over `max_tokens` × `n`, a missing
   `max_tokens` refused under one);
-- request features: provider storage, server tools, restricted mode (ADR
-  0027, 0037, 0041 §3);
+- request features: provider storage and stateful references, restricted
+  mode (ADR 0027, 0037, 0041 §3); server-side tools are admitted;
 - call lifetime: first-byte, idle and maximum durations;
 - refusal once known spend reaches an `enforce` budget (`budget.pool_exhausted`,
   402), within the snapshot's lag.

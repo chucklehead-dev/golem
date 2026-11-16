@@ -6,6 +6,12 @@ affected guarantees and release gates. What is built: the code's
 [orientation](walkthroughs/README.md) and the "Built" notes; release
 evidence is tracked in golem#7.
 
+> **M1's scope of record is [m1-plan.md](m1-plan.md)**, including what is
+> not being built in M1. This page is the whole product's requirements;
+> where it puts something in M1 that m1-plan.md does not (caps, team
+> pools, provider quota limits, token and $/min rate limits, CRDs in the
+> cluster, overrides), m1-plan.md wins and it moves to M2 or later.
+
 Status: draft for discussion. Revised 2026-11-11 (sixth pass: the design envelope, ADR 0021; the roadmap in roadmap.md).
 
 ## 1. Problem
@@ -130,9 +136,9 @@ fields are dropped and reported in a header. For Chat callers routed to
 Claude, golem can place prompt-cache breakpoints itself by route policy.
 
 5.1.3 **Decision dialects** *(added)*: both are billed on input tokens
-only and do not stream, so their cost is known before the call: the
-declared-worst-case check (§5.5) has no output term, and a `stream: true` request is refused by
-golem with the provider's own error shape.
+only and do not stream, so their cost is known before the call (it has no
+output term), and a `stream: true` request is refused by golem with the
+provider's own error shape.
 
 5.1.4 **Provider headers and betas pass through** *(added)*:
 `anthropic-beta`, `anthropic-version`, `OpenAI-Beta` and the like, by an
@@ -267,11 +273,12 @@ The full model is [org-model.md](org-model.md). In short:
   adjustments; those drawing on a cost center need a budget manager's
   approval.
 - Enforcement per request at three levels: key cap, member cap,
-  scope pool.
+  scope pool (from M2; M1 has the scope's budget alone, ADR 0031).
 
 | Capability | Milestone |
 |---|---|
-| Users, teams (Entra-group bound), services, personal and service keys, scope policies, member caps, team pools granted by admins, enforcement modes | M1 |
+| Users, teams (Entra-group bound), services, personal and service keys, scope policies with a budget, enforcement modes | M1 |
+| Member and key caps, team pools granted by admins | M2 (ADR 0031: scope budgets only in M1) |
 | Audit of every change | M1 |
 | Projects, monthly caps per scope set by admins or parent managers, cost-center mapping for chargeback (ADR 0034) | M2 |
 | Grants, adjustment requests and budget-manager approvals | when a budget manager asks for them |
@@ -283,32 +290,26 @@ The full model is [org-model.md](org-model.md). In short:
 ### 5.5 Limits
 
 - **Enforcement modes** per scope: `observe`, `warn`, `enforce` (§9.1).
-- **Provider quota limits** per deployment, shared by a site's gateways,
-  split statically between sites (§9.2, ADR 0012).
-- **Rate limits** in requests/min, tokens/min and $/min, at any of the
-  levels of §5.4 and per model or route; **concurrency limits** on
-  in-flight streams per principal *(added)*.
-- **Soft budgets** (ADR 0031): each call is checked against known spend
-  (the ledger's deduplicated balance in the snapshot, plus the site's
-  counter since), and its actual cost is added when it ends; once known
-  spend reaches a limit, every further call is refused on every site within
-  about a minute. In-flight calls can overshoot, by about the principal's
-  in-flight limit times its largest declared call, plus one refresh lag's
-  spend: expected exposure, not a bound (ADR 0044).
-  Scopes with the **declared-worst-case check** also require the request's declared
-  worst case to fit, and refuse requests that declare none. Budgets are
-  admission and monitoring controls, not spending ceilings (ADR 0044):
+- **Provider quota limits** per deployment *(M2; in M1 a deployment's
+  in-flight ceilings and the provider's own 429s, failed over: §9.2)*.
+- **Rate limits** in requests a minute, per member and per scope (M1);
+  tokens a minute, $/min and per-key limits are M2's. **Concurrency
+  limits** on in-flight calls per principal and per scope.
+- **Soft budgets** (ADR 0031): each call is checked against known spend,
+  the ledger's deduplicated spend published in each snapshot; once it
+  reaches an `enforce` budget, further calls are refused on every site
+  within the snapshot's lag (a few minutes). Calls in flight finish, and
+  spend within the lag is not seen: expected exposure, not a bound.
+  Budgets are admission and monitoring controls, not spending ceilings:
   calls whose usage is missing are charged conservative estimates, the
   provider's bill reconciled against the ledger is the record, and each
   provider account's own spending limit is the financial backstop.
-- **Valkey at every site**, required from M1 (ADR 0012), for spend counters
-  since the snapshot, rate windows, concurrency slots and provider quotas.
-- On Valkey outage: budget levels fail open or closed per scope policy;
-  rate limits fail open with a warning.
-- Refusals, in the caller's dialect, say which limit, at which level, and
-  when it resets: 429 with `Retry-After` for rate and concurrency limits,
-  402 for budgets and caps (ADR 0024); `x-ratelimit-*` headers in the
-  provider's style.
+- **Valkey at every site** for concurrency slots and rate buckets.
+- On Valkey outage: a gateway admits on its own in-flight counts, each
+  admission recorded as a waiver; rate limits fail open.
+- Refusals, in the caller's dialect, say which limit and when it resets:
+  429 with `Retry-After` for rate and concurrency limits, 402 for budgets
+  (ADR 0024). `x-ratelimit-*` headers are M2's.
 
 ### 5.6 Models, aliases and routing
 
@@ -391,13 +392,13 @@ The system is these deliverables (architecture.md, ADR 0003):
 | Component | Role | Milestone |
 |---|---|---|
 | golem-gateway | Data plane only: model requests in, provider calls out | M0 |
-| golem-control | Control API (config read, explain, overrides, org, keys, budgets, spend, audit), the CRD watch; its leader runs the jobs and signs and publishes snapshots (ADRs 0003, 0007) | M1 |
+| golem-control | Control API (org and keys in M1; config read, explain, overrides, budgets, spend from M2); one replica that compiles the config checkout, runs the jobs and signs and publishes snapshots (ADRs 0003, 0007, 0053, 0054) | M1 |
 | golemctl | CLI for every persona, including `login` and coding-agent setup | M1 |
 | golem-console | Small web UI for keys, caps and spend | M2 |
 | Backstage plugin | Spend, budgets and keys on Backstage entities | M3 |
 
-- **Two writers, one each**: declarative config is CRDs (GitOps), read by
-  golem-control; entitlements and operational overrides change only through
+- **Two writers, one each**: declarative config is the GitOps
+  repository, compiled by golem-control from a git checkout (ADR 0054); entitlements and operational overrides change only through
   the control API (protobuf, Connect; ADRs 0022, 0005). The CLI, console and
   plugin are API clients; the gateway reads only its snapshots from object
   storage and never calls the control plane.
@@ -417,9 +418,11 @@ The system is these deliverables (architecture.md, ADR 0003):
   service accounts reach golem, and admin ports to golem-control; no
   identity header is trusted (ADR 0036); bucket policies let each gateway pool read its snapshots and write only
   its own status objects.
-- **Config**: five CRD kinds (`Backend`, `ModelRoute`, `ScopePolicy`,
-  `Hook`, `PriceList`; ADR 0005) watched by golem-control, with status
-  written back; incident levers as expiring overrides through the API.
+- **Config**: the kinds `Backend`, `ModelRoute`, `ScopePolicy`,
+  `PriceList` (and `Hook` with hooks), as YAML in the GitOps repository,
+  compiled by golem-control from a git checkout (ADR 0054); no objects in
+  the cluster and no status in M1, and no overrides: M1's incident levers
+  are a pull request, ejection and the emergency denylist.
   Provider secrets stay in Kubernetes Secrets, mounted into the gateways
   that need them.
 - **Multiple instances and regions**: `GatewayPool`s per region or zone;
@@ -523,9 +526,10 @@ mis-set budget cannot stop a team's work on day one.
 
 ### 9.2 Provider quota limits
 
-Per deployment TPM/RPM limits shared by every gateway (in Valkey), so
-golem stays inside each provider account's quota instead of discovering it
-by 429s, and balancing knows the headroom.
+*(M2.)* Per deployment TPM/RPM limits shared by every gateway (in
+Valkey), so golem stays inside each provider account's quota instead of
+discovering it by 429s. M1 has none (ADR 0031): a deployment's in-flight
+ceilings, and the provider's 429s failed over to the next deployment.
 
 ### 9.3 Key format
 

@@ -7,8 +7,15 @@ affected guarantees and release gates. What is built: the code's
 evidence is tracked in golem#7.
 
 Status: draft, fifth pass. The entitlement model behind PRD §5.3–§5.5;
-decided in ADR 0010 (the model), 0010 (scopes and roles), 0006 (where it
-lives) and 0013 (multi-region enforcement).
+decided in ADR 0010 (scopes and roles), 0006 (where it lives) and 0031
+(budgets).
+
+> **M1's scope of record is [m1-plan.md](m1-plan.md).** M1 builds scopes,
+> members (from bound Entra groups), managers, services, keys with model
+> constraints and an expiry, and one budget per scope with its mode
+> (ADR 0031, 0050). Cost centers, grants, pools, approvals, member and key
+> caps, key spend and rate constraints, source binding and capture settings
+> below are M2 or later.
 
 ## 1. Entities
 
@@ -56,9 +63,9 @@ policy narrows; it can never be wider than its owner.
 
 **Where a scope's policy lives** (ADR 0050). A scope's policy is config:
 a `ScopePolicy` CRD named after the scope, in the GitOps repository,
-changed by a reviewed pull request (ADR 0005), with its models (route
-aliases), budget and budget mode, the declared-worst-case check,
-in-flight limits, request ceilings, provider storage and feature mode.
+changed by a reviewed pull request (ADR 0054), with its models (route
+aliases), budget and budget mode, rate limits, in-flight limits, request
+ceilings, provider storage and feature mode.
 The scope itself, its memberships, the Entra groups bound to it (an
 admin's act in the control API, ADR 0047), its keys and its role
 bindings are entitlements, in the state document. golem-control joins
@@ -73,12 +80,10 @@ metadata: {name: team-a}        # the scope's ID
 spec:
   models: [chat, coder]          # route aliases
   budgetMicros: 500000000        # this period's budget, micro-units
-  defaultMemberCapMicros: 0      # a member's cap without its own; 0: none
   rateLimits:                    # this site's; 0 or unset: none
     member: {requestsPerMinute: 60}
     scope: {requestsPerMinute: 600}
-  budgetMode: observe            # observe (default) | warn | enforce; caps follow it
-  declaredWorstCaseCheck: false
+  budgetMode: observe            # observe (default) | warn | enforce
   inFlight: {principal: 4, scope: 16}
   maxOutputTokens: 32000
   maxInputBytes: 4000000
@@ -167,49 +172,29 @@ pool.granted   = Σ grants out to sub-teams and projects   (team pools only)
 pool.available = total − granted − spent            (spent: known spend, ADR 0031)
 ```
 
-Caps on members do not move money; they are limits within the pool (a
-key's spend cap is the same kind of object, on a key).
-Their sum may exceed the pool (oversubscription, on, since few members
-use all of theirs). A member without a cap draws from the pool up to the
-scope's **default member cap** (its ScopePolicy's
-`defaultMemberCapMicros`). A cap of zero is none, as a budget of zero is:
-to stop a member, remove its membership. A member's own cap, and a key's,
-are state, set by the scope's managers (the control API, golemctl); the
-default is config, with the scope's budget (ADR 0050).
+*(M2, ADR 0034.)* Caps on members do not move money; they are limits
+within the pool (a key's spend cap is the same kind of object, on a key).
+Their sum may exceed the pool (oversubscription). M1 has no caps (ADR
+0031): a scope's budget is its ScopePolicy's `budgetMicros`, and one
+member or key can spend all of it, within the rate and in-flight limits.
 
 ### 4.2 Enforcement
 
 A request is charged to its key's scope. Before going upstream golem
-checks **known spend** (the ledger's balance published in the snapshot,
-plus the site's counter since) at each level, and fails with a 402 (not
-429, which SDKs retry: ADR 0024) naming the first level already reached:
-
-1. the key's own cap (if any);
-2. the member's cap in the scope (or the default member cap);
-3. the scope pool's `available`.
-
-Each level is an account with its own known spend: the snapshot's (the
-ledger's, by scope, by principal in the scope, by key) plus the site's
-counter for it since the snapshot's boundary, all checked in the one
-admission round trip and all added to by the one completion write
-(model/exposure.md's member accounts: a member counted from snapshots
-alone would be blind to its calls within a publication's lag). Only a
-capped member or key has an account at the site; a cap set mid-period
-counts from the ledger's spend at the next snapshot, missing at most the
-calls between that snapshot's boundary and the cap's publication.
+checks the scope's **known spend** (the ledger's deduplicated spend,
+published in each snapshot) against its budget, in the same admission
+round trip that takes the in-flight slots, and under `enforce` fails with
+a 402 `budget.pool_exhausted` (not 429, which SDKs retry: ADR 0024). In
+M1 the scope's budget is the only level (ADR 0031); key and member caps
+come with M2's pools (ADR 0034).
 
 Budgets are soft and eventually consistent (ADR 0031): calls already in
-flight can take spend past a limit: by about the principal's in-flight
-limit times its largest declared call, plus what it spends within one
-refresh lag; a scope's pool, shared by its members, by about the scope's
-own in-flight limit times the largest call (ADR 0041 §7.6). These are
-expected exposure while calls cost what they declare, not guarantees.
-A scope may choose the **declared-worst-case check** (`declaredWorstCaseCheck`): the
-request's declared worst case must also fit, and a request that declares
-none (no `max_tokens`, server-side tools) is refused. That narrows the
-overshoot by about one call; it is not a ceiling. A budget is an
+flight finish, and spend within the snapshot's lag is not seen, so a
+scope can pass its budget by about its in-flight limit times its largest
+call plus what it spends within the lag (bounded by its rate limit). That
+is stated exposure (model/exposure.md), not a guarantee. A budget is an
 admission and monitoring control: the provider's bill, reconciled, is the
-record, and the provider account's spending limit the backstop (ADR 0044).
+record, and the provider account's spending limit the backstop.
 
 What happens at a limit depends on the scope's enforcement mode (PRD
 §9.1), its ScopePolicy's `budgetMode`: `observe` (the default, so that
@@ -220,9 +205,9 @@ have made (the ledger row's `over_budget`), `warn` does that and adds a
 request to its ScopePolicy. In-flight limits refuse in every mode.
 
 At completion the call's actual cost is added to known spend. Team pools are not charged for a sub-team's or a project's spend: the
-grant already moved that money. Thresholds (e.g. 50/80/100%) at every level emit an
-event and notify the pool's managers; 100% at level 2 or 3 rejects, or
-downgrades to a configured cheaper alias.
+grant already moved that money. *(M2.)* Thresholds (e.g. 50/80/100%)
+emit an event and notify the pool's managers; 100% rejects, or downgrades
+to a configured cheaper alias.
 
 ### 4.3 Approvals (when a budget manager asks for them; M2 ships caps and a cost-center mapping: ADR 0034)
 
@@ -241,7 +226,7 @@ chargeback, a project's spend is apportioned to its funding sources pro
 rata by their grants in that period (configurable: in order). The ledger
 is in ClickHouse (ADR 0015).
 
-## 5. Examples
+## 5. Examples (the full model, M2)
 
 - Platform team gets $20k/month recurring from CC-4410 (budget manager).
   Its manager grants $5k/month to project "support-bot" and caps each

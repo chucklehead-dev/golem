@@ -126,7 +126,8 @@ code's walk through it, with each step's function, is the
 6. **Route.** The alias, within the principal's models, to its route; the
    route's feature mode (restricted or compatible: approved betas and API
    versions), then the scope's policy (`maxOutputTokens` over `max_tokens`
-   × `n`, `maxInputBytes`, provider storage, server tools). The pool is
+   × `n`, `maxInputBytes`, provider storage; server-side tools are
+   detected but admitted, ADR 0031). The pool is
    narrowed to the deployments that accept the request's `anthropic-beta`
    values (ADR 0028, betas only); none, `route.no_capable_deployment`,
    before anything is counted.
