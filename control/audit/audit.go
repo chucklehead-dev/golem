@@ -1,6 +1,6 @@
-// Package audit ships the state document's audit outbox (control-plane.md
-// §3): the leader archives each event, emits it as an OTel log record for
-// ClickHouse, and only then trims it from the outbox.
+// Package audit ships the state document's audit outbox. The leader
+// archives each event, emits it as an OTel log record for ClickHouse, and
+// only then trims it from the outbox.
 //
 // The archive is the durability boundary, not the collector: each event is
 // written once, create-only, as its own object (audit/<seq>.json) in an

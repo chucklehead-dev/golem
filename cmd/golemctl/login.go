@@ -18,7 +18,7 @@ import (
 
 // settings are where golem is and the cached tokens, in one file only its
 // owner reads (GOLEMCTL_HOME, else the user's config directory). The
-// design keeps tokens in the OS keychain (tools.md §1); a file is this
+// design keeps tokens in the OS keychain (tools.md); a file is this
 // slice's.
 //
 // Two resources take golemctl's tokens (ADR 0046): the control API's
@@ -141,14 +141,14 @@ func post(ctx context.Context, endpoint string, form url.Values, into any) error
 	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(into)
 }
 
-// login signs in by Entra's device code flow (entra.md #2: golemctl is a
-// public client) and saves the settings and tokens.
+// login signs in by Entra's device code flow, as golemctl is a public
+// client, and saves the settings and tokens.
 func login(ctx context.Context, args []string, _, errOut io.Writer) error {
 	prev, _ := loadSettings()
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	tenant := fs.String("tenant", prev.Tenant, "the Entra tenant (directory) ID")
-	client := fs.String("client-id", prev.ClientID, "golemctl's app registration's client ID (entra.md #2)")
+	client := fs.String("client-id", prev.ClientID, "golemctl's app registration's client ID (entra.md)")
 	api := fs.String("api", prev.API, "golem-control's URL")
 	ctl := fs.String("control", cmp.Or(prev.Control, "api://golem-control"), "the control API registration's Application ID URI")
 	gw := fs.String("gateway", cmp.Or(prev.Gateway, "api://golem"), "golem API's (the gateway's) Application ID URI")

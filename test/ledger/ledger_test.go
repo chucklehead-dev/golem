@@ -1,4 +1,4 @@
-// Package ledger tests the ledger's whole path (contracts.md §3.1, ADR
+// Package ledger tests the ledger's whole path (contracts.md, ADR
 // 0043): the gateway's telemetry exports rows over OTLP to the collector
 // configured by deploy/otel/collector.yaml, which queues them on disk and
 // writes them to ClickHouse, whose views (deploy/clickhouse/spend.sql) make

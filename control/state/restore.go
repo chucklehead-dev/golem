@@ -11,9 +11,8 @@ import (
 )
 
 // Restore is a document with an older one's entitlements brought back
-// without widening anyone's rights (security-and-correctness.md §3,
-// control-plane.md §3 History): for every right, the narrower of the
-// backup's and the current document's.
+// without widening anyone's rights (security-and-correctness.md). Each
+// right is the narrower of the backup's and the current document's.
 //
 //   - What only the backup has (a principal, scope, membership, role or
 //     key since removed) is not restored: re-granting it is a separate,
@@ -25,14 +24,13 @@ import (
 //   - What both have takes the narrower of each: groups, memberships and a
 //     key's models intersected, a key's expiry the earlier.
 //
-// A scope's policy is not in the state (its ScopePolicy is config, ADR
-// 0050), so a restore neither brings back nor narrows it.
+// A scope's policy is config, not state (ADR 0050), so a restore neither
+// brings back nor narrows it.
 //
-// The fence, the publication records, the revocations and the audit
-// outbox are the current document's, never the backup's (model/
-// leadership.md's RESTORE=preserve): a restore cannot move publication
-// back, depose or reinstate a leader, or revive a revoked key. A backup of
-// another schema is refused. The result is written by Update, which checks
+// The fence, the publication records, the revocations and the audit outbox
+// are the current document's, never the backup's. So a restore cannot move
+// publication back, depose or reinstate a leader, or revive a revoked key.
+// A backup of another schema is refused. Update writes the result, checking
 // every invariant against the current document.
 func Restore(cur, backup *Document, at time.Time) (*Document, Report, error) {
 	if backup.Schema != cur.Schema {

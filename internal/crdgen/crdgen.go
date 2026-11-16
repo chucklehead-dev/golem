@@ -1,9 +1,10 @@
-// Package crdgen writes the config CRDs' definitions (group golem.dev,
-// ADR 0005) from lib/api/v1alpha1's Go types: each kind's spec as an
-// OpenAPI schema, a field's doc comment its description. The types are
-// the source of truth; the compiler (lib/compile) is the validation, the
-// schema only its shape, so a typo is refused at kubectl apply. Its test
-// keeps deploy/charts/golem-control/crds current.
+// Package crdgen writes the config CRDs' definitions (group golem.dev)
+// from lib/api/v1alpha1's Go types. Each kind's spec becomes an OpenAPI
+// schema, and a field's doc comment its description.
+//
+// The types are the source of truth. The compiler, lib/compile, does the
+// validation. The schema gives only the shape, so a typo is refused at
+// kubectl apply. Its test keeps deploy/charts/golem-control/crds current.
 package crdgen
 
 import (

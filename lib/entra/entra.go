@@ -24,10 +24,10 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// Verifier verifies Entra ID v2 access tokens for one golem API (ADR 0009,
-// entra.md #1), locally: the signing keys are cached and refreshed in the
-// background, so the request path makes no network call. A token proves
-// who is calling, nothing more: rights come from the snapshot.
+// Verifier verifies Entra ID v2 access tokens for one golem API, locally
+// (ADR 0009). The signing keys are cached and refreshed in the background,
+// so the request path makes no network call. A token proves who is calling,
+// nothing more. Rights come from the snapshot.
 type Verifier struct {
 	// Tenant is the directory (tenant) ID tokens must come from.
 	Tenant string
@@ -48,8 +48,8 @@ type Verifier struct {
 	Now    func() time.Time
 
 	// MaxKeyAge is how old the cached key set may grow while refreshes
-	// fail before tokens are refused (default 24 hours): a key Entra has
-	// revoked must not be trusted for ever (golem#5).
+	// fail before tokens are refused, 24 hours by default. A key Entra has
+	// revoked must not be trusted for ever.
 	MaxKeyAge time.Duration
 
 	keys    atomic.Pointer[map[string]*rsa.PublicKey]
@@ -62,13 +62,13 @@ type Verifier struct {
 const leeway = time.Minute
 
 // The delegated scopes a user's token must carry, and the app role a
-// service's must (entra.md #1, #1b; each registration defines its own).
+// service's must. Each API registration in entra.md defines its own.
 const (
 	ScopeAccess = "golem.access" // golem API's: calling models
 	ScopeManage = "golem.manage" // the control API's: golemctl and the console
 	RoleService = "golem.service"
 	// RoleAdmin is the app role that makes a caller a golem admin
-	// (org-model.md §2): the control API registration's, not the gateway's.
+	// (org-model.md): the control API registration's, not the gateway's.
 	RoleAdmin = "golem.admin"
 )
 

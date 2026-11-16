@@ -164,7 +164,7 @@ func bootstrap(ctx context.Context, w io.Writer, args []string) error {
 // widening anyone's rights (state.Restore): a dry run by default, which
 // prints what would be withheld and rolled back; written with -apply. The
 // backup is a document file, an old version taken from the bucket's
-// history or its Object Lock replica (control-plane.md §3).
+// history or its Object Lock replica (control-plane.md).
 func restore(ctx context.Context, w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	where := fs.String("bucket", "", "the state bucket: a directory, or s3://bucket/prefix/")

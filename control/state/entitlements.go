@@ -12,11 +12,11 @@ import (
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// The entitlements part of the state (control-plane.md §3.1): principals,
-// their memberships, scopes and the Entra groups bound to them, keys by
-// hash, and the append-only revocations that a restore must preserve (ADR
-// 0041 §5). A scope's policy is config, not state: its ScopePolicy (ADR
-// 0050), which the snapshot compiler joins with the scopes here by ID.
+// The entitlements part of the state: principals, their memberships,
+// scopes and the Entra groups bound to them, keys by hash, and the
+// append-only revocations that a restore must keep (ADR 0041). A scope's
+// policy is config, its ScopePolicy, which the compiler joins with these
+// scopes by ID (ADR 0050).
 
 // Principal is a user or a service.
 //
@@ -52,10 +52,9 @@ func (p Principal) MemberOf(scope string) bool {
 // principal created now cannot be inherited by that person later.
 const ReservedPrefix = "entra:"
 
-// Scope is a scope as the state knows it (org-model.md §3): that it
-// exists, so memberships, keys and roles can name it, and the Entra groups
-// bound to it. Its policy (models, budget, limits) is its ScopePolicy's, in
-// the config (ADR 0050).
+// Scope is a scope as the state knows it: that it exists, so memberships,
+// keys and roles can name it, and the Entra groups bound to it. Its policy
+// is its ScopePolicy's, in the config (ADR 0050).
 type Scope struct {
 	// Groups are the Entra groups (object IDs) whose members, transitively,
 	// are the scope's synced members (ADR 0047): bound by admins.
@@ -72,15 +71,15 @@ type Key struct {
 	RevokedAt time.Time `json:"revokedAt,omitzero"`
 }
 
-// Revocation is a key revoked: kept for ever, so no restore of older
-// state can bring the key back (§3, History).
+// Revocation is a key revoked. It is kept for ever, so no restore of older
+// state can bring the key back.
 type Revocation struct {
 	Key string    `json:"key"` // its hash
 	At  time.Time `json:"at"`
 }
 
-// RoleBinding gives a principal a role on a scope (org-model.md §2):
-// "manager" for now. Admins hold the Entra app role golem.admin, not a
+// RoleBinding gives a principal a role on a scope, "manager" for now
+// (org-model.md). Admins hold the Entra app role golem.admin, not a
 // binding.
 type RoleBinding struct {
 	Principal string `json:"principal"`
@@ -88,8 +87,8 @@ type RoleBinding struct {
 	Scope     string `json:"scope"`
 }
 
-// AuditEvent is one change, written with it (control-plane.md §3). Seq
-// is the store's: assigned at the write, it names the event in the outbox.
+// AuditEvent is one change, written in the same write. Seq is assigned by
+// the store at the write, and names the event in the outbox.
 type AuditEvent struct {
 	Seq    uint64            `json:"seq"`
 	At     time.Time         `json:"at"`

@@ -1,8 +1,8 @@
-// Package period names budget periods: a calendar month in the
+// Package period names budget periods. A period is a calendar month in the
 // installation's period time zone, the month a call started in
-// (contracts.md §3). The gateway's counters, its ledger rows and
-// golem-control's watermarks all name a call's period through here, so they
-// cannot disagree about which month a call near midnight belongs to.
+// (contracts.md). The gateway's admission, its ledger rows and
+// golem-control's known spend all name a call's period through here. So
+// they cannot disagree about which month a call near midnight belongs to.
 package period
 
 import "time"

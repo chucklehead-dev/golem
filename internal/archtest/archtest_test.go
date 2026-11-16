@@ -1,5 +1,5 @@
-// Package archtest checks the layering rules of architecture.md §4.2 and
-// gateway.md §4 with go list, so a forbidden import fails CI rather than a
+// Package archtest checks the layering rules of architecture.md and
+// gateway.md with go list, so a forbidden import fails CI rather than a
 // review.
 package archtest
 

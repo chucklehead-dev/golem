@@ -1,5 +1,5 @@
 // Package sign signs and verifies what golem-control publishes: the
-// snapshot pointer, which binds a snapshot's hash (control-plane.md §4,
+// snapshot pointer, which binds a snapshot's hash (control-plane.md,
 // ADR 0006, 0007). A Signer holds the publishing key; gateways hold only a
 // Verifier, by key ID, so a key is rotated by publishing with a new ID
 // while gateways trust both.

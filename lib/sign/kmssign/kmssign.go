@@ -1,6 +1,6 @@
 // Package kmssign signs with an AWS KMS asymmetric key (ECC_NIST_P256,
 // ECDSA_SHA_256): golem-control's publishing key never leaves KMS
-// (control-plane.md §4, §5). Gateways verify with sign.ECDSAKeys and the
+// (control-plane.md). Gateways verify with sign.ECDSAKeys and the
 // key's public key (PublicKey), never calling KMS.
 package kmssign
 

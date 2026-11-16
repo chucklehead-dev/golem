@@ -1,14 +1,14 @@
 // Package contract holds the interfaces other systems depend on, as code:
-// refusal codes with their statuses (contracts.md §1), error origins (§2)
-// and golem's header names (§5). A test reads contracts.md and fails when
+// refusal codes with their statuses, error origins and golem's header
+// names, all from contracts.md. A test reads contracts.md and fails when
 // the two disagree, so the document stays the source and the code cannot
 // drift from it.
 package contract
 
-// Origin is who caused a failure (contracts.md §2).
+// Origin is who caused a failure (contracts.md).
 type Origin string
 
-// The origins, as contracts.md §2 lists them.
+// The origins, as contracts.md lists them.
 const (
 	OriginClient   Origin = "client"
 	OriginPolicy   Origin = "policy"
@@ -29,7 +29,7 @@ type Code struct {
 // with Retry-After (docs/spikes/sdk-compat.md).
 func (c Code) RetryAfter() bool { return c.Status == 429 || c.Status == 503 }
 
-// The codes, as contracts.md §1 lists them.
+// The codes, as contracts.md lists them.
 var (
 	LimitRate          = Code{"limit.rate", 429, OriginPolicy}
 	LimitConcurrency   = Code{"limit.concurrency", 429, OriginPolicy}
@@ -87,7 +87,7 @@ var Codes = []Code{
 	GatewayAuthorizationExpired, GatewayNotReady, GatewayInternal,
 }
 
-// Headers golem reads or sets (contracts.md §5). golem never forwards its
+// Headers golem reads or sets (contracts.md). golem never forwards its
 // own headers upstream.
 const (
 	HeaderRequestID  = "Golem-Request-Id"

@@ -118,7 +118,7 @@ func TestServicesOverConnect(t *testing.T) {
 	}
 }
 
-// TestPlainJSON: the API answers plain HTTP/JSON (architecture.md §3:
+// TestPlainJSON: the API answers plain HTTP/JSON (architecture.md:
 // curl works).
 func TestPlainJSON(t *testing.T) {
 	srv, _ := serve(t)

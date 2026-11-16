@@ -1,5 +1,5 @@
 // Package bucket is the object store golem publishes through
-// (control-plane.md §4, ADR 0006): gets with an entity tag, conditional
+// (control-plane.md, ADR 0006): gets with an entity tag, conditional
 // gets (If-None-Match), and puts that may be conditional (If-Match, or
 // If-None-Match: * to create only), as S3 provides. Dir is a directory's
 // implementation, for tests and development; the S3 one is another.

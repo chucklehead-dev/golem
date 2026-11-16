@@ -77,7 +77,7 @@ func identityName(src v1.Source[v1.LocalIdentity]) string {
 // localKeys validates a LocalIdentity's dev keys and compiles them to
 // hashes, sorted by hash. A key's principal is listed as a key owner, a
 // member of the scopes of its keys, since a key is honoured only for a
-// listed owner (golem#5).
+// listed owner.
 func localKeys(obj string, in []v1.LocalKey, scopes map[string]*snapshot.Scope, add adder) ([]snapshot.Key, []snapshot.Owner) {
 	var keys []snapshot.Key
 	hashes := map[string]bool{}
@@ -211,7 +211,7 @@ func priceList(objs v1.Objects, add adder) (string, []snapshot.Price) {
 // priceVersion is the version a PriceList's rows record (price_version):
 // its name and spec.version, or, without one, its name and the first 16
 // hex digits of its spec's SHA-256, so any change to an unversioned list is
-// a new version (contracts.md §4: versions are immutable once used).
+// a new version (contracts.md: versions are immutable once used).
 func priceVersion(pl v1.PriceList) string {
 	if pl.Spec.Version != "" {
 		return pl.Metadata.Name + "/" + pl.Spec.Version

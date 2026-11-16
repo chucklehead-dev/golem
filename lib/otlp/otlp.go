@@ -1,9 +1,7 @@
 // Package otlp is golem's OTLP/HTTP transport to a collector, shared by the
-// gateway (spans, metrics, the ledger's rows) and golem-control (its
-// metrics, and the audit's log records). Telemetry carries billing and audit data, so it
-// goes over TLS unless the collector is on this machine: a node-local
-// agent at a literal loopback address, 127.0.0.1 or [::1] (ADR 0043,
-// golem#5).
+// gateway and golem-control. Telemetry carries billing and audit data, so
+// it goes over TLS unless the collector is a node-local agent at a literal
+// loopback address, 127.0.0.1 or [::1] (ADR 0043).
 //
 // Each exporter is given its whole URL, scheme included: the SDK applies
 // the OTEL_EXPORTER_OTLP_* variables (INSECURE, ENDPOINT, the per-signal

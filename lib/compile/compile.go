@@ -1,7 +1,10 @@
-// Package compile is the snapshot compiler: config objects in, a validated
-// snapshot out, or every problem with its object and field path. One
-// validation path (ADR 0005): golemctl config validate runs it offline,
-// golem-control on the live set, the standalone gateway on its directory.
+// Package compile is the snapshot compiler. Config objects go in, and a
+// validated snapshot comes out, or every problem with its object and field
+// path.
+//
+// It is the one validation path (ADR 0054). golemctl config validate runs
+// it offline, golem-control on the checkout, the standalone gateway on its
+// directory.
 package compile
 
 import (
@@ -32,27 +35,24 @@ type Options struct {
 	Standalone bool
 	PublishSeq uint64        // the publication's sequence number
 	Now        time.Time     // the snapshot's IssuedAt, and its lease's start
-	Lease      time.Duration // zero: no lease (standalone only)
-	// PeriodZone is the budget periods' time zone the snapshot states
-	// (golem-control's -period-zone); "": none stated.
+	Lease      time.Duration // zero means no lease, standalone only
+	// PeriodZone is the budget periods' time zone the snapshot states,
+	// golem-control's -period-zone. Empty states none.
 	PeriodZone string
-	// ConfigRevision is the config's git commit, the snapshot's
-	// Source.ConfigRevision ("": not from a checkout). A renewal keeps the
-	// renewed publication's instead: its config part is that one's.
+	// ConfigRevision is the config's git commit, or empty when not from a
+	// checkout. A renewal keeps the renewed publication's instead, as its
+	// config part is that one's.
 	ConfigRevision snapshot.Revision
-	// Entitlements gives a published snapshot's entitlements (the state
-	// document's, control/state), told the route aliases that exist: its
-	// scopes are IDs (and known spend), which the compile joins with the
-	// config's ScopePolicies by name. nil: none, a snapshot that authorizes
-	// no one, and the ScopePolicies are only checked (golemctl config
-	// validate, which has no state).
+	// Entitlements returns a published snapshot's entitlements, given the
+	// route aliases that exist. They come from the state document. Their
+	// scopes are joined with the config's ScopePolicies by name. When nil,
+	// the snapshot authorizes no one and the policies are only checked, as
+	// golemctl config validate does.
 	Entitlements func(aliases []string) snapshot.Entitlements
-	// Unmatched, if set, is told of each scope of Entitlements' that no
-	// ScopePolicy names (published as DefaultScope: it can call nothing),
-	// and of each ScopePolicy whose scope the state has not (left out). The
-	// publication goes on: the state and the config change apart, so a
-	// mismatch is reported, not fatal to every pool's publication (and with
-	// it every gateway's authorization). nil: not reported.
+	// Unmatched, if set, is told of each mismatch of scopes and policies.
+	// A scope with no ScopePolicy is published able to call nothing. A
+	// ScopePolicy of no scope is left out. The publication goes on, since
+	// the state and the config change apart.
 	Unmatched func(Problem)
 }
 
@@ -119,15 +119,12 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 	return o.publication(snapshot.Snapshot{Backends: backends, Routes: routes, Entitlements: ents, Currency: currency, Prices: prices}), nil
 }
 
-// Renew is a published snapshot rebuilt as a new publication: its config
-// part (backends, routes, currency and prices, and its scopes' policies,
-// which Compile built from the config) kept as published, and o's
-// sequence, time, lease and entitlements, the state's scopes joined with
-// those policies as Compile joins them with the ScopePolicies. A scope the
-// state has created since is DefaultScope's (the snapshot keeps no
-// policy it did not publish). This is what golem-control renews from when
-// no config in its directory has compiled since it started (a restart
-// over a broken edit).
+// Renew rebuilds a published snapshot as a new publication. Its config
+// part is kept as published: backends, routes, prices, and its scopes'
+// policies. The sequence, time, lease and entitlements are o's, with the
+// state's scopes joined to those policies. A scope created since gets
+// DefaultScope, which can call nothing. golem-control renews this way when
+// no config has compiled since it started.
 func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
 	var ps Problems
 	if o.Standalone || o.Lease <= 0 {
@@ -342,8 +339,8 @@ func healthCheck(obj, at string, hc *v1.HealthCheck, add adder) (string, int64) 
 	return hc.Path, int64(cmp.Or(max(hc.IntervalSeconds, 0), 10)) * 1000
 }
 
-// backendAuth validates a Backend's spec.auth and compiles it: the secret
-// as a reference, never a value (ADR 0005). It reports at most one problem.
+// backendAuth validates a Backend's spec.auth and compiles it, the secret
+// as a reference, never a value (ADR 0054). It reports at most one problem.
 func backendAuth(obj string, a v1.Auth, standalone bool, add adder) snapshot.Auth {
 	sa := snapshot.Auth{Header: strings.ToLower(a.Header), Scheme: a.Scheme, Env: a.Env}
 	switch {
@@ -437,7 +434,7 @@ func (o Options) unmatched(p Problem) {
 // checkPriced refuses a ScopePolicy with a budget that can reach an
 // unpriced model: a scope with a budget is charged by price, so every
 // model it can reach needs one, or its budget could never be spent
-// (contracts.md §4). Both are config, so this is the config's problem,
+// (contracts.md). Both are config, so this is the config's problem,
 // found by golemctl config validate before it is merged.
 func checkPriced(policies map[string]compiledPolicy, routes []snapshot.Route, cat catalog, prices []snapshot.Price, add adder) {
 	priced := map[string]bool{}

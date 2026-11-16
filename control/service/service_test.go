@@ -46,7 +46,7 @@ func setup(t *testing.T) *Service {
 	return s
 }
 
-// TestAuthorization: who may do what (org-model.md §2), for each method.
+// TestAuthorization: who may do what (org-model.md), for each method.
 func TestAuthorization(t *testing.T) {
 	type op func(s *Service, c Caller) error
 	mint := func(owner, scope string) op {
@@ -341,7 +341,7 @@ func sameSet(a, b []string) bool {
 }
 
 // TestManagerReadsScope: a scope's manager reads it without being a
-// member (org-model.md §2: managing is its own right).
+// member (org-model.md: managing is its own right).
 func TestManagerReadsScope(t *testing.T) {
 	s := setup(t)
 	ctx := t.Context()

@@ -1,5 +1,5 @@
-// Package api is golem-control's transport (control-plane.md §2,
-// architecture.md §3): the Connect services generated from proto/golem,
+// Package api is golem-control's transport (control-plane.md,
+// architecture.md): the Connect services generated from proto/golem,
 // served on net/http, so each method is callable as gRPC, gRPC-Web or
 // plain HTTP/JSON. It authenticates the caller, converts messages and maps
 // errors; the rules are control/service's, and this package never writes

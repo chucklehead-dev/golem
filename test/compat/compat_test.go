@@ -1,6 +1,6 @@
 // Package compat runs the official SDKs (Python and TypeScript, Anthropic
 // and OpenAI) against the gateway, with a stub provider behind it: wire
-// compatibility without provider credentials (contracts.md §7), and the
+// compatibility without provider credentials (contracts.md), and the
 // SDKs' retry rules by status code (the roadmap's SDK retry spike).
 //
 // It needs python3 with test/compat/clients/requirements.txt and node with
@@ -242,7 +242,7 @@ func TestSDKs(t *testing.T) {
 }
 
 // TestRetryRules records how many attempts each SDK makes per status, with
-// two retries allowed, and checks the rules contracts.md §1 relies on: a
+// two retries allowed, and checks the rules contracts.md relies on: a
 // refusal golem means as final (400, 401, 402, 403, 404) is not retried;
 // 429 and 503 are.
 func TestRetryRules(t *testing.T) {

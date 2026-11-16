@@ -40,10 +40,9 @@ type lifecycle struct {
 	hurry context.Context
 }
 
-// track counts h's calls in flight. A call refused once the wait has
-// begun is answered in h's dialect, d, as every refusal is (contracts.md
-// §1): an SDK parses it and retries after its Retry-After, reaching
-// another of the pool's gateways.
+// track counts h's calls in flight. A call refused once the wait has begun
+// is answered in h's dialect, d, as every refusal is. An SDK parses it and
+// retries after its Retry-After, reaching another of the pool's gateways.
 func (lc *lifecycle) track(d proxy.Dialect, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !lc.begin() {
@@ -117,7 +116,7 @@ func (lc *lifecycle) shutdown() {
 	defer cancel()
 	if err := lc.srv.Shutdown(drain); err != nil {
 		// Closing the connections fails the calls' writes and ends their
-		// contexts: each accounts as a cancellation (ADR 0041 §7.6).
+		// contexts: each accounts as a cancellation (ADR 0041).
 		slog.Warn("golem-gateway: cutting the calls still in flight at the drain deadline", "err", err)
 		lc.srv.Close()
 	}

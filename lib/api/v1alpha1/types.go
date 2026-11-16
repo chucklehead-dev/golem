@@ -1,8 +1,8 @@
-// Package v1alpha1 holds golem's config CRDs (group golem.dev, ADR 0005) as
-// Go types, and reads them from YAML. It has no Kubernetes client
-// dependency, so the gateway, golemctl and golem-control share it
-// (ADR 0023). This version has Backend, ModelRoute, ScopePolicy,
-// PriceList and LocalIdentity; Hook follows.
+// Package v1alpha1 holds golem's config kinds (group golem.dev) as Go
+// types, and reads them from YAML (ADR 0054). It has no Kubernetes client
+// dependency, so the gateway, golemctl and golem-control share it. This
+// version has Backend, ModelRoute, ScopePolicy, PriceList and
+// LocalIdentity. TODO(ADR 0014): Hook.
 package v1alpha1
 
 // APIVersion is the apiVersion of every golem config object.
@@ -56,7 +56,7 @@ type BackendSpec struct {
 	// billed to (an Anthropic organisation or workspace ID, an OpenAI
 	// organisation or project ID, an AWS account ID), recorded on each
 	// ledger row as provider_account for reconciliation against the bill
-	// (contracts.md §3); unset, the row records the backend's name.
+	// (contracts.md); unset, the row records the backend's name.
 	ProviderAccount string       `json:"providerAccount,omitempty"`
 	AWS             *AWS         `json:"aws,omitempty"`
 	Auth            Auth         `json:"auth,omitzero"`
@@ -135,7 +135,7 @@ type Deployment struct {
 
 // Rate is a per-minute allowance of requests; 0: no limit. Requests only:
 // a provider's token limits are its 429s to enforce, which golem fails
-// over on, and spend is budgets' to account (ADR 0044).
+// over on, and spend is budgets' to account (ADR 0031).
 type Rate struct {
 	RequestsPerMinute int64 `json:"requestsPerMinute,omitempty"`
 }
@@ -165,7 +165,7 @@ type ModelRouteSpec struct {
 	// (model/attempts.md); the defaults are lib/compile's.
 	Retries *RouteRetries `json:"retries,omitempty"`
 	// Agent marks a coding-agent route: compatible feature mode by default
-	// (ADR 0041 §7.1), under the platform's standing approval.
+	// (ADR 0041), under the platform's standing approval.
 	Agent bool `json:"agent,omitempty"`
 	// ApprovedBetas are the anthropic-beta values restricted mode forwards.
 	ApprovedBetas []string `json:"approvedBetas,omitempty"`
@@ -207,7 +207,7 @@ type PoolMember struct {
 	Weight *int `json:"weight,omitempty"`
 }
 
-// ScopePolicy is a scope's policy (ADR 0005, 0050): what its members may
+// ScopePolicy is a scope's policy (ADR 0050): what its members may
 // call and within which limits. Its name is the scope's ID. A scope exists
 // in the state document (created through the control API, which holds its
 // memberships, keys and Entra group bindings); its policy is config,
@@ -228,25 +228,25 @@ type ScopePolicySpec struct {
 	// BudgetMicros is the period's budget in micro-units of the currency;
 	// zero is no budget.
 	BudgetMicros int64 `json:"budgetMicros,omitempty"`
-	// RateLimits are the scope's rate limits (PRD §5.5): each member's and
+	// RateLimits are the scope's rate limits (the PRD): each member's and
 	// the whole scope's, at this site. A call past either is refused
 	// limit.rate, 429 with a Retry-After, in every budget mode (a limit,
 	// not a budget); with Valkey unreachable they fail open.
 	RateLimits *RateLimits `json:"rateLimits,omitempty"`
-	// BudgetMode is what the budget does at admission (PRD §9.1): observe
+	// BudgetMode is what the budget does at admission (the PRD): observe
 	// (the default: calls over it are admitted and their ledger rows
 	// marked), warn (admitted, marked, and the response carries a
 	// golem-warning header) or enforce (refused, budget.pool_exhausted).
 	BudgetMode string   `json:"budgetMode,omitempty"`
 	InFlight   InFlight `json:"inFlight,omitzero"`
-	// Ceilings on a request (ADR 0038): output tokens asked for (max_tokens
+	// Ceilings on a request (ADR 0031): output tokens asked for (max_tokens
 	// times n) and the body's size. Zero is none.
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
 	// ProviderStorage is "forbidden" (the default: golem turns store off and
 	// refuses provider-side state) or "allowed" (ADR 0027).
 	ProviderStorage string `json:"providerStorage,omitempty"`
-	// Features is the request-feature mode (ADR 0037, 0041 §3): restricted
+	// Features is the request-feature mode (ADR 0037, 0041): restricted
 	// (approved fields, betas and versions only) or compatible (unknown
 	// features forwarded); unset, restricted except on agent routes.
 	Features string `json:"features,omitempty"`
@@ -285,7 +285,7 @@ type LocalMember struct {
 	Default string   `json:"default,omitempty"` // default: the first scope
 }
 
-// InFlight is a scope's in-flight limits (ADR 0031, 0041 §7.6).
+// InFlight is a scope's in-flight limits (ADR 0031, 0041).
 type InFlight struct {
 	Principal int `json:"principal,omitempty"` // per principal, default 4
 	Scope     int `json:"scope,omitempty"`     // for the scope, default 16
@@ -302,7 +302,7 @@ type LocalKey struct {
 	Revoked   bool     `json:"revoked,omitempty"`
 }
 
-// PriceList prices models (contracts.md §4). This first version has the
+// PriceList prices models (contracts.md). This first version has the
 // per-token rates; tiers, batch discounts and server-side tool units follow.
 type PriceList struct {
 	TypeMeta `json:",inline"`
@@ -315,7 +315,7 @@ type PriceListSpec struct {
 	Currency string  `json:"currency"`
 	Prices   []Price `json:"prices"`
 	// Version names this revision of the list, recorded with its name on
-	// each ledger row it prices (price_version, contracts.md §3: name/version);
+	// each ledger row it prices (price_version, contracts.md: name/version);
 	// unset, the row records the list's digest instead (name@sha256:...),
 	// which changes with every change to the spec.
 	Version string `json:"version,omitempty"`

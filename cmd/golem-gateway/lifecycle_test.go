@@ -74,7 +74,7 @@ func TestShutdownAccounts(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("shutdown did not finish")
 	}
-	time.Sleep(100 * time.Millisecond) // the cut call's slot is held for the provider's tail (golem#4)
+	time.Sleep(100 * time.Millisecond) // the cut call's slot is held for the provider's tail
 	if len(st.Slots()) != 0 {
 		t.Fatalf("slots %v: the call's slot freed after its tail", st.Slots())
 	}

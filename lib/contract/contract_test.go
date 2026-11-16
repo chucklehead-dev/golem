@@ -32,7 +32,7 @@ var (
 	statuses   = regexp.MustCompile(`\b([1-5]\d\d)\b`)
 )
 
-// TestCodesMatchContracts: every code in contracts.md §1 is in Codes with a
+// TestCodesMatchContracts: every code in contracts.md is in Codes with a
 // status its row names, and every code in Codes is in the table.
 func TestCodesMatchContracts(t *testing.T) {
 	documented := map[string][]int{}
@@ -80,7 +80,7 @@ func TestHeadersMatchContracts(t *testing.T) {
 }
 
 // TestLedgerDDL: the ClickHouse table has exactly the columns of
-// contracts.md §3.
+// contracts.md
 func TestLedgerDDL(t *testing.T) {
 	var want []string
 	for line := range strings.Lines(section(t, "## 3. The ledger")) {

@@ -34,7 +34,7 @@ func TestPlaintextOK(t *testing.T) {
 }
 
 // TestOTLPIgnoresInsecureEnv: the SDK's environment variables cannot turn
-// TLS off, nor send telemetry elsewhere (golem#5). With every insecure and
+// TLS off, nor send telemetry elsewhere. With every insecure and
 // endpoint variable set against it, a span (the gateway's exporters) and a
 // log record (golem-control's audit provider) and a metric (golem-control's
 // meter provider) still reach the TLS collector named, over TLS.

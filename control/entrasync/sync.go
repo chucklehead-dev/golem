@@ -1,5 +1,5 @@
 // Package entrasync is golem-control's Entra group sync (ADR 0047,
-// control-plane.md §6): while this replica leads, it reads the members of
+// control-plane.md): while this replica leads, it reads the members of
 // every Entra group bound to a scope from the directory (Microsoft Graph),
 // and makes the state's synced memberships match. It is the only writer
 // of a principal's Synced memberships and, with admins, of its Entra ID:
@@ -102,10 +102,9 @@ type Result struct {
 var errNoChange = errors.New("no change")
 
 // Step reads every bound group and reconciles the state with it, as the
-// leader at fence: the write is refused (state.ErrFenced) if this replica
-// was deposed while it read the directory, so a paused old leader's stale
-// read never undoes a newer leader's sync (model/leadership.md's
-// noStaleSync: the group sync was unfenced before).
+// leader at fence. The write is refused with state.ErrFenced if this
+// replica was deposed while it read the directory. So a paused old
+// leader's stale read never undoes a newer leader's sync.
 func (s *Sync) Step(ctx context.Context, fence state.Fence) (Result, error) {
 	if err := s.State.Refresh(ctx); err != nil {
 		return Result{}, err

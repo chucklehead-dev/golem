@@ -9,7 +9,7 @@
 //	golemctl keys create --scope team-a --expires 30d
 //
 // config validate runs the same snapshot compiler as golem-control and the
-// standalone gateway (ADR 0005: one validation path).
+// standalone gateway, so there is one validation path (ADR 0054).
 package main
 
 import (

@@ -18,8 +18,8 @@ import (
 // Graph is the directory as Microsoft Graph serves it: a group's
 // transitive user members, paged, and a user's account, live or deleted.
 // It needs the application permissions GroupMember.Read.All and
-// User.Read.All (entra.md #4: accountEnabled and the deleted items are not
-// basic properties).
+// User.Read.All, as accountEnabled and the deleted items are not basic
+// properties (entra.md, the jobs registration).
 type Graph struct {
 	Token  func(ctx context.Context) (string, error)
 	Base   string // default https://graph.microsoft.com/v1.0

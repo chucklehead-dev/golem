@@ -455,9 +455,9 @@ func (d deposing) Members(ctx context.Context, g string) ([]User, error) {
 	return d.dir.Members(ctx, g)
 }
 
-// TestSyncFenced: a sync whose replica was deposed while it read the
-// directory writes nothing (model/leadership.md's noStaleSync), and one run
-// at a stale epoch is refused outright.
+// TestSyncFenced checks that a sync whose replica was deposed while it read
+// the directory writes nothing, and one run at a stale epoch is refused
+// outright.
 func TestSyncFenced(t *testing.T) {
 	d := &dir{groups: map[string][]User{"g-a": {{ID: "oid-z", UPN: "zed@example.com", Enabled: true}}, "g-b": {}, "g-nested": {}}}
 	s := setup(t, d)

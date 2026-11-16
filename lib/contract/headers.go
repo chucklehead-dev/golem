@@ -15,7 +15,7 @@ import (
 var (
 	// SingleHeaders may appear at most once. Of these, NoListHeaders may
 	// not hold a comma either: an intermediary may join two of them into
-	// one comma-separated line (RFC 9110 §5.3), and none of their values
+	// one comma-separated line (RFC 9110), and none of their values
 	// has a comma of its own. read-only
 	SingleHeaders = []string{"Authorization", "X-Api-Key", "Content-Type",
 		HeaderScope, HeaderSession, HeaderEndUser, "Anthropic-Version", "Openai-Organization"}

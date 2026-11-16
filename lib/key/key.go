@@ -1,4 +1,4 @@
-// Package key is golem's API key format (contracts.md §5, ADR 0009):
+// Package key is golem's API key format (contracts.md, ADR 0009):
 //
 //	glm_live_<49 base62 characters>   a production installation's
 //	glm_dev_<49 base62 characters>    standalone and make dev-up's

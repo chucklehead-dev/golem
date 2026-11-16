@@ -8,7 +8,7 @@ import (
 	"slices"
 )
 
-// The audit outbox's bound (ADR 0041 §1, security-and-correctness.md §7).
+// The audit outbox's bound (ADR 0041, security-and-correctness.md).
 // The outbox lives in the document every write and every 500 ms read
 // carries, and only the leader's shipper trims it, after archival: with no
 // archive, or one unreachable, it would grow without limit. So the store
@@ -124,7 +124,7 @@ func (e *OutboxFull) Unwrap() error { return ErrOutboxFull }
 func (e *OutboxFull) Error() string {
 	const drain = "The outbox drains only as the leader archives it: check that golem-control runs with -audit-archive and that the archive bucket is reachable and writable (the leader's audit: error; operations.md, alert Audit outbox not draining), then retry"
 	if e.Hard() {
-		return fmt.Sprintf("%v: it holds %d audit events of its bound of %d (-audit-outbox-max), and this change's would pass it: no change that adds an event is written until it drains, revocations included (%s refused). %s. To deny access meanwhile, use the site's emergency denylist (operations.md §2, Emergency revocation)",
+		return fmt.Sprintf("%v: it holds %d audit events of its bound of %d (-audit-outbox-max), and this change's would pass it: no change that adds an event is written until it drains, revocations included (%s refused). %s. To deny access meanwhile, use the site's emergency denylist (operations.md, Emergency revocation)",
 			ErrOutboxFull, e.Len, e.Max, e.Action, drain)
 	}
 	return fmt.Sprintf("%v for changes that grant access: it holds %d audit events of its bound of %d (-audit-outbox-max), past the %d after which the rest is kept for restrictive changes, so %s is refused (%s); revocations and removals still land. %s",

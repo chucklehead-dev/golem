@@ -44,8 +44,8 @@ spec:
                 type: array
               version:
                 description: 'Version names this revision of the list, recorded with
-                  its name on each ledger row it prices (price_version, contracts.md
-                  §3: name/version); unset, the row records the list''s digest instead
+                  its name on each ledger row it prices (price_version, contracts.md:
+                  name/version); unset, the row records the list''s digest instead
                   (name@sha256:...), which changes with every change to the spec.'
                 type: string
             type: object

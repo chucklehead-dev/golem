@@ -396,7 +396,7 @@ func newHealth(holder *snapshot.Holder) (*route.Health, func(context.Context)) {
 }
 
 // applyKnown hands the limiter every scope's known spend, in the scope's
-// period (ADR 0052).
+// period (ADR 0031).
 func applyKnown(l *limit.Limiter, e *gsnapshot.Entitlements) {
 	ctx := context.Background()
 	for _, s := range e.Scopes {
@@ -404,12 +404,11 @@ func applyKnown(l *limit.Limiter, e *gsnapshot.Entitlements) {
 	}
 }
 
-// newHolder is the snapshot holder of a live installation (startSource
-// makes it a dev one standalone), handing each snapshot's known spend to
-// the limiter as it is applied (ADR 0052). It also ends the calls in flight
-// the snapshot withdraws (a key revoked, a principal gone from the key's
-// scope or from golem), as soon as it is in force: calls is the gateway's
-// registry of them.
+// newHolder is the snapshot holder of a live installation. startSource
+// makes it a dev one standalone. It hands each snapshot's known spend to
+// the limiter as it is applied. It also ends the calls in flight that the
+// snapshot withdraws, such as a revoked key's, as soon as it is in force.
+// calls is the gateway's registry of them.
 func newHolder(v *entra.Verifier, limiter *limit.Limiter, calls *proxy.InFlight) *snapshot.Holder {
 	h := &snapshot.Holder{Env: key.Live, Entra: v, AWS: awsCredentials()}
 	h.OnApply = func(c *snapshot.Compiled) {
@@ -502,7 +501,7 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 		handle(pattern, proxy.AnthropicMessages, models, loopbackOnly)
 	}
 	// A stored response's retrieval, deletion, cancellation or input items:
-	// M1 stores none (security-and-correctness.md §4).
+	// M1 stores none (security-and-correctness.md).
 	mux.HandleFunc("/v1/responses/{rest...}", func(w http.ResponseWriter, _ *http.Request) {
 		proxy.Refuse(w, proxy.OpenAIResponses, contract.AuthzProviderStorageForbidden,
 			"golem serves stateless responses only: no response is stored to retrieve, delete or cancel")
@@ -630,7 +629,7 @@ func newReading(o options) *proxy.Reading {
 func newServer(addr string, h http.Handler) *http.Server {
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true) // h2c behind the mesh (gateway.md §3 step 1)
+	protocols.SetUnencryptedHTTP2(true) // h2c behind the mesh (gateway.md)
 	return &http.Server{
 		Addr:              addr,
 		Handler:           h,
@@ -647,7 +646,7 @@ func newServer(addr string, h http.Handler) *http.Server {
 			SendPingTimeout:      30 * time.Second, // find dead connections under long streams
 			PingTimeout:          15 * time.Second,
 		},
-		// No WriteTimeout: streams are long (gateway.md §3 step 1).
+		// No WriteTimeout: streams are long (gateway.md).
 	}
 }
 
@@ -722,7 +721,7 @@ func validate(o options) error {
 
 // loadLocalKey reads standalone's local key, or makes one: a dev key in a
 // file only its user may read, kept across restarts so the developer's
-// tools keep working (ADR 0023; golem#5).
+// tools keep working (ADR 0023).
 func loadLocalKey(path string) (k, at string, err error) {
 	if path == "" {
 		dir, err := os.UserConfigDir()

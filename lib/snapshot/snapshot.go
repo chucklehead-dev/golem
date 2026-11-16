@@ -1,12 +1,12 @@
-// Package snapshot is the format of what the gateway runs on: backends,
-// routes, entitlements and prices, compiled from the config CRDs and the
-// state (ADR 0006), and the signed lease that bounds how long it may be used
-// (ADR 0030). It is data only; lib/compile builds it, the gateway compiles
-// it into lookup structures.
+// Package snapshot is the format the gateway runs on: backends, routes,
+// entitlements and prices, built from the config and the state. Its
+// authorization lease bounds how long it may be served (ADR 0030).
 //
-// The encoding is JSON in this first version; the design's protobuf
-// encoding (ADR 0022) replaces it with the proto skeletons, behind the same
-// Encode and Decode.
+// It is data only. lib/compile builds it, and the gateway compiles it into
+// lookup structures.
+//
+// Snapshots are JSON. TODO(ADR 0022): protobuf, behind the same Encode and
+// Decode.
 package snapshot
 
 import (
@@ -23,33 +23,31 @@ import (
 const Schema = 1
 
 // MaxMicros bounds a budget, and the cost one call adds to a counter, in
-// micro-units (2^50: about 1.1 billion units of currency). Valkey's scripts
-// sum in Lua numbers, doubles, exact only below 2^53: under this bound a
-// period's sums stay exact there as they are in memory.
+// micro-units. 2^50 is about 1.1 billion units of currency. Valkey's Lua
+// sums in doubles, exact only below 2^53, so under this bound its sums are
+// as exact as Go's.
 const MaxMicros = 1 << 50
 
 // Snapshot is one pool's complete configuration at one moment.
 type Snapshot struct {
 	Schema int `json:"schema"`
-	// PublishSeq orders publications; a gateway never applies one at or
+	// PublishSeq orders publications. A gateway never applies one at or
 	// below its floor (model/publication.md).
 	PublishSeq uint64    `json:"publishSeq"`
 	IssuedAt   time.Time `json:"issuedAt"`
-	// ValidUntil is the authorization lease: no new request is served
-	// after it. Zero only in standalone mode, which has no publisher.
+	// ValidUntil is the end of the authorization lease. No new request is
+	// served after it. Zero only in standalone mode, which has no publisher.
 	ValidUntil time.Time `json:"validUntil,omitzero"`
-	// PeriodZone is the time zone (an IANA name) the publisher's budget
-	// periods are calendar months in (golem-control's -period-zone): known
-	// spend's Period is a month there. A gateway whose own -period-zone
-	// differs refuses the snapshot, naming both, since its admission and
-	// ledger rows would put a call near midnight in another month. Empty:
-	// not stated (standalone, an older publisher), not checked.
+	// PeriodZone is the IANA time zone of the budget periods, golem-control's
+	// -period-zone. A gateway whose own -period-zone differs refuses the
+	// snapshot, as it would put a call near midnight in another month. Empty
+	// means not stated, as standalone, and is not checked.
 	PeriodZone string    `json:"periodZone,omitempty"`
 	Source     Source    `json:"source"`
 	Backends   []Backend `json:"backends"`
 	Routes     []Route   `json:"routes"`
-	// Entitlements are who may call what, within which limits (the state
-	// document's, org-model.md; in standalone, LocalIdentity's).
+	// Entitlements are who may call what, within which limits. They come
+	// from the state document, or standalone from the LocalIdentity.
 	Entitlements Entitlements `json:"entitlements"`
 	Currency     string       `json:"currency,omitempty"`
 	Prices       []Price      `json:"prices,omitempty"`
@@ -57,9 +55,9 @@ type Snapshot struct {
 
 // Entitlements are a snapshot's principals' rights.
 type Entitlements struct {
-	// Implicit (standalone only, without a LocalIdentity): every request is
-	// the local principal in the local scope, which may call every route
-	// with no limits (ADR 0023).
+	// Implicit is set standalone without a LocalIdentity. Every request is
+	// then the local principal in the local scope, which may call every
+	// route with no limits (ADR 0023).
 	Implicit bool    `json:"implicit,omitempty"`
 	Scopes   []Scope `json:"scopes,omitempty"`
 	Keys     []Key   `json:"keys,omitempty"`
@@ -67,10 +65,9 @@ type Entitlements struct {
 	// its object ID, a service by its app (client) ID (ADR 0009).
 	Users    []Member `json:"users,omitempty"`
 	Services []Member `json:"services,omitempty"`
-	// KeyOwners are the principals that hold keys but no Entra identity
-	// (a standalone LocalIdentity's). A key is honoured only for a listed
-	// owner (a user, a service or one of these) of its kind, a member of
-	// its scope (golem#5).
+	// KeyOwners are the principals that hold keys but no Entra identity,
+	// such as a standalone LocalIdentity's. A key is honoured only for a
+	// listed owner of its kind who is a member of its scope.
 	KeyOwners []Owner `json:"keyOwners,omitempty"`
 }
 
@@ -95,30 +92,29 @@ type Scope struct {
 	Models       []string `json:"models"` // aliases its members may call
 	BudgetMicros int64    `json:"budgetMicros,omitempty"`
 	// MemberRPM is each member's rate limit and ScopeRPM the whole scope's,
-	// in requests a minute (lib/api's RateLimits); 0: none.
+	// in requests a minute. 0 is none.
 	MemberRPM int64 `json:"memberRPM,omitempty"`
 	ScopeRPM  int64 `json:"scopeRPM,omitempty"`
-	// BudgetMode is what the budget does at admission (PRD §9.1, ADR 0050):
-	// "observe" (admitted, the ledger row marked over budget), "warn"
-	// (admitted and marked, with a golem-warning header) or "enforce"
-	// (refused). The compiler sets it for every scope; a gateway reads any
-	// other value as enforce, failing closed.
+	// BudgetMode is what an over-budget call meets at admission (ADR 0050).
+	// "observe" admits it and marks its ledger row. "warn" also adds a
+	// golem-warning header. "enforce" refuses it. A gateway reads any other
+	// value as enforce, failing closed.
 	BudgetMode        string `json:"budgetMode,omitempty"`
 	PrincipalInFlight int    `json:"principalInFlight"`
 	ScopeInFlight     int    `json:"scopeInFlight"`
-	// The scope's request policy: provider-side storage allowed (ADR 0027),
-	// and ceilings on output tokens asked for and on input size (ADR 0038;
-	// zero is none).
+	// The scope's request policy: whether provider-side storage is allowed
+	// (ADR 0027), and ceilings on output tokens asked for and on input size
+	// (ADR 0031). Zero is no ceiling.
 	StorageAllowed  bool  `json:"storageAllowed,omitempty"`
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 	MaxInputBytes   int64 `json:"maxInputBytes,omitempty"`
-	// Features: "restricted", "compatible", or "" (by the route's kind).
+	// Features is "restricted", "compatible", or "" to follow the route.
 	Features string `json:"features,omitempty"`
-	// KnownSpend is the ledger's spend for Period (a calendar month,
-	// "2026-11") of the calls that ended before Since, a minute
-	// golem-control places an ingestion allowance behind the snapshot's
-	// time: a gateway's known spend is this alone (ADR 0031). A gateway counts a snapshot of another period as none: a
-	// new month starts from nothing.
+	// KnownSpend is the ledger's spend in Period, a month such as
+	// "2026-11", of the calls that ended before Since. Since is the spend
+	// boundary, an ingestion allowance before the snapshot was built. A
+	// gateway's known spend is this alone (ADR 0031). Spend of another
+	// period counts as none.
 	Period     string    `json:"period,omitempty"`
 	KnownSpend int64     `json:"knownSpend,omitempty"`
 	Since      time.Time `json:"since,omitzero"`
@@ -151,20 +147,19 @@ type Price struct {
 	Version string `json:"version,omitempty"`
 }
 
-// Source names the inputs a snapshot was built from (model/freshness.md).
+// Source names the inputs a snapshot was built from.
 type Source struct {
 	StateVersion int64 `json:"stateVersion"`
-	// ConfigRevision is the config checkout's git commit (golem-control's
-	// -config-link: git-sync's worktree is named by its hash); "" when the
-	// config is not read from a checkout.
+	// ConfigRevision is the config checkout's git commit, found through
+	// golem-control's -config-link. Empty when the config is not read from
+	// a checkout.
 	ConfigRevision Revision `json:"configRevision"`
 	ConfigDigest   string   `json:"configDigest"`
 }
 
-// Revision is a config revision, a git commit's hash. Publishers before it
-// wrote this member as the number 0, never set; a number reads as "", so
-// a gateway upgraded first (operations.md, Upgrade) still reads their
-// snapshots.
+// Revision is a config revision, a git commit's hash. Older publishers
+// wrote the number 0 here. A number reads as "", so a gateway upgraded
+// first still reads their snapshots (operations.md, Upgrade).
 type Revision string
 
 // UnmarshalJSON reads a string, or an older publisher's number as "".
@@ -185,8 +180,8 @@ func (r *Revision) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Backend is a backend as compiled: its secrets are references, never values
-// (ADR 0005).
+// Backend is a backend as compiled. Its secrets are references, never
+// values (ADR 0054).
 type Backend struct {
 	Name    string `json:"name"`
 	Dialect string `json:"dialect"`
@@ -198,7 +193,8 @@ type Backend struct {
 	ProviderAccount string       `json:"providerAccount,omitempty"`
 	Auth            Auth         `json:"auth"`
 	Deployments     []Deployment `json:"deployments"`
-	// AllowPrivate grants loopback and private addresses (golem#5).
+	// AllowPrivate lets the backend's deployments be at loopback and
+	// private addresses.
 	AllowPrivate bool `json:"allowPrivate,omitempty"`
 }
 
@@ -261,10 +257,9 @@ type Target struct {
 // and encoding/json orders struct fields, so equal snapshots encode equally.
 func (s *Snapshot) Encode() ([]byte, error) { return json.Marshal(s) }
 
-// Decode reads a snapshot, refusing a schema this reader does not know,
-// and any member it does not know, a duplicate name, or a name in another
-// case. A snapshot is policy: a member a reader skipped is policy it would
-// not apply (a renamed check read as off), so it fails closed instead.
+// Decode reads a snapshot. It refuses an unknown schema, an unknown member,
+// a duplicate name, and a name in another case. A snapshot is policy, and a
+// skipped member would be policy not applied, so it fails closed instead.
 func Decode(b []byte) (*Snapshot, error) {
 	// The schema first: a newer schema's members are unknown here, and the
 	// refusal should say to upgrade the gateway, not name a member.

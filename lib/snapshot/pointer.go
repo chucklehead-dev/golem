@@ -9,7 +9,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/sign"
 )
 
-// Pointer is a pool's current publication (control-plane.md §4): which
+// Pointer is a pool's current publication (control-plane.md): which
 // snapshot, by its hash, at which sequence. Gateways poll it and trust
 // only a signed one; the snapshot object it names is checked against its
 // hash, so the snapshot needs no signature of its own.
@@ -32,7 +32,7 @@ type Pointer struct {
 // recorded, for a gateway that starts with no local checkpoint (the
 // publication model's TRUSTED_FLOOR). It is signed, as the pointer is, and
 // lives under a prefix only golem-control's role may write
-// (control-plane.md §3, "Write access"). golem-control writes it after the
+// (control-plane.md, "Write access"). golem-control writes it after the
 // record and before the pointer.
 type Checkpoint struct {
 	Pool       string `json:"pool"`

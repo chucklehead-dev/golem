@@ -1,7 +1,7 @@
 // Package s3bucket is lib/bucket's Bucket on Amazon S3, with S3's own
 // conditional requests: If-None-Match on GetObject, and If-Match or
 // If-None-Match: * on PutObject (S3 conditional writes), which the
-// publisher's compare-and-swap depends on (control-plane.md §4).
+// publisher's compare-and-swap depends on (control-plane.md).
 package s3bucket
 
 import (

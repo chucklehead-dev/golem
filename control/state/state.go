@@ -1,16 +1,13 @@
-// Package state is golem-control's store (control-plane.md §3, ADR 0006):
-// one document in the bucket, read from memory and refreshed by a
-// conditional get, written only by Update, which applies a change to a
-// copy, checks the store's invariants, increments state_version and writes
-// it with If-Match, re-reading and retrying when another writer won.
+// Package state is golem-control's store: one document in the bucket
+// (ADR 0006). Reads come from memory, refreshed by a conditional get.
 //
-// It holds golem-control's leadership fence (claimed once at start: Claim),
-// each pool's publication record (control/publish numbers and fences by
-// it), the entitlements
-// (entitlements.go, restored by restore.go) and the audit outbox
-// (control/audit ships it). The rest of the outline in §3.1 joins it as it
-// is built. The encoding is JSON, decoded strictly; the design's protobuf
-// and zstd replace it behind Encode and Decode.
+// Only Update writes. It applies a change to a copy, checks the store's
+// invariants, increments state_version and writes with If-Match. When
+// another writer won, it reads again and retries.
+//
+// The document holds the fence, each pool's publication record, the
+// entitlements and the audit outbox. It is JSON, decoded strictly.
+// TODO(ADR 0006): protobuf and zstd, behind the same Encode and Decode.
 package state
 
 import (
@@ -55,10 +52,9 @@ type Fence struct {
 type Document struct {
 	Schema       int    `json:"schema"`
 	StateVersion uint64 `json:"stateVersion"`
-	// Fence is golem-control's leadership as the document knows it: who
-	// leads, at which epoch (ADR 0049, 0053). golem-control's one replica
-	// claims it at start (Claim), and every leader-only write checks it
-	// (FencedUpdate).
+	// Fence is the replica that may write state, and its epoch (ADR 0053).
+	// golem-control claims it at start, and every leader-only write checks
+	// it.
 	Fence *Fence `json:"fence,omitempty"`
 	// Writes names the updates that wrote the last RecentWrites versions,
 	// newest last, so a writer whose compare-and-swap reply was lost can
@@ -72,10 +68,9 @@ type Document struct {
 	Keys        map[string]Key       `json:"keys,omitempty"`       // by hex SHA-256 of the key
 	Revocations []Revocation         `json:"revocations,omitempty"`
 	Roles       []RoleBinding        `json:"roles,omitempty"`
-	// Audit is the outbox (§3): a write's events go in with it; the leader
-	// ships them and trims only what is durably archived. It is bounded
-	// (Store.MaxOutbox, outbox.go), with the last 20% for restrictive
-	// changes.
+	// Audit is the outbox. A write's events go in with it, and the leader
+	// trims only what is durably archived. It is bounded by
+	// Store.MaxOutbox, its last 20% kept for restrictive changes.
 	Audit    []AuditEvent `json:"audit,omitempty"`
 	AuditSeq uint64       `json:"auditSeq,omitempty"` // the last event's number
 }
@@ -122,23 +117,22 @@ func (d *Document) clone() *Document {
 
 // Errors.
 var (
-	// ErrInvariant: a change the store refuses to write.
+	// ErrInvariant means the store refuses to write a change.
 	ErrInvariant = errors.New("state: the change breaks an invariant")
-	// ErrContended: other writers won every attempt.
+	// ErrContended means other writers won every attempt.
 	ErrContended = errors.New("state: the document changed under every attempt; retry")
-	// ErrRegressed: the bucket holds an older version than this store has
-	// seen, or none: an out-of-band restore or a deletion. The store adopts
-	// neither (adopting would drop every later revocation, the naive
-	// restore model/publication.md shows unsafe) nor writes over it.
+	// ErrRegressed means the bucket holds an older version than this store
+	// has seen, or none, after an out-of-band restore or a deletion. The
+	// store neither adopts it nor writes over it. Adopting would drop every
+	// later revocation.
 	ErrRegressed = errors.New("state: the document in the bucket went back")
-	// ErrFenced: the document's leadership is not the writer's (a later
-	// replica has claimed the fence, or it never held it at that epoch).
+	// ErrFenced means the document's fence is not the writer's. A later
+	// replica has claimed it, or the writer never held it at that epoch.
 	// Nothing was written.
 	ErrFenced = errors.New("state: fenced: this replica does not lead at that epoch")
-	// ErrMissing: there is no document, but the bucket shows golem-control
-	// has run on it (one of Store.Installed exists): the document was
-	// deleted. A store adopts no empty document then; only Bootstrap
-	// creates one.
+	// ErrMissing means there is no document, though the bucket shows
+	// golem-control has run on it. The document was deleted. Only Bootstrap
+	// creates one then.
 	ErrMissing = errors.New("state: the document is missing from a bucket golem-control has published from")
 )
 
@@ -149,10 +143,8 @@ type Store struct {
 	// (default 8).
 	Attempts int
 	// Installed are objects whose presence shows golem-control has run on
-	// this bucket (the pools' checkpoints and pointers): a first read that
-	// finds no document but one of these is ErrMissing, not the empty
-	// document. Without them a missing document is a first
-	// start.
+	// this bucket, such as the pools' checkpoints. A first read that finds
+	// one of these but no document is ErrMissing, not a first start.
 	Installed []string
 	// MaxOutbox bounds the audit outbox (outbox.go; default
 	// DefaultMaxOutbox): past 80% of it a write that grants or widens
@@ -352,11 +344,10 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 	return nil, ErrContended
 }
 
-// FencedUpdate is Update for a leader-only write (publication, the group
-// sync, the period and expiry jobs): change is applied only if the
-// document's leadership is still f, checked in the same compare-and-swap,
-// so a leader deposed while it worked writes nothing (model/leadership.md,
-// JOBS "doc").
+// FencedUpdate is Update for a leader-only write, such as a publication or
+// the group sync. change is applied only if the document's fence is still
+// f, checked in the same compare-and-swap. So a leader deposed while it
+// worked writes nothing.
 func (s *Store) FencedUpdate(ctx context.Context, f Fence, change func(*Document) error) (*Document, error) {
 	return s.Update(ctx, func(d *Document) error {
 		if l := d.Fence; l == nil || *l != f {
@@ -370,13 +361,11 @@ func (s *Store) FencedUpdate(ctx context.Context, f Fence, change func(*Document
 	})
 }
 
-// Claim takes the fence for holder at one above the document's epoch, the
-// one leadership step golem-control's single replica takes, at start (ADR
-// 0053): from then on every leader-only write it makes is fenced by the
-// returned fence (FencedUpdate), and a predecessor still running (a pod
-// paused, or not yet gone) is refused at its next fenced write. A claim
-// whose reply was lost is recognised by its write ID (Update), and not made
-// twice.
+// Claim takes the fence for holder at one above the document's epoch.
+// golem-control's one replica claims it at start (ADR 0053). Its later
+// leader-only writes are fenced by the returned fence. A predecessor still
+// running is refused at its next fenced write. A claim whose reply was lost
+// is recognised by its write ID, and not made twice.
 func (s *Store) Claim(ctx context.Context, holder string) (Fence, error) {
 	if holder == "" {
 		return Fence{}, errors.New("state: a fence's holder is required: the replica's name")
@@ -407,7 +396,7 @@ func (s *Store) Leads(f Fence) bool {
 }
 
 // Validate applies change to a copy of the current document and checks the
-// invariants, writing nothing: validate_only (control-plane.md §2).
+// invariants, writing nothing. It serves the control API's validate_only.
 func (s *Store) Validate(ctx context.Context, change func(*Document) error) error {
 	if err := s.loaded(ctx); err != nil {
 		return err
@@ -465,8 +454,8 @@ func check(old, next *Document, outbox int) error {
 	return checkOutbox(old, next, outbox)
 }
 
-// checkFence: the fence's epoch never goes back and the fence is never
-// dropped, so a fenced epoch stays fenced (Claim).
+// checkFence refuses a change that drops the fence or moves its epoch
+// back, so a fenced epoch stays fenced.
 func checkFence(old, next *Document) error {
 	if old.Fence != nil && (next.Fence == nil || next.Fence.Epoch < old.Fence.Epoch) {
 		return broken("the fence's epoch goes back")
@@ -474,9 +463,9 @@ func checkFence(old, next *Document) error {
 	return nil
 }
 
-// checkPublications: no pool's publication record is removed or goes back
-// in sequence, epoch or source, so a publisher fenced by them stays fenced
-// (model/publication.md).
+// checkPublications refuses a change that removes a pool's publication
+// record or moves its sequence, epoch or source back. So a publisher fenced
+// by a record stays fenced.
 func checkPublications(old, next *Document) error {
 	for pool, r := range old.Publications {
 		n, ok := next.Publications[pool]
@@ -506,8 +495,8 @@ func Decode(b []byte) (*Document, error) {
 	return &d, nil
 }
 
-// Run refreshes the document every 500 ms (control-plane.md §3) until ctx
-// ends, reporting a failure once until it changes.
+// Run refreshes the document every 500 ms until ctx ends, logging each
+// failure once until it changes.
 func (s *Store) Run(ctx context.Context) {
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()

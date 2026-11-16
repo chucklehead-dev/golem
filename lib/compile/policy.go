@@ -11,7 +11,7 @@ import (
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// The budget modes (PRD §9.1): what a scope's budget does at admission.
+// The budget modes (the PRD): what a scope's budget does at admission.
 // A scope with a budget and no mode observes: rollouts start in observe,
 // so a mis-set budget cannot stop a team's work on day one.
 const (

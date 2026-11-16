@@ -76,7 +76,7 @@ func TestJobBoundaryAndPeriods(t *testing.T) {
 	if k2, ok := j.Current(); !ok || k2.Scopes["team-a"] != 7 {
 		t.Fatal("the last result was not kept through a failure")
 	}
-	now = time.Date(2026, 12, 1, 0, 3, 0, 0, time.UTC) // a new month, B still in November
+	now = time.Date(2026, 12, 1, 0, 3, 0, 0, time.UTC) // a new month, the boundary still in November
 	asked := len(l.asked)
 	if err := j.Step(t.Context()); err != nil {
 		t.Fatal(err)

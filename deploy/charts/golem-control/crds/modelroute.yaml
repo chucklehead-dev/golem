@@ -21,8 +21,7 @@ spec:
             properties:
               agent:
                 description: 'Agent marks a coding-agent route: compatible feature
-                  mode by default (ADR 0041 §7.1), under the platform''s standing
-                  approval.'
+                  mode by default (ADR 0041), under the platform''s standing approval.'
                 type: boolean
               alias:
                 type: string

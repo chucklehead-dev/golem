@@ -132,8 +132,7 @@ spec:
                   calls are billed to (an Anthropic organisation or workspace ID,
                   an OpenAI organisation or project ID, an AWS account ID), recorded
                   on each ledger row as provider_account for reconciliation against
-                  the bill (contracts.md §3); unset, the row records the backend's
-                  name.
+                  the bill (contracts.md); unset, the row records the backend's name.
                 type: string
             type: object
         required:

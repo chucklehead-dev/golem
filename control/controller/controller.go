@@ -1,14 +1,14 @@
-// Package controller is golem-control's publishing loop (control-plane.md
-// §4, §6): while this replica leads, it compiles the config and publishes
-// every pool's snapshot when the config changes, when it claims the fence,
-// and every renewal interval to extend the snapshots' authorization lease
-// (ADR 0030).
+// Package controller is golem-control's publishing loop (control-plane.md).
+// While this replica leads, it compiles the config checkout and publishes
+// every pool's snapshot. It publishes when the config or the entitlements
+// change, when it claims the fence, and every renewal interval to extend
+// the snapshots' authorization lease (ADR 0030).
 //
-// This slice reads config CRDs from a directory and gives every pool the
-// same snapshot, its entitlements the state document's (principals,
-// scopes, keys and revocations), each scope with its ScopePolicy's policy
-// from the config (ADR 0050); a change to either is published at the next
-// step. Pool selectors and the CRD watch come later.
+// The entitlements are the state document's, each scope with its
+// ScopePolicy from the config (ADR 0050).
+//
+// Limitations: every pool gets the same snapshot; there are no pool
+// selectors and no CRD watch.
 package controller
 
 import (
@@ -39,89 +39,75 @@ import (
 
 // Controller publishes the config in Dir to every pool in Publishers.
 //
-// It is golem-control's one replica (ADR 0053): it claims the state
-// document's fence once, at start (Claim, state.Store.Claim), and leads
-// from then on; every leader-only write it makes is fenced by that claim.
-// A replica claimed over (a predecessor paused or not yet gone when its
-// successor started) is refused at its next fenced write, stops leading,
-// and Run returns ErrDeposed.
+// It is golem-control's one replica (ADR 0053). It claims the state
+// document's fence once, at start, and every leader-only write it makes is
+// fenced by that claim. If another replica claims over it, its next fenced
+// write is refused, it stops leading, and Run returns ErrDeposed.
 type Controller struct {
-	Dir string // config CRD YAML
-	// Checkout, if set, is the git checkout Dir is in (git-sync's, ADR
-	// 0054): its commit is published as each snapshot's
-	// Source.ConfigRevision, and its age bounds the renewals.
+	Dir string // the config YAML's directory
+	// Checkout, if set, is git-sync's checkout that Dir is in (ADR 0054).
+	// Its commit is published as each snapshot's Source.ConfigRevision,
+	// and its age bounds the renewals.
 	Checkout *Checkout
-	// MaxConfigAge, with Checkout's Fetched, is how old the checkout may
-	// be (since its last fetch) before leases stop being renewed: a
-	// stalled git-sync must not have its last checkout renewed for ever,
-	// as it may miss a restriction merged since. Past it no pool is
-	// renewed; a change of the entitlements or the epoch is still
-	// published, with the lease the pool's last publication gave (never
-	// later), so a revocation still reaches the gateways and their leases
-	// run out on time. 0: no bound.
+	// MaxConfigAge is how long after the checkout's last fetch leases stop
+	// being renewed, because a stalled git-sync may miss a restriction.
+	// Changes of the entitlements or the epoch are still published, with
+	// the lease the pool already had. 0 is no bound.
 	MaxConfigAge time.Duration
-	// State is the document; ID this replica's name, the fence's holder.
+	// State is the document. ID is this replica's name, the fence's holder.
 	State      *state.Store
 	ID         string
 	Publishers map[string]*publish.Publisher // by pool; they share State
-	// Lease is the published snapshots' authorization (ADR 0030, 0032: four
-	// hours for internal pools); Renew how often they are republished to
-	// extend it (default a minute).
+	// Lease is the snapshots' authorization lease (ADR 0030), four hours
+	// for internal pools. Renew is how often they are republished to
+	// extend it, a minute by default.
 	Lease, Renew time.Duration
-	// PeriodZone is the budget periods' time zone (an IANA name), stated
-	// in every snapshot so a gateway of another zone refuses it
-	// (snapshot.PeriodZone); "": none stated.
+	// PeriodZone is the budget periods' IANA time zone, stated in every
+	// snapshot so a gateway of another zone refuses it. Empty states none.
 	PeriodZone string
-	// Retry is how soon a pool whose publication failed is tried again
-	// (default two seconds), doubling at each further failure up to Renew,
-	// jittered; a change to publish (the config, the entitlements, the
-	// epoch) tries it at once.
+	// Retry is how soon a pool whose publication failed is tried again,
+	// two seconds by default. It doubles at each further failure up to
+	// Renew, jittered. A change to publish tries the pool at once.
 	Retry time.Duration
 	Now   func() time.Time
 	Log   *slog.Logger
 	// Audit, if set, ships the state's audit outbox while this replica
-	// leads (control/audit).
+	// leads.
 	Audit *audit.Shipper
-	// Spend, if set, is the known-spend job: each publication carries every
-	// scope's spend this period from the ledger, to a boundary (ADR
-	// 0048; withKnownSpend). Run reads it every SpendEvery, apart from
-	// the publications, which take its latest result.
+	// Spend, if set, is the known-spend job (ADR 0031). Run reads it every
+	// SpendEvery on its own goroutine, and each publication takes its
+	// latest result.
 	Spend *spend.Job
-	// SpendEvery is how often known spend is read (default 30 seconds),
-	// on its own goroutine: a publication takes its latest result.
+	// SpendEvery is how often known spend is read, 30 seconds by default.
 	SpendEvery time.Duration
 	// Sync, if set, reconciles the bound Entra groups' members while this
-	// replica leads, every SyncEvery (default five minutes; ADR 0047).
+	// replica leads, every SyncEvery, five minutes by default (ADR 0047).
 	Sync      *entrasync.Sync
 	SyncEvery time.Duration
 
-	syncTried time.Time // when the group sync last ran, succeeding or not (status.synced: last succeeded)
+	syncTried time.Time // when the group sync last ran, whether or not it succeeded
 	mu        sync.Mutex
-	// fence is this replica's claim (Claim), claimed whether it was made;
-	// deposed is set once the document's fence is another's, for good.
-	// Under mu.
+	// fence is the fence this replica claimed at start; claimed reports
+	// whether that claim succeeded. deposed becomes true, permanently, once
+	// another replica holds the fence. All three are under mu.
 	fence   state.Fence
 	claimed bool
 	deposed bool
-	good    v1.Objects // the last config that compiled; written under mu (ScopeModels reads it from the API's goroutines)
+	good    v1.Objects // the last config that compiled, under mu: ScopeModels reads it from the API's goroutines
 	goodSum [32]byte
-	goodRev snapshot.Revision // the checkout's commit good was read at (under mu)
-	// unmatched is what the last publication found of scopes and
-	// ScopePolicies that do not match (under mu, by
-	// compile.Options.Unmatched): a scope of the state's with no policy,
-	// published able to call nothing, and a policy of no scope.
+	goodRev snapshot.Revision // the checkout's commit good was read at, under mu
+	// unmatched is the mismatches of scopes and ScopePolicies the last
+	// publication found, under mu.
 	unmatched []compile.Problem
-	// renewing is each pool's publication as found in the bucket, renewed
-	// (compile.Renew) while no config has compiled since this replica
-	// started; nil once one has.
+	// renewing is each pool's publication as found in the bucket. It is
+	// renewed while no config has compiled since this replica started, and
+	// nil once one has.
 	renewing map[string]*snapshot.Snapshot
-	// pools is each pool's publishing state: what it last published and
-	// when, and its failed attempts since, so each pool is due on its own
-	// and a failing one is retried with backoff while the others publish at
-	// their own cadence. Only the loop touches it.
+	// pools is each pool's publishing state, so each pool is due on its own
+	// and a failing one backs off while the others publish. Only the loop
+	// touches it.
 	pools map[string]*poolState
-	// status is what the loop has done, for its metrics (control/metrics),
-	// under mu: written by the loop, read at a collection.
+	// status is what the loop has done, for its metrics, under mu.
 	status status
 }
 
@@ -373,20 +359,18 @@ func (c *Controller) notice() bool {
 }
 
 // Step publishes if this replica leads and a publication is due: a config
-// change, a new epoch, or the renewal interval. A config that does not
-// compile is reported, and the last one that did is renewed, so a broken
-// edit cannot let every gateway's authorization lapse. A scope of the
-// state's with no ScopePolicy is published able to call nothing, and a
-// ScopePolicy of no scope is left out, both reported (ErrUnmatched) every
-// step until they match; the other scopes and pools are published as
-// usual.
+// change, a new epoch, or the renewal interval. It reports whether it
+// published to any pool.
 //
-// Each pool is due on its own: a pool that fails (a tampered checkpoint, a
-// regressed record) is retried with backoff (Retry, doubling up to Renew)
-// while the others publish at their own cadence, and its last failure is
-// in the error of every step until it publishes. It reports whether it
-// published to any pool. A replica that finds itself deposed publishes
-// nothing and returns ErrDeposed.
+// A config that does not compile is reported, and the last one that did is
+// renewed, so a broken edit cannot let every gateway's lease lapse.
+// Mismatched scopes and ScopePolicies are reported every step as
+// ErrUnmatched; the rest is published as usual.
+//
+// Each pool is due on its own. A failing pool backs off while the others
+// publish, and its last failure is in every step's error until it
+// publishes. A replica that finds itself deposed publishes nothing and
+// returns ErrDeposed.
 func (c *Controller) Step(ctx context.Context) (bool, error) {
 	fence, leads := c.Fence()
 	if !leads {
@@ -481,12 +465,11 @@ func (c *Controller) renew() time.Duration { return cmp.Or(c.Renew, time.Minute)
 // started (good holds it).
 func (c *Controller) compiled() bool { return c.goodSum != [32]byte{} }
 
-// backoff is how long a pool waits after its nth failed attempt in a row:
-// Retry (two seconds unless set), doubled at each failure after the first,
-// at most the renewal interval, less up to a quarter of jitter. The jitter
-// keeps replicas' retries out of step; taking it off, never adding it,
-// keeps a failing pool tried at least once a renewal interval, which the
-// failure alerts rely on (they count attempts).
+// backoff is how long a pool waits after its nth failed attempt in a row.
+// It starts at Retry, doubles at each failure, and stops at the renewal
+// interval, less up to a quarter of jitter. Jitter is only ever taken off,
+// so a failing pool is tried at least once a renewal interval. The failure
+// alerts count those attempts.
 func (c *Controller) backoff(n int) time.Duration {
 	d, renew := cmp.Or(c.Retry, 2*time.Second), c.renew()
 	for i := 1; i < n && d < renew; i++ {
@@ -527,13 +510,11 @@ func (c *Controller) Unmatched() []compile.Problem {
 	return slices.Clone(c.unmatched)
 }
 
-// ScopeModels is the route aliases scope's ScopePolicy allows, for the
-// control API's check that a key only narrows its scope
-// (service.Service.ScopeModels): from the last good config, or, on a
-// replica where none has compiled (one that does not lead), the
-// directory's. A scope with no ScopePolicy allows none. ok is false with
-// neither, or a config that does not compile: the API checks nothing, and
-// the gateway still intersects a key's models with its scope's.
+// ScopeModels is the route aliases that scope's ScopePolicy allows. The
+// control API checks with it that a key only narrows its scope. It reads
+// the last good config, or the directory's on a replica where none has
+// compiled. A scope with no ScopePolicy allows none. ok is false when no
+// config compiles, and then the gateway still narrows a key's models.
 func (c *Controller) ScopeModels(scope string) (models []string, ok bool) {
 	c.mu.Lock()
 	objs, good := c.good, c.compiled()
@@ -555,16 +536,14 @@ func (c *Controller) ScopeModels(scope string) (models []string, ok bool) {
 	return nil, true
 }
 
-// due reports whether a pool's publication is due at now with content
-// cur. A pool whose last attempt failed is due once its backoff has
-// passed, or at once if cur differs from what that attempt tried to
-// publish: a revocation is not held back by a retry's wait. Otherwise it
-// is due when cur differs from its last publication's (the config, the
-// entitlements, the epoch), or its renewal interval has passed.
+// due reports whether a pool's publication is due at now with content cur.
+// A pool whose last attempt failed is due once its backoff has passed, or
+// at once if cur differs from what that attempt tried. So a revocation is
+// never held back by a retry's wait. Otherwise it is due when cur differs
+// from its last publication's, or its renewal interval has passed.
 //
-// While the config checkout is stale nothing is due for its renewal alone:
-// only a change (a revocation, a new epoch) is, published without
-// extending the lease (publish).
+// While the config checkout is stale, a renewal alone is not due. Only a
+// change is, published without extending the lease.
 func (c *Controller) due(ps *poolState, cur content, now time.Time, stale bool) bool {
 	if stale && cur == ps.published {
 		return false
@@ -575,12 +554,12 @@ func (c *Controller) due(ps *poolState, cur content, now time.Time, stale bool) 
 	return cur != ps.published || !now.Before(ps.at.Add(c.renew()))
 }
 
-// publish publishes the good config with doc's entitlements to pools (in
-// sorted order), all their records in one state write (ADR 0049), under
-// fence and from doc's version. It returns each failed pool's error. With
-// stale (the config checkout past MaxConfigAge) each pool's lease ends
-// when its last publication's did, never later; a pool this replica has
-// not published, or whose lease has ended, is not published (ErrStale).
+// publish publishes the good config with doc's entitlements to pools, in
+// sorted order, all their records in one state write. It runs under fence
+// and from doc's version, and returns each failed pool's error.
+//
+// When stale, each pool's lease ends no later than its last publication's.
+// A pool with no lease left from this replica is not published (ErrStale).
 func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.Document, pools []string, stale bool) map[string]error {
 	var pubs []*publish.Publisher
 	for _, pool := range pools {
@@ -646,9 +625,9 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	return perrs
 }
 
-// entitlements is the snapshot's entitlements for the routes that exist
-// (aliases): doc's, each scope with this period's known spend if the
-// known-spend job has a result (accounting.md).
+// entitlements is the snapshot's entitlements for the route aliases that
+// exist. They are doc's, each scope with this period's known spend if the
+// known-spend job has a result.
 func (c *Controller) entitlements(doc *state.Document) func(aliases []string) snapshot.Entitlements {
 	return func(aliases []string) snapshot.Entitlements {
 		e := doc.Entitlements(aliases)
@@ -661,11 +640,11 @@ func (c *Controller) entitlements(doc *state.Document) func(aliases []string) sn
 	}
 }
 
-// withKnownSpend gives e's scopes the period's known spend.
-func withKnownSpend(e *snapshot.Entitlements, k spend.Result) {
+// withKnownSpend gives e's scopes the period's known spend, from r.
+func withKnownSpend(e *snapshot.Entitlements, r spend.Result) {
 	for i := range e.Scopes {
 		sc := &e.Scopes[i]
-		sc.Period, sc.Since, sc.KnownSpend = k.Period, k.Since, k.Scopes[sc.ID]
+		sc.Period, sc.Since, sc.KnownSpend = r.Period, r.Since, r.Scopes[sc.ID]
 	}
 }
 
@@ -721,10 +700,10 @@ func (c *Controller) load(doc *state.Document) error {
 	return nil
 }
 
-// policiesRemoved lists the scopes of doc's whose ScopePolicy prev had and
-// next has not (ADR 0050): such an edit is refused, as a live scope with
-// no policy can call nothing. Against this replica's last good config
-// only: one that starts over a directory already without it publishes the
+// policiesRemoved lists doc's scopes whose ScopePolicy prev had and next
+// has not (ADR 0050). Such an edit is refused, as a live scope with no
+// policy can call nothing. It compares with this replica's last good
+// config only. A replica that starts without the policy publishes the
 // scope with no models, reported as unmatched.
 func policiesRemoved(prev, next v1.Objects, doc *state.Document) []string {
 	had := map[string]bool{}

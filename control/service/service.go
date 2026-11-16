@@ -1,14 +1,15 @@
-// Package service holds golem-control's rules (control-plane.md §2): each
-// method takes an authenticated caller, checks authorization against
-// org-model.md §2, validates the change, and applies it with its audit
-// events in one state update (control/state), which checks the store's
-// invariants and retries the whole change when another write won. The
-// transport (control/api) authenticates and calls these; nothing else
-// writes the document.
+// Package service holds the control API's rules (control-plane.md). Each
+// method takes an authenticated caller and checks authorization against
+// org-model.md. It validates the change, and applies it with its audit
+// events in one state update. The update checks the store's invariants
+// and retries the whole change when another write won.
 //
-// This slice: scopes, memberships, the manager role, keys, and the Entra
-// groups bound to scopes, whose members the group sync (control/entrasync)
-// makes members (ADR 0047).
+// control/api authenticates and calls these methods. Nothing else in the
+// API writes the document.
+//
+// The methods cover scopes, memberships, the manager role, keys, and the
+// Entra groups bound to scopes, whose members the group sync makes members
+// (ADR 0047).
 package service
 
 import (
@@ -31,7 +32,7 @@ type Caller struct {
 	// has one that matches none (control/api's "entra:<id>"), so it holds
 	// no membership or role and is recorded by its Entra ID in the audit.
 	Principal string
-	// Admin: the Entra app role golem.admin (org-model.md §2).
+	// Admin: the Entra app role golem.admin (org-model.md).
 	Admin bool
 }
 
@@ -58,11 +59,11 @@ func notFound(f string, a ...any) error {
 	return fmt.Errorf("%w: "+f, append([]any{ErrNotFound}, a...)...)
 }
 
-// MaxPersonalKeyLife is the longest a personal key lives (org-model.md §3:
+// MaxPersonalKeyLife is the longest a personal key lives (org-model.md:
 // policy, ninety days).
 const MaxPersonalKeyLife = 90 * 24 * time.Hour
 
-// manager is the one role golem binds so far (org-model.md §2); admins
+// manager is the one role golem binds so far (org-model.md); admins
 // hold the Entra app role instead of a binding.
 const manager = "manager"
 
@@ -340,7 +341,7 @@ func (s *Service) UnbindGroup(ctx context.Context, c Caller, o Options, scope, g
 
 // BindManager makes principal a manager of scope: admins only. The scope
 // and the principal must exist (not found otherwise). The principal need
-// not be a member: managing is its own right (org-model.md §2: a parent
+// not be a member: managing is its own right (org-model.md: a parent
 // team's managers manage its sub-teams), and a manager reads the scope
 // without being one.
 func (s *Service) BindManager(ctx context.Context, c Caller, o Options, scope, principal string) error {
@@ -384,7 +385,7 @@ type Minted struct {
 // MintKey mints a key for r.Owner in r.Scope. A member mints its own keys;
 // a scope's managers mint its services' keys; admins mint any. The owner
 // must be a member of the scope, and the models within the scope's. A
-// personal key (a user's) must expire (org-model.md §3): within
+// personal key (a user's) must expire (org-model.md): within
 // MaxPersonalKeyLife, which is also its expiry when none is asked for.
 func (s *Service) MintKey(ctx context.Context, c Caller, o Options, r KeyRequest) (Minted, error) {
 	if r.Owner == "" {
@@ -504,7 +505,7 @@ func keyExpiry(owner state.Principal, asked, now time.Time) (time.Time, error) {
 }
 
 // RevokeKey revokes a key by its hash: its owner, admins, and, for a
-// service's key, its scope's managers (org-model.md §2: managers mint,
+// service's key, its scope's managers (org-model.md: managers mint,
 // rotate and revoke service keys; a member's own keys end with their
 // membership, which a manager can remove). Revoking a revoked key is no
 // change.
