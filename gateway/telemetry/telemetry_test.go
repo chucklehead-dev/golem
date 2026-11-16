@@ -193,3 +193,40 @@ func TestAttemptIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestRowListAndMapTypes: funding and units are an OTLP list of maps and a
+// map of integers, the shapes golem.spend's Array(Tuple(source, share)) and
+// Map(String, UInt64) are read from (deploy/clickhouse/spend.sql's view),
+// empty when the call has none; standalone's JSON lines write them as an
+// array of objects and an object.
+func TestRowListAndMapTypes(t *testing.T) {
+	r := newRig(t)
+	c := call
+	c.Funding = []Funding{{"cc-1", 0.75}, {"cc-2", 0.25}}
+	c.Units = map[string]int64{"web_search": 3, "images": 1}
+	var row [ledgerColumns]attribute.KeyValue
+	r.t.Ledger.row(&row, &c)
+	got := map[string]attribute.Value{}
+	for _, kv := range row {
+		got[string(kv.Key)] = kv.Value
+	}
+	if f := got["funding"]; f.Type() != attribute.SLICE || len(f.AsSlice()) != 2 || f.AsSlice()[0].Type() != attribute.MAP {
+		t.Fatalf("funding %v (%v): want a list of maps", f.Emit(), f.Type())
+	}
+	if u := got["units"]; u.Type() != attribute.MAP || len(u.AsMap()) != 2 || u.AsMap()[0].Value.Type() != attribute.INT64 {
+		t.Fatalf("units %v (%v): want a map of integers", u.Emit(), u.Type())
+	}
+	r.t.Ended(t.Context(), c)
+	r.t.Ended(t.Context(), call)
+	rows := r.ledgerRows(t)
+	f, _ := json.Marshal(rows[0]["funding"])
+	u, _ := json.Marshal(rows[0]["units"])
+	if string(f) != `[{"share":0.75,"source":"cc-1"},{"share":0.25,"source":"cc-2"}]` || string(u) != `{"images":1,"web_search":3}` {
+		t.Fatalf("stdout funding %s, units %s", f, u)
+	}
+	f, _ = json.Marshal(rows[1]["funding"])
+	u, _ = json.Marshal(rows[1]["units"])
+	if string(f) != `[]` || string(u) != `{}` {
+		t.Fatalf("a call without funding or units: %s, %s; want [] and {}", f, u)
+	}
+}

@@ -94,11 +94,11 @@ prevent double counting.
 | `site`, `gateway_pool` | LowCardinality(String) | |
 | `principal_kind`, `principal_id`, `key_id` | | user or service; key prefix and id, never the key |
 | `scope_id`, `scope_path` | | `scope_path` is the team/sub-team/project chain at request time |
-| `funding` | Array(Tuple(source, share)) | the scope's funding sources and shares at request time |
+| `funding` | Array(Tuple(source, share)) | the scope's funding sources and shares at request time; on the wire (§3.1) a list of `{source, share}` maps. Empty until scopes carry funding |
 | `frontend_dialect`, `backend_dialect`, `envelope` | LowCardinality(String) | |
 | `alias`, `model`, `deployment`, `provider_account` | | `model` as the provider names it (inference profile ID on Bedrock) |
 | `tokens_input`, `tokens_output`, `tokens_cache_read`, `tokens_cache_write_5m`, `tokens_cache_write_1h`, `tokens_reasoning` | UInt64 | |
-| `units` | Map(String, UInt64) | other billed units: `web_search`, `code_execution_seconds`, `images` |
+| `units` | Map(String, UInt64) | other billed units: `web_search`, `code_execution_seconds`, `images`; on the wire a map of integers. Empty until a dialect reads them |
 | `cost_micros` | Int64 | in the configured currency's millionths; computed by golem |
 | `currency` | FixedString(3) | |
 | `price_version` | String | the `PriceList` version used |

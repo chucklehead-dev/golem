@@ -117,8 +117,8 @@ func (j *jsonLogger) Emit(_ context.Context, r otellog.Record) {
 	}
 }
 
-// writeValue writes an attribute's value as its JSON type; the ledger's
-// other types (none today) as their string form.
+// writeValue writes an attribute's value as its JSON type (lists and maps
+// as arrays and objects); other types (none in a row) as their string form.
 func writeValue(enc *jsontext.Encoder, v attribute.Value) error {
 	switch v.Type() {
 	case attribute.BOOL:
@@ -133,6 +133,18 @@ func writeValue(enc *jsontext.Encoder, v attribute.Value) error {
 			err = errors.Join(err, enc.WriteToken(jsontext.String(s)))
 		}
 		return errors.Join(err, enc.WriteToken(jsontext.EndArray))
+	case attribute.SLICE: // funding: an array of objects
+		err := enc.WriteToken(jsontext.BeginArray)
+		for _, e := range v.AsSlice() {
+			err = errors.Join(err, writeValue(enc, e))
+		}
+		return errors.Join(err, enc.WriteToken(jsontext.EndArray))
+	case attribute.MAP: // units, and a funding source
+		err := enc.WriteToken(jsontext.BeginObject)
+		for _, kv := range v.AsMap() {
+			err = errors.Join(err, enc.WriteToken(jsontext.String(string(kv.Key))), writeValue(enc, kv.Value))
+		}
+		return errors.Join(err, enc.WriteToken(jsontext.EndObject))
 	default:
 		return enc.WriteToken(jsontext.String(v.Emit()))
 	}

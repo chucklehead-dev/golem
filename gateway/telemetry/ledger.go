@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -73,7 +75,7 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		s("key_id", c.Key),
 		s("scope_id", c.Scope),
 		s("scope_path", c.Scope),
-		attribute.StringSlice("funding", nil),
+		{Key: "funding", Value: fundingValue(c.Funding)},
 		s("frontend_dialect", c.Frontend),
 		s("backend_dialect", c.Backend),
 		s("envelope", c.Envelope),
@@ -87,7 +89,7 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		i("tokens_cache_write_5m", c.Usage.CacheWrite),
 		i("tokens_cache_write_1h", 0),
 		i("tokens_reasoning", c.Usage.Reasoning),
-		s("units", "{}"), // a JSON object: log attributes have no map type
+		{Key: "units", Value: unitsValue(c.Units)},
 		i("cost_micros", c.Cost),
 		s("currency", c.Currency),
 		s("price_version", ""),
@@ -103,3 +105,38 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 // ledgerColumns is golem.spend's column count; the row is built in an
 // array of this size, on the stack, not a slice the record copies again.
 const ledgerColumns = 40
+
+// fundingValue is funding as golem.spend's Array(Tuple(source String,
+// share Float64)): an OTLP array of {source, share} maps, which the
+// collector writes as a JSON array of objects that deploy/clickhouse's
+// view reads into the tuples by name.
+func fundingValue(fs []Funding) attribute.Value {
+	if len(fs) == 0 {
+		return noFunding
+	}
+	vs := make([]attribute.Value, len(fs))
+	for i, f := range fs {
+		vs[i] = attribute.MapValue(attribute.String("source", f.Source), attribute.Float64("share", f.Share))
+	}
+	return attribute.SliceValue(vs...)
+}
+
+// unitsValue is units as golem.spend's Map(String, UInt64): an OTLP map
+// of integers, in key order (a row's bytes do not depend on map order).
+func unitsValue(us map[string]int64) attribute.Value {
+	if len(us) == 0 {
+		return noUnits
+	}
+	kvs := make([]attribute.KeyValue, 0, len(us))
+	for _, k := range slices.Sorted(maps.Keys(us)) {
+		kvs = append(kvs, attribute.Int64(k, us[k]))
+	}
+	return attribute.MapValue(kvs...)
+}
+
+// noFunding and noUnits are the empty list and map, made once: most rows
+// carry them. Read-only.
+var (
+	noFunding = attribute.SliceValue()
+	noUnits   = attribute.MapValue()
+)

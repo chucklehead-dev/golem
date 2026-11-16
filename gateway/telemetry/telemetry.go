@@ -72,6 +72,18 @@ type Call struct {
 	// attempt is its own ledger event (AttemptID), so a retried call's
 	// rows are never deduplicated into one.
 	Attempt int
+	// Funding is the scope's funding sources and their shares at request
+	// time, and Units its other billed units by name (web_search, ...):
+	// golem.spend's funding and units (contracts.md §3). The request path
+	// fills neither yet; the row carries them as an empty list and map.
+	Funding []Funding
+	Units   map[string]int64
+}
+
+// Funding is one funding source of a scope and its share of the cost.
+type Funding struct {
+	Source string
+	Share  float64
 }
 
 // AttemptID is the attempt's ID, its ledger event's: the request ID for a
