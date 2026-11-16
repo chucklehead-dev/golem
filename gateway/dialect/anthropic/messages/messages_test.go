@@ -10,6 +10,27 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/sse"
 )
 
+// TestFileReferences: content that refers to a file the provider stores
+// is Stateful (M1 refuses it), found decoded at any depth whatever its
+// escapes; a file's name in text or in a tool call's input is not one.
+func TestFileReferences(t *testing.T) {
+	for _, c := range []struct{ name, messages, want string }{
+		{"document file source", `[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file_1"}}]}]`, "messages (a file source)"},
+		{"image file source, escaped", `[{"role":"user","content":[{"type":"image","s\u006furce":{"t\u0079pe":"fi\u006ce","file\u005fid":"file_1"}}]}]`, "messages (a file source)"},
+		{"in a tool result", `[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":"file","file_id":"file_1"}}]}]}]`, "messages (a file source)"},
+		{"a container upload", `[{"role":"user","content":[{"type":"container_upload","file_id":"file_1"}]}]`, "messages (a file_id)"},
+		{"a file_id with another source type", `[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"","file_id":"file_1"}}]}]`, "messages (a file_id)"},
+		{"base64 source", `[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]`, ""},
+		{"text naming a file", `[{"role":"user","content":"{\"source\":{\"type\":\"file\",\"file_id\":\"x\"}}"}]`, ""},
+		{"a tool's input", `[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"read","input":{"file_id":"f","source":{"type":"file"}}}]}]`, ""},
+	} {
+		var r Request
+		if err := r.Scan([]byte(`{"model":"m","messages":` + c.messages + `}`)); err != nil || r.Stateful != c.want {
+			t.Errorf("%s: %q, %v; want %q", c.name, r.Stateful, err, c.want)
+		}
+	}
+}
+
 func TestScan(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
