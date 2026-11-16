@@ -39,7 +39,10 @@ func TestStatus(t *testing.T) {
 	if !r1.ShippedAt().IsZero() || !r1.SyncedAt().IsZero() {
 		t.Fatal("a job reported success before it ran")
 	}
-	if err := r1.tick(t.Context()); err != nil {
+	if _, err := r1.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(r1.auditStep(t.Context()), r1.syncStep(t.Context())); err != nil {
 		t.Fatal(err)
 	}
 	if !r1.ShippedAt().Equal(r1.clock) || !r1.SyncedAt().Equal(r1.clock) || r1.GuardTrips() != 0 {
@@ -55,8 +58,8 @@ func TestStatus(t *testing.T) {
 	g.users = nil
 	r1.clock = r1.clock.Add(5 * time.Minute)
 	w.lead("r1")
-	if err := r1.tick(t.Context()); !errors.Is(err, entrasync.ErrTooManyRemovals) {
-		t.Fatalf("tick: %v, want the removal guard", err)
+	if err := r1.syncStep(t.Context()); !errors.Is(err, entrasync.ErrTooManyRemovals) {
+		t.Fatalf("the sync: %v, want the removal guard", err)
 	}
 	if r1.GuardTrips() != 1 || !r1.SyncedAt().Equal(synced) {
 		t.Fatalf("guard %d, synced %v; want one trip and the earlier sync", r1.GuardTrips(), r1.SyncedAt())

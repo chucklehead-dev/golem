@@ -88,7 +88,9 @@ buckets (each site's Valkey), shipped audit (the archive and ClickHouse).
    entitlements or the epoch, the renewal interval (60 s), or a failed
    pool's backoff (2 s doubling to the interval, jittered), each pool on
    its own.
-5. **Known spend** (§5), once a step with a pool due.
+5. **Known spend** (§5): the spend job's latest result. The job reads
+   ClickHouse on its own goroutine every 30 s (and once before the first
+   publication), so a ClickHouse that is down or slow delays none.
 6. **Publish** (`PublishAll`): every due pool's record won in one fenced
    update (numbered above the record, the verified checkpoint and the
    signed pointer), then for each pool the snapshot
@@ -98,8 +100,11 @@ buckets (each site's Valkey), shipped audit (the archive and ClickHouse).
    only forward. A record below what the bucket proves stops that pool
    (`ErrRegressed`); a checkpoint that does not verify, or has gone, stops
    it too (`ErrTampered`). Other pools go on.
-7. **The audit outbox** shipped (§6), then the **group sync** if due
-   (every 5 minutes, `-entra-sync-every`).
+
+Beside the loop, each on its own goroutine while this replica leads: the
+**audit outbox** shipped (§6) every second, and the **group sync** every
+5 minutes (`-entra-sync-every`). A revocation is published at the next
+step whatever these are waiting on.
 
 The lease is four hours (`-lease`, at most every gateway's `-max-lease`),
 counted from the inputs' read. Gateways poll their pointer every second
@@ -140,7 +145,7 @@ With `-clickhouse` (its password in `$CLICKHOUSE_PASSWORD`, read-only on
 `golem.spend`): per scope and period (`-period-zone`, stated in every
 snapshot and checked by every gateway), the spend in `golem.spend_dedup` of
 calls that ended before a boundary B, a whole minute `-spend-allowance`
-(5 minutes) before now: one query a step, its values bound as parameters.
+(5 minutes) before now: one query every 30 s, its values bound as parameters.
 A failure keeps the last result for its period and reports it stale
 (`golem.control.spend.stale`); a new period starts from nothing. Each
 site's ingestion lag (now less its latest `ended_at`, from

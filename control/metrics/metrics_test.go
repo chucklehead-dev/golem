@@ -158,6 +158,9 @@ func TestMetrics(t *testing.T) {
 	}
 
 	r.lead()
+	if err := r.c.Spend.Step(t.Context()); err != nil { // Run's spend job, apart from the publication
+		t.Fatal(err)
+	}
 	if p, err := r.c.Step(t.Context()); !p || err != nil {
 		t.Fatalf("published %v, %v", p, err)
 	}

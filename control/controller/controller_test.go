@@ -374,6 +374,9 @@ func TestKnownSpend(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := r1.spendStep(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if p, err := w.step("r1"); !p || err != nil {
 		t.Fatalf("published %v %v", p, err)
 	}
