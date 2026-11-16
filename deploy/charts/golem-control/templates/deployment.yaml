@@ -48,8 +48,13 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            # git-sync points /config/current at each checkout in turn.
+            # git-sync points /config/current at each checkout in turn
+            # (/config/.worktrees/<commit>), and rewrites FETCH_HEAD at
+            # every successful fetch (ADR 0054).
             - -config=/config/current/{{ .Values.config.path }}
+            - -config-link=/config/current
+            - -config-fetched=/config/.git/FETCH_HEAD
+            - -max-config-age={{ .Values.config.maxAge }}
             - -bucket={{ .Values.bucket }}
             - -signing-key={{ .Values.signingKey }}
             {{- if .Values.trustedKeys.configMap }}

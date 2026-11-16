@@ -47,6 +47,19 @@ import (
 // and Run returns ErrDeposed.
 type Controller struct {
 	Dir string // config CRD YAML
+	// Checkout, if set, is the git checkout Dir is in (git-sync's, ADR
+	// 0054): its commit is published as each snapshot's
+	// Source.ConfigRevision, and its age bounds the renewals.
+	Checkout *Checkout
+	// MaxConfigAge, with Checkout's Fetched, is how old the checkout may
+	// be (since its last fetch) before leases stop being renewed: a
+	// stalled git-sync must not have its last checkout renewed for ever,
+	// as it may miss a restriction merged since. Past it no pool is
+	// renewed; a change of the entitlements or the epoch is still
+	// published, with the lease the pool's last publication gave (never
+	// later), so a revocation still reaches the gateways and their leases
+	// run out on time. 0: no bound.
+	MaxConfigAge time.Duration
 	// State is the document; ID this replica's name, the fence's holder.
 	State      *state.Store
 	ID         string
@@ -89,6 +102,7 @@ type Controller struct {
 	deposed bool
 	good    v1.Objects // the last config that compiled; written under mu (ScopeModels reads it from the API's goroutines)
 	goodSum [32]byte
+	goodRev snapshot.Revision // the checkout's commit good was read at (under mu)
 	// unmatched is what the last publication found of scopes and
 	// ScopePolicies that do not match (under mu, by
 	// compile.Options.Unmatched): a scope of the state's with no policy,
@@ -171,13 +185,16 @@ const (
 	// edit was refused: the last good config (or the bucket's) is renewed
 	// instead, or nothing can be.
 	ReasonConfigRenewing = "config_renewing"
+	// ReasonConfigStale: the config checkout is older than MaxConfigAge,
+	// and publishing would have extended the pool's lease (ErrStale).
+	ReasonConfigStale = "config_stale"
 	// ReasonOther: anything else (the bucket refusing a write, the signer
 	// failing, a build error).
 	ReasonOther = "other"
 )
 
 // Reasons are every Reason, in a fixed order.
-var Reasons = []string{ReasonTampered, ReasonRegressed, ReasonFenced, ReasonConflict, ReasonUnmatched, ReasonConfigRenewing, ReasonOther} // read-only
+var Reasons = []string{ReasonTampered, ReasonRegressed, ReasonFenced, ReasonConflict, ReasonUnmatched, ReasonConfigRenewing, ReasonConfigStale, ReasonOther} // read-only
 
 // FailureReason classifies a publication's error by the sentinel errors it
 // wraps.
@@ -193,6 +210,8 @@ func FailureReason(err error) string {
 		return ReasonConflict
 	case errors.Is(err, ErrUnmatched):
 		return ReasonUnmatched
+	case errors.Is(err, ErrStale):
+		return ReasonConfigStale
 	}
 	return ReasonOther
 }
@@ -371,6 +390,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	}
 	doc := c.State.Current()
 	cfgErr := c.load(doc)
+	stale := c.staleErr()
 	if !c.compiled() {
 		// No config has compiled since this replica started: renew what is
 		// published (it compiled when it was), so a restart over a broken
@@ -395,20 +415,20 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	var waiting []error // pools backing off, not tried this step: their last failure
 	for _, pool := range slices.Sorted(maps.Keys(c.Publishers)) {
 		switch ps := c.pool(pool); {
-		case c.due(ps, cur, now):
+		case c.due(ps, cur, now, stale != nil):
 			due = append(due, pool)
 		case ps.failures > 0:
 			waiting = append(waiting, fmt.Errorf("pool %s: %w", pool, ps.err))
 		}
 	}
 	if len(due) == 0 {
-		return false, errors.Join(append(waiting, cfgErr, c.unmatchedErr())...)
+		return false, errors.Join(append(waiting, stale, cfgErr, c.unmatchedErr())...)
 	}
 	var spendErr error
 	if c.Spend != nil {
 		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
 	}
-	perrs := c.publish(ctx, fence, doc, due) // counts each pool's failure
+	perrs := c.publish(ctx, fence, doc, due, stale != nil) // counts each pool's failure
 	c.degraded(cfgErr, due...)
 	var errs []error
 	published := false
@@ -425,7 +445,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		ps.retryAt = now.Add(c.backoff(ps.failures))
 		errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
 	}
-	return published, errors.Join(append(append(errs, waiting...), cfgErr, spendErr, c.unmatchedErr())...)
+	return published, errors.Join(append(append(errs, waiting...), stale, cfgErr, spendErr, c.unmatchedErr())...)
 }
 
 // pool is pool's publishing state, created on first use.
@@ -529,7 +549,14 @@ func (c *Controller) ScopeModels(scope string) (models []string, ok bool) {
 // publish: a revocation is not held back by a retry's wait. Otherwise it
 // is due when cur differs from its last publication's (the config, the
 // entitlements, the epoch), or its renewal interval has passed.
-func (c *Controller) due(ps *poolState, cur content, now time.Time) bool {
+//
+// While the config checkout is stale nothing is due for its renewal alone:
+// only a change (a revocation, a new epoch) is, published without
+// extending the lease (publish).
+func (c *Controller) due(ps *poolState, cur content, now time.Time, stale bool) bool {
+	if stale && cur == ps.published {
+		return false
+	}
 	if ps.failures > 0 {
 		return cur != ps.attempted || !now.Before(ps.retryAt)
 	}
@@ -538,8 +565,11 @@ func (c *Controller) due(ps *poolState, cur content, now time.Time) bool {
 
 // publish publishes the good config with doc's entitlements to pools (in
 // sorted order), all their records in one state write (ADR 0049), under
-// fence and from doc's version. It returns each failed pool's error.
-func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.Document, pools []string) map[string]error {
+// fence and from doc's version. It returns each failed pool's error. With
+// stale (the config checkout past MaxConfigAge) each pool's lease ends
+// when its last publication's did, never later; a pool this replica has
+// not published, or whose lease has ended, is not published (ErrStale).
+func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.Document, pools []string, stale bool) map[string]error {
 	var pubs []*publish.Publisher
 	for _, pool := range pools {
 		pubs = append(pubs, c.Publishers[pool])
@@ -548,7 +578,16 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	validUntil := map[string]time.Time{}                    // each pool's lease, as built
 	ptrs, perrs := publish.PublishAll(ctx, c.State, fence, doc.StateVersion, pubs,
 		func(p *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
-			o := compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(), PeriodZone: c.PeriodZone,
+			c.mu.Lock()
+			rev, last := c.goodRev, c.status.pools[p.Pool].ValidUntil
+			c.mu.Unlock()
+			now, lease := c.now().UTC(), c.lease()
+			if stale {
+				if lease = min(lease, last.Sub(now)); lease <= 0 {
+					return nil, fmt.Errorf("%w: pool %s's lease would be extended, and it has none left from this replica to keep (its last ended %s)", ErrStale, p.Pool, last.UTC().Format(time.RFC3339))
+				}
+			}
+			o := compile.Options{PublishSeq: seq, Now: now, Lease: lease, PeriodZone: c.PeriodZone, ConfigRevision: rev,
 				Entitlements: c.entitlements(doc), Unmatched: func(q compile.Problem) { unmatched[q.String()] = q }}
 			var s *snapshot.Snapshot
 			var err error
@@ -587,7 +626,10 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 		}
 		c.status.pools[pool] = Publication{At: c.now(), Seq: ptr.PublishSeq, ValidUntil: validUntil[pool]}
 		c.mu.Unlock()
-		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", fence.Epoch, "hash", ptr.Hash[:12])
+		c.mu.Lock()
+		rev := c.goodRev
+		c.mu.Unlock()
+		c.log().Info("published", "pool", pool, "seq", ptr.PublishSeq, "epoch", fence.Epoch, "hash", ptr.Hash[:12], "configRevision", rev)
 	}
 	return perrs
 }
@@ -623,7 +665,11 @@ func withKnownSpend(e *snapshot.Entitlements, k spend.Known) {
 // published, and reported (compile.Options.Unmatched). An unchanged
 // directory costs a content hash.
 func (c *Controller) load(doc *state.Document) error {
-	root, err := os.OpenRoot(c.Dir)
+	dir, rev, err := c.Checkout.resolve(c.Dir)
+	if err != nil {
+		return fmt.Errorf("config directory: %w", err)
+	}
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return fmt.Errorf("config directory: %w", err)
 	}
@@ -634,6 +680,11 @@ func (c *Controller) load(doc *state.Document) error {
 		return err
 	}
 	if sum == c.goodSum {
+		// The same config at another commit (a change elsewhere in the
+		// repository): the next publication names it.
+		c.mu.Lock()
+		c.goodRev = rev
+		c.mu.Unlock()
 		return nil
 	}
 	objs, err := v1.DecodeFS(fsys)
@@ -652,8 +703,9 @@ func (c *Controller) load(doc *state.Document) error {
 			strings.Join(gone, ", "))
 	}
 	c.mu.Lock()
-	c.good, c.goodSum = objs, sum
+	c.good, c.goodSum, c.goodRev = objs, sum, rev
 	c.mu.Unlock()
+	c.log().Info("golem-control: config applied", "configRevision", rev)
 	return nil
 }
 

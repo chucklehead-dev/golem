@@ -22,13 +22,20 @@ pools: [internal]
 lease: 4h
 
 # The config: the GitOps repository's directory of golem CRD YAML, kept
-# checked out by git-sync beside golem-control (each push is a new
-# directory, compiled and published within a step).
+# checked out by git-sync beside golem-control (ADR 0054: each push is a
+# new worktree, compiled and published within a step; its commit is each
+# snapshot's configRevision).
 config:
   repo: ""         # required: e.g. git@github.com:corp/golem-config.git
   ref: main
   path: ""         # the directory within the repository; "" its root
   period: 30s
+  # How long ago git-sync may have last fetched before golem-control stops
+  # renewing leases (-max-config-age): a stalled checkout may miss a
+  # restriction merged since, so the gateways' leases run out rather than
+  # serve it. Far above period; alert well before it (operations.md,
+  # Alerts: golem.control.config.age).
+  maxAge: 30m
   # A Secret with an SSH deploy key (key ssh) and known_hosts.
   sshSecret: golem-config-deploy-key
 gitSync:

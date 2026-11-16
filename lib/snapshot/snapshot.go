@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -147,9 +148,36 @@ type Price struct {
 
 // Source names the inputs a snapshot was built from (model/freshness.md).
 type Source struct {
-	StateVersion   int64  `json:"stateVersion"`
-	ConfigRevision int64  `json:"configRevision"`
-	ConfigDigest   string `json:"configDigest"`
+	StateVersion int64 `json:"stateVersion"`
+	// ConfigRevision is the config checkout's git commit (golem-control's
+	// -config-link: git-sync's worktree is named by its hash); "" when the
+	// config is not read from a checkout.
+	ConfigRevision Revision `json:"configRevision"`
+	ConfigDigest   string   `json:"configDigest"`
+}
+
+// Revision is a config revision, a git commit's hash. Publishers before it
+// wrote this member as the number 0, never set; a number reads as "", so
+// a gateway upgraded first (operations.md, Upgrade) still reads their
+// snapshots.
+type Revision string
+
+// UnmarshalJSON reads a string, or an older publisher's number as "".
+func (r *Revision) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] != '"' {
+		var n json.Number
+		if err := json.Unmarshal(b, &n); err != nil {
+			return fmt.Errorf("configRevision: want a commit hash or an older publisher's number: %w", err)
+		}
+		*r = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	*r = Revision(s)
+	return nil
 }
 
 // Backend is a backend as compiled: its secrets are references, never values

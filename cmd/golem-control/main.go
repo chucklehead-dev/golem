@@ -34,6 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 
 	"github.com/chucklehead-dev/golem/control/api"
@@ -213,6 +214,8 @@ func restore(ctx context.Context, w io.Writer, args []string) error {
 // options are golem-control's flags.
 type options struct {
 	config, bucket, signingKey, pools, id string
+	configLink, configFetched             string
+	maxConfigAge                          time.Duration
 	trustedKeys                           string
 	authLease                             time.Duration
 	counterRetention                      time.Duration
@@ -234,6 +237,9 @@ type options struct {
 func parseFlags() (options, error) {
 	var o options
 	flag.StringVar(&o.config, "config", "", "the config CRDs' directory")
+	flag.StringVar(&o.configLink, "config-link", "", "git-sync's --link, which -config is within: its target is the worktree of the commit checked out, named by its hash, published as each snapshot's configRevision and logged; empty: no revision")
+	flag.StringVar(&o.configFetched, "config-fetched", "", "a file whose modification time is when the config checkout was last fetched: git-sync's <root>/.git/FETCH_HEAD, rewritten at every successful sync; empty: the checkout's age is not bounded")
+	flag.DurationVar(&o.maxConfigAge, "max-config-age", 30*time.Minute, "with -config-fetched, how long ago the checkout may have been fetched before leases stop being renewed (a stalled git-sync's checkout may miss a restriction): changes are still published within the lease already granted, and the gateways' leases run out; 0: no bound")
 	flag.StringVar(&o.bucket, "bucket", "", "the bucket: a directory, or s3://<bucket>/<prefix>")
 	flag.StringVar(&o.signingKey, "signing-key", "", "the publishing key: file:<an Ed25519 PKCS#8 PEM> or kms:<a KMS key ARN, ECC_NIST_P256>")
 	flag.StringVar(&o.trustedKeys, "trusted-keys", "", "a directory of retiring publishing keys' public halves (*.pub, as a gateway's -keys): checkpoints and pointers they signed are trusted while the signer is rotated, and re-signed with -signing-key at the next publication; empty: the signing key's own only")
@@ -259,6 +265,9 @@ func parseFlags() (options, error) {
 	flag.Parse()
 	if o.config == "" || o.bucket == "" || o.signingKey == "" {
 		return o, errors.New("-config, -bucket and -signing-key are required")
+	}
+	if o.maxConfigAge < 0 {
+		return o, fmt.Errorf("-max-config-age %s: not negative (0 for no bound)", o.maxConfigAge)
 	}
 	if o.outboxMax < 10 {
 		return o, fmt.Errorf("-audit-outbox-max %d: at least 10, so its last 20%% is kept for restrictive changes (default %d)", o.outboxMax, state.DefaultMaxOutbox)
@@ -400,6 +409,12 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 	}
 	c = &controller.Controller{Dir: o.config, Lease: o.authLease, PeriodZone: o.periodZone,
 		State: st, ID: replica, Publishers: map[string]*publish.Publisher{}}
+	if o.configLink != "" || o.configFetched != "" {
+		c.Checkout = &controller.Checkout{Link: o.configLink, Fetched: o.configFetched}
+		c.MaxConfigAge = o.maxConfigAge
+	} else {
+		slog.Warn("golem-control: no -config-fetched: the config checkout's age is not bounded, and a stalled git-sync's last checkout is renewed for as long as golem-control runs")
+	}
 	for _, p := range list(o.pools) {
 		c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Keys: trusted, Pool: p}
 	}
@@ -520,6 +535,9 @@ func openMetrics(ctx context.Context, telem, replica string, c *controller.Contr
 	if err := metrics.Register(mp, c); err != nil {
 		return nil, errors.Join(fmt.Errorf("metrics: %w", err), stop(ctx))
 	}
+	if err := registerConfigAge(mp, c); err != nil {
+		return nil, errors.Join(fmt.Errorf("metrics: %w", err), stop(ctx))
+	}
 	return func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -527,6 +545,25 @@ func openMetrics(ctx context.Context, telem, replica string, c *controller.Contr
 			slog.Warn("golem-control: the last metrics were not exported", "err", err)
 		}
 	}, nil
+}
+
+// ConfigAge is the config checkout's age instrument's name.
+const ConfigAge = "golem.control.config.age"
+
+// registerConfigAge registers golem.control.config.age: how long ago the
+// config checkout was last fetched (controller.ConfigAge), in seconds;
+// nothing while it is not known (no -config-fetched, or unreadable).
+// Past -max-config-age leases are not renewed (operations.md, Alerts).
+func registerConfigAge(mp metric.MeterProvider, c *controller.Controller) error {
+	_, err := mp.Meter("golem/control").Float64ObservableGauge(ConfigAge, metric.WithUnit("s"),
+		metric.WithDescription("How long ago the config checkout was last fetched (git-sync's FETCH_HEAD); past -max-config-age leases are not renewed"),
+		metric.WithFloat64Callback(func(_ context.Context, o metric.Float64Observer) error {
+			if age, ok := c.ConfigAge(); ok {
+				o.Observe(age.Seconds())
+			}
+			return nil
+		}))
+	return err
 }
 
 // openAudit is the audit shipper over the archive, emitting log records to

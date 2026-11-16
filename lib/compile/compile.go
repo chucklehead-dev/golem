@@ -36,6 +36,10 @@ type Options struct {
 	// PeriodZone is the budget periods' time zone the snapshot states
 	// (golem-control's -period-zone); "": none stated.
 	PeriodZone string
+	// ConfigRevision is the config's git commit, the snapshot's
+	// Source.ConfigRevision ("": not from a checkout). A renewal keeps the
+	// renewed publication's instead: its config part is that one's.
+	ConfigRevision snapshot.Revision
 	// Entitlements gives a published snapshot's entitlements (the state
 	// document's, control/state), told the route aliases that exist: its
 	// scopes are IDs (and known spend), which the compile joins with the
@@ -145,8 +149,10 @@ func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
 	if len(ps) > 0 {
 		return nil, ps
 	}
-	return o.publication(snapshot.Snapshot{Backends: prev.Backends, Routes: prev.Routes, Entitlements: ents,
-		Currency: prev.Currency, Prices: prev.Prices}), nil
+	s := o.publication(snapshot.Snapshot{Backends: prev.Backends, Routes: prev.Routes, Entitlements: ents,
+		Currency: prev.Currency, Prices: prev.Prices})
+	s.Source.ConfigRevision = prev.Source.ConfigRevision
+	return s, nil
 }
 
 // publication is s as o's publication: its schema, sequence, time and
@@ -156,7 +162,7 @@ func (o Options) publication(s snapshot.Snapshot) *snapshot.Snapshot {
 	if o.Lease > 0 {
 		s.ValidUntil = o.Now.Add(o.Lease).UTC()
 	}
-	s.Source.ConfigDigest = digest(s.Backends, s.Routes)
+	s.Source.ConfigDigest, s.Source.ConfigRevision = digest(s.Backends, s.Routes), o.ConfigRevision
 	return &s
 }
 
