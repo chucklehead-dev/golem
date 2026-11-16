@@ -411,6 +411,17 @@ Done when:
 The team's traffic moves to golem with budgets in observe, on the real
 install. Two weeks begin here.
 
+Status:
+- **Built: the Helm charts** (deploy/charts, its README): golem-control
+  (two replicas, git-sync for the config repository, `-probes` for
+  `/livez` and `/readyz`) and a gateway pool (three replicas across
+  zones, PDB, provider Secrets, denylist, Valkey TLS, grace period the
+  drain plus the readiness window, an optional AuthorizationPolicy).
+  Checked by rendering both and checking every flag they pass against the
+  binaries'; not yet by `helm template`, nor on a cluster. Open: the CRD
+  definitions, the ClickHouse DDL Job, dashboards, egress ServiceEntries,
+  the image builds, and the deploy to EKS through Argo.
+
 - **Install**: Helm charts for the gateway and golem-control through Argo
   CD, on EKS. The chart sets drain to the 10 minutes operations.md assumes
   (the binary's `-drain` defaults to 30 s). Argo Rollouts and Crossplane

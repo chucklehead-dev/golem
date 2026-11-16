@@ -1,0 +1,6 @@
+apiVersion: v2
+name: golem-gateway
+description: One golem gateway pool (docs/operations.md §1); install once per pool and site.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

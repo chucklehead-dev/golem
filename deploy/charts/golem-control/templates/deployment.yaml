@@ -1,0 +1,153 @@
+{{- range list "bucket" "signingKey" }}{{ if not (index $.Values .) }}{{ fail (printf "values.%s is required" .) }}{{ end }}{{ end -}}
+{{- if not .Values.config.repo }}{{ fail "values.config.repo is required" }}{{ end -}}
+{{- if not .Values.api.entraTenant }}{{ fail "values.api.entraTenant is required (the control API takes Entra tokens)" }}{{ end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: golem-control
+  labels: {{- include "golem-control.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {{- include "golem-control.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "golem-control.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: golem-control
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "golem-control.selector" . | nindent 14 }}
+      # The first checkout before golem-control starts, so its first step
+      # compiles the config rather than renewing the last publication.
+      initContainers:
+        - name: git-clone
+          image: {{ .Values.gitSync.image }}
+          args:
+            - --repo={{ .Values.config.repo }}
+            - --ref={{ .Values.config.ref }}
+            - --root=/config
+            - --link=current
+            - --period={{ .Values.config.period }}
+            - --ssh-key-file=/etc/git-secret/ssh
+            - --ssh-known-hosts-file=/etc/git-secret/known_hosts
+            - --one-time
+          env:
+            - {name: HOME, value: /tmp}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+            - {name: git-secret, mountPath: /etc/git-secret, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: control
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            # git-sync points /config/current at each checkout in turn.
+            - -config=/config/current/{{ .Values.config.path }}
+            - -bucket={{ .Values.bucket }}
+            - -signing-key={{ .Values.signingKey }}
+            {{- if .Values.trustedKeys.configMap }}
+            - -trusted-keys=/etc/golem/trusted-keys
+            {{- end }}
+            - -pools={{ join "," .Values.pools }}
+            - -lease={{ .Values.lease }}
+            - -listen=:{{ .Values.api.port }}
+            - -probes=:{{ .Values.probesPort }}
+            - -drain={{ .Values.api.drain }}
+            - -entra-tenant={{ .Values.api.entraTenant }}
+            - -entra-audience={{ .Values.api.audience }}
+            {{- with .Values.entraSync.clientID }}
+            - -entra-sync-client-id={{ . }}
+            - -entra-sync-every={{ $.Values.entraSync.every }}
+            - -entra-sync-max-removals={{ $.Values.entraSync.maxRemovals }}
+            {{- end }}
+            {{- with .Values.clickhouse.url }}
+            - -clickhouse={{ . }}
+            - -clickhouse-user={{ $.Values.clickhouse.user }}
+            {{- end }}
+            - -spend-allowance={{ .Values.spendAllowance }}
+            - -counter-retention={{ .Values.counterRetention }}
+            - -period-zone={{ .Values.periodZone }}
+            {{- with .Values.auditArchive }}
+            - -audit-archive={{ . }}
+            {{- end }}
+            - -telemetry={{ .Values.telemetry }}
+          {{- if .Values.clickhouse.url }}
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.clickhouse.passwordSecret.name }}, key: {{ .Values.clickhouse.passwordSecret.key }}}
+          {{- end }}
+          ports:
+            - {name: api, containerPort: {{ .Values.api.port }}}
+            - {name: probes, containerPort: {{ .Values.probesPort }}}
+          livenessProbe:
+            httpGet: {path: /livez, port: probes}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: probes}
+            periodSeconds: 5
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+            {{- if .Values.trustedKeys.configMap }}
+            - {name: trusted-keys, mountPath: /etc/golem/trusted-keys, readOnly: true}
+            {{- end }}
+        - name: git-sync
+          image: {{ .Values.gitSync.image }}
+          args:
+            - --repo={{ .Values.config.repo }}
+            - --ref={{ .Values.config.ref }}
+            - --root=/config
+            - --link=current
+            - --period={{ .Values.config.period }}
+            - --ssh-key-file=/etc/git-secret/ssh
+            - --ssh-known-hosts-file=/etc/git-secret/known_hosts
+          env:
+            - {name: HOME, value: /tmp}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+            - {name: git-secret, mountPath: /etc/git-secret, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: git-secret
+          secret: {secretName: {{ .Values.config.sshSecret }}, defaultMode: 0400}
+        {{- if .Values.trustedKeys.configMap }}
+        - name: trusted-keys
+          configMap: {name: {{ .Values.trustedKeys.configMap }}}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}

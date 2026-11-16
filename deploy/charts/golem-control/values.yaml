@@ -1,0 +1,69 @@
+# golem-control: one installation (docs/operations.md §1). Two replicas,
+# one leading (its lease is in the state bucket, ADR 0049).
+
+image:
+  repository: ghcr.io/chucklehead-dev/golem-control
+  tag: ""          # default: the chart's appVersion
+  pullPolicy: IfNotPresent
+
+replicas: 2
+
+# The state bucket, the publishing key (KMS), and the pools published to.
+bucket: ""         # required: s3://<bucket>/<prefix>
+signingKey: ""     # required: kms:<a KMS key ARN, ECC_NIST_P256>
+trustedKeys:       # retiring publishing keys' public halves, while rotating
+  configMap: ""
+pools: [internal]
+lease: 4h
+
+# The config: the GitOps repository's directory of golem CRD YAML, kept
+# checked out by git-sync beside golem-control (each push is a new
+# directory, compiled and published by the leader within a step).
+config:
+  repo: ""         # required: e.g. git@github.com:corp/golem-config.git
+  ref: main
+  path: ""         # the directory within the repository; "" its root
+  period: 30s
+  # A Secret with an SSH deploy key (key ssh) and known_hosts.
+  sshSecret: golem-config-deploy-key
+gitSync:
+  image: registry.k8s.io/git-sync/git-sync:v4.4.0
+
+# The control API (golemctl, the console), its Entra registration.
+api:
+  port: 8443
+  entraTenant: ""  # required for the API
+  audience: api://golem-control
+  drain: 10s
+
+# The jobs registration (Entra group sync), by workload identity.
+entraSync:
+  clientID: ""
+  every: 5m
+  maxRemovals: 50
+
+# Known spend (ADR 0048): the ledger's ClickHouse, read-only.
+clickhouse:
+  url: ""          # empty: snapshots carry no known spend
+  user: golem_control
+  passwordSecret: {name: golem-clickhouse, key: password}
+spendAllowance: 5m
+counterRetention: 6h
+periodZone: UTC
+
+# The audit archive: an Object Lock bucket in a separate account.
+auditArchive: ""
+telemetry: otel-collector.observability.svc:4318
+
+serviceAccount:
+  annotations: {}
+  #  eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/golem-control
+
+probesPort: 8081
+
+resources:
+  requests: {cpu: 250m, memory: 256Mi}
+  limits: {memory: 1Gi}
+
+nodeSelector: {}
+tolerations: []

@@ -1,0 +1,112 @@
+{{- $req := list "site" "bucket" -}}
+{{- range $req }}{{ if not (index $.Values .) }}{{ fail (printf "values.%s is required" .) }}{{ end }}{{ end -}}
+{{- if not .Values.valkey.address }}{{ fail "values.valkey.address is required" }}{{ end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "golem-gateway.name" . }}
+  labels: {{- include "golem-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {{- include "golem-gateway.selector" . | nindent 6 }}
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {{- include "golem-gateway.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "golem-gateway.name" . }}
+      # Past the readiness window and the drain: the kubelet must not kill
+      # a stream the drain is waiting for.
+      terminationGracePeriodSeconds: {{ add (include "golem-gateway.seconds" .Values.drain) (include "golem-gateway.seconds" .Values.unready) 30 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "golem-gateway.selector" . | nindent 14 }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - -listen=:{{ .Values.service.port }}
+            - -pool={{ .Values.pool }}
+            - -site={{ .Values.site }}
+            - -bucket={{ .Values.bucket }}
+            - -keys=/etc/golem/keys
+            - -checkpoint=/var/lib/golem/checkpoint
+            - -secrets=/var/run/golem/secrets
+            - -valkey={{ .Values.valkey.address }}
+            {{- if .Values.valkey.tls }}
+            - -valkey-tls
+            {{- end }}
+            {{- with .Values.valkey.user }}
+            - -valkey-user={{ . }}
+            {{- end }}
+            - -valkey-replica-acks={{ .Values.valkey.replicaAcks }}
+            {{- with .Values.entra.tenant }}
+            - -entra-tenant={{ . }}
+            - -entra-audience={{ $.Values.entra.audience }}
+            {{- end }}
+            - -telemetry={{ .Values.telemetry }}
+            - -denylist=/etc/golem/denylist/{{ .Values.denylist.key }}
+            - -unready={{ .Values.unready }}
+            - -drain={{ .Values.drain }}
+            - -max-body={{ .Values.maxBody }}
+            - -auth-failures={{ .Values.guard.authFailures }}
+            - -max-conns={{ .Values.guard.maxConns }}
+            {{- with .Values.guard.sourceHeader }}
+            - -source-header={{ . }}
+            {{- end }}
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.valkey.passwordSecret.name }}, key: {{ .Values.valkey.passwordSecret.key }}}
+          ports:
+            - {name: http, containerPort: {{ .Values.service.port }}}
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            failureThreshold: 2
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: keys, mountPath: /etc/golem/keys, readOnly: true}
+            - {name: denylist, mountPath: /etc/golem/denylist, readOnly: true}
+            # The checkpoint: the floor across a container's restarts. A
+            # rescheduled pod starts from the bucket's trusted checkpoint.
+            - {name: checkpoint, mountPath: /var/lib/golem}
+            {{- range .Values.providerSecrets }}
+            - {name: secret-{{ . }}, mountPath: /var/run/golem/secrets/{{ . }}, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: keys
+          configMap: {name: {{ .Values.trustedKeys.configMap }}}
+        - name: denylist
+          configMap: {name: {{ .Values.denylist.configMap }}, optional: false}
+        - name: checkpoint
+          emptyDir: {}
+        {{- range .Values.providerSecrets }}
+        - name: secret-{{ . }}
+          secret: {secretName: {{ . }}}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}

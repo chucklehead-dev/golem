@@ -221,7 +221,7 @@ type options struct {
 	trustedKeys                           string
 	authLease                             time.Duration
 	counterRetention                      time.Duration
-	listen                                string
+	listen, probes                        string
 	drain                                 time.Duration
 	archive, telemetry                    string
 	outboxMax                             int
@@ -246,6 +246,7 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.id, "id", "", "this replica's name (default: the host name)")
 	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
 	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
+	flag.StringVar(&o.probes, "probes", "", "serve GET /livez and /readyz here, for Kubernetes' probes (ready once the state is loaded); empty: none")
 	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut and the lease is given up")
 	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
 	flag.IntVar(&o.outboxMax, "audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, in events: past 80% of it changes that grant access are refused, and at it every change that adds an audit event, until the archive drains it")
@@ -318,7 +319,27 @@ func run() error {
 	defer cancel()
 	var wg sync.WaitGroup
 	var failed error // a component's failure, which stops the rest
+	var failOnce sync.Once
+	fail := func(err error) { failOnce.Do(func() { failed = err }); cancel() }
 	wg.Go(func() { st.Run(ctx) })
+	if o.probes != "" {
+		// The state is loaded and the replica runs: alive and ready. A
+		// replica not leading is ready too: it serves the API and stands by.
+		mux := http.NewServeMux()
+		ok := func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) }
+		mux.HandleFunc("GET /livez", ok)
+		mux.HandleFunc("GET /readyz", ok)
+		probes := &http.Server{Addr: o.probes, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		wg.Go(func() {
+			<-ctx.Done()
+			probes.Close()
+		})
+		wg.Go(func() {
+			if err := probes.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fail(fmt.Errorf("-probes: %w", err))
+			}
+		})
+	}
 	if o.listen != "" {
 		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, &service.Service{State: st, ScopeModels: c.ScopeModels})
 		if err != nil {
@@ -329,8 +350,7 @@ func run() error {
 		// below, and the lease's release after it, follow the drain.
 		wg.Go(func() {
 			if err := serveAPI(ctx, srv, srv.ListenAndServe, o.drain); err != nil {
-				failed = fmt.Errorf("the control API: %w", err) // read after wg.Wait
-				cancel()
+				fail(fmt.Errorf("the control API: %w", err)) // read after wg.Wait
 			}
 		})
 		slog.Info("golem-control: the control API is listening", "addr", o.listen)

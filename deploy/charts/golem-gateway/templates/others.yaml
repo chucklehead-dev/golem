@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "golem-gateway.name" . }}
+  labels: {{- include "golem-gateway.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "golem-gateway.name" . }}
+  labels: {{- include "golem-gateway.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "golem-gateway.selector" . | nindent 4 }}
+  ports:
+    # h2c behind the mesh (gateway.md §3 step 1).
+    - {name: http, port: {{ .Values.service.port }}, targetPort: http, appProtocol: kubernetes.io/h2c}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "golem-gateway.name" . }}
+  labels: {{- include "golem-gateway.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {{- include "golem-gateway.selector" . | nindent 6 }}
+{{- with .Values.authorizationPolicy.principals }}
+---
+# Only these workloads reach the pool (docs/operations.md §1).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "golem-gateway.name" $ }}
+  labels: {{- include "golem-gateway.labels" $ | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "golem-gateway.selector" $ | nindent 6 }}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: {{- toYaml . | nindent 14 }}
+      to:
+        - operation:
+            paths: ["/v1/*"]
+    # The kubelet's probes are not mesh traffic; Istio rewrites them.
+{{- end }}

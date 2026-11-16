@@ -1,0 +1,6 @@
+apiVersion: v2
+name: golem-control
+description: golem's control plane (docs/operations.md §1); one installation.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
