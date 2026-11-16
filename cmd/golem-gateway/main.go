@@ -73,7 +73,6 @@ type options struct {
 	// and an AUTH user; the password is $VALKEY_PASSWORD's, never a flag
 	valkeyAddr, valkeyCA, valkeyUser string
 	valkeyTLS                        bool
-	replicaAcks                      int
 	// the floor before authentication (gateway/guard)
 	sourceHeader                                         string
 	sourceRate, sourceBurst, authFailRate, authFailBurst float64
@@ -109,7 +108,6 @@ func parse(args []string) (options, error) {
 	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run although golem#7's deployment evidence is not in (test sites only)")
 
 	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey (host:port) for the limiter")
-	fs.IntVar(&o.replicaAcks, "valkey-replica-acks", 0, "pool mode: replicas each spend add waits for (WAIT), so a failover cannot lose it")
 	fs.BoolVar(&o.valkeyTLS, "valkey-tls", false, "pool mode: connect to Valkey over TLS (ElastiCache's in-transit encryption), verifying its certificate against the system's roots for the address's host name")
 	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "pool mode, with -valkey-tls: a PEM file of the CA certificates to verify Valkey's certificate against, in place of the system's roots")
 	fs.StringVar(&o.valkeyUser, "valkey-user", "", "pool mode: the Valkey user to AUTH as (an ACL user; ElastiCache RBAC); its password in $VALKEY_PASSWORD. Empty with the password set: AUTH as the default user")
@@ -138,7 +136,7 @@ func run(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "golem-gateway:", err)
 		return 2
 	}
-	// One period zone for the counters and the ledger rows: a call near
+	// One period zone for admission and the ledger rows: a call near
 	// midnight on the last of the month belongs to one month in both.
 	zone, err := time.LoadLocation(o.zoneName)
 	if err != nil {
@@ -236,7 +234,7 @@ func run(ctx context.Context, args []string) int {
 // newLimiter is the limiter over its store: in memory standalone (ADR
 // 0023), the site's Valkey in pool mode. A Valkey unreachable at the start
 // does not stop the gateway: the limiter starts in its outage mode
-// (waivers, increments held) and connect, run in the background, dials
+// (waivers) and connect, run in the background, dials
 // until it answers; Run's Recover then brings the limiter back. connect is
 // nil when there is nothing to dial; closeStore closes the store's client.
 func newLimiter(o options, zone *time.Location) (limiter *limit.Limiter, connect func(context.Context), closeStore func(), err error) {
@@ -254,7 +252,6 @@ func newLimiter(o options, zone *time.Location) (limiter *limit.Limiter, connect
 			slog.Error("golem-gateway: the site's Valkey is unreachable; starting with the limiter in its outage mode (calls admitted on local counts, recorded as waivers) and retrying the connection",
 				"valkey", o.valkeyAddr, "err", err)
 		}
-		v.ReplicaAcks = o.replicaAcks
 		store, connect, closeStore = v, v.Connect, v.Close
 	}
 	limiter = limit.New(store)
@@ -314,32 +311,18 @@ func newHealth(holder *snapshot.Holder) (*route.Health, func(context.Context)) {
 	}
 }
 
-// applyKnown hands the limiter each account's known spend: every scope's,
-// its members' and its capped keys' (org-model.md §4.2), in the scope's
-// period and from its boundary.
+// applyKnown hands the limiter every scope's known spend, in the scope's
+// period (ADR 0052).
 func applyKnown(l *limit.Limiter, e *gsnapshot.Entitlements) {
 	ctx := context.Background()
-	period := map[string]limit.Known{}
 	for _, s := range e.Scopes {
-		k := limit.Known{Period: s.Period, Spend: s.KnownSpend, Since: s.Since}
-		period[s.ID] = k
-		l.ApplySnapshot(ctx, s.ID, k)
-		for _, m := range s.Members {
-			k.Spend = m.KnownSpend
-			l.ApplySnapshot(ctx, limit.MemberAccount(s.ID, m.Principal), k)
-		}
-	}
-	for _, key := range e.Keys {
-		if k, ok := period[key.Scope]; ok && key.CapMicros > 0 {
-			k.Spend = key.KnownSpend
-			l.ApplySnapshot(ctx, limit.KeyAccount(key.Display), k)
-		}
+		l.ApplySnapshot(ctx, s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend})
 	}
 }
 
 // newHolder is the snapshot holder of a live installation (startSource
 // makes it a dev one standalone), handing each snapshot's known spend to
-// the limiter as it is applied (ADR 0048). It also ends the calls in flight
+// the limiter as it is applied (ADR 0052). It also ends the calls in flight
 // the snapshot withdraws (a key revoked, a principal gone from the key's
 // scope or from golem), as soon as it is in force: calls is the gateway's
 // registry of them.

@@ -44,16 +44,10 @@ func scopePolicy(obj, at string, p Policy, add adder) snapshot.Scope {
 		add(obj, at+".budgetMicros", "at most %d (2^50), not %d: larger sums are not exact in the site store", int64(snapshot.MaxMicros), p.BudgetMicros)
 	}
 	switch {
-	case p.DefaultMemberCapMicros < 0:
-		add(obj, at+".defaultMemberCapMicros", "must not be negative (is %d); 0 is no cap", p.DefaultMemberCapMicros)
-	case p.DefaultMemberCapMicros > snapshot.MaxMicros:
-		add(obj, at+".defaultMemberCapMicros", "at most %d (2^50), not %d: larger sums are not exact in the site store", int64(snapshot.MaxMicros), p.DefaultMemberCapMicros)
-	}
-	switch {
 	case p.BudgetMode != "" && p.BudgetMode != BudgetObserve && p.BudgetMode != BudgetWarn && p.BudgetMode != BudgetEnforce:
 		add(obj, at+".budgetMode", "observe (the default), warn or enforce, not %q", p.BudgetMode)
-	case p.BudgetMode != "" && p.BudgetMicros == 0 && p.DefaultMemberCapMicros == 0:
-		add(obj, at+".budgetMode", "%s, but there is no budget: set budgetMicros (or defaultMemberCapMicros), or remove budgetMode", p.BudgetMode)
+	case p.BudgetMode != "" && p.BudgetMicros == 0:
+		add(obj, at+".budgetMode", "%s, but there is no budget: set budgetMicros, or remove budgetMode", p.BudgetMode)
 	}
 	if p.InFlight.Principal < 0 {
 		add(obj, at+".inFlight.principal", "must not be negative (is %d); 0 or unset is the default, %d", p.InFlight.Principal, DefaultPrincipalInFlight)
@@ -79,11 +73,10 @@ func scopePolicy(obj, at string, p Policy, add adder) snapshot.Scope {
 	}
 	memberRPM := requestsPerMinute(obj, at+".rateLimits.member", limits.Member, add)
 	scopeRPM := requestsPerMinute(obj, at+".rateLimits.scope", limits.Scope, add)
-	// Every scope has a mode: its members' and keys' caps (state, set by
-	// its managers) follow it whether or not it has a budget.
+	// Every scope has a mode, whether or not it has a budget.
 	mode := cmp.Or(p.BudgetMode, BudgetObserve)
-	return snapshot.Scope{BudgetMicros: p.BudgetMicros, BudgetMode: mode, DefaultMemberCapMicros: max(p.DefaultMemberCapMicros, 0),
-		MemberRPM: memberRPM, ScopeRPM: scopeRPM, DeclaredWorstCaseCheck: p.DeclaredWorstCaseCheck,
+	return snapshot.Scope{BudgetMicros: p.BudgetMicros, BudgetMode: mode,
+		MemberRPM: memberRPM, ScopeRPM: scopeRPM,
 		PrincipalInFlight: cmp.Or(p.InFlight.Principal, DefaultPrincipalInFlight), ScopeInFlight: cmp.Or(p.InFlight.Scope, DefaultScopeInFlight),
 		StorageAllowed: p.ProviderStorage == "allowed", MaxOutputTokens: p.MaxOutputTokens, MaxInputBytes: p.MaxInputBytes, Features: p.Features}
 }
@@ -154,7 +147,7 @@ func join(state []snapshot.Scope, policies map[string]compiledPolicy, report fun
 			report(Problem{Object: "scope " + st.ID, Path: "ScopePolicy",
 				Msg: fmt.Sprintf("no ScopePolicy named %q: the scope is published with no models (its members can call nothing) until one is added to the config", st.ID)})
 		}
-		sc.ID, sc.Period, sc.KnownSpend, sc.Since, sc.Members = st.ID, st.Period, st.KnownSpend, st.Since, st.Members
+		sc.ID, sc.Period, sc.KnownSpend, sc.Since = st.ID, st.Period, st.KnownSpend, st.Since
 		out = append(out, sc)
 	}
 	for _, id := range slices.Sorted(maps.Keys(policies)) {
@@ -172,7 +165,7 @@ func join(state []snapshot.Scope, policies map[string]compiledPolicy, report fun
 func policiesOf(scopes []snapshot.Scope) map[string]compiledPolicy {
 	out := make(map[string]compiledPolicy, len(scopes))
 	for _, sc := range scopes {
-		sc.Period, sc.KnownSpend, sc.Since, sc.Members = "", 0, time.Time{}, nil
+		sc.Period, sc.KnownSpend, sc.Since = "", 0, time.Time{}
 		out[sc.ID] = compiledPolicy{sc, "ScopePolicy/" + sc.ID + " (as published)"}
 	}
 	return out

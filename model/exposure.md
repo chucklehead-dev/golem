@@ -7,18 +7,19 @@ one principal on one gateway, with a working Valkey. This one asks what
 §6 says the first model does not establish:
 
 > A scope's pool is shared by several principals, served by several
-> gateways on a site. Known spend is a snapshot from the ledger plus the
-> site's counter, and the ledger ingests events late. Valkey can be
-> unreachable or lose writes. A client can cancel a call the provider keeps
-> working on. Does the scope stay within a stated bound, and when it cannot,
-> is the exposure at least recorded?
+> gateways on a site. Known spend is a snapshot from the ledger, which
+> ingests events late. Valkey can be unreachable. A client can cancel a
+> call the provider keeps working on. Does the scope stay within a stated
+> bound, and when it cannot, is the exposure at least recorded?
 
-The design's answer is yes, if four rules hold:
+Known spend is the snapshot's alone ([ADR 0052](../docs/adr/0052-accounting-for-m1.md)):
+golem-control publishes each scope's spend about every minute, and the
+site keeps no spend counter. Valkey holds the concurrency slots. The
+design's answer is yes, if three rules hold:
 
 | Switch | When on (the design) | When off (the bug it prevents) |
 |---|---|---|
 | `SCOPE_LIMIT_ON` | A scope has its own in-flight limit, checked with the principal's | Each principal stays within its limit, but the scope's exposure is their sum: grows with every member who joins |
-| `HANDOFF` = `"buckets"` | The counter keeps each minute's spend (by when its calls ended); a snapshot carries a time boundary B, an ingestion allowance before its publication, and the ledger's spend of the calls that ended before B; known spend is that plus the counter's minutes from B on (ADR 0048): exact on every gateway whichever snapshot it holds, while the ledger ingests within the allowance | `"noAllowance"`: B is the publication's own time, and a row still on its way is in neither the snapshot nor the minutes counted. `"resetAtApply"`: applying a snapshot clears the counter, and the spend after B (and a gateway still on an older snapshot) loses it. `"sum"`: the ledger's balance and the whole counter are added |
 | `HOLD_ON_CANCEL` | A cancelled call keeps its slot until its upstream has ended | The slot is freed at cancellation while the provider keeps working: cancel and resend escapes the in-flight limit |
 | `REACQUIRE` | When Valkey comes back, each gateway re-registers the slots of its calls still running | Slots that expired during the outage are forgotten: new calls are admitted next to calls still streaming |
 
@@ -45,26 +46,6 @@ module exposure {
 A scope with a `BUDGET`, several principals each with `LIMIT` calls in
 flight, the scope with `SCOPE_LIMIT`, a site's `GATEWAYS`, and a few
 `REQUESTS`, each its `OWNER`'s. Costs and `WORST` as in the first model.
-Only the soft check: the declared-worst-case check tightens the bound by a call, as
-accounting.md shows, and changes nothing here.
-
-Each principal is also a **member account** with a cap, `MEMBER_CAP` (0:
-none), the same for every member here (org-model.md §4.2: a member's cap,
-or the scope's default). A key's cap is the same kind of account, nested
-in its member's and sharing its in-flight limit, so what this model shows
-of a member holds of a key. `MEMBER_KNOWN` is how admission knows a
-member's spend: `"counter"` (the design), a member counter beside the
-scope's, written in the same script and so in the same Valkey write, and
-handed over by the same boundary; or `"snapshotOnly"`, the snapshot's
-per-member spend alone, which is simpler (no per-member keys in Valkey)
-and wrong: a member's calls within one publication's lag are not seen at
-all.
-
-Time is in minutes, the counter's grain. `ALLOWANCE` is how many minutes
-the ledger may take to ingest a row: the deployment's assumption (the
-collector's queue and ClickHouse's insert lag, ADR 0043), stated as the
-guard on `tick` (§5.5). golem-control places a snapshot's boundary that
-far behind the time it publishes.
 
 ```quint exposure.qnt +=
   const REQUESTS: Set[str]
@@ -75,14 +56,10 @@ far behind the time it publishes.
   const BUDGET: int
   const LIMIT: int
   const SCOPE_LIMIT: int
-  const ALLOWANCE: int
 
   const SCOPE_LIMIT_ON: bool
-  const HANDOFF: str
   const HOLD_ON_CANCEL: bool
   const REACQUIRE: bool
-  const MEMBER_CAP: int
-  const MEMBER_KNOWN: str
 ```
 
 ## 3. State
@@ -93,11 +70,10 @@ A call is `idle`, `inflight`, `cancelled` (the client went away; the
 provider may still be working, and billing), or `done`. Each records the
 gateway that admitted it, what the provider billed, and the spend event
 the gateway emitted for it: its cost at completion, or at cancellation
-what the gateway had seen so far, and the minute it was emitted: the
-call's end, which its ledger row and its counter minute both carry.
+what the gateway had seen so far.
 
 ```quint exposure.qnt +=
-  type Event = (str, int, int)
+  type Event = (str, int)
 
   var phase: str -> str
   var gatewayOf: str -> str
@@ -105,77 +81,51 @@ call's end, which its ledger row and its counter minute both carry.
   var seenCost: str -> int
 ```
 
-### 3.2 Known spend: snapshot, counter, ledger
+### 3.2 Known spend: the snapshot
 
-- `now`: the minute.
-- `counter`: the site counter in Valkey: each minute's spend, the sum of
-  the events that ended in it. It holds amounts, not events: adding is
-  `INCRBY`, and nothing names an event in it. The design keeps a minute
-  for the retention window, longer than any snapshot a live gateway holds.
-- `pending`: the increments each gateway holds while it believes Valkey
-  unreachable (`gwDown`), each with its own minute. Its ledger row does not
-  wait: rows are written at a call's end (ADR 0043). Each gateway notices
-  on its own that Valkey is back and replays its own, into their minutes;
-  until then the others admit against a counter that lacks them.
+- `latest`: the known spend golem-control last published for the scope:
+  the spend of the events the ledger had then. Where it places the
+  boundary of what it counts (ADR 0048's ingestion allowance) is its
+  concern: here a snapshot is the spend of some subset of the events
+  emitted before it, which is all a late, out-of-order ingestion can
+  give.
+- `snaps`: the known spend each gateway has applied. Gateways apply
+  snapshots independently.
+- `gwDown`: the gateways that believe Valkey unreachable.
 - `grace`: gateways that recovered within the last grace period. A
   recovered gateway cannot know which peers have not recovered yet, whose
-  running calls Valkey then lacks, so for a grace period (two renewal
-  intervals, 60 seconds) its admissions are waivers too. The grace may end
-  only once every gateway has recovered: each renews every 30 seconds, so
-  each notices within one interval. That timing is an assumption, and the
-  guard on `graceEnds` is where the model states it.
-- `buffer` and `ledger`: rows on their way to ClickHouse, and there: the
-  event, its cost and the minute its call ended.
-- `mcounter`: each member's counter, minute by minute, as `counter` is
-  the scope's: one admission script adds a call's cost to both, so a
-  failover that loses a write loses it from both.
-- `latest`: the snapshot golem-control last published: its boundary `b`,
-  the spend of the ledger's rows that ended before it, and the ledger's
-  whole balance `whole` (for the broken hand-off); `mspend` and `mwhole`
-  the same per member.
-- `snaps`: the snapshot each gateway has applied. Gateways apply snapshots
-  independently; this is the skew the first version of this model hid by
-  applying every snapshot everywhere at once.
+  running calls' slots Valkey then lacks, so for a grace period (two
+  renewal intervals, 60 seconds) its admissions are waivers too. The grace
+  may end only once every gateway has recovered: each renews every 30
+  seconds, so each notices within one interval. That timing is an
+  assumption, and the guard on `graceEnds` is where the model states it.
 
 ```quint exposure.qnt +=
-  type Row = (str, int, int)
-  type Snap = { b: int, spend: int, whole: int, mspend: str -> int, mwhole: str -> int }
-
-  var now: int
-  var counter: int -> int
-  var mcounter: str -> (int -> int)
-  var pending: str -> Set[Event]
+  var latest: int
+  var snaps: str -> int
   var gwDown: Set[str]
   var grace: Set[str]
-  var buffer: Set[Row]
-  var ledger: Set[Row]
-  var latest: Snap
-  var snaps: str -> Snap
 ```
 
 ### 3.3 Valkey's slots
 
 `slots` are the calls Valkey holds a concurrency slot for; `valkeyUp`
-whether gateways can reach it. `views` is each gateway's known spend as it
-last computed it: during an outage that is all it has; `mviews` each
-gateway's last known spend of each member.
+whether gateways can reach it.
 
 ```quint exposure.qnt +=
   var slots: Set[str]
   var valkeyUp: bool
-  var views: str -> int
-  var mviews: str -> (str -> int)
 ```
 
 ### 3.4 Ghosts
 
 - `observed`: every event any gateway emitted, the spend golem knows of.
-- `uncounted`: spend golem never heard of, or lost from known spend: a
-  failover's lost minutes, a cancelled call's billing past what the
-  gateway saw.
-- `waived`: calls admitted while Valkey was unreachable.
-- `heldEver`: the spend gateways ever held during an outage: while a
-  gateway holds it, the others admit without it.
+- `uncounted`: spend golem never heard of: a cancelled call's billing
+  past what the gateway saw.
+- `waived`: calls admitted while Valkey was unreachable, or in a grace.
+- `lag`: the most spend any admission did not see: what golem had
+  observed but the admitting gateway's snapshot lacked, the largest over
+  every admission.
 - `overAdmit`: a call admitted while Valkey was reachable although the
   principal or the scope was already at its limit: the bug.
 
@@ -183,7 +133,7 @@ gateway's last known spend of each member.
   var observed: Set[Event]
   var uncounted: int
   var waived: Set[str]
-  var heldEver: int
+  var lag: int
   var overAdmit: bool
 ```
 
@@ -195,69 +145,28 @@ gateway's last known spend of each member.
     gatewayOf' = REQUESTS.mapBy(r => ""),
     billed' = REQUESTS.mapBy(r => 0),
     seenCost' = REQUESTS.mapBy(r => 0),
-    now' = 0, counter' = Map(), mcounter' = MEMBERS.mapBy(p => Map()), pending' = GATEWAYS.mapBy(g => Set()), gwDown' = Set(), grace' = Set(),
-    buffer' = Set(), ledger' = Set(),
-    latest' = blankSnap, snaps' = GATEWAYS.mapBy(g => blankSnap),
-    slots' = Set(), valkeyUp' = true, views' = GATEWAYS.mapBy(g => 0), mviews' = GATEWAYS.mapBy(g => MEMBERS.mapBy(p => 0)),
-    observed' = Set(), uncounted' = 0, waived' = Set(), heldEver' = 0, overAdmit' = false,
+    latest' = 0, snaps' = GATEWAYS.mapBy(g => 0), gwDown' = Set(), grace' = Set(),
+    slots' = Set(), valkeyUp' = true,
+    observed' = Set(), uncounted' = 0, waived' = Set(), lag' = 0, overAdmit' = false,
   }
 
-  // The first snapshot: nothing from the ledger, every minute counted.
-  val MEMBERS: Set[str] = REQUESTS.map(r => OWNER.get(r))
-  val blankSnap: Snap = { b: 0, spend: 0, whole: 0, mspend: MEMBERS.mapBy(p => 0), mwhole: MEMBERS.mapBy(p => 0) }
   def sum(events: Set[Event]): int = events.fold(0, (acc, e) => acc + e._2)
-  def rowsSum(rows: Set[Row]): int = rows.fold(0, (acc, r) => acc + r._2)
   def running: Set[str] = REQUESTS.filter(r => phase.get(r) == "inflight" or phase.get(r) == "cancelled")
   def ownedBy(rs: Set[str], p: str): Set[str] = rs.filter(r => OWNER.get(r) == p)
   def totalBilled: int = REQUESTS.fold(0, (acc, r) => acc + billed.get(r))
-  def billedOf(p: str): int = ownedBy(REQUESTS, p).fold(0, (acc, r) => acc + billed.get(r))
-  def countedOf(p: str): int = sum(observed.filter(e => OWNER.get(e._1) == p))
   def counted: int = sum(observed)
-  def held: int = GATEWAYS.fold(0, (acc, g) => acc + sum(pending.get(g)))
   // A gateway uses the store if Valkey answers and it has recovered.
   def usesStore(g: str): bool = valkeyUp and not(gwDown.contains(g))
-```
-
-Known spend, the number every check reads, for one gateway. In the design:
-its snapshot's spend, the calls that ended before `b`, plus the counter's
-minutes from `b` on. A call is on one side of `b` only, by the one minute
-its row and its counter increment share, so it is counted once; the real
-check reads at most a lease's minutes, in one script, whatever the
-traffic.
-
-```quint exposure.qnt +=
-  def counterFrom(b: int): int = counter.keys().filter(t => t >= b).fold(0, (acc, t) => acc + counter.get(t))
-  def counterAll: int = counter.keys().fold(0, (acc, t) => acc + counter.get(t))
-  def addAt(c: int -> int, t: int, cost: int): int -> int =
-    if (c.keys().contains(t)) c.set(t, c.get(t) + cost) else c.put(t, cost)
-  def known(g: str): int =
-    val sn = snaps.get(g)
-    if (HANDOFF == "sum") sn.whole + counterAll
-    else sn.spend + counterFrom(sn.b)
-```
-
-A member's known spend is the same sum over the member's counter, unless
-the snapshot alone is read (`"snapshotOnly"`):
-
-```quint exposure.qnt +=
-  def minutesFrom(c: int -> int, b: int): int = c.keys().filter(t => t >= b).fold(0, (acc, t) => acc + c.get(t))
-  def mknown(g: str, p: str): int =
-    val sn = snaps.get(g)
-    if (MEMBER_KNOWN == "snapshotOnly") sn.mspend.get(p)
-    else if (HANDOFF == "sum") sn.mwhole.get(p) + minutesFrom(mcounter.get(p), -1)
-    else sn.mspend.get(p) + minutesFrom(mcounter.get(p), sn.b)
-  def underCap(v: int): bool = MEMBER_CAP == 0 or v < MEMBER_CAP
+  // Known spend, the number every check reads: the gateway's snapshot.
+  def known(g: str): int = snaps.get(g)
 ```
 
 "The rest stays as it is", by group:
 
 ```quint exposure.qnt +=
   action keepCalls = all { phase' = phase, gatewayOf' = gatewayOf, billed' = billed, seenCost' = seenCost }
-  action keepSpend = all {
-    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
-  }
-  action keepGhosts = all { observed' = observed, uncounted' = uncounted, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit }
+  action keepSpend = all { latest' = latest, snaps' = snaps, gwDown' = gwDown, grace' = grace }
+  action keepGhosts = all { observed' = observed, uncounted' = uncounted, waived' = waived, lag' = lag, overAdmit' = overAdmit }
 ```
 
 ## 5. Actions
@@ -270,71 +179,43 @@ those limits with the calls really running (the provider's work), not with
 Valkey's slots, so a slot freed too early or forgotten shows up here.
 
 While Valkey is unreachable, a gateway admits against what it knows: its
-own running calls for the principal and the scope, and known spend from
-the counter as it last read it (`views`). The call is waived. (An earlier
-version checked the true counter here, which no gateway can read during an
-outage; the limiter's Hegel test found the model refusing a call any
-implementation would admit.)
+own running calls for the principal and the scope, and its snapshot's
+known spend, which needs no Valkey. The call is waived.
 
 ```quint exposure.qnt +=
   action admit(request: str, gateway: str): bool = all {
     phase.get(request) == "idle",
+    known(gateway) < BUDGET,
     val p = OWNER.get(request)
     val local = running.filter(r => gatewayOf.get(r) == gateway)
     if (usesStore(gateway)) all {
-      known(gateway) < BUDGET,
-      underCap(mknown(gateway, p)), // the member's account, in the same script
-      views' = views.put(gateway, known(gateway)), // the check reads the counter
-      mviews' = mviews.put(gateway, mviews.get(gateway).put(p, mknown(gateway, p))),
       ownedBy(slots, p).size() < LIMIT,
       if (SCOPE_LIMIT_ON) slots.size() < SCOPE_LIMIT else true,
       slots' = slots.union(Set(request)),
-      // In grace, peers may still hold calls Valkey lacks: a waiver.
+      // In grace, peers may still run calls Valkey has no slot for: a waiver.
       waived' = if (grace.contains(gateway)) waived.union(Set(request)) else waived,
       overAdmit' = (overAdmit or (not(grace.contains(gateway)) and (ownedBy(running, p).size() >= LIMIT or running.size() >= SCOPE_LIMIT))),
     } else all {
-      views.get(gateway) < BUDGET,
-      underCap(mviews.get(gateway).get(p)),
-      views' = views, mviews' = mviews,
       ownedBy(local, p).size() < LIMIT,
       if (SCOPE_LIMIT_ON) local.size() < SCOPE_LIMIT else true,
       slots' = slots,
       waived' = waived.union(Set(request)),
       overAdmit' = overAdmit,
     },
+    lag' = if (counted - known(gateway) > lag) counted - known(gateway) else lag,
     phase' = phase.put(request, "inflight"),
     gatewayOf' = gatewayOf.put(request, gateway),
     billed' = billed, seenCost' = seenCost,
-    valkeyUp' = valkeyUp, observed' = observed, uncounted' = uncounted, heldEver' = heldEver,
-    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps,
+    valkeyUp' = valkeyUp, observed' = observed, uncounted' = uncounted,
+    keepSpend,
   }
 ```
 
-### 5.2 Emitting a spend event
+### 5.2 A call completes
 
-Both a completion and a cancellation emit one event, at the call's
-gateway, in the minute it happens. Its ledger row is written at once and
-travels on its own. If the gateway uses the store, the event's cost is
-added to its minute in the counter; otherwise the increment waits with the
-gateway (§5.6).
-
-```quint exposure.qnt +=
-  action emit(id: str, cost: int, g: str): bool = all {
-    val e = (id, cost, now)
-    all {
-      observed' = observed.union(Set(e)),
-      counter' = if (usesStore(g)) addAt(counter, now, cost) else counter,
-      mcounter' = if (usesStore(g)) mcounter.set(OWNER.get(id), addAt(mcounter.get(OWNER.get(id)), now, cost)) else mcounter,
-      buffer' = buffer.union(Set(e)),
-      pending' = if (usesStore(g)) pending else pending.put(g, pending.get(g).union(Set(e))),
-      heldEver' = if (usesStore(g)) heldEver else heldEver + cost,
-    },
-    now' = now, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
-  }
-```
-
-### 5.3 A call completes
+Both a completion and a cancellation emit one event, its ledger row, at
+the call's gateway. The site keeps no counter of it: known spend has it
+once a snapshot does.
 
 ```quint exposure.qnt +=
   action complete(request: str, cost: int): bool = all {
@@ -342,14 +223,14 @@ gateway (§5.6).
     phase' = phase.put(request, "done"),
     billed' = billed.put(request, cost),
     seenCost' = seenCost.put(request, cost),
-    emit(request, cost, gatewayOf.get(request)),
+    observed' = observed.union(Set((request, cost))),
     slots' = slots.exclude(Set(request)),
-    gatewayOf' = gatewayOf, valkeyUp' = valkeyUp,
-    uncounted' = uncounted, waived' = waived, overAdmit' = overAdmit,
+    gatewayOf' = gatewayOf, valkeyUp' = valkeyUp, keepSpend,
+    uncounted' = uncounted, waived' = waived, lag' = lag, overAdmit' = overAdmit,
   }
 ```
 
-### 5.4 The client cancels, the provider carries on
+### 5.3 The client cancels, the provider carries on
 
 The gateway closes its upstream connection and emits what it had seen
 (the stream's deltas so far). The provider may go on generating, and
@@ -363,10 +244,10 @@ maximum duration).
     phase.get(request) == "inflight",
     phase' = phase.put(request, "cancelled"),
     seenCost' = seenCost.put(request, seen),
-    emit(request, seen, gatewayOf.get(request)),
+    observed' = observed.union(Set((request, seen))),
     slots' = if (HOLD_ON_CANCEL) slots else slots.exclude(Set(request)),
-    gatewayOf' = gatewayOf, billed' = billed, valkeyUp' = valkeyUp,
-    uncounted' = uncounted, waived' = waived, overAdmit' = overAdmit,
+    gatewayOf' = gatewayOf, billed' = billed, valkeyUp' = valkeyUp, keepSpend,
+    uncounted' = uncounted, waived' = waived, lag' = lag, overAdmit' = overAdmit,
   }
 
   action providerEnds(request: str, cost: int): bool = all {
@@ -377,93 +258,50 @@ maximum duration).
     uncounted' = uncounted + (cost - seenCost.get(request)),
     slots' = slots.exclude(Set(request)),
     gatewayOf' = gatewayOf, seenCost' = seenCost, valkeyUp' = valkeyUp,
-    keepSpend, observed' = observed, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit,
+    keepSpend, observed' = observed, waived' = waived, lag' = lag, overAdmit' = overAdmit,
   }
 ```
 
-### 5.5 Time passes, the ledger ingests, the control plane publishes, gateways apply
+### 5.4 The control plane publishes, gateways apply
 
-Ingestion is late and in any order, but within `ALLOWANCE` minutes: the
-clock does not move past a row's minute plus the allowance while the row
-is still on its way. That is the deployment's assumption, not a property
-golem enforces; a row later than that is an undercount until the next
-snapshot whose boundary passes it, or reconciliation (ADR 0048).
-
-golem-control places a snapshot's boundary `b` the allowance behind the
-time it publishes, so every row before `b` is in the ledger, and the
-snapshot's spend is those rows (`"noAllowance"`: `b` is the publication's
-own time). Publication and application are separate steps, and each
-gateway applies on its own.
+A snapshot's known spend is some of the events emitted so far: those the
+ledger has ingested, before golem-control's boundary. Ingestion is late
+and in any order, so it may be any subset. Publication and application
+are separate steps, and each gateway applies on its own.
 
 ```quint exposure.qnt +=
-  action tick: bool = all {
-    buffer.forall(r => r._3 >= now + 1 - ALLOWANCE),
-    now' = now + 1,
-    counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
-    keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
-  }
-
-  action deliver(r: Row): bool = all {
-    buffer.contains(r),
-    buffer' = buffer.exclude(Set(r)),
-    ledger' = ledger.union(Set(r)),
-    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
-    keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
-  }
-
-  def boundary: int = if (HANDOFF == "noAllowance") now else now - ALLOWANCE
-
-  action publishSnapshot: bool = all {
-    val b = boundary
-    latest' = { b: b, spend: rowsSum(ledger.filter(r => r._3 < b)), whole: rowsSum(ledger),
-      mspend: MEMBERS.mapBy(p => rowsSum(ledger.filter(r => r._3 < b and OWNER.get(r._1) == p))),
-      mwhole: MEMBERS.mapBy(p => rowsSum(ledger.filter(r => OWNER.get(r._1) == p))) },
-    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger,
-    snaps' = snaps, views' = views, mviews' = mviews,
+  action publishSnapshot(ingested: Set[Event]): bool = all {
+    ingested.subseteq(observed),
+    latest' = sum(ingested),
+    snaps' = snaps, gwDown' = gwDown, grace' = grace,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 
   action applySnapshot(gateway: str): bool = all {
     snaps.get(gateway) != latest,
     snaps' = snaps.put(gateway, latest),
-    // The bug: start the counter again at each snapshot, as if the
-    // snapshot held everything before it.
-    counter' = if (HANDOFF == "resetAtApply" and valkeyUp) Map() else counter,
-    mcounter' = if (HANDOFF == "resetAtApply" and valkeyUp) MEMBERS.mapBy(p => Map()) else mcounter,
-    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, views' = views, mviews' = mviews,
+    latest' = latest, gwDown' = gwDown, grace' = grace,
     keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
   }
 ```
 
-### 5.6 Valkey
+### 5.5 Valkey
 
 **Unreachable.** Gateways cannot renew slots, so every slot's TTL lapses
 (the model takes the outage as longer than the 90-second TTL: the worst
 case), and every gateway notices (its renewal fails within 30 seconds).
-The counter itself survives.
 
-**Back.** Valkey answers, and each gateway, on its own, replays the
-increments it held, one at a time, each into its own minute, and then
-recovers: with `REACQUIRE` it re-registers a slot for each of its calls
-still running, cancelled ones included, and uses the store again.
-
-**A failover.** Valkey is reachable but lost some of its latest writes:
-here, a minute's spend. What it held is uncounted until the snapshots'
-boundary passes that minute, when the ledger's rows count it again; the
-model counts it lost for good, the worst case. The implementation narrows
-the window by waiting for a replica to acknowledge each increment, which
-the model, like the real failure, need not honour.
+**Back.** Valkey answers, and each gateway, on its own, recovers: with
+`REACQUIRE` it re-registers a slot for each of its calls still running,
+cancelled ones included, and uses the store again, in a grace.
 
 ```quint exposure.qnt +=
   action valkeyDown: bool = all {
     valkeyUp,
     valkeyUp' = false,
     gwDown' = GATEWAYS,
-    grace' = grace,
     slots' = Set(),
-    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
+    latest' = latest, snaps' = snaps, grace' = grace,
     keepCalls, keepGhosts,
   }
 
@@ -473,26 +311,13 @@ the model, like the real failure, need not honour.
     slots' = slots, keepCalls, keepSpend, keepGhosts,
   }
 
-  action replayOne(gateway: str, e: Event): bool = all {
-    valkeyUp,
-    gwDown.contains(gateway),
-    pending.get(gateway).contains(e),
-    counter' = addAt(counter, e._3, e._2),
-    mcounter' = mcounter.set(OWNER.get(e._1), addAt(mcounter.get(OWNER.get(e._1)), e._3, e._2)),
-    pending' = pending.put(gateway, pending.get(gateway).exclude(Set(e))),
-    now' = now, buffer' = buffer, gwDown' = gwDown, grace' = grace, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
-    keepCalls, slots' = slots, valkeyUp' = valkeyUp, keepGhosts,
-  }
-
   action recover(gateway: str): bool = all {
     valkeyUp,
     gwDown.contains(gateway),
-    pending.get(gateway) == Set(),
     gwDown' = gwDown.exclude(Set(gateway)),
     grace' = grace.union(Set(gateway)),
     slots' = if (REACQUIRE) slots.union(running.filter(r => gatewayOf.get(r) == gateway)) else slots,
-    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
+    latest' = latest, snaps' = snaps,
     keepCalls, valkeyUp' = valkeyUp, keepGhosts,
   }
 
@@ -502,48 +327,30 @@ the model, like the real failure, need not honour.
     grace.contains(gateway),
     gwDown == Set(),
     grace' = grace.exclude(Set(gateway)),
-    now' = now, counter' = counter, mcounter' = mcounter, pending' = pending, gwDown' = gwDown, buffer' = buffer, ledger' = ledger,
-    latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
+    latest' = latest, snaps' = snaps, gwDown' = gwDown,
     keepCalls, keepGhosts, slots' = slots, valkeyUp' = valkeyUp,
-  }
-
-  action failover(t: int): bool = all {
-    valkeyUp,
-    counter.keys().contains(t),
-    counter' = counter.keys().exclude(Set(t)).mapBy(m => counter.get(m)),
-    mcounter' = mcounter.keys().mapBy(p => mcounter.get(p).keys().exclude(Set(t)).mapBy(m => mcounter.get(p).get(m))),
-    uncounted' = uncounted + counter.get(t),
-    now' = now, pending' = pending, gwDown' = gwDown, grace' = grace, buffer' = buffer, ledger' = ledger, latest' = latest, snaps' = snaps, views' = views, mviews' = mviews,
-    keepCalls, slots' = slots, valkeyUp' = valkeyUp,
-    observed' = observed, waived' = waived, heldEver' = heldEver, overAdmit' = overAdmit,
   }
 ```
 
-### 5.7 The step
+### 5.6 The step
 
 ```quint exposure.qnt +=
   action step = {
     nondet request = REQUESTS.oneOf()
     nondet gateway = GATEWAYS.oneOf()
     nondet cost = COSTS.oneOf()
-    nondet r = buffer.union(Set(("none", 0, 0))).oneOf()
-    nondet e = pending.get(gateway).union(Set(("none", 0, 0))).oneOf()
-    nondet t = counter.keys().union(Set(-1)).oneOf()
+    nondet ingested = observed.powerset().oneOf()
     any {
-      tick,
       admit(request, gateway),
       complete(request, cost),
       cancel(request, cost),
       providerEnds(request, cost),
-      deliver(r),
-      publishSnapshot,
+      publishSnapshot(ingested),
       applySnapshot(gateway),
       valkeyDown,
       valkeyBack,
-      replayOne(gateway, e),
       recover(gateway),
       graceEnds(gateway),
-      failover(t),
     }
   }
 ```
@@ -563,73 +370,42 @@ thinks.
 ### 6.2 The scope's stated bound
 
 The first model's argument, at scope level: the last admission made with
-Valkey reachable saw known spend below the budget, with fewer than
-`SCOPE_LIMIT` calls running, each billing at most `WORST`. To that add
+Valkey reachable, outside a grace, saw known spend below the budget, with
+fewer than `SCOPE_LIMIT` calls running, each billing at most `WORST`. Its
+known spend lacked at most `lag` of what golem had observed. To that add
 what golem never heard of and what was admitted under waiver.
 
 ```quint exposure.qnt +=
   val withinBound =
-    totalBilled <= BUDGET + SCOPE_LIMIT * WORST + uncounted + waived.size() * WORST + heldEver
+    totalBilled <= BUDGET + lag + SCOPE_LIMIT * WORST + uncounted + waived.size() * WORST
+
+  val safe = limitsHonoured and withinBound
 ```
 
 So the number ADR 0031 can advertise for a scope is `SCOPE_LIMIT × WORST`
-over the budget, not a principal's `LIMIT × WORST`, plus two terms that are
-reported, not bounded in advance: spend lost in failures (until
-reconciliation books it), waived admissions, and spend gateways held during
-an outage (which the others admitted without, until each recovered).
+over the budget, not a principal's `LIMIT × WORST`, plus terms that are
+reported, not bounded in advance by the model: spend golem never heard of
+(until reconciliation books it), waived admissions, and the **lag**: the
+spend that ended within one snapshot's lag (ingestion, the allowance,
+publication about every minute, and application) and so was not yet in the
+known spend admission read. The in-flight limits do not bound the lag on
+their own, since short calls finish many to a slot in a minute; the
+scope's rate limit does: at most the scope's requests a minute over the
+lag's minutes, each at most `WORST`. A scope without a rate limit has
+that term bounded only by how fast its in-flight calls finish.
 
-### 6.3 The handoff: never counted twice, no increment lost
-
-Known spend never exceeds the spend golem has observed; and while Valkey
-is reachable, it falls short only by what a failover lost (or a cancelled
-call billed beyond what was seen, which `uncounted` also holds), while the
-ledger ingests within its allowance. The second
-is the sharper check of the handoff: the bound in §6.2 only fails once
-enough lost increments pile up, which takes several snapshots in a row;
-this fails at the first.
-
-On every gateway, whichever snapshot it holds:
-
-```quint exposure.qnt +=
-  val knownNeverOver = GATEWAYS.forall(g => known(g) <= counted)
-  val noLostIncrements = GATEWAYS.forall(g => usesStore(g) implies known(g) + uncounted + held >= counted)
-
-  val safe = limitsHonoured and withinBound and knownNeverOver and noLostIncrements and memberWithinBound and memberKnownNeverOver
-```
-
-### 6.3a A member's bound
-
-A member's account is the scope's argument with the member's own in-flight
-limit: the last admission made with Valkey reachable saw the member's
-known spend below its cap, with fewer than `LIMIT` of its calls running.
-The ghost terms are the scope's (a member's share of them is at most all
-of them). And a member's known spend, like the scope's, never counts what
-was not spent.
-
-```quint exposure.qnt +=
-  val memberWithinBound = MEMBER_CAP == 0 or MEMBERS.forall(p =>
-    billedOf(p) <= MEMBER_CAP + LIMIT * WORST + uncounted + waived.size() * WORST + heldEver)
-  val memberKnownNeverOver = GATEWAYS.forall(g => MEMBERS.forall(p => mknown(g, p) <= countedOf(p)))
-```
-
-### 6.4 Possibility
+### 6.3 Possibility
 
 The design must be able to: go over the budget (the accepted risk); admit
 under waiver past a limit, and still hold the bound; bill a cancelled call
-more than the gateway saw; and hand a counter over to a snapshot while an
-event is still on its way to the ledger.
+more than the gateway saw; and admit a call while spend is outside the
+snapshot.
 
 ```quint exposure.qnt +=
   val overshoots = totalBilled > BUDGET
   val waiverExceedsLimit = REQUESTS.exists(r => ownedBy(running, OWNER.get(r)).size() > LIMIT)
   val cancelledBilledMore = REQUESTS.exists(r => billed.get(r) > seenCost.get(r))
-  // A gateway's snapshot holds some spend, and the counter's minutes after
-  // its boundary hold more.
-  val handoffInFlight = GATEWAYS.exists(g => snaps.get(g).spend > 0 and counterFrom(snaps.get(g).b) > 0)
-  // Two gateways on different snapshots, both exact.
-  val snapshotSkew = GATEWAYS.exists(g => GATEWAYS.exists(h => snaps.get(g).b != snaps.get(h).b))
-  // A member past its cap (by the calls in flight when it reached it).
-  val memberOvershoots = MEMBER_CAP > 0 and MEMBERS.exists(p => billedOf(p) > MEMBER_CAP)
+  val snapshotLags = lag > 0
 ```
 
 ## 7. The stories
@@ -647,65 +423,20 @@ is two.
       .expect(not(limitsHonoured))
 ```
 
-**A counter reset at each snapshot forgets spend** (`resetAtApply`). A
-call completes at 3 in minute 0; a snapshot is published at once, its
-boundary the allowance before, so it holds nothing; g1 applies it and the
-counter starts again. Known spend is 0 though 3 was spent. In the design
-the counter keeps minute 0, which is after the boundary: known spend 3.
+**Spend within a snapshot's lag** (the design). Four calls one after
+another each cost 3, and no snapshot has any of them: each is admitted
+against known spend 0. The scope has spent 12, past the budget and its
+in-flight term (4 + 2 × 3); the bound holds by its lag term alone, the 9
+the last admission did not see.
 
 ```quint exposure.qnt +=
-  run resetTest =
+  run lagTest =
     init
       .then(admit("a1", "g1")).then(complete("a1", 3))
-      .then(publishSnapshot).then(applySnapshot("g1"))
-      .expect(not(noLostIncrements))
-```
-
-**A summed counter counts twice** (`sumHandoff`). One call's row is in
-the ledger and so in the snapshot, and its minute still in the counter.
-
-```quint exposure.qnt +=
-  run sumTest =
-    init
-      .then(admit("a1", "g1"))
-      .then(complete("a1", 2))
-      .then(deliver(("a1", 2, 0)))
-      .then(publishSnapshot)
-      .then(applySnapshot("g1"))
-      .expect(not(knownNeverOver))
-```
-
-**A boundary without the allowance loses a row on its way**
-(`noAllowance`). A call completes in minute 0; a minute later its row is
-still on its way, within the allowance. A snapshot whose boundary is its
-own time, minute 1, leaves the call out (it has no row before minute 1),
-and the counter from minute 1 on lacks it too. In the design the boundary
-is minute 0, and the counter's minute 0 counts the call.
-
-```quint exposure.qnt +=
-  run noAllowanceTest =
-    init
-      .then(admit("a1", "g1")).then(complete("a1", 3))
-      .then(tick)
-      .then(publishSnapshot)
-      .then(applySnapshot("g1"))
-      .expect(not(noLostIncrements))
-```
-
-**Two gateways, two snapshots, both exact** (the design). The call's row
-is ingested and two minutes pass; g1 applies a snapshot with the call in
-its spend (boundary minute 1), while g2, on the first snapshot, counts it
-from the counter's minute 0. Both know 3.
-
-```quint exposure.qnt +=
-  run skewTest =
-    init
-      .then(admit("a1", "g1")).then(complete("a1", 3))
-      .then(deliver(("a1", 3, 0)))
-      .then(tick).then(tick)
-      .then(publishSnapshot)
-      .then(applySnapshot("g1"))
-      .expect(snapshotSkew and known("g1") == 3 and known("g2") == 3 and noLostIncrements and knownNeverOver)
+      .then(admit("b1", "g2")).then(complete("b1", 3))
+      .then(admit("c1", "g1")).then(complete("c1", 3))
+      .then(admit("a2", "g2")).then(complete("a2", 3))
+      .expect(lag == 9 and totalBilled > BUDGET + SCOPE_LIMIT * WORST and withinBound and limitsHonoured)
 ```
 
 **Cancel and resend** (`releaseOnCancel`). p1 cancels its call; the
@@ -750,20 +481,6 @@ limit of one. Nothing is hidden: both are waived, and the bound holds.
       .expect(waiverExceedsLimit and waived.size() == 2 and withinBound and limitsHonoured)
 ```
 
-**A member seen only in snapshots** (`memberSnapshotOnly`). p1's cap is
-1. Its first call costs 3; no snapshot has been published since, so the
-snapshot says p1 spent nothing, and its second call is admitted and costs
-3 more: 6, past the cap plus a call in flight (4). In the design the
-member counter holds the first call's 3, and the second is refused.
-
-```quint exposure.qnt +=
-  run memberCapTest =
-    init
-      .then(admit("a1", "g1")).then(complete("a1", 3))
-      .then(admit("a2", "g1")).then(complete("a2", 3))
-      .expect(not(memberWithinBound))
-```
-
 The model ends here:
 
 ```quint exposure.qnt +=
@@ -772,26 +489,16 @@ The model ends here:
 
 ## 8. What this model leaves out
 
-- **Several sites.** Each site has its own Valkey and counter; a site's
-  known spend lacks the other sites' minutes after the boundary until a
-  later snapshot's boundary passes them (the allowance plus about a
-  minute).
-  Scope limits are per site, so the stated bound becomes, per scope, the
-  sum over its active sites of `SCOPE_LIMIT × WORST`, plus what the other
-  sites spend within one snapshot's lag, which their rate limits cap. With
-  the secondary site a warm standby, that term is zero in normal
-  operation. Not modelled.
-- **The declared-worst-case check** (accounting.md): one call tighter, nothing else changes.
-- **Rows later than the allowance**, and **retention**: the model holds the
-  ledger to its allowance (`tick`'s guard) and keeps every minute; a later
-  row undercounts until the next boundary passes it, and a boundary older
-  than the retention would lose the minutes between it and the
-  retention's start, but known spend is never below the site's counter
-  total, and golem-control reports such a result stale (ADR 0048); in the
-  model, keeping every minute, the floor never binds.
-- **An increment added twice**: a replay whose reply was lost may be sent
-  again and added twice; that errs high, and the model's gateways see
-  every reply.
+- **Several sites.** Each site has its own Valkey and slots. Scope limits
+  are per site, so the stated bound becomes, per scope, the sum over its
+  active sites of `SCOPE_LIMIT × WORST`; the lag term already holds every
+  site's spend outside the snapshot. With the secondary site a warm
+  standby, the extra sites' terms are zero in normal operation. Not
+  modelled.
+- **The time a snapshot takes**: the model lets a snapshot lack any of
+  the events emitted, and `lag` measures what it lacked; how long that is
+  (ADR 0048's allowance, the publication interval) is the freshness and
+  publication models' and golem-control's.
 - **Crashes and reconciliation** (accounting.md): a gateway crash is
   another source of `uncounted`; reconciliation books it.
 - **Prices**: `WORST` is a true bound only for the modalities and billing
@@ -807,111 +514,39 @@ The model ends here:
 |---|---|---|
 | `exposureDesign` | none | nothing (`safe` holds) |
 | `noScopeLimit` | `SCOPE_LIMIT_ON` | `limitsHonoured` |
-| `resetAtApply` | `HANDOFF = "resetAtApply"` | `noLostIncrements` |
-| `sumHandoff` | `HANDOFF = "sum"` | `knownNeverOver` |
-| `noAllowance` | `HANDOFF = "noAllowance"` | `noLostIncrements` |
 | `releaseOnCancel` | `HOLD_ON_CANCEL` | `limitsHonoured` |
 | `noReacquire` | `REACQUIRE` | `limitsHonoured` |
-| `memberCaps` | none (members capped at 1, the scope's budget out of the way) | nothing |
-| `memberSnapshotOnly` | `MEMBER_KNOWN = "snapshotOnly"` | `memberWithinBound` |
 
 Each story passes in the design it names and fails in `exposureDesign`;
-`waiverTest` and `skewTest` pass in `exposureDesign`.
+`waiverTest` and `lagTest` pass in `exposureDesign`.
 
 ```quint exposure.qnt +=
 
 module exposureDesign {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
+    SCOPE_LIMIT_ON = true, HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }
 
 module noScopeLimit {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = false, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
-}
-
-module resetAtApply {
-  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
-    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "resetAtApply", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
-}
-
-module sumHandoff {
-  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
-    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "sum", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
+    SCOPE_LIMIT_ON = false, HOLD_ON_CANCEL = true, REACQUIRE = true).*
 }
 
 module releaseOnCancel {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = false, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
-}
-
-module noAllowance {
-  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
-    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "noAllowance", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
-}
-
-module memberCaps {
-  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
-    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 100, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 1, MEMBER_KNOWN = "counter").*
-}
-
-module memberSnapshotOnly {
-  import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
-    OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 100, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 1, MEMBER_KNOWN = "snapshotOnly").*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
+    SCOPE_LIMIT_ON = true, HOLD_ON_CANCEL = false, REACQUIRE = true).*
 }
 
 module noReacquire {
   import exposure(REQUESTS = Set("a1", "a2", "b1", "b2", "c1"),
     OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2", "b2" -> "p2", "c1" -> "p3"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = false, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
-}
-```
-
-## The small instance
-
-The instance the exhaustive search explores (exposure.small.yaml, run by
-check-exposure.sh where it has one): the design at sizes small enough to
-search every run to a depth. The binding names this module rather than
-repeating its constants. Its variants (`simulate.variants`) are the
-designs, each with the mechanism it turns off, what it must hold and
-what it must break; `gotogether simulate -matrix` searches every run of
-each to the binding's depth and writes this table, the properties by the
-designs (a cell "breaks in N steps" is its shortest counterexample):
-
-<!-- gotogether:matrix -->
-| | design | no scope limit | reset at apply | sum | no allowance | no hold on cancel | no reacquire | member caps | member snapshot only |
-|---|---|---|---|---|---|---|---|---|---|
-| safe | holds to depth 7 | breaks in 2 steps | breaks in 4 steps | breaks in 5 steps | breaks in 5 steps | breaks in 3 steps | breaks in 7 steps | holds to depth 7 | breaks in 4 steps |
-| limitsHonoured | holds to depth 7 | breaks in 2 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 3 steps | breaks in 7 steps | holds to depth 7 | holds to depth 7 |
-| withinBound | holds to depth 7 | breaks in 4 steps | breaks in 6 steps | holds to depth 7 | breaks in 7 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
-| knownNeverOver | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
-| noLostIncrements | holds to depth 7 | holds to depth 7 | breaks in 4 steps | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
-| memberWithinBound | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 4 steps |
-| memberKnownNeverOver | holds to depth 7 | holds to depth 7 | holds to depth 7 | breaks in 5 steps | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 | holds to depth 7 |
-<!-- /gotogether:matrix -->
-
-```quint exposure.qnt +=
-
-module small {
-  import exposure(REQUESTS = Set("a1", "a2", "b1"), OWNER = Map("a1" -> "p1", "a2" -> "p1", "b1" -> "p2"),
-    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 3), WORST = 3, BUDGET = 2, LIMIT = 1, SCOPE_LIMIT = 1, ALLOWANCE = 1,
-    SCOPE_LIMIT_ON = true, HANDOFF = "buckets", HOLD_ON_CANCEL = true, REACQUIRE = true, MEMBER_CAP = 0, MEMBER_KNOWN = "counter").*
+    GATEWAYS = Set("g1", "g2"), COSTS = Set(1, 2, 3), WORST = 3, BUDGET = 4, LIMIT = 1, SCOPE_LIMIT = 2,
+    SCOPE_LIMIT_ON = true, HOLD_ON_CANCEL = true, REACQUIRE = false).*
 }
 ```

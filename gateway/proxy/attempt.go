@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
@@ -30,10 +29,8 @@ func (h *Handler) health() *route.Health {
 // with backoff, so the gateway's retry is a failover or nothing, and a pool
 // of one makes one attempt. It marks the one it takes in tried. With none,
 // it returns the earliest time one may take an attempt again (zero:
-// unknown). A deployment its health takes must also have quota for the
-// attempt (quota; nil: none checked): one at its quota is passed over, as
-// one at its ceiling is, and left untried.
-func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string, quota func(*route.Target) (bool, time.Time)) (*route.Target, *route.Lease, time.Time) {
+// unknown).
+func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string) (*route.Target, *route.Lease, time.Time) {
 	var earliest time.Time
 	later := func(at time.Time) {
 		if !at.IsZero() && (earliest.IsZero() || at.Before(earliest)) {
@@ -49,13 +46,6 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, bet
 			later(at)
 			continue
 		}
-		if quota != nil {
-			if ok, at := quota(t); !ok {
-				l.Release() // not attempted: the deployment as it was
-				later(at)
-				continue
-			}
-		}
 		tried[i] = true
 		return t, l, time.Time{}
 	}
@@ -63,14 +53,9 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, bet
 }
 
 // noDeployment is the refusal of a call no deployment of its route takes
-// now, with the earliest time one may (retryAt): every one at its share
-// of the provider's quota, if a share turned one away, else resting or at
+// now, with the earliest time one may (retryAt): every one resting or at
 // its ceiling.
-func noDeployment(quotaFull bool, retryAt time.Time) *refusal {
-	if quotaFull {
-		return &refusal{code: contract.LimitProviderQuota, retryAfter: time.Until(retryAt),
-			msg: "every deployment of this route is at its share of the provider's quota for this minute; retry after the Retry-After"}
-	}
+func noDeployment(retryAt time.Time) *refusal {
 	return &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
 		msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"}
 }
@@ -116,25 +101,9 @@ func incapable(rt *route.Route, betas []string) *refusal {
 	return &refusal{code: contract.RouteNoCapableDeployment, msg: "no deployment of route " + rt.Alias + " accepts these anthropic-beta values together (" + strings.Join(betas, ", ") + "): send fewer"}
 }
 
-// takeQuota takes an attempt's request from t's quota share, if it has
-// one (PRD §9.2), reporting when the share has room again if not; it
-// records in quotaFull that a deployment was passed over at its quota.
-func (c *callState) takeQuota(t *route.Target) (bool, time.Time) {
-	m := c.h.Meters
-	if m == nil || t.QuotaRPM == 0 {
-		return true, time.Time{}
-	}
-	ok, _, wait := m.Take(c.bg, []admission.Meter{{Key: admission.QuotaMeter(t.Key()), PerMinute: t.QuotaRPM}})
-	if !ok {
-		c.quotaFull = true
-		return false, time.Now().Add(wait)
-	}
-	return true, time.Time{}
-}
-
-// next picks the call's next deployment (pick), taking its quota.
+// next picks the call's next deployment (pick).
 func (c *callState) next() (*route.Target, *route.Lease, time.Time) {
-	return pick(c.hl, c.rt, c.tried, c.principal.ID, c.betas, c.takeQuota)
+	return pick(c.hl, c.rt, c.tried, c.principal.ID, c.betas)
 }
 
 // retry, given an attempt's failure before it committed, takes the pool's

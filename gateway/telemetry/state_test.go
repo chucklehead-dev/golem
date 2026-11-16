@@ -77,8 +77,6 @@ func TestStateGauges(t *testing.T) {
 		MetricSnapshotSeq:     42,
 		MetricLimiterDown:     0,
 		MetricWaivers:         0,
-		MetricHeld:            0,
-		MetricHeldDropped:     0,
 		MetricDenylistEntries: 2,
 	} {
 		if v, ok := got[name]; !ok || v != want {
@@ -96,13 +94,12 @@ func TestStateGauges(t *testing.T) {
 		if err != nil || !tk.Waived() {
 			t.Fatalf("Admit = %v: want a waiver", err)
 		}
-		tk.Complete(t.Context(), 1000) // held for replay
+		tk.Complete(t.Context(), 1000)
 		now = issued.Add(4*time.Hour + time.Minute)
 		got := collectState(t, r)
 		for name, want := range map[string]float64{
 			MetricLimiterDown:    1,
 			MetricWaivers:        1,
-			MetricHeld:           1,
 			MetricLeaseRemaining: -60, // run out a minute ago
 		} {
 			if v := got[name]; v != want {

@@ -240,8 +240,8 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 			targets[targetKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
 				URL: u, Transport: rt, Header: header, MaxInFlight: d.MaxInFlight, MaxPerPrincipal: d.MaxInFlightPerPrincipal, Envelope: b.Envelope,
 				HealthPath: d.HealthPath, HealthInterval: time.Duration(d.HealthIntervalMs) * time.Millisecond,
-				QuotaRPM: d.QuotaRPM, Betas: setOf(d.Betas),
-				ID: b.Name + "/" + d.Name}
+				Betas: setOf(d.Betas),
+				ID:    b.Name + "/" + d.Name}
 		}
 	}
 	return targets, used, nil

@@ -18,12 +18,12 @@ import (
 )
 
 // Call is one request as admission sees it: who, under which limits, to
-// which deployment, at what declared worst case.
+// which deployment.
 type Call struct {
 	ID               string // the request ID: the call's event in the ledger
 	Principal, Scope string
-	// The route chosen. gateway/limit reads none of them: rate limits and
-	// quota shares are Meters, taken outside admission.
+	// The route chosen. gateway/limit reads none of them: rate limits are
+	// Meters, taken outside admission.
 	Alias, Deployment, Model string
 	Budget                   int64 // the scope's budget in micro-units; 0: none
 	// BudgetMode is what the budget does (PRD §9.1): Enforce refuses a call
@@ -32,18 +32,6 @@ type Call struct {
 	BudgetMode     BudgetMode
 	PrincipalLimit int // in-flight calls per principal; 0: none
 	ScopeLimit     int // in-flight calls per scope (ADR 0041 §7.6); 0: none
-	// DeclaredWorstCaseCheck (a scope option): admit only if known spend
-	// plus Worst, the call's declared worst case, fits (ADR 0044); else
-	// known spend below the budget.
-	DeclaredWorstCaseCheck bool
-	Worst                  int64
-	// Key is the display ID of the key that authenticated the call ("" for
-	// a token). KeyCap and MemberCap are the accounts below the scope's
-	// (org-model.md §4.2): the key's spend cap, and its member's cap in
-	// the scope (the member's own, or the scope's default), each checked
-	// before the scope's budget and under its BudgetMode; 0: none.
-	Key               string
-	KeyCap, MemberCap int64
 	// Started is when the call began (the request's arrival): it fixes the
 	// budget period. Deadline is when it must have ended (the route's
 	// maximum duration); zero: none.
@@ -100,61 +88,26 @@ type Ticket interface {
 	Period() string
 	// Waived reports an admission outside the bound (the store was down).
 	Waived() bool
-	// OverBudget reports a call admitted over one of its accounts' limits,
-	// in a mode that admits one (Warn, Observe): what Enforce would have
-	// refused.
-	OverBudget() Over
-}
-
-// Level is one of a call's accounts (org-model.md §4.2), in the order
-// admission checks them.
-type Level uint8
-
-// The levels; NoLevel is none.
-const (
-	NoLevel Level = iota
-	KeyLevel
-	MemberLevel
-	ScopeLevel
-)
-
-// Code is the refusal of a call over the level's limit.
-func (l Level) Code() contract.Code {
-	switch l {
-	case KeyLevel:
-		return contract.BudgetKeyCap
-	case MemberLevel:
-		return contract.BudgetMemberCap
-	}
-	return contract.BudgetPoolExhausted
-}
-
-// Over is the account an admitted call is over the limit of: its level
-// (NoLevel: none), its known spend as admission checked it, and its limit.
-type Over struct {
-	Level        Level
-	Known, Limit int64
+	// OverBudget reports a call admitted over its scope's budget, in a
+	// mode that admits one (Warn, Observe): what Enforce would have
+	// refused; and the known spend admission read.
+	OverBudget() (over bool, known int64)
 }
 
 // Meter is one per-minute bucket of requests a request is charged to: a
-// deployment's share of its provider's quota (PRD §9.2, ADR 0012), or a
 // member's or a scope's rate limit (PRD §5.5), each shared by a site's
 // gateways. Requests only: tokens are the provider's 429s to enforce and
 // budgets' to account (ADR 0044).
 type Meter struct {
-	Key       string // QuotaMeter, MemberRateMeter, ScopeRateMeter
+	Key       string // MemberRateMeter, ScopeRateMeter
 	PerMinute int64
 }
 
 // The meters' keys.
-func QuotaMeter(deployment string) string            { return "q:" + deployment }
 func MemberRateMeter(scope, principal string) string { return "rm:" + scope + "/" + principal }
 func ScopeRateMeter(scope string) string             { return "rs:" + scope }
 
-// Meters takes requests from meters: a call's rate limits once, its
-// deployment's quota share each attempt (model/attempts.md's
-// QUOTA_PER_ATTEMPT: a failover must not land on a deployment at its
-// quota).
+// Meters takes requests from meters: a call's rate limits, once.
 type Meters interface {
 	// Take takes a request from every meter of ms, or from none, reporting
 	// the first without room (its index) and how long until it has; an

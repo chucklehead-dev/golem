@@ -3,7 +3,6 @@ package limit
 import (
 	"context"
 	"slices"
-	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -20,25 +19,17 @@ func (v *Valkey) mustClient() valkey.Client {
 }
 
 // valkeyFaults injects the model's environment into a Valkey store: an
-// outage (every call fails, and the slots' TTLs lapse) and a failover (a
-// minute of the counter lost).
+// outage (every call fails, and the slots' TTLs lapse).
 type valkeyFaults struct {
 	*Valkey
 	down atomic.Bool
 }
 
-func (f *valkeyFaults) Admit(ctx context.Context, a Admission) (Result, error) {
+func (f *valkeyFaults) Admit(ctx context.Context, a Admission) (Outcome, error) {
 	if f.down.Load() {
-		return Result{}, ErrUnavailable
+		return 0, ErrUnavailable
 	}
 	return f.Valkey.Admit(ctx, a)
-}
-
-func (f *valkeyFaults) Complete(ctx context.Context, in Increment, s Slot) error {
-	if f.down.Load() {
-		return ErrUnavailable
-	}
-	return f.Valkey.Complete(ctx, in, s)
 }
 
 func (f *valkeyFaults) Release(ctx context.Context, s Slot) error {
@@ -53,27 +44,6 @@ func (f *valkeyFaults) Reacquire(ctx context.Context, ss []Slot) error {
 		return ErrUnavailable
 	}
 	return f.Valkey.Reacquire(ctx, ss)
-}
-
-func (f *valkeyFaults) Add(ctx context.Context, in Increment) error {
-	if f.down.Load() {
-		return ErrUnavailable
-	}
-	return f.Valkey.Add(ctx, in)
-}
-
-func (f *valkeyFaults) AddAll(ctx context.Context, incs []Increment) error {
-	if f.down.Load() {
-		return ErrUnavailable
-	}
-	return f.Valkey.AddAll(ctx, incs)
-}
-
-func (f *valkeyFaults) Since(ctx context.Context, account, period string, since time.Time) (int64, error) {
-	if f.down.Load() {
-		return 0, ErrUnavailable
-	}
-	return f.Valkey.Since(ctx, account, period, since)
 }
 
 func (f *valkeyFaults) Take(ctx context.Context, ms []Meter) (bool, int, time.Duration, error) {
@@ -95,35 +65,6 @@ func (f *valkeyFaults) SetDown(down bool) {
 		f.mustClient().Do(ctx, f.mustClient().B().Del().Key(keys...).Build())
 	}
 	f.down.Store(down)
-}
-
-// failover loses a minute of every account's counter, and its share of
-// each total, as a replica missing those writes would (a call's
-// increment reaches all its accounts in one write).
-func (f *valkeyFaults) failover(period string, minute int64) {
-	ctx := context.Background()
-	field := strconv.FormatInt(minute, 10)
-	keys, _ := f.mustClient().Do(ctx, f.mustClient().B().Keys().Pattern(f.prefix+"spend:*:"+period).Build()).AsStrSlice()
-	for _, k := range keys {
-		lost, _ := f.mustClient().Do(ctx, f.mustClient().B().Hget().Key(k).Field(field).Build()).AsInt64()
-		f.mustClient().Do(ctx, f.mustClient().B().Hdel().Key(k).Field(field).Build())
-		f.mustClient().Do(ctx, f.mustClient().B().Hincrby().Key(k).Field("total").Increment(-lost).Build())
-	}
-}
-
-// Buckets is the counter, minute to spend.
-func (f *valkeyFaults) Buckets(sc, period string) map[int64]int64 {
-	m, _ := f.mustClient().Do(context.Background(), f.mustClient().B().Hgetall().Key(f.counterKey(sc, period)).Build()).AsStrMap()
-	out := map[int64]int64{}
-	for k, v := range m {
-		minute, err := strconv.ParseInt(k, 10, 64)
-		if err != nil {
-			continue // "total"
-		}
-		spend, _ := strconv.ParseInt(v, 10, 64)
-		out[minute] = spend
-	}
-	return out
 }
 
 func (f *valkeyFaults) Slots() []Slot {

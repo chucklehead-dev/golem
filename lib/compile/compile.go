@@ -291,7 +291,6 @@ func deployments(obj string, ds []v1.Deployment, aws *v1.AWS, standalone bool, a
 		if !bedrock {
 			sd.HealthPath, sd.HealthIntervalMs = healthCheck(obj, at, d.HealthCheck, add)
 		}
-		sd.QuotaRPM = requestsPerMinute(obj, at+".quota", d.Quota, add)
 		out = append(out, sd)
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
@@ -307,8 +306,8 @@ func betasOf(bs []string) []string {
 	return slices.Compact(slices.Sorted(slices.Values(bs)))
 }
 
-// requestsPerMinute validates the Rate at path at (a deployment's quota, a
-// scope's rate limit), giving its requests a minute (0 for none).
+// requestsPerMinute validates the Rate at path at (a scope's rate limit),
+// giving its requests a minute (0 for none).
 func requestsPerMinute(obj, at string, r *v1.Rate, add adder) int64 {
 	if r == nil {
 		return 0

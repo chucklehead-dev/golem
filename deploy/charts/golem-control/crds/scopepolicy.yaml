@@ -29,19 +29,6 @@ spec:
                   ledger rows marked), warn (admitted, marked, and the response carries
                   a golem-warning header) or enforce (refused, budget.pool_exhausted).'
                 type: string
-              declaredWorstCaseCheck:
-                description: 'DeclaredWorstCaseCheck admits a call only if known spend
-                  plus its declared worst case fits, and refuses calls that declare
-                  none (no max_tokens, server-side tools): a fail-closed admission
-                  mode, not a spending ceiling (ADR 0044).'
-                type: boolean
-              defaultMemberCapMicros:
-                description: 'DefaultMemberCapMicros is each member''s cap in the
-                  scope for the period, for a member with no cap of its own (org-model.md
-                  §4.1-4.2; a member''s own is state, set by the scope''s managers):
-                  a member past it is refused budget.member_cap, under the budget''s
-                  mode. Zero is none.'
-                type: integer
               features:
                 description: 'Features is the request-feature mode (ADR 0037, 0041
                   §3): restricted (approved fields, betas and versions only) or compatible

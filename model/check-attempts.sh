@@ -39,12 +39,4 @@ expect attemptsDesign cutRetryTest fail
 expect sharedEvent sharedEventTest pass
 expect attemptsDesign sharedEventTest fail
 
-echo "== exhaustive: attempts.small.yaml, each design every run up to a depth (not a sample)"
-if command -v "${GOTOGETHER:-gotogether}" >/dev/null; then
-  . ./graph.sh
-  matrix attempts
-else
-  echo "  skipped: gotogether is not installed (go install github.com/chucklehead-dev/gotogether/cmd/gotogether@latest)"
-fi
-
 exit $fail

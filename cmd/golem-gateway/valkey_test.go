@@ -130,9 +130,10 @@ func TestPoolModeValkeyTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	keys, err := c.Do(ctx, c.B().Keys().Pattern("{golem:test}:spend:*").Build()).AsStrSlice()
-	if err != nil || len(keys) == 0 {
-		t.Fatalf("Valkey holds %v (%v): the gateway did not count the call there (it is down: TLS or AUTH not used)", keys, err)
+	// The call's slot was taken and freed there: its release is a ZREM.
+	stats, err := c.Do(ctx, c.B().Info().Section("commandstats").Build()).ToString()
+	if err != nil || !strings.Contains(stats, "cmdstat_zrem:") {
+		t.Fatalf("Valkey's command stats %q (%v): the gateway did not take the call's slot there (it is down: TLS or AUTH not used)", stats, err)
 	}
 	cancel()
 	stopped(t, done)

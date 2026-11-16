@@ -25,7 +25,6 @@ valkey:
   tls: true
   user: golem-gateway
   passwordSecret: {name: golem-valkey, key: password}
-  replicaAcks: 1
 
 # Entra (users' and services' tokens); empty tenant: golem keys only.
 entra:

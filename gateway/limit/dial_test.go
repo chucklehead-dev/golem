@@ -14,9 +14,9 @@ import (
 
 // TestStartWithValkeyDown: a store whose Valkey is unreachable as the
 // gateway starts is still a store; the limiter starts in its outage mode
-// (waivers, increments held), stays down while Valkey is unreachable even
-// with nothing held, and once Connect has made a client, Recover replays
-// what was held into Valkey.
+// (waivers), stays down while Valkey is unreachable even with nothing
+// running, and once Connect has made a client, Recover re-registers the
+// running calls' slots in Valkey.
 func TestStartWithValkeyDown(t *testing.T) {
 	addr := valkeyAddr(t)
 	ctx := t.Context()
@@ -50,7 +50,7 @@ func TestStartWithValkeyDown(t *testing.T) {
 	if !l.Down() {
 		t.Fatal("MarkDown: the limiter is not down")
 	}
-	// Nothing held, nothing running: Recover must still find the store down.
+	// Nothing running: Recover must still find the store down.
 	if err := l.Recover(ctx); !errors.Is(err, ErrUnavailable) || !l.Down() {
 		t.Fatalf("Recover with Valkey unreachable: %v, down %v; want ErrUnavailable, still down", err, l.Down())
 	}
@@ -58,12 +58,8 @@ func TestStartWithValkeyDown(t *testing.T) {
 	if err != nil || !tk.Waived() {
 		t.Fatalf("Admit while down: %v; want a waiver", err)
 	}
-	tk.Complete(ctx, 5)
-	if l.Held() != 1 {
-		t.Fatalf("held %d, want the completion's increment", l.Held())
-	}
-	if err := l.Recover(ctx); !errors.Is(err, ErrUnavailable) || l.Held() != 1 {
-		t.Fatalf("Recover before a client: %v, held %d", err, l.Held())
+	if err := l.Recover(ctx); !errors.Is(err, ErrUnavailable) || !l.Down() {
+		t.Fatalf("Recover before a client: %v, down %v", err, l.Down())
 	}
 
 	// Connect retries, backing off: the first retry fails, the next makes
@@ -77,10 +73,10 @@ func TestStartWithValkeyDown(t *testing.T) {
 	if n := dials.Load(); n != 3 || len(waits) != 2 || waits[0] != time.Second || waits[1] != 2*time.Second {
 		t.Fatalf("%d dials after waits %v; want the first and two retries, after 1s and 2s", n, waits)
 	}
-	if err := l.Recover(ctx); err != nil || l.Down() || l.Held() != 0 {
-		t.Fatalf("Recover with Valkey up: %v, down %v, held %d", err, l.Down(), l.Held())
+	if err := l.Recover(ctx); err != nil || l.Down() {
+		t.Fatalf("Recover with Valkey up: %v, down %v", err, l.Down())
 	}
-	if got, err := v.Since(ctx, "s", tk.Period(), time.Time{}); err != nil || got != 5 {
-		t.Fatalf("Valkey's counter: %d, %v; want the held 5", got, err)
+	if got, err := v.ScopeSlots(ctx, "s"); err != nil || len(got) != 1 || got[0] != "a" {
+		t.Fatalf("Valkey's slots: %v, %v; want the running call's, re-registered", got, err)
 	}
 }

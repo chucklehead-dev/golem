@@ -119,12 +119,6 @@ type Deployment struct {
 	// (a local box, ADR 0017): a box that is down is ejected before a call
 	// finds it, and one that answers again is readmitted. Not for bedrock.
 	HealthCheck *HealthCheck `json:"healthCheck,omitempty"`
-	// Quota is this site's share of the provider account's quota for the
-	// deployment (PRD §9.2, ADR 0012: each site's share set here, split
-	// statically), shared by the site's gateways in Valkey: an attempt past
-	// it goes to the pool's next deployment, and a call that finds every
-	// one at its quota is refused limit.provider_quota with a Retry-After.
-	Quota *Rate `json:"quota,omitempty"`
 	// Betas, if set, are the anthropic-beta values the deployment accepts
 	// (Bedrock takes a subset of Anthropic's): a request with another is
 	// not sent to it, so a failover never lands where it would be refused,
@@ -225,12 +219,6 @@ type ScopePolicySpec struct {
 	// BudgetMicros is the period's budget in micro-units of the currency;
 	// zero is no budget.
 	BudgetMicros int64 `json:"budgetMicros,omitempty"`
-	// DefaultMemberCapMicros is each member's cap in the scope for the
-	// period, for a member with no cap of its own (org-model.md §4.1-4.2;
-	// a member's own is state, set by the scope's managers): a member past
-	// it is refused budget.member_cap, under the budget's mode. Zero is
-	// none.
-	DefaultMemberCapMicros int64 `json:"defaultMemberCapMicros,omitempty"`
 	// RateLimits are the scope's rate limits (PRD §5.5): each member's and
 	// the whole scope's, at this site. A call past either is refused
 	// limit.rate, 429 with a Retry-After, in every budget mode (a limit,
@@ -240,13 +228,8 @@ type ScopePolicySpec struct {
 	// (the default: calls over it are admitted and their ledger rows
 	// marked), warn (admitted, marked, and the response carries a
 	// golem-warning header) or enforce (refused, budget.pool_exhausted).
-	BudgetMode string `json:"budgetMode,omitempty"`
-	// DeclaredWorstCaseCheck admits a call only if known spend plus its declared
-	// worst case fits, and refuses calls that declare none (no max_tokens,
-	// server-side tools): a fail-closed admission mode, not a spending
-	// ceiling (ADR 0044).
-	DeclaredWorstCaseCheck bool     `json:"declaredWorstCaseCheck,omitempty"`
-	InFlight               InFlight `json:"inFlight,omitzero"`
+	BudgetMode string   `json:"budgetMode,omitempty"`
+	InFlight   InFlight `json:"inFlight,omitzero"`
 	// Ceilings on a request (ADR 0038): output tokens asked for (max_tokens
 	// times n) and the body's size. Zero is none.
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
@@ -308,9 +291,6 @@ type LocalKey struct {
 	Models    []string `json:"models,omitempty"`  // narrows the scope's
 	Expires   string   `json:"expires,omitempty"` // RFC 3339
 	Revoked   bool     `json:"revoked,omitempty"`
-	// CapMicros is the key's spend cap for each period (org-model.md §4.2);
-	// 0: none.
-	CapMicros int64 `json:"capMicros,omitempty"`
 }
 
 // PriceList prices models (contracts.md §4). This first version has the

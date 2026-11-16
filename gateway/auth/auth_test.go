@@ -184,35 +184,3 @@ func TestDenylist(t *testing.T) {
 		t.Fatalf("cleared: %v", err)
 	}
 }
-
-// TestCaps: a key's principal carries its own cap in the scope, or the
-// scope's default, and its key's cap; a token's principal its cap alone.
-func TestCaps(t *testing.T) {
-	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	capped, uncapped := key.New(key.Live), key.New(key.Live)
-	e := snapshot.Entitlements{
-		Scopes: []snapshot.Scope{{ID: "team-a", Models: []string{"claude"}, DefaultMemberCapMicros: 50,
-			Members: []snapshot.MemberAccount{{Principal: "alice", CapMicros: 80}, {Principal: "bob", KnownSpend: 3}}}},
-		Keys: []snapshot.Key{{Hash: hashOf(capped), Display: key.Display(capped), Principal: "alice", Scope: "team-a", CapMicros: 20},
-			{Hash: hashOf(uncapped), Display: key.Display(uncapped), Principal: "bob", Scope: "team-a"}},
-		Users: []snapshot.Member{{ID: "carol", Entra: "c-oid", Scopes: []string{"team-a"}, Default: "team-a"}},
-		KeyOwners: []snapshot.Owner{{ID: "alice", Kind: "user", Scopes: []string{"team-a"}},
-			{ID: "bob", Kind: "user", Scopes: []string{"team-a"}}},
-	}
-	k := Compile(e, key.Live, func() time.Time { return now }, nil)
-	for _, tc := range []struct {
-		key           string
-		member, keyed int64
-	}{{capped, 80, 20}, {uncapped, 50, 0}} {
-		p, no := k.Authenticate(http.Header{"X-Api-Key": {tc.key}})
-		if no != nil {
-			t.Fatal(no.Msg)
-		}
-		if p.Limits.MemberCapMicros != tc.member || p.Limits.KeyCapMicros != tc.keyed {
-			t.Errorf("%s: member cap %d key cap %d, want %d and %d", p.ID, p.Limits.MemberCapMicros, p.Limits.KeyCapMicros, tc.member, tc.keyed)
-		}
-	}
-	if p := k.byEntra["c-oid"]["team-a"]; p.Limits.MemberCapMicros != 50 || p.Limits.KeyCapMicros != 0 {
-		t.Errorf("carol (a token): %+v, want the scope's default cap and no key cap", p.Limits)
-	}
-}

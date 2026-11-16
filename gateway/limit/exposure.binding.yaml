@@ -12,9 +12,7 @@ constants:
   BUDGET: '4'
   LIMIT: '1'
   SCOPE_LIMIT: '2'
-  ALLOWANCE: '1'
   SCOPE_LIMIT_ON: 'true'
-  HANDOFF: '"buckets"'
   HOLD_ON_CANCEL: 'true'
   REACQUIRE: 'true'
 
@@ -23,19 +21,11 @@ actions:
   complete: {}
   cancel: {}
   providerEnds: {}
-  tick: {}
-  deliver:
-    args:
-      r: '({{.id}}, {{.cost}}, {{.at}})'
   publishSnapshot: {}
   applySnapshot: {}
   valkeyDown: {}
   valkeyBack: {}
-  replayOne:
-    args:
-      e: '({{.id}}, {{.cost}}, {{.at}})'
   recover: {}
   graceEnds: {}
-  failover: {}
 
 invariants: [safe]

@@ -63,9 +63,8 @@ type Call struct {
 	// Waived: admitted outside the budget's bound, while the site store was
 	// unreachable or in the grace after a recovery (ADR 0041 §7.3).
 	Waived bool
-	// OverBudget: admitted over one of its accounts' limits (its key's cap,
-	// its member's, its scope's budget) in observe or warn mode, a call
-	// enforce would have refused (PRD §9.1, ADR 0050).
+	// OverBudget: admitted over its scope's budget in observe or warn
+	// mode, a call enforce would have refused (PRD §9.1, ADR 0050).
 	OverBudget bool
 	// Attempt is the call's attempt the row records, from 1 (0 is 1): each
 	// attempt is its own ledger event (AttemptID), so a retried call's
