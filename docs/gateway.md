@@ -55,7 +55,7 @@ request:   ztunnel (mesh mTLS) → listener → frontend (dialect, scan) → aut
 response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
 inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
            or, standalone (ADR 0023), CRD YAML in a local directory compiled in-process
-state:     the site's Valkey, over TLS with AUTH (spend since the snapshot, concurrency slots; rate windows and provider quota shares planned) (ADR 0031)
+state:     the site's Valkey, over TLS with AUTH (spend since the snapshot by account, concurrency slots, rate limits and provider quota shares in requests a minute) (ADR 0031)
 outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
            status/<pool>/<id> in object storage (applied hash, compile errors)
 local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
@@ -170,9 +170,10 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    Valkey is unreachable starts in that mode, retries the connection in
    the background, and is ready all the same: readiness never depends on
    the site store. Stateless refusals (deny lists, size rules)
-   fit a Request hook; rate limits do not, since a hook that took a token
-   before a budget refusal would spend it on a refused call: they belong
-   in the admitter's round trip.
+   fit a Request hook. Rate limits are taken just before admission, in
+   their own round trip: they count requests, so a call then refused for
+   its budget or slots has used one of its minute, as a provider's own
+   meter counts a refused request.
 7. **Attempt loop.** For each attempt: build the upstream request (fast
    path: same bytes, spliced model name; else the frontend's decoder and the
    backend's encoder through `canon`), wrap it in the deployment's envelope

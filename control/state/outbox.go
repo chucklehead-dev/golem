@@ -76,8 +76,10 @@ var actions = map[string]Class{
 	"role.bind":         Widening,
 	"key.mint":          Widening,
 	"key.revoke":        Restrictive,
-	"member.cap":        Widening, // a cap raised or removed widens
-	"key.cap":           Widening,
+	// A cap lowered narrows, one raised or removed widens: judged by the
+	// change itself (widens), so a lowered cap lands past the reserve.
+	"member.cap": Restrictive,
+	"key.cap":    Restrictive,
 	// control/entrasync: a user created, memberships added; and the
 	// removals and offboarding, written as their own event so they land
 	// when the additions are held back.
@@ -182,10 +184,25 @@ func checkOutbox(old, next *Document, bound int) error {
 	return nil
 }
 
+// capRaised reports whether a cap went from old to next by widening: a
+// cap removed (0 is none) or raised.
+func capRaised(old, next int64) bool { return old > 0 && (next == 0 || next > old) }
+
+// lowerCap is the narrower of two caps (0 is none).
+func lowerCap(a, b int64) int64 {
+	switch {
+	case a == 0:
+		return b
+	case b == 0:
+		return a
+	}
+	return min(a, b)
+}
+
 // widens is the first way next grants access old does not, or "": a scope
 // created or a group bound to one, a principal created, given an identity
-// or made a member, a role bound, or a live key minted, moved, revived or
-// widened in models or expiry. A principal's default scope and sign-in
+// or made a member or its cap raised, a role bound, or a live key minted,
+// moved, revived or widened in models, expiry or cap. A principal's default scope and sign-in
 // name are not access.
 func widens(old, next *Document) string {
 	for _, id := range slices.Sorted(maps.Keys(next.Scopes)) {
@@ -212,6 +229,9 @@ func widens(old, next *Document) string {
 			if !o.MemberOf(s) {
 				return "principal " + id + " made a member of " + s
 			}
+			if capRaised(o.Caps[s], p.Caps[s]) {
+				return "principal " + id + "'s cap in " + s + " raised or removed"
+			}
 		}
 	}
 	for _, r := range next.Roles {
@@ -236,6 +256,8 @@ func widens(old, next *Document) string {
 			return "key " + k.Display + "'s models widened"
 		case !o.ExpiresAt.IsZero() && (k.ExpiresAt.IsZero() || k.ExpiresAt.After(o.ExpiresAt)):
 			return "key " + k.Display + "'s expiry extended"
+		case capRaised(o.CapMicros, k.CapMicros):
+			return "key " + k.Display + "'s cap raised or removed"
 		}
 	}
 	return ""

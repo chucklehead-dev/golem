@@ -91,12 +91,10 @@ type Scope struct {
 	// spend this period, each with its cap and known spend (org-model.md
 	// §4.2). Zero is none.
 	DefaultMemberCapMicros int64 `json:"defaultMemberCapMicros,omitempty"`
-	// MemberRPM and MemberTPM are each member's rate limit, ScopeRPM and
-	// ScopeTPM the whole scope's (lib/api's RateLimits); 0: none.
+	// MemberRPM is each member's rate limit and ScopeRPM the whole scope's,
+	// in requests a minute (lib/api's RateLimits); 0: none.
 	MemberRPM int64           `json:"memberRPM,omitempty"`
-	MemberTPM int64           `json:"memberTPM,omitempty"`
 	ScopeRPM  int64           `json:"scopeRPM,omitempty"`
-	ScopeTPM  int64           `json:"scopeTPM,omitempty"`
 	Members   []MemberAccount `json:"members,omitempty"`
 	// BudgetMode is what the budget does at admission (PRD §9.1, ADR 0050):
 	// "observe" (admitted, the ledger row marked over budget), "warn"

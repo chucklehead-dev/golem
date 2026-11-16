@@ -153,6 +153,11 @@ func narrower(cur, next *Document) error {
 		case !subset(p.Scopes, c.Scopes) || !subset(p.Synced, c.Synced):
 			return fmt.Errorf("principal %s: memberships widened", id)
 		}
+		for _, s := range p.Members() {
+			if capRaised(c.Caps[s], p.Caps[s]) {
+				return fmt.Errorf("principal %s: cap in %s raised or removed (%d, now %d)", id, s, c.Caps[s], p.Caps[s])
+			}
+		}
 	}
 	for _, rb := range next.Roles {
 		if !slices.Contains(cur.Roles, rb) {
@@ -171,6 +176,8 @@ func narrower(cur, next *Document) error {
 			return fmt.Errorf("key %s: models widened (%v, now %v)", h, k.Models, c.Models)
 		case !c.ExpiresAt.IsZero() && (k.ExpiresAt.IsZero() || k.ExpiresAt.After(c.ExpiresAt)):
 			return fmt.Errorf("key %s: expiry later", h)
+		case capRaised(c.CapMicros, k.CapMicros):
+			return fmt.Errorf("key %s: cap raised or removed (%d, now %d)", h, c.CapMicros, k.CapMicros)
 		}
 	}
 	return nil
@@ -217,6 +224,12 @@ func randomDoc(r *rand.Rand) *Document {
 		if m := p.Members(); len(m) > 0 && r.IntN(2) == 0 {
 			p.Default = m[r.IntN(len(m))]
 		}
+		for _, s := range pick(p.Members()) {
+			if p.Caps == nil {
+				p.Caps = map[string]int64{}
+			}
+			p.Caps[s] = int64(5 * (1 + r.IntN(2)))
+		}
 		d.Principals[id] = p
 		for _, s := range pick(scopes) {
 			d.Roles = append(d.Roles, RoleBinding{id, "manager", s})
@@ -234,6 +247,7 @@ func randomDoc(r *rand.Rand) *Document {
 		if r.IntN(3) == 0 {
 			k.ExpiresAt = time.Unix(int64(500+100*r.IntN(3)), 0).UTC()
 		}
+		k.CapMicros = []int64{0, 3, 7}[r.IntN(3)]
 		switch {
 		case len(m) == 0 || r.IntN(4) == 0: // revoked, in a scope it may no longer be a member of
 			k.Scope = []string{"a", "b", "c"}[i%3]
