@@ -97,9 +97,13 @@ with the old key too.
 golem-control exports its metrics over OTLP with `-telemetry <collector>`
 (each replica its own, its resource naming it as `service.instance.id`);
 gateways with an OTLP `-telemetry` export theirs, under their resource's
-`golem.site` and `golem.pool`. Every instrument below is observable: read
-from the component's state when the SDK collects (every minute), never on
-a request. Times are Unix seconds, so "seconds since" is the rule's
+`golem.site` and `golem.pool`. Every instrument below but the gateway's
+request-path ones (`golem.ttft`, `golem.calls`, `golem.attempts`,
+`golem.refusals`, recorded as each call or attempt ends) is observable:
+read from the component's state when the SDK collects (every minute),
+never on a request. No instrument is attributed by principal, scope or
+request: their attributes are the snapshot's routes and deployments and
+the contract's fixed values. Times are Unix seconds, so "seconds since" is the rule's
 `now() - metric`. A replica that does not lead keeps reporting its own
 last publication, so rules over golem-control take the newest across
 replicas (`max by (pool)`).
@@ -130,6 +134,12 @@ replicas (`max by (pool)`).
 | `golem.limit.waivers` | counter, {count} | | Calls admitted as waivers (outage, or the grace after it) |
 | `golem.limit.held`, `golem.limit.dropped` | gauge / counter, {count} | | Spend increments held for replay; held ones dropped (the counter lacks them) |
 | `golem.denylist.entries` | gauge, {count} | | Entries in the emergency denylist in force (with `-denylist`) |
+| `golem.deployment.in_flight` | gauge, {attempt} | `golem.deployment` | Each of the applied snapshot's deployments' attempts holding a place under its ceiling (`route.Health`) |
+| `golem.deployment.ejected` | gauge, 1 | `golem.deployment` | 1 while that deployment is ejected (consecutive failures, a failed probe or check), until a commit or a passing check readmits it; per gateway (model/attempts.md §9) |
+| `golem.ttft` | histogram, s | `gen_ai.request.model` (the alias), `gen_ai.response.model` (the model), `golem.deployment` | Time to first token: from the request's arrival to its commit point, a stream's first event relayed or a whole response's headers, retries and failovers included (exit 3: p95 under 2 s; 2 s is a bucket boundary). A call answered with an error, or never committed, records none |
+| `golem.calls` | counter, {call} | `gen_ai.request.model`, `golem.deployment` (its last attempt's), `golem.outcome`, `golem.error.origin` | Admitted calls, as they end: `outcome` is the ledger's (`completed`, `cancelled`, `terminated`, `failed`, `uncertain`) and `error.origin` contracts.md §2's (`client`, `policy`, `provider`, `gateway`, or empty). A call is counted once, however many attempts it made |
+| `golem.attempts` | counter, {attempt} | `golem.deployment`, `golem.attempt.result` | Attempts, by how each ended (model/attempts.md): `committed`, `refused` (429, 503, 529, or an error as a stream's first event), `unreached` (DNS, dial, TLS), `uncertain` (sent, then no answer). More attempts than calls is retries and failovers |
+| `golem.refusals` | counter, {count} | `golem.error.code`, `golem.error.origin` | Requests refused before any attempt (authentication, policy, limits, budgets): not in `golem.calls`, so an error-origin rate over every request adds the two |
 
 The alerts, in words over these metrics (Grafana's alert rules, delivered
 with the chart, §1: *not built in M1*, so the site writes them in its own
@@ -161,6 +171,9 @@ added to now, or `max by (pool) golem.control.publish.valid_until`.
 | **Limiter down** | `golem.limit.down` = 1 for 5 min | warning; page after 30 min | The site's Valkey is unreachable (a gateway that started meanwhile starts down, ready, retrying the connection): admission is on local counts and every admission is a waiver (`golem.limit.waivers` rising), held increments (`golem.limit.held`) wait for its return. Fix Valkey (ElastiCache, the network, the gateways' credentials). |
 | **Held increments dropped** | `increase(golem.limit.dropped)` > 0 | warning | An outage outlasted the hold's cap, or a gateway left with Valkey down: the counter lacks that spend until known spend's boundary passes it (the ledger has the rows). |
 | **Denylist differs across a site** | `golem.denylist.entries` not equal across a site's gateways for 5 min | warning | The projected volume has not reached every gateway, or an edit was refused (the gateway logs why and keeps the previous list). |
+| **Time to first token slow** | for a route (`gen_ai.request.model`), p95 of `golem.ttft` over 5 min > 2 s, for 10 min | warning | Exit 3's bound. By `golem.deployment`: one deployment slow is its provider (its region's quota, a cold local box): `golem.attempts{golem.attempt.result="refused"}` rising there means failovers add to the wait. All slow at once with few attempts per call is the gateway's (its CPU, the admission's Valkey round trip). |
+| **Provider failures high** | `sum(rate(golem.calls{golem.error.origin="provider"}[5m])) / sum(rate(golem.calls[5m]))` > 5%, for 5 min | page | Failover is not hiding a provider outage: by `golem.deployment`, the deployments ending calls in failure, and by `golem.outcome` whether they are refusals relayed (every deployment of the pool refusing: quota, an SCP), cut streams (`failed`) or `uncertain` (timeouts; charged their worst case until reconciliation). Check `golem.deployment.ejected` and the route's retry budget. |
+| **Deployment ejected** | `golem.deployment.ejected` = 1 for a deployment for 10 min | warning | Its calls fail over to the pool's next deployment (or fail, in a pool of one). The gateways' logs and the ledger's rows for that deployment name the failures; a provider-side outage readmits it on its own at the first probe that commits. An ejection lasting past the provider's recovery is a broken probe path (credentials, network, a stale endpoint in the config). |
 | **golem-control silent** | `absent(golem.control.leader)` for 5 min | page | No replica is exporting: pods down or crash-looping (`ErrMissing` at start, a broken flag), or the collector path. |
 | **Gateway silent** | `absent(golem.snapshot.age)` for a pool for 5 min | page | No gateway of the pool exports: the pool or the collector path is down (PRD §9.13). |
 

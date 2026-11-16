@@ -290,7 +290,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp, err = t.Transport.RoundTrip(up)
 		if err != nil {
 			ub.Close()
-			if !reachedProvider(err) && c.retry(0, 0) {
+			if !reachedProvider(err) && c.retry(telemetry.AttemptUnreached, 0, 0) {
 				continue
 			}
 			c.endUnanswered(err)
@@ -298,7 +298,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		lim.gotHeaders()
 		c.row.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
-		if retryable(resp.StatusCode) && c.retry(resp.StatusCode, providerRetryAfter(resp)) {
+		if retryable(resp.StatusCode) && c.retry(telemetry.AttemptRefused, resp.StatusCode, providerRetryAfter(resp)) {
 			resp.Body.Close()
 			continue
 		}
@@ -310,7 +310,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// refused as retryable, the provider billing nothing for it.
 			if ex.first.await(h.Dialect, upBody, ex.buf) {
 				resp.Body.Close()
-				if c.retry(0, providerRetryAfter(resp)) {
+				if c.retry(telemetry.AttemptRefused, 0, providerRetryAfter(resp)) {
 					continue
 				}
 				c.endFailedFirst(providerRetryAfter(resp))
@@ -318,6 +318,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			upBody = &ex.first
 		}
+		c.row.Committed = time.Now() // the first event in hand, or a whole response's headers
 		break
 	}
 	// Committed: this attempt's response is the caller's, and the caller's
@@ -448,6 +449,10 @@ func (c *callState) endUnanswered(err error) {
 		code, msg = ended.code, ended.message()
 	}
 	c.row.Ended, c.row.Status = time.Now(), code.Status
+	c.row.AttemptResult = telemetry.AttemptUnreached
+	if reachedProvider(err) {
+		c.row.AttemptResult = telemetry.AttemptUncertain
+	}
 	cost := chargeUnanswered(&c.row, err, callerLeft, ended, c.requestBytes, c.req, c.price)
 	c.h.Telemetry.Ended(c.ctx, c.row)
 	if cost == 0 {
@@ -465,6 +470,7 @@ func (c *callState) endFailedFirst(after time.Duration) {
 	code := contract.UpstreamUnavailable
 	c.row.Ended, c.row.Status = time.Now(), code.Status
 	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = coded(outcomeFailed, code)
+	c.row.AttemptResult = telemetry.AttemptRefused
 	c.h.Telemetry.Ended(c.ctx, c.row)
 	c.acct.complete(0)
 	if c.h.record != nil {
@@ -515,6 +521,10 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 
 	c.row.Ended, c.row.Status, c.row.Usage, c.row.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
 	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = outcome(res, cut || streamed && ex.streamErr, ended)
+	c.row.AttemptResult = telemetry.AttemptCommitted
+	if retryable(resp.StatusCode) { // the last attempt's refusal, relayed
+		c.row.AttemptResult = telemetry.AttemptRefused
+	}
 	h.Telemetry.Ended(c.ctx, c.row)
 	switch {
 	case c.acct.ticket == nil: // nothing counted

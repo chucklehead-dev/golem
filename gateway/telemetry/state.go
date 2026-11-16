@@ -5,10 +5,12 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/limit"
+	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 )
 
@@ -22,6 +24,8 @@ const (
 	MetricLimiterDown     = "golem.limit.down"
 	MetricWaivers         = "golem.limit.waivers"
 	MetricDenylistEntries = "golem.denylist.entries"
+	MetricInFlight        = "golem.deployment.in_flight"
+	MetricEjected         = "golem.deployment.ejected"
 )
 
 // State is what the gateway's state gauges read: each is read only when
@@ -35,6 +39,9 @@ type State struct {
 	Limiter *limit.Limiter
 	// Deny, if set, is the site's denylist file.
 	Deny *auth.DenyFile
+	// Health, if set, is the gateway's view of its deployments: each of the
+	// applied snapshot's deployments' attempts in flight and ejection.
+	Health *route.Health
 	// Now is the clock the snapshot's age and lease are measured by
 	// (default time.Now).
 	Now func() time.Time
@@ -44,7 +51,9 @@ type State struct {
 // applied snapshot's age (now − IssuedAt) and lease remaining
 // (ValidUntil − now) in seconds, its publication sequence, the pool's
 // pointer overdue and the last-good copy served (0/1), the limiter down
-// (0/1), its waivers, and the denylist's entries. None is attributed beyond the resource's site and pool.
+// (0/1), its waivers, and the denylist's entries, none attributed beyond
+// the resource's site and pool; and, by golem.deployment, each of the
+// applied snapshot's deployments' attempts in flight and ejection (0/1).
 func ObserveState(mp metric.MeterProvider, s State) error {
 	m := mp.Meter("golem/gateway") // the request path's meter (New)
 	now := s.Now
@@ -89,6 +98,12 @@ func ObserveState(mp metric.MeterProvider, s State) error {
 		deny = ig(MetricDenylistEntries, "{count}", "Entries in the site's emergency denylist in force")
 		insts = append(insts, deny)
 	}
+	var inflight, ejected metric.Int64ObservableGauge
+	if s.Health != nil {
+		inflight = ig(MetricInFlight, "{attempt}", "Attempts holding a place on the deployment, against its ceiling")
+		ejected = ig(MetricEjected, "1", "1 while the deployment is ejected, until a commit (a probe's) or a passing check readmits it")
+		insts = append(insts, inflight, ejected)
+	}
 	if err := errors.Join(errs...); err != nil {
 		return err
 	}
@@ -100,6 +115,16 @@ func ObserveState(mp metric.MeterProvider, s State) error {
 				o.ObserveFloat64(lease, v.Sub(t).Seconds())
 			}
 			o.ObserveInt64(seq, int64(c.Snapshot.PublishSeq))
+			if s.Health != nil && c.Routes != nil {
+				// The deployments routed now: one the snapshot dropped is
+				// reported no more.
+				for _, t := range c.Routes.Targets() {
+					d := s.Health.Deployment(t)
+					at := metric.WithAttributeSet(attribute.NewSet(attribute.String(attrDeployment, t.Key())))
+					o.ObserveInt64(inflight, int64(d.InFlight), at)
+					o.ObserveInt64(ejected, b2i(d.Ejected), at)
+				}
+			}
 		}
 		if s.Source != nil {
 			o.ObserveInt64(overdue, b2i(s.Source.Overdue()))

@@ -128,9 +128,9 @@ func (c *callState) next() (*route.Target, *route.Lease, time.Time, bool) {
 // next deployment if the call may retry: it was kept, has attempts left,
 // its caller is there, nothing withdrew it, and the pool's budget has a
 // retry. It records the failed attempt's row (charged nothing: the
-// provider saw nothing, or refused before any output) and reports whether
-// the call goes on.
-func (c *callState) retry(status int, after time.Duration) bool {
+// provider saw nothing, or refused before any output), its result one of
+// telemetry's (unreached or refused), and reports whether the call goes on.
+func (c *callState) retry(result string, status int, after time.Duration) bool {
 	gone := c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil
 	c.endLease(after, gone)
 	c.h.paused(c.r)
@@ -148,6 +148,7 @@ func (c *callState) retry(status int, after time.Duration) bool {
 	code := contract.UpstreamUnavailable
 	c.row.Ended, c.row.Status = time.Now(), cmp.Or(status, code.Status)
 	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = coded(outcomeFailed, code)
+	c.row.AttemptResult = result
 	c.h.Telemetry.Retried(c.ctx, c.row)
 	c.row.ProviderRequestID, c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = "", "", "", ""
 	c.target, c.lease = next, nl

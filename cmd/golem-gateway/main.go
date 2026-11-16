@@ -195,9 +195,10 @@ func run(ctx context.Context, args []string) int {
 	if err != nil {
 		return failed("%v", err)
 	}
+	health, check := newHealth(holder)
 	if meter != nil {
 		// Read at each collection: nothing on the request path.
-		state := telemetry.State{Holder: holder, Limiter: limiter, Deny: holder.Deny}
+		state := telemetry.State{Holder: holder, Limiter: limiter, Deny: holder.Deny, Health: health}
 		state.Source, _ = src.(*snapshot.Bucket)
 		if err := telemetry.ObserveState(meter, state); err != nil {
 			return failed("telemetry: %v", err)
@@ -209,7 +210,6 @@ func run(ctx context.Context, args []string) int {
 		wg.Go(func() { entra.Run(bg) })
 	}
 
-	health, check := newHealth(holder)
 	wg.Go(func() { check(bg) })
 	lc := &lifecycle{unready: o.unready, drain: o.drainFor, cut: 10 * time.Second}
 	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel, calls, health))
