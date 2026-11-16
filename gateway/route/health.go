@@ -40,17 +40,17 @@ type Health struct {
 
 type deployment struct {
 	inflight int
-	// byPrincipal counts each principal's leases, for the deployment's
+	// byPrincipal counts each principal's holds, for the deployment's
 	// per-principal ceiling (Target.MaxPerPrincipal); nil until one is set.
 	byPrincipal map[string]int
 	fails       int
 	until       time.Time // ejected until; zero: not ejected
 	probing     bool      // the one probe of an ejected deployment is in flight
 	ejections   int       // in a row, for the next ejection's length
-	// admitted counts readmissions: a probe sent before the last one is an
+	// readmissions counts the deployment's readmissions: a probe taken before the latest is an
 	// ordinary attempt now (its deployment no longer ejected), so its
 	// verdict is not a probe's.
-	admitted int
+	readmissions int
 }
 
 func (h *Health) now() time.Time {
@@ -72,18 +72,18 @@ func (h *Health) dep(t *Target) *deployment {
 	return d
 }
 
-// Lease is one attempt's hold on its deployment: its place under the
+// Hold is one attempt's hold on its deployment: its place under the
 // ceiling, and the probe, if it is one. Exactly one of Commit and Fail
 // reports how the attempt went; Release ends its hold when the attempt is
 // over (a committed one's stream ended).
-type Lease struct {
-	h         *Health
-	d         *deployment
-	probe     bool
-	epoch     int    // d.admitted when the lease was taken
-	principal string // counted in d.byPrincipal, if the deployment has a per-principal ceiling
-	done      bool   // Commit or Fail has reported
-	freed     bool
+type Hold struct {
+	h           *Health
+	d           *deployment
+	probe       bool
+	readmission int    // d.readmissions when the hold was taken
+	principal   string // counted in d.byPrincipal, if the deployment has a per-principal ceiling
+	done        bool   // Commit or Fail has reported
+	freed       bool
 }
 
 // Refused is why Acquire refused an attempt: the deployment's state, or
@@ -91,7 +91,7 @@ type Lease struct {
 type Refused int
 
 const (
-	// NotRefused: a lease was taken.
+	// NotRefused: a hold was taken.
 	NotRefused Refused = iota
 	// Ejected: the deployment rests after failures, or its one probe is
 	// in flight.
@@ -109,14 +109,14 @@ const (
 // deployment past its ejection takes one probe at a time). It reports,
 // when it refuses, when t may take one again (zero: unknown, a ceiling
 // frees when an attempt ends). AcquireWhy says why, too.
-func (h *Health) Acquire(t *Target, principal string) (*Lease, time.Time) {
+func (h *Health) Acquire(t *Target, principal string) (*Hold, time.Time) {
 	l, at, _ := h.AcquireWhy(t, principal)
 	return l, at
 }
 
 // AcquireWhy is Acquire, with why it refused: a principal at its own
 // per-principal ceiling is told so, not that the deployment is down.
-func (h *Health) AcquireWhy(t *Target, principal string) (*Lease, time.Time, Refused) {
+func (h *Health) AcquireWhy(t *Target, principal string) (*Hold, time.Time, Refused) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.dep(t)
@@ -133,7 +133,7 @@ func (h *Health) AcquireWhy(t *Target, principal string) (*Lease, time.Time, Ref
 	if t.MaxInFlight > 0 && d.inflight >= t.MaxInFlight {
 		return nil, time.Time{}, AtCeiling
 	}
-	l := &Lease{h: h, d: d, probe: probe, epoch: d.admitted}
+	l := &Hold{h: h, d: d, probe: probe, readmission: d.readmissions}
 	if t.MaxPerPrincipal > 0 {
 		if d.byPrincipal[principal] >= t.MaxPerPrincipal {
 			return nil, time.Time{}, AtPrincipalCeiling
@@ -149,14 +149,14 @@ func (h *Health) AcquireWhy(t *Target, principal string) (*Lease, time.Time, Ref
 	return l, time.Time{}, NotRefused
 }
 
-// isProbe reports whether the lease is its deployment's probe still: one
+// isProbe reports whether the hold is its deployment's probe still: one
 // taken as a probe, before no readmission since.
-func (l *Lease) isProbe() bool { return l.probe && l.epoch == l.d.admitted }
+func (l *Hold) isProbe() bool { return l.probe && l.readmission == l.d.readmissions }
 
 // Commit reports the attempt committed: the deployment answered, so its
 // failures are forgotten and, if ejected, it is readmitted, which ends any
 // probe in flight (an attempt sent before the ejection may answer first).
-func (l *Lease) Commit() {
+func (l *Hold) Commit() {
 	l.h.mu.Lock()
 	defer l.h.mu.Unlock()
 	if l.done {
@@ -169,7 +169,7 @@ func (l *Lease) Commit() {
 // readmit forgets d's failures and ends its ejection and any probe.
 func (d *deployment) readmit() {
 	if !d.until.IsZero() {
-		d.admitted++
+		d.readmissions++
 	}
 	d.fails, d.until, d.ejections, d.probing = 0, time.Time{}, 0, false
 }
@@ -185,9 +185,9 @@ func (h *Health) eject(d *deployment, now time.Time, wait time.Duration) {
 }
 
 // Fail reports the attempt failed before it committed, the provider's
-// Retry-After with it if it gave one, and releases the lease. Enough
+// Retry-After with it if it gave one, and releases the hold. Enough
 // failures in a row, or a failed probe, eject the deployment.
-func (l *Lease) Fail(retryAfter time.Duration) {
+func (l *Hold) Fail(retryAfter time.Duration) {
 	l.h.mu.Lock()
 	defer l.h.mu.Unlock()
 	if !l.done {
@@ -205,10 +205,10 @@ func (l *Lease) Fail(retryAfter time.Duration) {
 	l.release()
 }
 
-// Release ends the lease's hold on its deployment's ceiling. A lease that
+// Release ends the hold on its deployment's ceiling. A hold that
 // reported neither Commit nor Fail (the caller left first) frees its probe
 // too, leaving the deployment as it was.
-func (l *Lease) Release() {
+func (l *Hold) Release() {
 	l.h.mu.Lock()
 	defer l.h.mu.Unlock()
 	if !l.done && l.isProbe() {
@@ -218,7 +218,7 @@ func (l *Lease) Release() {
 	l.release()
 }
 
-func (l *Lease) release() {
+func (l *Hold) release() {
 	if !l.freed {
 		l.freed = true
 		l.d.inflight--
@@ -289,7 +289,7 @@ func (h *Health) budget(alias string) *float64 {
 // DeploymentHealth is what Health knows of a deployment, for its metrics
 // and its tests.
 type DeploymentHealth struct {
-	InFlight int  // attempts holding a lease
+	InFlight int  // attempts holding the deployment
 	Ejected  bool // until a commit readmits it
 	Probing  bool // its one probe is in flight
 }

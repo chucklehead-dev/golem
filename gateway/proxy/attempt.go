@@ -41,7 +41,7 @@ func (h *Handler) reading() *Reading {
 // unknown), and whether every one it passed over was for the principal's
 // own share of it (route.AtPrincipalCeiling): its own calls, not the
 // deployments, are what it waits on.
-func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string) (*route.Target, *route.Lease, time.Time, bool) {
+func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string) (*route.Target, *route.Hold, time.Time, bool) {
 	var earliest time.Time
 	later := func(at time.Time) {
 		if !at.IsZero() && (earliest.IsZero() || at.Before(earliest)) {
@@ -120,7 +120,7 @@ func incapable(rt *route.Route, betas []string) *refusal {
 }
 
 // next picks the call's next deployment (pick).
-func (c *callState) next() (*route.Target, *route.Lease, time.Time, bool) {
+func (c *callState) next() (*route.Target, *route.Hold, time.Time, bool) {
 	return pick(c.hl, c.rt, c.tried, c.principal.ID, c.betas)
 }
 
@@ -128,13 +128,13 @@ func (c *callState) next() (*route.Target, *route.Lease, time.Time, bool) {
 // next deployment if the call may retry: it was kept, has attempts left,
 // its caller is there, nothing withdrew it, its upstream context is not
 // done (a route's alarm that fired would fail the retry at once, after it
-// took the next deployment's lease and a retry from the budget), and the
+// took the next deployment's hold and a retry from the budget), and the
 // pool's budget has a retry. It records the failed attempt's row (charged nothing: the
 // provider saw nothing, or refused before any output), its result one of
 // telemetry's (unreached or refused), and reports whether the call goes on.
 func (c *callState) retry(result string, status int, after time.Duration) bool {
 	gone := c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil
-	c.endLease(after, gone)
+	c.endHold(after, gone)
 	c.h.paused(c.r)
 	if !c.kept || c.attempt >= c.rt.MaxAttempts || c.r.Context().Err() != nil || c.upCtx.Err() != nil {
 		return false
@@ -153,21 +153,21 @@ func (c *callState) retry(result string, status int, after time.Duration) bool {
 	c.row.AttemptResult = result
 	c.h.Telemetry.Retried(c.ctx, c.row)
 	c.row.ProviderRequestID, c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = "", "", "", ""
-	c.target, c.lease = next, nl
+	c.target, c.hold = next, nl
 	return true
 }
 
-// endLease ends a failed attempt's lease: a failure of its deployment's
+// endHold ends a failed attempt's hold: a failure of its deployment's
 // (after, the provider's Retry-After), unless the call itself was ended,
 // its caller gone or a sweep withdrawing it (gone). Then the attempt's end
 // says nothing of the deployment: it is released, so callers cancelling
 // cannot eject a healthy deployment.
-func (c *callState) endLease(after time.Duration, gone bool) {
+func (c *callState) endHold(after time.Duration, gone bool) {
 	if gone {
-		c.lease.Release()
+		c.hold.Release()
 		return
 	}
-	c.lease.Fail(after)
+	c.hold.Fail(after)
 }
 
 // paused runs beforePick, if set (tests).

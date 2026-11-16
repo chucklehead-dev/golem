@@ -336,7 +336,7 @@ func TestOwnShareIsTheCallersLimit(t *testing.T) {
 
 // TestNoRetryPastTheCallsEnd: an attempt refused as the route's maximum
 // duration cancels the upstream context is not retried: the retry would
-// take the next deployment's lease and a retry from the route's budget
+// take the next deployment's hold and a retry from the route's budget
 // for a request that could only fail at once, and be charged and failed
 // as uncertain. The caller has the refusal; the next deployment is left
 // untouched.

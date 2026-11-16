@@ -132,7 +132,7 @@ func TestIsErrorEvent(t *testing.T) {
 // committed. The request went out, so the attempt is uncertain
 // (model/attempts.md): the call ends without a retry, though the pool has
 // another deployment, is charged its worst case, and its deployment's
-// lease fails (with EjectAfter 1 it is ejected), never commits.
+// hold fails (with EjectAfter 1 it is ejected), never commits.
 func TestNoFirstEvent(t *testing.T) {
 	for name, body := range map[string]func(*http.Request) io.Reader{
 		"reset before any event": func(*http.Request) io.Reader { return failing{} },
@@ -174,7 +174,7 @@ func TestNoFirstEvent(t *testing.T) {
 				t.Fatalf("rows %v: want one, uncertain and charged its worst case", all)
 			}
 			if dh := h.Health.Deployment(rt.Pool[0]); !dh.Ejected || dh.InFlight != 0 {
-				t.Fatalf("deployment %+v: want its lease failed (ejected), not committed", dh)
+				t.Fatalf("deployment %+v: want its hold failed (ejected), not committed", dh)
 			}
 		})
 	}

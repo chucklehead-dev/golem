@@ -182,11 +182,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var retryAt time.Time
 	var own bool
-	if c.target, c.lease, retryAt, own = c.next(); c.target == nil {
+	if c.target, c.hold, retryAt, own = c.next(); c.target == nil {
 		h.fail(ctx, w, reqIDs, &p, noDeployment(retryAt, own))
 		return
 	}
-	defer func() { c.lease.Release() }() // the last attempt's: when the call is over
+	defer func() { c.hold.Release() }() // the last attempt's: when the call is over
 
 	var deadline time.Time // the call's end at the latest: renewals stop there
 	if rt.MaxDuration > 0 {
@@ -320,7 +320,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// The stream failed or ended before its first event (a reset, the
 			// idle alarm, the caller leaving): nothing to commit. The provider
 			// had the request, so it ends as an attempt with no answer does:
-			// uncertain, its lease failed, its slot held for the tail.
+			// uncertain, its hold failed, its slot held for the tail.
 			if err := ex.first.unanswered(); err != nil {
 				resp.Body.Close()
 				c.endUnanswered(err)
@@ -355,12 +355,12 @@ type callState struct {
 	requestBytes int64 // for an estimate, once the body is gone
 
 	// The attempts: the deployments tried and the one being attempted,
-	// with its lease from the deployment's health and its price.
+	// with its hold from the deployment's health and its price.
 	hl      *route.Health
 	tried   []bool
 	betas   []string
 	target  *route.Target
-	lease   *route.Lease
+	hold    *route.Hold
 	price   libsnapshot.Price
 	attempt int
 	kept    bool // the caller's body is kept for a retry
@@ -403,7 +403,7 @@ func (c *callState) endUnanswered(err error) {
 	callerLeft := c.r.Context().Err() != nil
 	code, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(c.upCtx)) // the cause as the call failed
 	ended := terminatedBy(c.upCtx)
-	c.endLease(0, callerLeft || ended != nil || err == errUnsent)
+	c.endHold(0, callerLeft || ended != nil || err == errUnsent)
 	if ended != nil && !callerLeft { // the headers not yet sent: the dialect's error
 		code, msg = ended.code, ended.message()
 	}
@@ -447,9 +447,9 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 	// The deployment answered: a provider's 4xx is the request's fault,
 	// not its health.
 	if retryable(resp.StatusCode) || resp.StatusCode >= 500 {
-		c.lease.Fail(providerRetryAfter(resp))
+		c.hold.Fail(providerRetryAfter(resp))
 	} else {
-		c.lease.Commit()
+		c.hold.Commit()
 	}
 	copyHeaders(w.Header(), resp.Header, forwardResponse)
 	w.WriteHeader(resp.StatusCode)

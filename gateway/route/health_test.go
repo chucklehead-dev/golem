@@ -32,7 +32,7 @@ func TestEjection(t *testing.T) {
 		l.Fail(0)
 	}
 	if l, until := h.Acquire(d, ""); l != nil || !until.Equal(now.Add(10*time.Second)) {
-		t.Fatalf("lease %v until %v: two failures in a row eject for 10 s", l, until)
+		t.Fatalf("hold %v until %v: two failures in a row eject for 10 s", l, until)
 	}
 	now = now.Add(10 * time.Second)
 	probe, _ := h.Acquire(d, "")

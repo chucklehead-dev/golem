@@ -55,12 +55,12 @@ func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
-	target, lease, retryAt, own := pick(h.health(), rt, make([]bool, len(rt.Pool)), p.principal.ID, p.betas)
+	target, hold, retryAt, own := pick(h.health(), rt, make([]bool, len(rt.Pool)), p.principal.ID, p.betas)
 	if target == nil {
 		h.fail(ctx, w, reqIDs, &p, noDeployment(retryAt, own))
 		return
 	}
-	defer lease.Release() // a count says nothing of the deployment's health
+	defer hold.Release() // a count says nothing of the deployment's health
 	out := getBody()
 	*out = ex.rewrite(h.Dialect, (*out)[:0], p.body, target.Model)
 	upCtx, cancel := context.WithTimeout(ctx, cmp.Or(rt.Headers, time.Minute))
