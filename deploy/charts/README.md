@@ -11,7 +11,13 @@ first, then a gateway pool per site.
   control API's Entra tenant; ClickHouse and the Entra group sync are
   optional.
 - `golem-gateway`: one pool at one site, three replicas spread across
-  zones, a PDB, the provider Secrets mounted for the pool's backends, the
+  zones, each pod with its own OpenTelemetry collector (ADR 0043's in-pod
+  variant: a native sidecar, the gateway exporting to 127.0.0.1:4318 in
+  plaintext, the collector's file_storage queue on an emptyDir, its
+  config deploy/otel/collector.yaml from a ConfigMap, ClickHouse's
+  endpoint and password as its env; `collector.enabled: false` and
+  `telemetry: host:port` for a remote collector over TLS, with
+  `caBundle` for a private CA as `SSL_CERT_FILE`), a PDB, the provider Secrets mounted for the pool's backends, the
   emergency-denylist ConfigMap (managed outside Argo), the publishing keys
   it trusts (a ConfigMap), the site's Valkey (TLS, an ACL user, the
   password from a Secret), and an Istio AuthorizationPolicy when

@@ -1,5 +1,9 @@
 {{- range list "site" "bucket" }}{{ if not (index $.Values .) }}{{ fail (printf "values.%s is required" .) }}{{ end }}{{ end -}}
 {{- if not .Values.valkey.address }}{{ fail "values.valkey.address is required" }}{{ end -}}
+{{- if .Values.collector.enabled }}
+{{- if .Values.telemetry }}{{ fail "values.telemetry is a remote collector's address: set it with collector.enabled=false, or leave it empty for the pod's collector (127.0.0.1:4318)" }}{{ end -}}
+{{- if not .Values.collector.clickhouse.endpoint }}{{ fail "values.collector.clickhouse.endpoint is required with the pod's collector (collector.enabled): where it writes the ledger" }}{{ end -}}
+{{- else if not .Values.telemetry }}{{ fail "values.telemetry is required with collector.enabled=false: the remote collector's OTLP/HTTP host:port (over TLS), or off" }}{{ end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,6 +35,36 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels: {{- include "golem-gateway.selector" . | nindent 14 }}
+      {{- if .Values.collector.enabled }}
+      # The pod's collector (ADR 0043): a native sidecar, started before
+      # the gateway and stopped after it, so the rows the drain writes
+      # reach its queue.
+      initContainers:
+        - name: collector
+          image: {{ .Values.collector.image }}
+          restartPolicy: Always
+          args: [--config=/etc/otelcol/{{ .Values.collector.configKey }}]
+          env:
+            - {name: OTELCOL_QUEUE_DIR, value: /var/lib/otelcol/queue}
+            - {name: CLICKHOUSE_ENDPOINT, value: {{ .Values.collector.clickhouse.endpoint | quote }}}
+            - {name: CLICKHOUSE_USERNAME, value: {{ .Values.collector.clickhouse.user | quote }}}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.collector.clickhouse.passwordSecret.name }}, key: {{ .Values.collector.clickhouse.passwordSecret.key }}}
+            - {name: GOLEM_SITE, value: {{ .Values.site | quote }}}
+            - {name: GOLEM_POOL, value: {{ .Values.pool | quote }}}
+            {{- with .Values.collector.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources: {{- toYaml .Values.collector.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: collector-config, mountPath: /etc/otelcol, readOnly: true}
+            - {name: collector-queue, mountPath: /var/lib/otelcol/queue}
+      {{- end }}
       containers:
         - name: gateway
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -54,7 +88,7 @@ spec:
             - -entra-tenant={{ . }}
             - -entra-audience={{ $.Values.entra.audience }}
             {{- end }}
-            - -telemetry={{ .Values.telemetry }}
+            - -telemetry={{ include "golem-gateway.telemetry" . }}
             - -denylist=/etc/golem/denylist/{{ .Values.denylist.key }}
             - -unready={{ .Values.unready }}
             - -drain={{ .Values.drain }}
@@ -78,6 +112,9 @@ spec:
             - name: VALKEY_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ .Values.valkey.passwordSecret.name }}, key: {{ .Values.valkey.passwordSecret.key }}}
+            {{- if .Values.caBundle.configMap }}
+            - {name: SSL_CERT_FILE, value: /etc/golem/ca/{{ .Values.caBundle.key }}}
+            {{- end }}
           ports:
             - {name: http, containerPort: {{ .Values.service.port }}}
           livenessProbe:
@@ -98,6 +135,9 @@ spec:
             # The checkpoint: the floor across a container's restarts. A
             # rescheduled pod starts from the bucket's trusted checkpoint.
             - {name: checkpoint, mountPath: /var/lib/golem}
+            {{- if .Values.caBundle.configMap }}
+            - {name: ca, mountPath: /etc/golem/ca, readOnly: true}
+            {{- end }}
             {{- range .Values.providerSecrets }}
             - {name: secret-{{ . }}, mountPath: /var/run/golem/secrets/{{ . }}, readOnly: true}
             {{- end }}
@@ -108,6 +148,20 @@ spec:
           configMap: {name: {{ .Values.denylist.configMap }}, optional: false}
         - name: checkpoint
           emptyDir: {}
+        {{- if .Values.caBundle.configMap }}
+        - name: ca
+          configMap: {name: {{ .Values.caBundle.configMap }}}
+        {{- end }}
+        {{- if .Values.collector.enabled }}
+        - name: collector-config
+          configMap: {name: {{ include "golem-gateway.collectorConfigMap" . }}}
+        - name: collector-queue
+          {{- with .Values.collector.queue.volume }}
+          {{- toYaml . | nindent 10 }}
+          {{- else }}
+          emptyDir: {sizeLimit: {{ .Values.collector.queue.sizeLimit }}}
+          {{- end }}
+        {{- end }}
         {{- range .Values.providerSecrets }}
         - name: secret-{{ . }}
           secret: {secretName: {{ . }}}

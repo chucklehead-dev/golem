@@ -41,8 +41,57 @@ entra:
   tenant: ""
   audience: api://golem
 
-# Telemetry: an OTLP/HTTP collector (the node-local one, ADR 0043).
-telemetry: otel-collector.observability.svc:4318
+# Telemetry (ADR 0043, operations.md "Telemetry transport"). By default a
+# collector runs in the gateway's pod (collector, below) and the gateway
+# exports to it at 127.0.0.1:4318: loopback, plaintext, the hop inside the
+# pod's network namespace. Set telemetry to a host:port only with the
+# sidecar off, for a remote collector: the gateway then demands TLS (it
+# refuses plaintext to any non-loopback address) and verifies the
+# collector against the system roots, or the CA bundle below.
+telemetry: ""      # empty: the sidecar's 127.0.0.1:4318 (collector.enabled), else required
+
+# A remote collector's private CA (PEM), for a non-loopback telemetry: the
+# distroless image has only the public roots and golem has no CA flag, so
+# the bundle is mounted and named by SSL_CERT_FILE. SSL_CERT_FILE replaces
+# the system roots for every TLS client in the gateway (providers, Entra,
+# S3, Valkey without -valkey-ca): the bundle must hold their roots too.
+caBundle:
+  configMap: ""    # empty: none (the system roots)
+  key: ca.crt
+
+# The pod's collector (ADR 0043's in-pod variant), a native sidecar (an
+# init container that keeps running: it starts before the gateway and is
+# stopped after it, so the drain's last ledger rows reach it; Kubernetes
+# 1.29 or later). Its config is deploy/otel/collector.yaml, not written
+# here: the chart renders it as a ConfigMap from its copy at
+# files/otel-collector.yaml when that copy is present, and otherwise mounts
+# the ConfigMap named here, created from deploy/otel/collector.yaml
+# (docs/operations.md, First install). The config reads the env the chart
+# sets (OTELCOL_QUEUE_DIR, CLICKHOUSE_ENDPOINT, CLICKHOUSE_USERNAME,
+# CLICKHOUSE_PASSWORD, GOLEM_SITE, GOLEM_POOL): keep the names in step.
+collector:
+  enabled: true
+  image: otel/opentelemetry-collector-contrib:0.115.1
+  configMap: ""    # empty: <release's name>-collector (golem-gateway-<pool>-collector)
+  configKey: collector.yaml
+  # The sending queue's file_storage directory (OTELCOL_QUEUE_DIR). The
+  # default emptyDir is on the node's disk: it survives the collector's
+  # restarts and a ClickHouse outage while the pod lives, not the pod's
+  # deletion. Size it for the outage it must ride (about 5 MB/s a site at
+  # 2,000 calls a second, divided among the pods). volume replaces the
+  # emptyDir with another volume source (an ephemeral PVC).
+  queue:
+    sizeLimit: 8Gi
+    volume: {}     # empty: emptyDir with sizeLimit
+  # Where the collector writes the ledger.
+  clickhouse:
+    endpoint: ""   # required with the collector, e.g. https://clickhouse.golem.svc:8443
+    user: golem_ingest
+    passwordSecret: {name: golem-clickhouse-ingest, key: password}
+  env: []          # more env for the config (name/value or valueFrom)
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
 
 # The emergency denylist, managed outside Argo (docs/operations.md §2).
 denylist:

@@ -63,7 +63,15 @@ periodZone: UTC
 
 # The audit archive: an Object Lock bucket in a separate account.
 auditArchive: ""
+# golem-control's metrics and audit records over OTLP/HTTP: a non-loopback
+# collector is reached over TLS (lib/otlp), verified against the system
+# roots, or caBundle's (as SSL_CERT_FILE, which then replaces the system
+# roots for every TLS client: KMS, S3, Entra and ClickHouse too); "off" for
+# none.
 telemetry: otel-collector.observability.svc:4318
+caBundle:
+  configMap: ""    # empty: none (the system roots)
+  key: ca.crt
 
 serviceAccount:
   annotations: {}

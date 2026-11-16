@@ -48,3 +48,16 @@ spec:
             paths: ["/v1/*"]
     # The kubelet's probes are not mesh traffic; Istio rewrites them.
 {{- end }}
+{{- $collector := .Files.Get "files/otel-collector.yaml" }}
+{{- if and .Values.collector.enabled $collector (not .Values.collector.configMap) }}
+---
+# The pod collector's config: the chart's copy of deploy/otel/collector.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "golem-gateway.collectorConfigMap" . }}
+  labels: {{- include "golem-gateway.labels" . | nindent 4 }}
+data:
+  {{ .Values.collector.configKey }}: |
+{{ $collector | indent 4 }}
+{{- end }}

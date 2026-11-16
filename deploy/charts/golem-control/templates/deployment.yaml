@@ -78,11 +78,16 @@ spec:
             - -audit-archive={{ . }}
             {{- end }}
             - -telemetry={{ .Values.telemetry }}
-          {{- if .Values.clickhouse.url }}
+          {{- if or .Values.clickhouse.url .Values.caBundle.configMap }}
           env:
+            {{- if .Values.clickhouse.url }}
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ .Values.clickhouse.passwordSecret.name }}, key: {{ .Values.clickhouse.passwordSecret.key }}}
+            {{- end }}
+            {{- if .Values.caBundle.configMap }}
+            - {name: SSL_CERT_FILE, value: /etc/golem/ca/{{ .Values.caBundle.key }}}
+            {{- end }}
           {{- end }}
           ports:
             - {name: api, containerPort: {{ .Values.api.port }}}
@@ -102,6 +107,9 @@ spec:
             - {name: config, mountPath: /config, readOnly: true}
             {{- if .Values.trustedKeys.configMap }}
             - {name: trusted-keys, mountPath: /etc/golem/trusted-keys, readOnly: true}
+            {{- end }}
+            {{- if .Values.caBundle.configMap }}
+            - {name: ca, mountPath: /etc/golem/ca, readOnly: true}
             {{- end }}
         - name: git-sync
           image: {{ .Values.gitSync.image }}
@@ -129,6 +137,10 @@ spec:
         {{- if .Values.trustedKeys.configMap }}
         - name: trusted-keys
           configMap: {name: {{ .Values.trustedKeys.configMap }}}
+        {{- end }}
+        {{- if .Values.caBundle.configMap }}
+        - name: ca
+          configMap: {name: {{ .Values.caBundle.configMap }}}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}

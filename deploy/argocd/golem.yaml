@@ -67,6 +67,10 @@ spec:
             site: "{{.site}}"
             bucket: s3://golem-state/golem/
             valkey: {address: "{{.valkey}}"}
+            # The pod's collector writes the ledger here (its config is
+            # deploy/otel/collector.yaml, docs/operations.md First install).
+            collector:
+              clickhouse: {endpoint: "https://clickhouse.golem.svc:8443"}
             providerSecrets: [anthropic]
             serviceAccount:
               annotations:
