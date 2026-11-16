@@ -21,9 +21,9 @@ import (
 	"time"
 	"uuid"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
@@ -335,7 +335,7 @@ func New(p Providers, site, pool string) (*Telemetry, error) {
 	}
 	lp := p.Logger
 	if lp == nil {
-		lp = global.GetLoggerProvider()
+		lp = otel.GetLoggerProvider()
 	}
 	return &Telemetry{tracer: p.Tracer.Tracer("golem/gateway"), tokens: tokens, duration: duration, ttft: ttft,
 		calls: calls, attempts: attempts, refusals: refusals, Ledger: NewLedger(lp.Logger("golem/ledger"), site, pool),

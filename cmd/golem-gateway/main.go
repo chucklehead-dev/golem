@@ -151,6 +151,22 @@ func run(ctx context.Context, args []string) int {
 	if o.standalone == "" {
 		site, pool = o.site, o.pool
 	}
+	// Signals are caught from here until the telemetry has flushed: the
+	// first starts the shutdown (sig), a second cuts the drain short
+	// (hurry), and neither kills the process while it drains, so the
+	// ledger's last rows are still delivered. signal.Stop is deferred
+	// before the telemetry's flush, so it runs after it.
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	sig, stop := context.WithCancel(ctx)
+	defer stop()
+	hurry, hurryUp := context.WithCancel(context.Background())
+	defer hurryUp()
+	watched, watching := make(chan struct{}), make(chan struct{})
+	defer func() { close(watching); <-watched }()
+	go func() { defer close(watched); watchSignals(sigs, stop, hurryUp, watching) }()
+
 	tel, meter, shutdownTelemetry, err := setupTelemetry(o.telem, site, pool)
 	if err != nil {
 		return failed("%v", err)
@@ -161,11 +177,9 @@ func run(ctx context.Context, args []string) int {
 	}
 	entra := newEntra(o.tenant, o.audience, o.jwks)
 
-	sig, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	// The background loops live through the drain (renewals keep calls'
 	// slots), and end after it. Every goroutine is owned here.
-	bg, stopBg := context.WithCancel(context.Background())
+	bg, stopBg := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopBg() // also on a failed start
 	var wg sync.WaitGroup
 
@@ -191,7 +205,8 @@ func run(ctx context.Context, args []string) int {
 		holder.Deny = deny
 		wg.Go(func() { deny.Run(bg) })
 	}
-	src, keyPath, err := startSource(bg, o, holder)
+	// Under the signal's context: a SIGTERM ends a start hung on the bucket.
+	src, keyPath, err := startSource(sig, o, holder)
 	if err != nil {
 		return failed("%v", err)
 	}
@@ -211,7 +226,7 @@ func run(ctx context.Context, args []string) int {
 	}
 
 	wg.Go(func() { check(bg) })
-	lc := &lifecycle{unready: o.unready, drain: o.drainFor, cut: 10 * time.Second}
+	lc := &lifecycle{unready: o.unready, drain: o.drainFor, cut: 10 * time.Second, hurry: hurry}
 	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel, calls, health))
 	lc.srv = srv
 	drained := make(chan struct{})
@@ -234,6 +249,25 @@ func run(ctx context.Context, args []string) int {
 	limiter.Finish(fctx)
 	fcancel()
 	return code
+}
+
+// watchSignals calls first at the first signal and second at each later
+// one, until done is closed.
+func watchSignals(sigs <-chan os.Signal, first, second func(), done <-chan struct{}) {
+	for n := 0; ; n++ {
+		select {
+		case <-done:
+			return
+		case s := <-sigs:
+			if n == 0 {
+				slog.Info("golem-gateway: shutting down; a second signal cuts the drain short", "signal", s)
+				first()
+			} else {
+				slog.Warn("golem-gateway: a second signal: cutting the drain short; the calls cut still account and the telemetry still flushes", "signal", s)
+				second()
+			}
+		}
+	}
 }
 
 // newLimiter is the limiter over its store: in memory standalone (ADR
@@ -590,7 +624,9 @@ func setupTelemetry(where, site, pool string) (_ *telemetry.Telemetry, meter met
 		return nil, nil, nil, fmt.Errorf("telemetry: %w", err)
 	}
 	return tel, p.Meter, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Four seconds for each provider (the ledger, spans, metrics): at
+		// most 12 s, inside the pod's grace after the drain and the cut.
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
 		if err := shutdown(ctx); err != nil {
 			slog.Warn("golem-gateway: telemetry not flushed", "err", err)

@@ -88,7 +88,9 @@ buckets (each site's Valkey), shipped audit (the archive and ClickHouse).
    entitlements or the epoch, the renewal interval (60 s), or a failed
    pool's backoff (2 s doubling to the interval, jittered), each pool on
    its own.
-5. **Known spend** (§5), once a step with a pool due.
+5. **Known spend** (§5): the spend job's latest result. The job reads
+   ClickHouse on its own goroutine every 30 s (and once before the first
+   publication), so a ClickHouse that is down or slow delays none.
 6. **Publish** (`PublishAll`): every due pool's record won in one fenced
    update (numbered above the record, the verified checkpoint and the
    signed pointer), then for each pool the snapshot
@@ -98,14 +100,24 @@ buckets (each site's Valkey), shipped audit (the archive and ClickHouse).
    only forward. A record below what the bucket proves stops that pool
    (`ErrRegressed`); a checkpoint that does not verify, or has gone, stops
    it too (`ErrTampered`). Other pools go on.
-7. **The audit outbox** shipped (§6), then the **group sync** if due
-   (every 5 minutes, `-entra-sync-every`).
+
+Beside the loop, each on its own goroutine while this replica leads: the
+**audit outbox** shipped (§6) every second, and the **group sync** every
+5 minutes (`-entra-sync-every`). A revocation is published at the next
+step whatever these are waiting on.
 
 The lease is four hours (`-lease`, at most every gateway's `-max-lease`),
 counted from the inputs' read. Gateways poll their pointer every second
 and apply a newer publication at least their floor, so a revocation
 reaches every connected gateway in about two seconds. Each snapshot names
 its commit (`Source.ConfigRevision`), logged at each publication.
+
+Every external call has a deadline, so a bucket, ClickHouse or Graph that
+accepts a request and never answers fails that step rather than holding
+the loop: the S3 client waits at most 15 s for a response's headers, each
+state read or write 15 s, a step's publication a minute, known spend 30 s,
+an audit batch a minute and a group sync two minutes. A gateway bounds
+each poll of its pointer, and its start, at 30 s.
 
 Signing: `-signing-key kms:<arn>` (ECDSA P-256 in KMS, `lib/sign/kmssign`)
 or `file:` (Ed25519, development). `golem-control pubkey` prints the public
@@ -133,7 +145,7 @@ With `-clickhouse` (its password in `$CLICKHOUSE_PASSWORD`, read-only on
 `golem.spend`): per scope and period (`-period-zone`, stated in every
 snapshot and checked by every gateway), the spend in `golem.spend_dedup` of
 calls that ended before a boundary B, a whole minute `-spend-allowance`
-(5 minutes) before now: one query a step, its values bound as parameters.
+(5 minutes) before now: one query every 30 s, its values bound as parameters.
 A failure keeps the last result for its period and reports it stale
 (`golem.control.spend.stale`); a new period starts from nothing. Each
 site's ingestion lag (now less its latest `ended_at`, from
@@ -210,8 +222,9 @@ registration (`api://golem-control`, scope `golem.manage`; a gateway token
 is refused, ADR 0046), verified before the body is read; messages are at
 most 1 MiB; an internal error's text is logged, not returned. Until Entra's
 keys have been fetched the API answers `Unavailable`, and publication runs
-regardless. `-probes` serves `/livez` and `/readyz` (ready once the state is
-loaded); `-drain` gives calls in flight 10 s at shutdown.
+regardless. `-probes` serves `/livez` and `/readyz` (ready while this replica
+leads: the state loaded and the fence claimed, until a successor claims
+over it); `-drain` gives calls in flight 10 s at shutdown.
 
 | Method | Who | Effect |
 |---|---|---|

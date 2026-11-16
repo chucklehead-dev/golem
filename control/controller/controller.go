@@ -84,9 +84,12 @@ type Controller struct {
 	Audit *audit.Shipper
 	// Spend, if set, is the known-spend job: each publication carries every
 	// scope's spend this period from the ledger, to a boundary (ADR
-	// 0048; withKnownSpend). It is read whenever a
-	// publication is due.
+	// 0048; withKnownSpend). Run reads it every SpendEvery, apart from
+	// the publications, which take its latest result.
 	Spend *spend.Job
+	// SpendEvery is how often known spend is read (default 30 seconds),
+	// on its own goroutine: a publication takes its latest result.
+	SpendEvery time.Duration
 	// Sync, if set, reconciles the bound Entra groups' members while this
 	// replica leads, every SyncEvery (default five minutes; ADR 0047).
 	Sync      *entrasync.Sync
@@ -312,11 +315,23 @@ func (c *Controller) now() time.Time {
 // lease is the snapshots' authorization lease: four hours unless set.
 func (c *Controller) lease() time.Duration { return cmp.Or(c.Lease, 4*time.Hour) }
 
-func (c *Controller) log() *slog.Logger {
-	if c.Log != nil {
-		return c.Log
-	}
-	return slog.Default()
+func (c *Controller) log() *slog.Logger { return cmp.Or(c.Log, slog.Default()) }
+
+// The deadlines of the loop's external calls: a bucket, ClickHouse or
+// Graph that accepts a request and never answers must not hold the loop.
+// The state's own reads and writes are bounded by its Timeout.
+const (
+	publishTimeout = time.Minute      // every due pool's publication: the records' write, each pool's objects, the signer
+	spendTimeout   = 30 * time.Second // known spend's ClickHouse queries
+	auditTimeout   = time.Minute      // one batch of the outbox archived, emitted and trimmed
+	syncTimeout    = 2 * time.Minute  // the group sync's Graph reads and its write
+)
+
+// bounded runs f under a deadline of d.
+func bounded(ctx context.Context, d time.Duration, f func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return f(ctx)
 }
 
 // ErrDeposed: another replica has claimed the fence since this one did. It
@@ -395,7 +410,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		// No config has compiled since this replica started: renew what is
 		// published (it compiled when it was), so a restart over a broken
 		// edit cannot let every gateway's authorization lapse either.
-		if err := c.loadPublished(ctx); err != nil {
+		if err := bounded(ctx, publishTimeout, c.loadPublished); err != nil {
 			c.setConfigBroken(true)
 			c.count(ReasonConfigRenewing)
 			return false, fmt.Errorf("no config has compiled yet, and nothing published can be renewed: fix the config directory: %w", errors.Join(cfgErr, err))
@@ -424,11 +439,9 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	if len(due) == 0 {
 		return false, errors.Join(append(waiting, stale, cfgErr, c.unmatchedErr())...)
 	}
-	var spendErr error
-	if c.Spend != nil {
-		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
-	}
-	perrs := c.publish(ctx, fence, doc, due, stale != nil) // counts each pool's failure
+	pctx, cancel := context.WithTimeout(ctx, publishTimeout)
+	perrs := c.publish(pctx, fence, doc, due, stale != nil) // counts each pool's failure
+	cancel()
 	c.degraded(cfgErr, due...)
 	var errs []error
 	published := false
@@ -445,7 +458,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		ps.retryAt = now.Add(c.backoff(ps.failures))
 		errs = append(errs, fmt.Errorf("pool %s: %w", pool, err))
 	}
-	return published, errors.Join(append(append(errs, waiting...), stale, cfgErr, spendErr, c.unmatchedErr())...)
+	return published, errors.Join(append(append(errs, waiting...), stale, cfgErr, c.unmatchedErr())...)
 }
 
 // pool is pool's publishing state, created on first use.
@@ -774,11 +787,31 @@ func (c *Controller) decodeDir() (v1.Objects, error) {
 // due, every second, until ctx ends (nil) or another replica claims the
 // fence over this one (ErrDeposed: its process should exit, as a
 // predecessor it has no work left).
+//
+// Known spend, the audit outbox and the group sync run on goroutines of
+// their own, each at its own cadence and under its own deadline, stopped
+// before Run returns: a publication (a revocation) never waits behind
+// ClickHouse, the archive or Graph. Known spend is read once before the
+// first publication, so a restart does not publish a snapshot without it.
 func (c *Controller) Run(ctx context.Context) error {
 	if _, leads := c.Fence(); !leads {
 		if err := c.Claim(ctx); err != nil {
 			return err
 		}
+	}
+	jobs, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer stop()
+	if c.Spend != nil {
+		c.report("known spend", c.spendStep(jobs), new(string))
+		wg.Go(func() { c.every(jobs, cmp.Or(c.SpendEvery, 30*time.Second), "known spend", c.spendStep) })
+	}
+	if c.Audit != nil {
+		wg.Go(func() { c.every(jobs, time.Second, "audit", c.auditStep) })
+	}
+	if c.Sync != nil {
+		wg.Go(func() { c.every(jobs, time.Second, "entra sync", c.syncStep) })
 	}
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -789,42 +822,63 @@ func (c *Controller) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 		}
-		switch err := c.tick(ctx); {
-		case errors.Is(err, ErrDeposed):
+		_, err := c.Step(ctx)
+		if errors.Is(err, ErrDeposed) {
 			return err
-		case err == nil:
-			last = ""
-		case err.Error() != last:
-			c.log().Error("golem-control", "err", err)
-			last = err.Error()
 		}
+		c.report("publication", err, &last)
 	}
 }
 
-// tick is one second's work: a publication if due, then, while this
-// replica leads, the audit outbox shipped and the group sync if due. A
-// fenced write refused (the store has read the successor's claim) ends
-// this replica's leadership: ErrDeposed.
-func (c *Controller) tick(ctx context.Context) (err error) {
-	_, err = c.Step(ctx)
-	defer func() {
-		if _, leads := c.Fence(); leads && !c.notice() {
-			err = errors.Join(ErrDeposed, err)
+// every runs step at every interval until ctx ends, reporting its failure
+// once until it changes.
+func (c *Controller) every(ctx context.Context, interval time.Duration, what string, step func(context.Context) error) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	var last string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
-	}()
-	if fence, leads := c.Fence(); c.Audit != nil && leads {
-		if _, aerr := c.Audit.Step(ctx, fence); aerr != nil {
-			err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
-		} else {
-			c.mu.Lock()
-			c.status.shipped = c.now()
-			c.mu.Unlock()
-		}
+		c.report(what, step(ctx), &last)
 	}
-	if serr := c.syncStep(ctx); serr != nil {
-		err = errors.Join(err, fmt.Errorf("entra sync: %w", serr))
+}
+
+// report logs err unless it is what was last logged (*last).
+func (c *Controller) report(what string, err error, last *string) {
+	switch {
+	case err == nil:
+		*last = ""
+	case err.Error() != *last:
+		c.log().Error("golem-control: "+what, "err", err)
+		*last = err.Error()
 	}
-	return err
+}
+
+// spendStep reads known spend, under its deadline: publications carry its
+// latest result (Spend.Current), which a failure keeps.
+func (c *Controller) spendStep(ctx context.Context) error {
+	return bounded(ctx, spendTimeout, c.Spend.Step)
+}
+
+// auditStep ships a batch of the audit outbox while this replica leads.
+func (c *Controller) auditStep(ctx context.Context) error {
+	fence, leads := c.Fence()
+	if c.Audit == nil || !leads {
+		return nil
+	}
+	actx, cancel := context.WithTimeout(ctx, auditTimeout)
+	_, err := c.Audit.Step(actx, fence)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	c.mu.Lock()
+	c.status.shipped = c.now()
+	c.mu.Unlock()
+	return nil
 }
 
 // syncStep runs the group sync if this replica leads and it is due. A
@@ -835,7 +889,9 @@ func (c *Controller) syncStep(ctx context.Context) error {
 		return nil
 	}
 	c.syncTried = c.now()
-	res, err := c.Sync.Step(ctx, fence)
+	sctx, cancel := context.WithTimeout(ctx, syncTimeout)
+	res, err := c.Sync.Step(sctx, fence)
+	cancel()
 	c.mu.Lock()
 	switch {
 	case err == nil:

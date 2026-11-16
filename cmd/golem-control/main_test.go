@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,7 +69,7 @@ func TestOpenSigner(t *testing.T) {
 }
 
 func TestAPINeedsTenant(t *testing.T) {
-	if _, err := apiServer(t.Context(), "127.0.0.1:0", "", "api://golem", "", nil); err == nil || !strings.Contains(err.Error(), "-entra-tenant") {
+	if _, _, err := apiServer("127.0.0.1:0", "", "api://golem", "", nil); err == nil || !strings.Contains(err.Error(), "-entra-tenant") {
 		t.Fatalf("an API without a tenant: %v", err)
 	}
 }
@@ -91,10 +93,15 @@ func TestAPIStartsWithoutEntra(t *testing.T) {
 		w.Write(set)
 	}))
 	defer jwks.Close()
-	srv, err := apiServer(t.Context(), "127.0.0.1:0", "tid", "api://golem-control", jwks.URL, &service.Service{State: &state.Store{}})
+	srv, refreshKeys, err := apiServer("127.0.0.1:0", "tid", "api://golem-control", jwks.URL, &service.Service{State: &state.Store{}})
 	if err != nil {
 		t.Fatalf("the API with Entra unreachable: %v; it must start, and the publisher with it", err)
 	}
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer cancel()
+	wg.Go(func() { refreshKeys(ctx) })
 	s, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, (&jose.SignerOptions{}).WithHeader("kid", "other"))
 	tok, _ := jwt.Signed(s).Claims(map[string]any{"iss": "https://login.microsoftonline.com/tid/v2.0", "aud": "api://golem-control"}).Serialize()
 	call := func() int {

@@ -247,7 +247,7 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.id, "id", "", "this replica's name (default: the host name)")
 	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge); at most every gateway's -max-lease, or they refuse every snapshot")
 	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
-	flag.StringVar(&o.probes, "probes", "", "serve GET /livez and /readyz here, for Kubernetes' probes (ready once the state is loaded); empty: none")
+	flag.StringVar(&o.probes, "probes", "", "serve GET /livez and /readyz here, for Kubernetes' probes (ready while this replica leads: the state loaded and the fence claimed); empty: none")
 	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut")
 	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
 	flag.IntVar(&o.outboxMax, "audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, in events: past 80% of it changes that grant access are refused, and at it every change that adds an audit event, until the archive drains it")
@@ -327,36 +327,34 @@ func run() error {
 	}
 	defer func() { closeAudit(); closeMetrics() }() // the audit's records, then the metrics' last collection
 	slog.Info("golem-control: running", "replica", replica, "pools", o.pools, "signing key", signer.KeyID())
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// Built before any goroutine starts: a failure here returns with
+	// nothing left running.
+	var srv *http.Server
+	var refreshKeys func(context.Context)
+	if o.listen != "" {
+		if srv, refreshKeys, err = apiServer(o.listen, o.tenant, o.audience, "", &service.Service{State: st, ScopeModels: c.ScopeModels}); err != nil {
+			return fmt.Errorf("-listen: %w", err)
+		}
+	}
+	// A component's failure stops the rest; the first is the cause.
+	ctx, fail := context.WithCancelCause(ctx)
+	defer fail(nil)
 	var wg sync.WaitGroup
-	var failed error // a component's failure, which stops the rest
-	var failOnce sync.Once
-	fail := func(err error) { failOnce.Do(func() { failed = err }); cancel() }
 	wg.Go(func() { st.Run(ctx) })
 	if o.probes != "" {
-		// The state is loaded, the fence claimed and the replica runs:
-		// alive and ready.
 		mux := http.NewServeMux()
-		ok := func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) }
-		mux.HandleFunc("GET /livez", ok)
-		mux.HandleFunc("GET /readyz", ok)
+		mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
+		mux.HandleFunc("GET /readyz", readyz(c))
 		probes := &http.Server{Addr: o.probes, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-		wg.Go(func() {
-			<-ctx.Done()
-			probes.Close()
-		})
+		defer context.AfterFunc(ctx, func() { probes.Close() })()
 		wg.Go(func() {
 			if err := probes.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fail(fmt.Errorf("-probes: %w", err))
 			}
 		})
 	}
-	if o.listen != "" {
-		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, "", &service.Service{State: st, ScopeModels: c.ScopeModels})
-		if err != nil {
-			return fmt.Errorf("-listen: %w", err)
-		}
+	if srv != nil {
+		wg.Go(func() { refreshKeys(ctx) })
 		// Drained when the context ends; serveAPI returns only once the
 		// calls in flight have finished (or -drain passed), so the wait
 		// below follows the drain.
@@ -373,8 +371,8 @@ func run() error {
 		fail(err)
 	}
 	wg.Wait() // the state's loop, and the API drained
-	if failed != nil {
-		return failed
+	if err := context.Cause(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return err
 	}
 	slog.Info("golem-control: stopped")
 	return nil
@@ -457,12 +455,15 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 // verifier does), and the publisher runs regardless. A replica that
 // refused to start would stop publication, and every gateway's lease
 // would run out with it.
-func apiServer(ctx context.Context, listen, tenant, audience, jwks string, svc *service.Service) (*http.Server, error) {
+//
+// refreshKeys is the verifier's key refresh loop, for the caller to run
+// (and wait for) until ctx ends: it fetches at once, retrying until Entra
+// answers.
+func apiServer(listen, tenant, audience, jwks string, svc *service.Service) (_ *http.Server, refreshKeys func(context.Context), _ error) {
 	if tenant == "" {
-		return nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
+		return nil, nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
 	}
 	e := &entra.Verifier{Tenant: tenant, Audiences: list(audience), Scope: entra.ScopeManage, JWKS: jwks}
-	go e.Run(ctx) //qenv:ok the key refresh loop, ended by ctx: it fetches at once, retrying until Entra answers
 	h := (&api.Server{Service: svc, Auth: api.EntraAuth{Entra: e, State: svc.State}}).Handler()
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)
@@ -471,7 +472,20 @@ func apiServer(ctx context.Context, listen, tenant, audience, jwks string, svc *
 	// cut off rather than held.
 	return &http.Server{Addr: listen, Handler: h, Protocols: &protocols, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: time.Minute,
-		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, nil
+		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}, e.Run, nil
+}
+
+// readyz is golem-control's readiness: ready while it leads, which it does
+// once it has loaded the state and claimed the fence, and until a
+// successor claims over it (it then exits).
+func readyz(c *controller.Controller) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		if _, leads := c.Fence(); !leads {
+			http.Error(w, "not leading: the fence is not claimed, or another replica has claimed over this one", http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte("ok\n"))
+	}
 }
 
 // serveAPI runs serve (srv's ListenAndServe, or Serve on a listener) until

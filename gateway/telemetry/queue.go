@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -107,11 +108,13 @@ func (q *LedgerQueue) run() {
 			}
 		case <-t.C:
 		case reply := <-q.flush:
-			buf = q.drain(q.base, buf)
+			// What is queued now, not until the queue is empty: under
+			// steady load it never is, and the flush would never answer.
+			buf = q.drain(q.base, buf, len(q.q))
 			close(reply)
 			continue
 		case ctx := <-q.stop:
-			buf = q.drain(ctx, buf)
+			buf = q.drain(ctx, buf, -1)          // no row is queued after the shutdown
 			if n := len(buf) + len(q.q); n > 0 { // the deadline passed
 				q.Failed.Add(int64(n))
 				slog.Error("telemetry: ledger rows undelivered at shutdown (golem.ledger.failed)", "rows", n)
@@ -122,11 +125,12 @@ func (q *LedgerQueue) run() {
 	}
 }
 
-// drain exports everything queued, while ctx lasts; it returns what it
-// could not send.
-func (q *LedgerQueue) drain(ctx context.Context, buf []sdklog.Record) []sdklog.Record {
+// drain exports buf and n more rows of the queue (every one, while it has
+// any, if n is negative), while ctx lasts; it returns what it could not
+// send.
+func (q *LedgerQueue) drain(ctx context.Context, buf []sdklog.Record, n int) []sdklog.Record {
 	for ctx.Err() == nil {
-		for len(buf) < q.batch && len(q.q) > 0 {
+		for ; len(buf) < q.batch && len(q.q) > 0 && n != 0; n-- {
 			buf = append(buf, <-q.q)
 		}
 		if len(buf) == 0 {
@@ -161,8 +165,10 @@ func (q *LedgerQueue) export(ctx context.Context, buf []sdklog.Record) []sdklog.
 			break
 		}
 		q.Retried.Add(1)
+		// Less up to a quarter, at random: gateways that lost the same
+		// collector do not retry in step.
 		select {
-		case <-time.After(backoff):
+		case <-time.After(backoff - rand.N(backoff/4+1)):
 		case <-ctx.Done():
 		}
 		backoff = min(2*backoff, 30*time.Second)
@@ -197,7 +203,8 @@ func (q *LedgerQueue) Shutdown(ctx context.Context) error {
 	return q.exp.Shutdown(ctx)
 }
 
-// ForceFlush exports every row queued now. A shutdown may stop the worker
+// ForceFlush exports every row queued now; rows queued after it was asked
+// are not waited for. A shutdown may stop the worker
 // at any point of it: it waits on the worker's exit as well, so it never
 // waits on a worker that is gone (the shutdown has drained, or counted,
 // what was queued). It takes no lock: a flush's exports can retry for

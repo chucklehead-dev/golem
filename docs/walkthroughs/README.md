@@ -56,7 +56,7 @@ through `canon` (M1.5); upstream transports live in `gateway/snapshot`
 |---|---|---|
 | `cmd/golem-control` | flags and wiring; the `keygen`, `pubkey`, `restore` and `bootstrap` subcommands | `dispatch`, `run` |
 | `control/state` | the state document in the bucket: in-memory reads, `Update` by compare-and-swap with invariants, the fence, the audit outbox, restore, bootstrap | `Store.Update`, `Store.FencedUpdate`, `Store.Claim`, `check`, `Restore`, `Store.Bootstrap` |
-| `control/controller` | the loop: compile the config checkout, publish every pool when due, ship the audit, run the group sync | `Controller.Run`, `Controller.tick`, `Controller.Step`, `Controller.due`, `Checkout.resolve` |
+| `control/controller` | the loop: compile the config checkout, publish every pool when due, ship the audit, run the group sync | `Controller.Run`, `Controller.Step`, `Controller.due`, `Checkout.resolve` |
 | `control/publish` | one pool's publication: snapshot, record, checkpoint, pointer | `Publisher.Publish`, `PublishAll`, `Publisher.prepare` |
 | `control/spend` | known spend per scope from ClickHouse, before a boundary | `Job.Step`, `ClickHouse.Spend`, `Job.Lags` |
 | `control/audit` | the outbox shipped: archived, emitted, then trimmed | `Shipper.Step` |
@@ -167,9 +167,9 @@ once the lease has expired.
 
 One replica (ADR 0053). `Controller.Run` claims the fence
 (`Controller.Claim`, `Store.Claim`: one above the document's epoch), then
-every second `Controller.tick`:
+every second `Controller.Step`:
 
-1. `Controller.Step`: `Store.Refresh`; `Controller.notice` (another's
+1. `Store.Refresh`; `Controller.notice` (another's
    fence: `ErrDeposed`, the process exits); `Controller.load` compiles the
    checkout (`Checkout.resolve` through git-sync's link, the commit as
    `ConfigRevision`) with the state's entitlements, keeping the last good
@@ -179,11 +179,14 @@ every second `Controller.tick`:
 2. A pool is due (`Controller.due`) on a change of config, entitlements or
    epoch, at the renewal interval (60 s), or at its backoff after a
    failure; past the config age only a change, with the lease capped.
-3. `Job.Step` (known spend) once a step with something due; then
-   `Controller.publish` → `PublishAll`: every due pool's record in one
-   fenced update, then each pool's snapshot, checkpoint and pointer.
-4. `Shipper.Step` (the audit outbox), then `syncStep` (the group sync,
-   every 5 minutes), both fenced.
+3. `Controller.publish` → `PublishAll`: every due pool's record in one
+   fenced update, then each pool's snapshot, checkpoint and pointer, with
+   the spend job's latest result.
+
+Beside it, each on a goroutine of its own (`Controller.every`) under its
+own deadline: `spendStep` (`Job.Step`, known spend, every 30 s),
+`auditStep` (`Shipper.Step`, the audit outbox) and `syncStep` (the group
+sync, every 5 minutes), the last two fenced.
 
 The control API (`control/api`, `control/service`) runs beside the loop in
 the same process; its writes are ordinary compare-and-swap updates.

@@ -14,6 +14,7 @@
 package state
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	jsonv2 "encoding/json/v2"
@@ -157,6 +158,11 @@ type Store struct {
 	// DefaultMaxOutbox): past 80% of it a write that grants or widens
 	// access is refused, and at it every write that adds an audit event.
 	MaxOutbox int
+	// Timeout bounds each of the store's bucket calls: a read (Load,
+	// Refresh) and each write of an Update (default 15 seconds). A bucket
+	// that accepts a request and never answers must not hold the
+	// publication loop, the refresh or an API call for good.
+	Timeout time.Duration
 
 	mu  sync.Mutex
 	cur *Document
@@ -172,6 +178,8 @@ func (s *Store) Load(ctx context.Context) error { return s.refresh(ctx, true) }
 func (s *Store) Refresh(ctx context.Context) error { return s.refresh(ctx, false) }
 
 func (s *Store) refresh(ctx context.Context, full bool) error {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout())
+	defer cancel()
 	s.mu.Lock()
 	tag := s.tag
 	s.mu.Unlock()
@@ -213,6 +221,9 @@ func (s *Store) refresh(ctx context.Context, full bool) error {
 	s.set(d, newTag)
 	return nil
 }
+
+// timeout is Timeout or its default.
+func (s *Store) timeout() time.Duration { return cmp.Or(s.Timeout, 15*time.Second) }
 
 // regressed is ErrRegressed, saying what to do.
 func regressed(had uint64, now string) error {
@@ -294,6 +305,7 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 	if attempts <= 0 {
 		attempts = 8
 	}
+	var ids []string // one write ID an attempt: any of them found written is this update landed
 	for range attempts {
 		s.mu.Lock()
 		base, tag := s.cur, s.tag
@@ -304,23 +316,29 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 		}
 		next.Schema, next.StateVersion = Schema, base.StateVersion+1
 		id := rand.Text()
+		ids = append(ids, id)
 		next.wrote(id)
 		body, err := next.Encode()
 		if err != nil {
 			return nil, err
 		}
-		newTag, err := s.Bucket.Put(ctx, DocumentKey, body, tag)
-		if errors.Is(err, bucket.ErrPrecondition) {
+		pctx, cancel := context.WithTimeout(ctx, s.timeout())
+		newTag, err := s.Bucket.Put(pctx, DocumentKey, body, tag)
+		cancel()
+		// A put that ran out of its own time may have landed, its reply
+		// lost: it is judged as a lost race is.
+		timedOut := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+		if errors.Is(err, bucket.ErrPrecondition) || timedOut {
 			// Another writer won, or this one did and its reply was lost (a
 			// retried conditional put fails its own condition): read what
-			// is there, and if this write is among its recent ones, it
-			// succeeded, whether or not others have written since. Applying
-			// the change again would apply it twice (a second audit event;
-			// a removal that landed answered NotFound).
+			// is there, and if one of this update's writes is among its
+			// recent ones, it succeeded, whether or not others have written
+			// since. Applying the change again would apply it twice (a
+			// second audit event; a removal that landed answered NotFound).
 			if err := s.Load(ctx); err != nil {
 				return nil, err
 			}
-			if cur := s.Current(); slices.Contains(cur.Writes, id) {
+			if cur := s.Current(); slices.ContainsFunc(cur.Writes, func(w string) bool { return slices.Contains(ids, w) }) {
 				return cur, nil
 			}
 			continue
