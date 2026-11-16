@@ -148,7 +148,7 @@ func bindAttempts(ceiling, retries int, deps, names []string) *connect.Binding[*
 		Action("end", (*attemptsDriver).End, "c", "cut", "cost").
 		Action("giveUp", (*attemptsDriver).GiveUp, "c").
 		Skip("tailEnds"). // the slot's: the limiter's, not here
-		State(func(d *attemptsDriver) any { return d.state() })
+		State((*attemptsDriver).state)
 }
 
 func (d *attemptsDriver) init() {
@@ -347,13 +347,11 @@ func TestAttemptsModel(t *testing.T) {
 		}
 	}
 	t.Run("ceiling one", func(t *testing.T) {
-		connect.Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gateway", MaxSamples: 50, MaxSteps: 20,
-			Require: []string{"failedOver", "ejectedThenProbed", "retriesSpent", "attemptsSpent"}},
-			bindAttempts(1, 2, []string{"d1", "d2", "d3"}, []string{"c1", "c2"}).Driver)
+		bindAttempts(1, 2, []string{"d1", "d2", "d3"}, []string{"c1", "c2"}).Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gateway", MaxSamples: 50, MaxSteps: 20,
+			Require: []string{"failedOver", "ejectedThenProbed", "retriesSpent", "attemptsSpent"}})
 	})
 	t.Run("ceiling two", func(t *testing.T) {
-		connect.Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gatewayWide", MaxSamples: 50, MaxSteps: 20,
-			Require: []string{"probePassedBy"}},
-			bindAttempts(2, 2, []string{"d1", "d2"}, []string{"c1", "c2", "c3"}).Driver)
+		bindAttempts(2, 2, []string{"d1", "d2"}, []string{"c1", "c2", "c3"}).Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gatewayWide", MaxSamples: 50, MaxSteps: 20,
+			Require: []string{"probePassedBy"}})
 	})
 }
