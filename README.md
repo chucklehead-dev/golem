@@ -16,7 +16,7 @@ Status: M1, the first team in production, built and awaiting its install
 and acceptance runs: [docs/m1-plan.md](docs/m1-plan.md) is the scope of
 record, with what is built, what remains and what M1 does not build. The
 gateway serves Anthropic Messages, OpenAI Chat and Responses, Bedrock and
-vLLM boxes, standalone from local YAML (`golem-gateway --standalone
+vLLM boxes, standalone from local YAML (`golem-gateway -standalone
 examples/standalone`) or as a pool from signed snapshots in a bucket
 (`golem-gateway -pool <name> -bucket … -keys … -valkey … -site …`, behind
 `-accept-unreleased` until golem#7's deployment evidence is in).
@@ -55,6 +55,8 @@ snapshot carries.
   keys, roles, budgets, grants, approvals, capture and retention.
 - [docs/entra.md](docs/entra.md): the Entra ID app registrations.
 - [docs/testing.md](docs/testing.md): what testing exists and what is owed.
+- [docs/contributing.md](docs/contributing.md): building (Go 1.27.4 or
+  later), the checks to run, and how comments and JSON code are written.
 - [model/](model/README.md): three literate Quint models (publication,
   exposure, attempts), each checked by `make` and driving the code through
   its connect test.

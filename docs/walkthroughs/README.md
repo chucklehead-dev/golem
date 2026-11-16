@@ -16,7 +16,31 @@ built), [contracts.md](../contracts.md) (codes, the ledger, headers), the
 
 The longer walkthroughs this page replaces (request path, gateway edges,
 accounting, control plane, control API, config and snapshots) are in git
-history: `git log --diff-filter=D -- docs/walkthroughs/`.
+history: `git log --diff-filter=D -- docs/walkthroughs/`. How comments are
+written, and the checks to run: [contributing.md](../contributing.md).
+
+## Glossary
+
+The words the code uses for golem's concepts, each for one thing only.
+
+| Word | Meaning | In the code |
+|---|---|---|
+| ticket | an admitted call's admission record: its slots, period and cost; it ends exactly once, completed or cancelled | `admission.Ticket`, `limit.Ticket` |
+| slot | one place of concurrency, held by a call in flight against a principal's or a scope's in-flight limit | `Limiter.Admit`, `admitScript` |
+| hold | one attempt's reservation of a deployment, against its ceilings; committed, failed or released | `route.Hold` (being renamed from `route.Lease` on the gateway's branch) |
+| grant | what an authentication honoured: the principal and the key or token, so a later snapshot can be asked whether it still would | `auth.Grant`, `Keys.Honours` |
+| lease | only the snapshot's authorization lease: how long a snapshot may be served (`ValidUntil`), renewed every minute by publication | `snapshot.Snapshot.ValidUntil`, `-lease`, `-max-lease` |
+| fence | golem-control's claim to write state: a holder and an epoch in the state document, checked by every leader-only write | `state.Fence`, `Store.Claim`, `Store.FencedUpdate` |
+| known spend | a scope's spend this period from the ledger, as the snapshot carries it; a gateway counts nothing else | `spend.Result`, `Scope.KnownSpend` |
+| spend boundary | the whole minute, an ingestion allowance before now, before which known spend counts the calls that ended | `spend.Result.Since`, `Scope.Since` |
+| waiver | a call admitted on local counts while the site's Valkey is down or recovering, recorded as such on its row | `Ticket.Waived`, `Limiter.MarkDown` |
+| floor | the lowest publication a gateway may apply: its checkpoint's, never lowered | `Bucket.Start`, `Holder.Apply` |
+| tail | the time after an ambiguous end during which the provider may still be working, so the call's slot stays held, at most to its deadline | `settlement.cancel`, `Ticket.Cancel` |
+| uncertain | a call's outcome when it failed after the provider may have received it: charged its worst case until reconciliation | the ledger's `outcome` (contracts.md) |
+| observe, warn, enforce | a scope's budget modes: an over-budget call is admitted and marked; admitted, marked and warned; or refused (402) | `ScopePolicy.budgetMode`, `Scope.BudgetMode` |
+
+`uuid`, imported in the gateway, is the Go 1.27 standard library's
+package, not a third-party module.
 
 ## 1. The package map
 
@@ -77,6 +101,8 @@ through `canon` (M1.5); upstream transports live in `gateway/snapshot`
 | `lib/entra` | Entra token verification for one audience and scope | `Verifier.Verify`, `Verifier.Run` |
 | `lib/key`, `lib/period`, `lib/contract`, `lib/otlp` | the key format; budget periods; codes and headers (checked against contracts.md); OTLP over TLS | `key.Parse`; `contract_test.go`; `otlp.PlaintextOK` |
 | `internal/crdgen` | the CRDs, the chart's DDL and collector copies kept current | its tests |
+| `internal/flagusage` | both binaries' `-help`, their flags in groups with the settings read from the environment | `Print` |
+| `internal/doccheck` | a test: no Go comment cites a stub ADR or a section number | `TestCommentsCiteLiveText` |
 | `cmd/golemctl` | `config validate`, `login`, `token`, the org and key commands | `main`, `api.go` |
 | `deploy/` | the charts, Argo sample, `clickhouse/spend.sql`, `otel/collector.yaml` | deploy/charts/README.md |
 | `test/compat`, `test/ledger` | real SDKs against a gateway; the ledger end to end | `TestSDKs`, `TestLedgerReachesClickHouse` |

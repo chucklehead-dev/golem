@@ -201,7 +201,7 @@ Each binary also gets its own image and its own dependency list in
 
 | Topology | Store | Notes |
 |---|---|---|
-| Laptop | none | `golem-gateway --standalone ./config/`: the gateway alone from CRD YAML, in-memory limits, the developer's own provider credentials (ADR 0023) |
+| Laptop | none | `golem-gateway -standalone ./config/`: the gateway alone from CRD YAML, in-memory limits, the developer's own provider credentials (ADR 0023) |
 | Development of golem itself | MinIO | `make dev-up`: kind, MinIO, Valkey, dex, ClickHouse and Langfuse in containers, production code unchanged; also the integration-test environment |
 | Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (one replica, ADR 0053), gateways across zones; ElastiCache for Valkey; Helm charts through GitOps (ADR 0036) |
 | Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0008); Valkey there as at any site |

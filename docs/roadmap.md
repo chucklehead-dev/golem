@@ -49,7 +49,7 @@ The gateway end to end with nothing optional.
   `golemctl bootstrap` (moved to M2: M1 makes them by hand, and
   `golem-control bootstrap` exists for a missing document, control-plane.md §7).
 - Benchmarks and the stub-upstream load test as baselines.
-- Standalone mode (`--standalone`, ADR 0023) and `make dev-up` (kind,
+- Standalone mode (`-standalone`, ADR 0023) and `make dev-up` (kind,
   MinIO, Valkey, dex, ClickHouse, Langfuse) as the integration-test
   environment.
 

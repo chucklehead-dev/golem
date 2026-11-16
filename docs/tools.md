@@ -78,7 +78,7 @@ ledger drift (control-plane.md §5).
 
 ## 5. Standalone gateway
 
-For a developer's own machine: `golem-gateway --standalone ./config/`
+For a developer's own machine: `golem-gateway -standalone ./config/`
 serves the CRD YAML in `./config/` with the developer's provider
 credentials, and `--explain request.json` shows how a request would be
 routed and limited (ADR 0023). `golemctl agent setup … --local` points an

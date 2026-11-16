@@ -440,7 +440,7 @@ as a publication from the bucket is, until its lease ends (a copy that
 does not compile yet, its Secret not yet mounted, is retried from disk
 every 30 seconds until it does or the bucket's publication applies).
 
-`golem-gateway --standalone <dir>` (ADR 0023) runs this binary on a laptop
+`golem-gateway -standalone <dir>` (ADR 0023) runs this binary on a laptop
 from the same CRD YAML as the GitOps repository, compiled in-process by
 `lib/compile` and recompiled on change, with one implicit local principal
 (or a `LocalIdentity` file), the in-memory limiter, the developer's own

@@ -17,7 +17,7 @@ a bucket, a control plane, Valkey and Kubernetes.
 
 ## Decision
 
-- **`golem-gateway --standalone <dir>`**: the production gateway binary,
+- **`golem-gateway -standalone <dir>`**: the production gateway binary,
   running from local files:
   - config: the same CRD YAML as the GitOps repository (`Backend`,
     `ModelRoute`, `ScopePolicy`, `Hook`, `PriceList`), compiled in-process
@@ -32,7 +32,7 @@ a bucket, a control plane, Valkey and Kubernetes.
   - provider credentials: the developer's own (environment variables, an
     AWS profile), through the normal envelopes;
   - telemetry: stdout, or a local OTLP endpoint;
-  - `golem-gateway --standalone <dir> --explain <request.json>` prints the
+  - `golem-gateway -standalone <dir> -explain <request.json>` prints the
     route, deployment and limits a request would get.
 - **Guard rails**: binds to `127.0.0.1` by default; prints a "not for
   shared use" banner; refuses edge pools, remote sites, bucket settings and

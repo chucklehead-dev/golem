@@ -21,7 +21,8 @@ gateway links nothing of the control plane and no database, ClickHouse or
 Kubernetes client; golemctl links `lib/` and the generated clients only.
 `lib/contract`'s test fails when the codes and headers drift from
 contracts.md; `internal/crdgen`'s when the chart's CRDs, DDL copy or
-collector config drift from their sources.
+collector config drift from their sources. `internal/doccheck`'s fails when a Go
+comment cites a stub ADR or a section number ([contributing.md](contributing.md)).
 
 ## 2. The kinds of test
 

@@ -37,7 +37,7 @@ and the site's emergency denylist (*Emergency revocation*).
 | **Drain** | `preStop` turns readiness off and waits for in-flight streams up to the drain grace (default 10 minutes for agent streams), then ends them with a dialect error event; a call arriving once the drain's wait has begun is refused in its dialect (`gateway.not_ready`, 503 with Retry-After), so the SDK retries it on another gateway; `terminationGracePeriodSeconds` follows it. A second SIGTERM (or interrupt) during the drain cuts it short: the calls still in flight are ended and account, and the telemetry still flushes (each provider up to 4 s); signals never kill the gateway mid-drain. |
 | **Provider credential rotation** | Update the Secret; kubelet refreshes the mounted file; the gateway re-reads it. Workload identity needs none. |
 | **Backend maintenance** | Planned: a pull request removing the deployment from each `ModelRoute`'s `spec.pool` (and restoring it after). `Backend.spec.disabled` is *not built in M1*, and `weight: 0` is refused by the compiler (weights are not used in M1: it would not take the deployment out). Unplanned: the gateways eject a deployment that fails on their own (three failures in a row, probed back); for a deployment answering wrongly but not failing, the same pull request. Expiring overrides (`golemctl overrides ...`) are *not built in M1*. |
-| **Incident freeze** | *Not built in M1* (a freeze override). To stop new config reaching a pool, do not merge to the config repository's branch (git-sync follows it; each merge is published within a minute). To stop callers, the emergency denylist (*Emergency revocation*). Stopping golem-control is not a freeze: gateways keep their snapshot until the lease runs out (ADR 0032), and then refuse everything. |
+| **Incident freeze** | *Not built in M1* (a freeze override). To stop new config reaching a pool, do not merge to the config repository's branch (git-sync follows it; each merge is published within a minute). To stop callers, the emergency denylist (*Emergency revocation*). Stopping golem-control is not a freeze: gateways keep their snapshot until the lease runs out (ADR 0030), and then refuse everything. |
 | **Leadership and tampering** (ADR 0053) | The bucket policy lets only golem-control's role write `state/`, `control/` and `snapshots/`: it is the only defence against a rollback of the document together with a record's older checkpoint and pointer. (There is no lease object: one replica claims the document's fence at start.) A `tampered` publication failure pages (§2.2: a pool's checkpoint does not verify or is missing, `ErrTampered`; that pool stops publishing until restored from the bucket's versions), and so does a pool's publication sequence or the leadership epoch going down (§2.2, *Sequence or epoch went back*); the document's Object Lock history then shows when and by whom. |
 | **Config and prices** | golem-control trial-compiles each edit of the config directory with the state's scopes. An edit that does not compile (a ScopePolicy whose budget reaches a model no PriceList prices among its problems; `golemctl config validate` in CI catches it first) is refused (`config not applied, the last good one is published`) and the last good config keeps being renewed: fix the edit. A golem-control that starts (or takes over) while the directory does not compile renews the publication already in the bucket with the current entitlements and logs `renewing the published config: the config directory does not compile` every step: the gateways stay authorized, but no config change reaches them until the directory is fixed. An edit that deletes the ScopePolicy of a scope the state has is refused (`the ScopePolicy of live scope … removed`): restore it, or set its `models: []` to stop the scope. A scope of the state's with no ScopePolicy is published with no models (its members can call nothing), and a ScopePolicy naming no scope of the state's is not published; both are logged (`scopes and ScopePolicies do not match`, naming each) every step until they match: merge the scope's ScopePolicy, or create the scope (`golemctl scopes create <id>`), or correct the name. Every other scope and pool is unaffected. |
 | **Changing a scope's policy** (its models, budget, budget mode, limits) | A pull request to the scope's `ScopePolicy` (its name is the scope's ID) in the GitOps repository, reviewed by the platform team (CODEOWNERS), checked by `golemctl config validate` in CI, synced by Argo CD; the next publication carries it (within a minute of golem-control reading it). The control API no longer sets policy: `golemctl scopes create <id>` creates the scope, which can call nothing until its ScopePolicy is merged. A new scope's budget starts in `budgetMode: observe` (the default): watch its ledger rows' `over_budget` for a period, then move it to `warn` or `enforce` by another pull request (PRD §9.1; an M1 exit criterion). A budget raised mid-month takes effect at the next publication; an emergency stop for one scope is the same pull request (`models: []`), or a key revocation for one caller. History and review are the repository's (ADR 0050). |
@@ -47,7 +47,7 @@ and the site's emergency denylist (*Emergency revocation*).
 | **State restore** | Fetch the wanted older version of `state/document.json` from the bucket's history (or its Object Lock replica), then `golem-control restore -bucket <url> -from old.json -actor <who>`: a dry run listing what the backup holds that would be **withheld** (rights removed since: re-grant each as its own change) and what would be **rolled back** (rights added since; keys minted since are revoked). Add `-apply` to write it, audited as `state.restore`. The fence, the publication records, the revocations and the audit outbox are always the current document's; a restore never widens a right. |
 | **Snapshot objects** | Every publication writes a new content-addressed snapshot object (`snapshots/<pool>/<hash>.json`; a renewal's differs in its lease), about 1,440 a pool a day, and none is deleted by golem. The bucket's lifecycle rule expires objects under `snapshots/<pool>/` other than `current` two days after creation: longer than any authorization lease (four hours), so no object a gateway could still apply is removed, and a publisher down for days has let its lease lapse long before. The Crossplane composition sets the rule; a hand-built bucket needs it. |
 | **Emergency revocation** | Site responders edit a separately bootstrapped denylist (`golem-gateway -denylist`; format in control-plane.md §5) outside Argo ownership/pruning; confirm projected-volume propagation (gateways re-read it every five seconds and log each list applied, or why an edit was not). It refuses new requests, and each list applied terminates the matching calls in flight within seconds (a stream ends with its dialect's error event `auth.denied`; the ledger row's outcome is `terminated`; logged as `ended calls in flight whose authorization was withdrawn`). A snapshot that revokes a key, or removes its principal, does the same at each gateway as it is applied. Lease expiry stops new requests only. No seconds guarantee from the edit to the file until measured (projection is the site's); local Kubernetes delivery must work. Keep denials until fresh durable revocation is confirmed (ADR 0041 §1). |
-| **Authorization runway** | The alerts of §2.2 over `golem.snapshot.lease_remaining`, `golem.snapshot.age` and `golem.control.publish.time`, with ADR 0032's thresholds. Edge pools warn after one missed 60-second renewal and page after two, before their five-minute expiry; include bounded clock skew and name the actual expiry time (`golem.control.publish.valid_until`). |
+| **Authorization runway** | The alerts of §2.2 over `golem.snapshot.lease_remaining`, `golem.snapshot.age` and `golem.control.publish.time`, with ADR 0030's thresholds. Edge pools warn after one missed 60-second renewal and page after two, before their five-minute expiry; include bounded clock skew and name the actual expiry time (`golem.control.publish.valid_until`). |
 | **Langfuse projects** | Design: a golem-control job creates a project when a scope first needs its own and adds its credentials to the capture collector's Secret (ADRs 0035, 0041). *Not built in M1* (capture is M2). |
 | **Second site** | Design: the bucket replicated to the standby region; its gateways read the replica; a golem-control there scaled to zero; the failover runbook promotes the replica and scales up (ADR 0008). *Not built in M1* (one site). |
 | **Support** | `golemctl support-bundle` and `golemctl gateways` are *not built in M1*. By hand: golem-control's log (`published`, with each pool's sequence and `configRevision`; the config's errors), each gateway's log and its status object in the bucket (`status/<pool>/<gateway>`: what it applied; diagnostic only), §2.2's metrics, and `golemctl config validate` on the commit published. |
@@ -262,6 +262,67 @@ charts' defaults (deploy/charts/*/values.yaml); the namespace is `golem`.
     checkpoint, applies the publication and becomes ready.
 11. **Create the scopes** (`golemctl scopes create <id>`, matching their
     ScopePolicies), their members or bound Entra groups, and keys.
+
+## Settings the two binaries must agree on
+
+Some of golem-control's flags have a counterpart in every gateway's. When
+they disagree the gateways refuse every snapshot, keep serving what they
+hold until its lease runs out, and then refuse every call. Each binary
+logs its side in one line at start: `golem-control: settings shared with
+the gateways` and, in pool mode, `golem-gateway: settings shared with
+golem-control`. Compare the two after any change to either chart's values.
+
+| golem-control | golem-gateway | Rule | When it is broken |
+|---|---|---|---|
+| `-lease` | `-max-lease` | `-lease` ≤ `-max-lease` (the charts' `lease` and `maxLease`) | a snapshot whose lease runs further ahead than `-max-lease` plus `-clock-skew` is refused |
+| `-period-zone` | `-period-zone` | identical IANA names | a snapshot stating another zone is refused, the log naming both |
+| `-signing-key`, `-trusted-keys` | `-keys` | `-keys` holds the public half of `-signing-key` (`golem-control pubkey`), and during a rotation the retiring key's too (§2.1) | the pointer does not verify and is refused |
+| the publisher's clock | `-clock-skew` | the clocks differ by less than `-clock-skew` | a pointer issued further ahead is refused |
+
+## Flag details
+
+`-help` prints each binary's flags in groups, with the settings read from
+the environment (`$VALKEY_PASSWORD`, `$CLICKHOUSE_PASSWORD`) under their
+group. What the one-line help texts leave out:
+
+- **`-listen` and `-unready` (gateway).** Pool mode runs in a pod: `-listen`
+  defaults to `:8080` there, and to `127.0.0.1:8080` standalone, where
+  any address but loopback is refused. `-unready` defaults to 5 s in pool mode,
+  0 standalone. It must exceed the time the endpoints take to drop a
+  stopping pod, or a call routed to it in that window is refused. The
+  chart sets both explicitly (`service.port`, `unready`).
+- **`-telemetry`.** The gateway defaults to `stdout`, so a gateway started
+  without a collector still writes its ledger rows where they can be seen.
+  golem-control defaults to `off`: it writes no ledger, and its metrics and
+  audit records are of use only in a collector. The charts set both.
+- **`-checkpoint` (gateway).** A file on the gateway's own disk recording
+  the last publication applied, its floor across restarts. `last-good.json`
+  beside it holds that publication itself, served at a restart while the
+  bucket is unreachable. Empty: the bucket's trusted checkpoint alone sets
+  the floor, and a restart with the bucket down serves nothing.
+- **`-source-header` (gateway).** The header the proxy in front sets to the
+  caller's address, its last value taken (`X-Forwarded-For`). Empty, the
+  connection's address is the source. Behind a sidecar that is the
+  sidecar's address, so every per-source limit becomes the pod's.
+- **`-auth-failures` and `-auth-failure-burst` (gateway).** Past them, a
+  source's Entra tokens and its requests that fail authentication are
+  refused until it slows. A valid golem key from that source is still
+  served. Only the credential's faults count, never golem's or Entra's.
+- **`-accept-unreleased` (gateway).** Pool mode refuses to start without it
+  until its production prerequisites are confirmed: provider-account
+  spending limits, OTLP over TLS to the real collector, and an owner of
+  each hop's mTLS (golem#7, m1-security-gates.md). It is for test sites
+  and the observe phase.
+- **`-max-config-age` (golem-control).** With `-config-fetched`, how long
+  after the checkout's last fetch leases stop being renewed. A stalled
+  git-sync's checkout may miss a restriction merged since. Changes of the
+  entitlements or the epoch are still published, within the lease already
+  granted, so a revocation still reaches the gateways and their leases
+  run out on time.
+- **`-audit-outbox-max` (golem-control).** The audit outbox's bound, in
+  events. Past 80% of it, changes that grant access are refused. At it,
+  every change that adds an audit event is refused, revocations included,
+  until the archive drains it. Use the emergency denylist meanwhile.
 
 ## Bedrock: the gateway's AWS role
 
