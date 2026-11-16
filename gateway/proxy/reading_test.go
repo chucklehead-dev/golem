@@ -101,6 +101,9 @@ func TestReadingBounds(t *testing.T) {
 		done := make(chan int)
 		go func() { done <- serveBody(h, alice, held, -1).Code }()
 		<-held.sent
+		for h.Reading.Bytes() < 90 { // counted as its read returns
+			time.Sleep(time.Millisecond)
+		}
 		w := serveBody(h, bob, strings.NewReader(readingBody), int64(len(readingBody)))
 		if w.Code != 429 || errorCode(t, w) != "limit.concurrency" || w.Header().Get("Retry-After") != "1" ||
 			!strings.Contains(w.Body.String(), "reading too many request bodies") {
