@@ -8,6 +8,16 @@ image:
 
 replicas: 3        # across zones (topologySpread below)
 
+# The release gate (cmd/golem-gateway): pool mode exits at start unless
+# -accept-unreleased is given, until golem#7's deployment evidence is in
+# (provider spending limits, OTLP TLS against the real collector, each
+# hop's mTLS owner). That evidence can only be gathered from a deployment,
+# so the observe-phase site sets this true, and only with a recorded
+# decision (who accepted it, for which site, until when) in its values'
+# review. Leave it false everywhere else: the pods then crash-loop with the
+# gate's message, which names what is missing.
+acceptUnreleased: false
+
 # The pool this release serves and the site it runs at.
 pool: internal
 site: ""           # required: this site's name (its Valkey's keys and ledger rows)

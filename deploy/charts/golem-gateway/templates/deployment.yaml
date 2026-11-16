@@ -70,6 +70,10 @@ spec:
             {{- with .Values.guard.sourceHeader }}
             - -source-header={{ . }}
             {{- end }}
+            {{- if .Values.acceptUnreleased }}
+            # The observe-phase site's recorded decision (values.yaml).
+            - -accept-unreleased
+            {{- end }}
           env:
             - name: VALKEY_PASSWORD
               valueFrom:

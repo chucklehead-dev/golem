@@ -15,7 +15,10 @@ first, then a gateway pool per site.
   emergency-denylist ConfigMap (managed outside Argo), the publishing keys
   it trusts (a ConfigMap), the site's Valkey (TLS, an ACL user, the
   password from a Secret), and an Istio AuthorizationPolicy when
-  principals are given. The grace period is the drain (10 minutes by
+  principals are given. Pool mode is behind the gateway's release gate
+  (golem#7): `acceptUnreleased: true` passes `-accept-unreleased`, for the
+  observe-phase site only and with a recorded decision; left false, the
+  pods exit naming the missing evidence. The grace period is the drain (10 minutes by
   default, as operations.md assumes) plus the readiness window.
 
 Each ServiceAccount takes its AWS role by annotation (IRSA or Pod
