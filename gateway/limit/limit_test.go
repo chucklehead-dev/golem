@@ -14,10 +14,10 @@ func scopeCall(id, principal string) Call {
 	return Call{ID: id, Principal: principal, Scope: "s", Budget: 10, PrincipalLimit: 1, ScopeLimit: 2}
 }
 
-// TestSoft: known spend is the snapshot's (ADR 0031), checked below the
-// budget whatever the call then costs (the accepted risk); a call's cost
-// is its ledger row's, not counted here.
-func TestSoft(t *testing.T) {
+// TestKnownSpendIsTheSnapshots: known spend is the snapshot's (ADR 0031),
+// checked below the budget whatever the call then costs (the accepted risk); a
+// call's cost is its ledger row's, not counted here.
+func TestKnownSpendIsTheSnapshots(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
 	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
@@ -43,7 +43,9 @@ func TestSoft(t *testing.T) {
 	}
 }
 
-func TestLimits(t *testing.T) {
+// TestInFlightLimits: the principal's and the scope's in-flight limits refuse,
+// and a cancelled call keeps its slot until its upstream ends.
+func TestInFlightLimits(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
 	a, _ := l.Admit(ctx, scopeCall("a", "p1"))

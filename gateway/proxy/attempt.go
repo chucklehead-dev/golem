@@ -135,7 +135,7 @@ func (c *callState) next() (*route.Target, *route.Hold, time.Time, bool) {
 func (c *callState) retry(result string, status int, after time.Duration) bool {
 	gone := c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil
 	c.endHold(after, gone)
-	c.h.paused(c.r)
+	c.h.runBeforePick(c.r)
 	if !c.kept || c.attempt >= c.rt.MaxAttempts || c.r.Context().Err() != nil || c.upCtx.Err() != nil {
 		return false
 	}
@@ -170,8 +170,8 @@ func (c *callState) endHold(after time.Duration, gone bool) {
 	c.hold.Fail(after)
 }
 
-// paused runs beforePick, if set (tests).
-func (h *Handler) paused(r *http.Request) {
+// runBeforePick runs the beforePick test hook, if set.
+func (h *Handler) runBeforePick(r *http.Request) {
 	if h.beforePick != nil {
 		h.beforePick(r)
 	}

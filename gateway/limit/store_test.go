@@ -248,10 +248,10 @@ func TestValkeyStore(t *testing.T) {
 	})
 }
 
-// TestWrap: a transport failure is ErrUnavailable and keeps its cause, so a
+// TestTransportFailureIsUnavailable: a transport failure is ErrUnavailable and keeps its cause, so a
 // caller can tell a deadline from a refused connection; a server's reply
 // is not unavailability.
-func TestWrap(t *testing.T) {
+func TestTransportFailureIsUnavailable(t *testing.T) {
 	err := wrap(context.DeadlineExceeded)
 	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("%v: want both ErrUnavailable and its cause", err)
