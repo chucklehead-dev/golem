@@ -284,7 +284,7 @@ func (e *Verifier) Run(ctx context.Context) {
 	var last time.Time // the last refresh tried
 	retry := retryFirst
 	next := e.now()
-	if e.Ready() { // fetched before Run (golem-control fetches at its start)
+	if e.Ready() { // fetched before Run (by a caller's Refresh)
 		last = time.Unix(0, e.keysAt.Load())
 		next = last.Add(refreshEvery)
 	}
