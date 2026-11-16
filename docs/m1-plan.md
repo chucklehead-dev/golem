@@ -417,8 +417,9 @@ Status:
   `/livez` and `/readyz`) and a gateway pool (three replicas across
   zones, PDB, provider Secrets, denylist, Valkey TLS, grace period the
   drain plus the readiness window, an optional AuthorizationPolicy).
-  Checked by rendering both and checking every flag they pass against the
-  binaries'; not yet by `helm template`, nor on a cluster. Open: the CRD
+  Checked by `helm lint` and `helm template` (Helm 3.16; a missing
+  required value fails naming it) and every flag they pass against the
+  binaries'; not yet against a cluster's schemas, nor deployed. Open: the CRD
   definitions, the ClickHouse DDL Job, dashboards, egress ServiceEntries,
   the image builds, and the deploy to EKS through Argo.
 
