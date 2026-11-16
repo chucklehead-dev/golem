@@ -67,9 +67,6 @@ func (m *Mem) Take(_ context.Context, ms []Meter) (bool, int, time.Duration, err
 
 // bucket is key's bucket; mu is held.
 func (m *Mem) bucket(key string) *rateBucket {
-	if m.buckets == nil {
-		m.buckets = map[string]*rateBucket{}
-	}
 	b := m.buckets[key]
 	if b == nil {
 		b = &rateBucket{}
@@ -134,7 +131,7 @@ func (l *Limiter) Take(ctx context.Context, ms []Meter) (bool, int, time.Duratio
 	ok, over, wait, err := l.store.Take(sctx, ms)
 	if err != nil {
 		if ctx.Err() == nil {
-			l.markDown(err)
+			l.MarkDown(err)
 			l.failedOpen(err)
 		}
 		return true, 0, 0
