@@ -53,7 +53,13 @@ drain: 10m
 # The floor before authentication (gateway/guard).
 guard:
   sourceHeader: ""        # e.g. X-Forwarded-For where the mesh sets one
-  authFailures: 20
+  # Failed authentications a second each source may make before its
+  # further failures are refused limit.source. Empty: 20 with sourceHeader
+  # set, else 0 (off): behind the Istio sidecar every caller shares the
+  # sidecar's address, so one source's budget would be the whole pod's,
+  # and a flood of bad tokens would refuse every other caller's failures
+  # with it. Set a number to choose either way.
+  authFailures: ""
   maxConns: 8192
 
 maxBody: "33554432"   # quoted: a large number would render as 3.3554432e+07

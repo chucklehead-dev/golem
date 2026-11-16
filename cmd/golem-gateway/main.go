@@ -120,7 +120,7 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.sourceHeader, "source-header", "", "the header the proxy in front sets to the caller's address (its last value is taken, e.g. X-Forwarded-For); empty: the connection's address, which behind a sidecar is the sidecar's, so the per-source limits are the pod's")
 	fs.Float64Var(&o.sourceRate, "source-rate", 0, "requests a second each source may make before authentication; 0: no limit (authenticated callers' limits are the policy's)")
 	fs.Float64Var(&o.sourceBurst, "source-burst", 0, "the requests a quiet source may make at once (default -source-rate)")
-	fs.Float64Var(&o.authFailRate, "auth-failures", 20, "failed authentications a second each source may make; past them (and the burst) its requests are refused until it slows; 0: no limit")
+	fs.Float64Var(&o.authFailRate, "auth-failures", 20, "failed authentications a second each source may make; past them (and the burst) its Entra tokens, and its requests that fail authentication, are refused until it slows (a valid golem key is still served); only the credential's faults count, not golem's or Entra's; 0: no limit")
 	fs.Float64Var(&o.authFailBurst, "auth-failure-burst", 200, "the failed authentications a source may make at once")
 	fs.IntVar(&o.maxConns, "max-conns", 8192, "connections open at once; past it new ones wait in the listen backlog; 0: no limit")
 	fs.IntVar(&o.maxConnsPerSource, "max-conns-per-source", 0, "connections open at once from one remote address (for a gateway reached directly, not behind a sidecar); 0: no limit")

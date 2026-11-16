@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -654,10 +655,18 @@ func reachedProvider(err error) bool {
 // authenticate takes the request's snapshot and finds its principal.
 func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compiled, *auth.Principal, *refusal) {
 	// The floor before anything is checked (gateway/guard): a source's
-	// requests, and its failed authentications, bounded.
+	// requests, and its failed authentications, bounded. A source past its
+	// failures (a flood of bad credentials, perhaps behind the same sidecar
+	// as valid callers) still has a golem key looked up, cheaply, and is
+	// refused only if that fails too; an Entra token from it is refused
+	// before its signature is checked.
 	src := h.Guard.Source(r)
 	if no := h.Guard.Admit(src); no != nil {
 		return nil, nil, &refusal{code: contract.LimitSource, msg: no.Msg, retryAfter: no.RetryAfter}
+	}
+	failing := h.Guard.Failing(src)
+	if failing != nil && !sendsGolemKey(r.Header) {
+		return nil, nil, &refusal{code: contract.LimitSource, msg: failing.Msg, retryAfter: failing.RetryAfter}
 	}
 	snap, err := h.Snapshots.Current()
 	switch {
@@ -670,10 +679,57 @@ func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compil
 	}
 	p, no := snap.Auth.AuthenticateGrant(r.Header, g)
 	if no != nil {
+		if !credentialsFault(no) {
+			return nil, nil, &refusal{code: no.Code, msg: no.Msg}
+		}
 		h.Guard.Failed(src)
+		if failing != nil {
+			return nil, nil, &refusal{code: contract.LimitSource, msg: failing.Msg, retryAfter: failing.RetryAfter}
+		}
 		return nil, nil, &refusal{code: no.Code, msg: no.Msg}
 	}
 	return snap, p, nil
+}
+
+// credentialsFault reports whether an authentication's refusal was the
+// credential's fault, and so counts against its source's failures
+// (gateway/guard): a key unknown, revoked, expired or of another
+// installation, a token invalid or expired, none sent. Not the gateway's
+// state (gateway.not_ready: Entra's keys not yet fetched), nor a token
+// refused for golem's copy of Entra's keys (too old, or without the key
+// that signed it: Entra rotated): those are golem's or Entra's, and would
+// lock out every caller of a shared address at once. Nor a valid
+// credential refused by policy (authz.*, the denylist).
+func credentialsFault(no *auth.Refusal) bool {
+	switch no.Code {
+	case contract.AuthKeyUnknown, contract.AuthKeyRevoked, contract.AuthKeyExpired, contract.AuthKeyWrongInstallation,
+		contract.AuthTokenExpired, contract.AuthMissing:
+		return true
+	case contract.AuthTokenInvalid:
+		// lib/entra says these only in its message (its Error has no
+		// field for them): TestEntraKeyTroubleIsNoFailure pins them.
+		return !strings.Contains(no.Msg, entraKeysTooOld) && !strings.Contains(no.Msg, entraUnknownKey)
+	}
+	return false
+}
+
+// lib/entra's refusals of a token for golem's copy of the signing keys.
+const (
+	entraKeysTooOld = "signing keys is too old to trust"
+	entraUnknownKey = "signed by an unknown key"
+)
+
+// sendsGolemKey reports whether the request's credential (x-api-key, or
+// Authorization: Bearer) is a golem key, not an Entra token: a key is a
+// hash lookup, a token a signature check.
+func sendsGolemKey(h http.Header) bool {
+	cred := h.Get("X-Api-Key")
+	if cred == "" {
+		if v := h.Get("Authorization"); len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
+			cred = v[7:]
+		}
+	}
+	return strings.HasPrefix(strings.TrimSpace(cred), "glm_")
 }
 
 // preallocMax is the most readBody allocates on a body's claimed length

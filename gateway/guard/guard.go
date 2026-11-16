@@ -8,6 +8,7 @@ package guard
 
 import (
 	"cmp"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -17,11 +18,14 @@ import (
 )
 
 // Guard keeps two token buckets per source: requests (Rate a second, up to
-// Burst), taken before authentication, and failed authentications
-// (FailRate, FailBurst). A source whose failures have emptied its bucket
-// has every request refused until it refills: it cannot be told apart from
-// its flood, and each failure (a token's signature checked) costs more
-// than a refusal. Safe for concurrent use; a nil Guard admits everything.
+// Burst), taken before authentication (Admit), and failed authentications
+// (FailRate, FailBurst; Failed). A source whose failures have emptied its
+// bucket is Failing until it refills: the request path then refuses each
+// of its requests that fails authentication too, and an Entra token before
+// its signature is checked (each costs more than a refusal), but still
+// serves a valid golem key (a cheap lookup), so a flood from a shared
+// address (a sidecar's) cannot lock out its valid callers. Safe for
+// concurrent use; a nil Guard admits everything.
 type Guard struct {
 	// SourceHeader, if set, names a header the proxy in front of the
 	// gateway sets to the caller's address, its last comma-separated value
@@ -35,17 +39,22 @@ type Guard struct {
 	// FailRate and FailBurst are each source's failed authentications; 0:
 	// no limit.
 	FailRate, FailBurst float64
-	// MaxSources bounds the sources kept (default 65536): past it, new
-	// sources share one pair of buckets, so a spray of addresses is limited
-	// as one.
+	// MaxSources bounds the sources kept (default 65536): past it, while
+	// no kept source can be forgotten, new sources are not limited at all
+	// (logged at most once a minute): one bucket they shared could be
+	// drained by any of them, refusing every other.
 	MaxSources int
 	// Now is the clock (tests set it).
 	Now func() time.Time
+	// Log is where an overflowing source table is reported (default
+	// slog's).
+	Log *slog.Logger
 
 	mu       sync.Mutex
 	sources  map[string]*source
-	overflow source
 	swept    time.Time
+	logged   time.Time // the last overflow logged
+	overflow int       // sources unlimited since
 }
 
 type source struct {
@@ -113,32 +122,51 @@ type Refusal struct {
 	RetryAfter time.Duration
 }
 
-// Admit takes one request of src's, or refuses it.
+// Admit takes one request of src's, or refuses it past the source's
+// request rate. Its failures are Failing's.
 func (g *Guard) Admit(src string) *Refusal {
-	if !g.on() {
+	if g == nil || g.Rate <= 0 {
 		return nil
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
 	s := g.source(src, now)
-	if g.FailRate > 0 {
-		g.fillFail(s, now)
-		if s.fail.tokens < 1 {
-			return &Refusal{Msg: "too many failed authentications from this address: check the key or token; retry later", RetryAfter: s.fail.wait(g.FailRate)}
-		}
+	if s == nil {
+		return nil // past MaxSources: not limited
 	}
-	if g.Rate > 0 {
-		s.req.fill(now, g.Rate, cmp.Or(g.Burst, g.Rate))
-		if s.req.tokens < 1 {
-			return &Refusal{Msg: "too many requests from this address; retry later", RetryAfter: s.req.wait(g.Rate)}
-		}
-		s.req.tokens--
+	s.req.fill(now, g.Rate, cmp.Or(g.Burst, g.Rate))
+	if s.req.tokens < 1 {
+		return &Refusal{Msg: "too many requests from this address; retry later", RetryAfter: s.req.wait(g.Rate)}
+	}
+	s.req.tokens--
+	return nil
+}
+
+// Failing is the refusal of src's requests while it is past its failed
+// authentications (with when to retry), or nil: what the request path
+// tells such a source whose request fails, or whose credential would cost
+// a signature check.
+func (g *Guard) Failing(src string) *Refusal {
+	if g == nil || g.FailRate <= 0 {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	s := g.source(src, now)
+	if s == nil {
+		return nil
+	}
+	g.fillFail(s, now)
+	if s.fail.tokens < 1 {
+		return &Refusal{Msg: "too many failed authentications from this address: check the key or token; retry later", RetryAfter: s.fail.wait(g.FailRate)}
 	}
 	return nil
 }
 
-// Failed records one failed authentication of src's.
+// Failed records one failed authentication of src's: one that was the
+// credential's fault, not the gateway's or Entra's (the caller decides).
 func (g *Guard) Failed(src string) {
 	if g == nil || g.FailRate <= 0 {
 		return
@@ -147,6 +175,9 @@ func (g *Guard) Failed(src string) {
 	defer g.mu.Unlock()
 	now := g.now()
 	s := g.source(src, now)
+	if s == nil {
+		return
+	}
 	g.fillFail(s, now)
 	s.fail.tokens = max(s.fail.tokens-1, 0)
 }
@@ -158,7 +189,8 @@ func (g *Guard) fillFail(s *source, now time.Time) {
 
 // source is src's buckets; at MaxSources, once a second, the sources whose
 // buckets have refilled are forgotten (a forgotten source starts full, as
-// it would be), and if none were, src shares the overflow's.
+// it would be), and if none were, src has none (nil): it is not limited,
+// rather than sharing a bucket any one source could drain for all.
 func (g *Guard) source(src string, now time.Time) *source {
 	if s := g.sources[src]; s != nil {
 		return s
@@ -168,22 +200,34 @@ func (g *Guard) source(src string, now time.Time) *source {
 	}
 	limit := cmp.Or(g.MaxSources, 65536)
 	if len(g.sources) >= limit {
-		if now.Sub(g.swept) < time.Second {
-			return &g.overflow
-		}
-		g.swept = now
-		for k, s := range g.sources {
-			if s.req.full(now, g.Rate, g.Burst) && s.fail.full(now, g.FailRate, g.FailBurst) {
-				delete(g.sources, k)
+		if now.Sub(g.swept) >= time.Second {
+			g.swept = now
+			for k, s := range g.sources {
+				if s.req.full(now, g.Rate, g.Burst) && s.fail.full(now, g.FailRate, g.FailBurst) {
+					delete(g.sources, k)
+				}
 			}
 		}
 		if len(g.sources) >= limit {
-			return &g.overflow
+			g.overflowed(now, limit)
+			return nil
 		}
 	}
 	s := &source{}
 	g.sources[src] = s
 	return s
+}
+
+// overflowed reports a source left unlimited for want of room, at most once
+// a minute.
+func (g *Guard) overflowed(now time.Time, limit int) {
+	g.overflow++
+	if now.Sub(g.logged) < time.Minute {
+		return
+	}
+	cmp.Or(g.Log, slog.Default()).Warn("golem-gateway: the guard's source table is full; new sources are not limited before authentication until kept ones refill",
+		"sources", limit, "unlimited", g.overflow)
+	g.logged, g.overflow = now, 0
 }
 
 // full reports whether b would be full now (a bucket with no rate is).
