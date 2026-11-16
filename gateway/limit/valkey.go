@@ -1,6 +1,7 @@
 package limit
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,8 @@ type Valkey struct {
 	prefix string
 	// TTL is a slot's life without renewal (ADR 0031: 90 seconds).
 	TTL time.Duration
+	// Log is where Connect logs its dials; nil logs to slog.Default().
+	Log *slog.Logger
 
 	afterFn func(time.Duration) <-chan time.Time // Connect's waits (tests)
 
@@ -113,7 +116,7 @@ func (v *Valkey) Connect(ctx context.Context) {
 		c, err := v.dial()
 		if err != nil {
 			wait = min(2*wait, 30*time.Second)
-			slog.Warn("limit: Valkey still unreachable; admitting on local counts, recorded as waivers", "retry_in", wait, "err", err)
+			v.log().Warn("limit: Valkey still unreachable; admitting on local counts, recorded as waivers", "retry_in", wait, "err", err)
 			continue
 		}
 		if ctx.Err() != nil {
@@ -121,9 +124,11 @@ func (v *Valkey) Connect(ctx context.Context) {
 			return
 		}
 		v.cl.Store(&c)
-		slog.Info("limit: connected to Valkey; the limiter recovers at its next renewal")
+		v.log().Info("limit: connected to Valkey; the limiter recovers at its next renewal")
 	}
 }
+
+func (v *Valkey) log() *slog.Logger { return cmp.Or(v.Log, slog.Default()) }
 
 // after is time.After, or a test's.
 func (v *Valkey) after(d time.Duration) <-chan time.Time {

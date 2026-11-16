@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,7 @@ func snap(seq uint64, until time.Time) *snapshot.Snapshot {
 func TestHolder(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	h := &Holder{Now: func() time.Time { return now }}
-	if _, err := h.Current(); err != ErrNotReady {
+	if _, err := h.Current(); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("before any snapshot: %v", err)
 	}
 	if err := h.Apply(snap(5, now.Add(time.Hour)), "h5", fixed{"a/key": "sk"}); err != nil {
@@ -69,7 +70,7 @@ func TestHolder(t *testing.T) {
 	}
 	// Past the lease, nothing new is served.
 	now = now.Add(time.Hour)
-	if _, err := h.Current(); err != ErrExpired {
+	if _, err := h.Current(); !errors.Is(err, ErrExpired) {
 		t.Fatalf("after the lease: %v", err)
 	}
 }
@@ -83,7 +84,7 @@ func TestRaiseFloor(t *testing.T) {
 	if err := h.Apply(snap(3, time.Now().Add(time.Hour)), "x", fixed{"a/key": "k"}); err == nil {
 		t.Fatal("a replay below the trusted floor was applied on an empty gateway")
 	}
-	if _, err := h.Current(); err != ErrNotReady || h.Floor() != 10 {
+	if _, err := h.Current(); !errors.Is(err, ErrNotReady) || h.Floor() != 10 {
 		t.Fatalf("after the refused replay: %v, floor %d", err, h.Floor())
 	}
 	// The checkpoint itself is the current publication: a restarted gateway

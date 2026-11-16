@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"math/rand/v2"
@@ -45,8 +46,12 @@ type LedgerQueue struct {
 	// Failed, rows the exporter did not take after its retries, or the
 	// shutdown's deadline left undelivered; Retried, the exports retried.
 	Dropped, Failed, Retried atomic.Int64
-	backoff                  atomic.Int64 // the first retry's wait (SetBackoff)
+	// Log is where lost rows are logged; nil logs to slog.Default().
+	Log     *slog.Logger
+	backoff atomic.Int64 // the first retry's wait (SetBackoff)
 }
+
+func (q *LedgerQueue) log() *slog.Logger { return cmp.Or(q.Log, slog.Default()) }
 
 // exportTimeout bounds one export while running; a shutdown's deadline
 // bounds its own.
@@ -85,7 +90,7 @@ func (q *LedgerQueue) OnEmit(_ context.Context, r *sdklog.Record) error {
 // drop counts a refused row, and says so at the 1st, 2nd, 4th, 8th...
 func (q *LedgerQueue) drop(why string) {
 	if n := q.Dropped.Add(1); n&(n-1) == 0 {
-		slog.Error("telemetry: "+why+"; ledger rows are being dropped (golem.ledger.dropped)", "dropped", n, "size", cap(q.q))
+		q.log().Error("telemetry: "+why+"; ledger rows are being dropped (golem.ledger.dropped)", "dropped", n, "size", cap(q.q))
 	}
 }
 
@@ -117,7 +122,7 @@ func (q *LedgerQueue) run() {
 			buf = q.drain(ctx, buf, -1)          // no row is queued after the shutdown
 			if n := len(buf) + len(q.q); n > 0 { // the deadline passed
 				q.Failed.Add(int64(n))
-				slog.Error("telemetry: ledger rows undelivered at shutdown (golem.ledger.failed)", "rows", n)
+				q.log().Error("telemetry: ledger rows undelivered at shutdown (golem.ledger.failed)", "rows", n)
 			}
 			return
 		}
@@ -161,7 +166,7 @@ func (q *LedgerQueue) export(ctx context.Context, buf []sdklog.Record) []sdklog.
 		}
 		if attempt == exportAttempts || ctx.Err() != nil {
 			q.Failed.Add(int64(len(buf)))
-			slog.Error("telemetry: ledger rows not delivered (golem.ledger.failed)", "rows", len(buf), "attempts", attempt, "err", err)
+			q.log().Error("telemetry: ledger rows not delivered (golem.ledger.failed)", "rows", len(buf), "attempts", attempt, "err", err)
 			break
 		}
 		q.Retried.Add(1)

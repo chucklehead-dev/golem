@@ -108,12 +108,13 @@ func TestRetryBudget(t *testing.T) {
 	for range 10 {
 		h.Called("a") // capped at the burst
 	}
-	if !h.Retry("a") || !h.Retry("a") || h.Retry("a") {
+	first, second, third := h.Retry("a"), h.Retry("a"), h.Retry("a")
+	if !first || !second || third {
 		t.Fatal("want two retries, then none")
 	}
 	h.Called("a")
 	h.Called("a")
-	if !h.Retry("a") || h.Retry("b") == false {
+	if credited, other := h.Retry("a"), h.Retry("b"); !credited || !other {
 		t.Fatal("two calls credit one retry; another route has its own budget")
 	}
 }

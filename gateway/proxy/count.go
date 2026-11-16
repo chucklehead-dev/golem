@@ -11,9 +11,9 @@ import (
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
-// CountTokensPath is Anthropic's token count, beside its Messages
+// countTokensPath is Anthropic's token count, beside its Messages
 // endpoint: a deployment's URL with this suffix.
-const CountTokensPath = "/count_tokens"
+const countTokensPath = "/count_tokens"
 
 // maxCountResponse bounds a token count's answer: a small JSON object.
 const maxCountResponse = 64 << 10
@@ -67,9 +67,9 @@ func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	up, ub := upstreamRequest(upCtx, r, target, out, h.Dialect.forwardRequest())
 	u := *target.URL
-	u.Path += CountTokensPath
+	u.Path += countTokensPath
 	if u.RawPath != "" {
-		u.RawPath += CountTokensPath
+		u.RawPath += countTokensPath
 	}
 	up.URL = &u
 	resp, err := target.Transport.RoundTrip(up)

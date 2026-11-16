@@ -13,10 +13,10 @@ import (
 	"github.com/chucklehead-dev/golem/lib/period"
 )
 
-// SchemaVersion is golem.spend's contract version (contracts.md): 2,
+// schemaVersion is golem.spend's contract version (contracts.md): 2,
 // rows written at their call's end (ADR 0043), whose ended_at puts them on
 // one side of a snapshot's boundary (ADR 0031).
-const SchemaVersion = 2
+const schemaVersion = 2
 
 // Ledger writes the access-log records that are golem.spend's rows, one per
 // upstream attempt, as OTel log records whose attributes are the table's
@@ -60,7 +60,7 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 	id := c.AttemptID()
 	s, i, f := attribute.String, attribute.Int64, attribute.Float64
 	*dst = [...]attribute.KeyValue{
-		i("schema_version", SchemaVersion),
+		i("schema_version", schemaVersion),
 		s("row_kind", "attempt"),
 		s("request_id", c.RequestID),
 		s("attempt_id", id),

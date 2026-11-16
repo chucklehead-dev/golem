@@ -59,7 +59,7 @@ func (d *streamDecoder) next(src io.Reader, m *message) error {
 	}
 	d.buf = d.buf[:rest]
 	if _, err := io.ReadFull(src, d.buf); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
 		return err

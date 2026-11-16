@@ -50,6 +50,9 @@ type Limiter struct {
 	Location *time.Location
 	// Now is the clock (tests set it).
 	Now func() time.Time
+	// Log is where outages and failed renewals are logged; nil logs to
+	// slog.Default().
+	Log *slog.Logger
 	// Waived counts the calls admitted as waivers (Ticket.Waived): while
 	// the store was unreachable, or in the grace after a recovery.
 	Waived atomic.Int64
@@ -155,6 +158,8 @@ func (t *Ticket) Period() string { return t.period }
 // budget, in a mode that admits one (warn, observe): what enforce would
 // have refused; and the known spend admission read.
 func (t *Ticket) OverBudget() (bool, int64) { return t.over, t.knownSpend }
+
+func (l *Limiter) log() *slog.Logger { return cmp.Or(l.Log, slog.Default()) }
 
 func (l *Limiter) now() time.Time {
 	if l.Now != nil {
@@ -307,7 +312,7 @@ func (l *Limiter) markDown(err error, unreleased ...Slot) {
 	l.keepEnded(unreleased...)
 	l.downGen++
 	if !l.down.Swap(true) {
-		slog.Warn("limit: the site store is unreachable; admitting on local counts, recorded as waivers", "err", err)
+		l.log().Warn("limit: the site store is unreachable; admitting on local counts, recorded as waivers", "err", err)
 		select {
 		case l.downed <- struct{}{}:
 		default: // Run is already told
@@ -598,14 +603,14 @@ func (l *Limiter) Run(ctx context.Context) {
 		switch {
 		case l.Down():
 			if err := l.Recover(ctx); err != nil {
-				slog.Warn("limiter store still unreachable; admitting on local counts, recorded as waivers", "err", err)
+				l.log().Warn("limiter store still unreachable; admitting on local counts, recorded as waivers", "err", err)
 				wait = min(2*wait, renewInterval)
 			} else {
 				wait = renewInterval
 			}
 		default:
 			if err := l.Renew(ctx); err != nil {
-				slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
+				l.log().Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
 			}
 			wait = renewInterval // a failure is told on downed
 		}

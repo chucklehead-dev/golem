@@ -258,7 +258,3 @@ func (u *StreamUsage) Response(body []byte) {
 
 var usageNames = usage.Names{Input: "input_tokens", Output: "output_tokens", // read-only
 	InputDetails: "input_tokens_details", OutputDetails: "output_tokens_details"}
-
-// IsError reports a stream event that is the response's failure before
-// any output: an error event (the commit point refuses it).
-func IsError(event []byte) bool { return string(event) == "error" }

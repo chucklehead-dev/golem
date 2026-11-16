@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
@@ -57,7 +58,7 @@ func TestScan(t *testing.T) {
 	if err := r.Scan([]byte(`{"model":"gpt","store":"no"}`)); err == nil {
 		t.Error("a store that is not a boolean passed as not storing")
 	}
-	if err := r.Scan([]byte(`{"input":"hi"}`)); err != ErrNoModel {
+	if err := r.Scan([]byte(`{"input":"hi"}`)); !errors.Is(err, ErrNoModel) {
 		t.Errorf("%v", err)
 	}
 }

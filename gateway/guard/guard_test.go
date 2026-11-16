@@ -51,7 +51,8 @@ func TestRequestRate(t *testing.T) {
 		t.Fatalf("past the burst: %+v", no)
 	}
 	now = now.Add(time.Second) // two more
-	if g.Admit("a") != nil || g.Admit("a") != nil || g.Admit("a") == nil {
+	first, second, third := g.Admit("a"), g.Admit("a"), g.Admit("a")
+	if first != nil || second != nil || third == nil {
 		t.Fatal("a second refilled other than two")
 	}
 }

@@ -44,7 +44,7 @@ func sums(t *testing.T, r *sdkmetric.ManualReader, by map[string]string) map[str
 		var key []string
 		for _, k := range strings.Split(by[name], ",") {
 			v, _ := attrs.Value(attribute.Key(k))
-			key = append(key, v.Emit())
+			key = append(key, v.String())
 		}
 		if out[name] == nil {
 			out[name] = map[string]int64{}

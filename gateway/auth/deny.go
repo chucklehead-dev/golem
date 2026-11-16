@@ -46,10 +46,8 @@ func ParseDenylist(b []byte) (*Denylist, error) {
 	d := &Denylist{keys: map[[32]byte]bool{}, principals: map[string]bool{}, entra: map[string]bool{}}
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for n := 1; sc.Scan(); n++ {
-		line := strings.TrimSpace(sc.Text())
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = strings.TrimSpace(line[:i])
-		}
+		line, _, _ := strings.Cut(sc.Text(), "#")
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}

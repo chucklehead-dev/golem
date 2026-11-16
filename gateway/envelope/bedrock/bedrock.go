@@ -14,6 +14,7 @@ package bedrock
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -57,10 +58,15 @@ type Transport struct {
 	Credentials aws.CredentialsProvider
 	// Now is the signing clock (tests set it).
 	Now func() time.Time
+	// Log is where a refusal of the gateway's credentials is logged; nil
+	// logs to slog.Default().
+	Log *slog.Logger
 
 	signerOnce sync.Once // RoundTrip is concurrent
 	signer     *v4.Signer
 }
+
+func (t *Transport) log() *slog.Logger { return cmp.Or(t.Log, slog.Default()) }
 
 // MetadataHeader carries a request's metadata to Bedrock's invocation
 // logs (InvokeModel's per-request metadata tagging).
@@ -150,14 +156,14 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	switch {
 	case resp.StatusCode != http.StatusOK:
-		return anthropicError(resp)
+		return anthropicError(resp, t.log())
 	case count:
 		return countAnswer(resp)
 	case stream:
 		resp.Header.Set("Content-Type", "text/event-stream")
 		resp.Header.Del("Content-Length")
 		resp.ContentLength = -1
-		resp.Body = &reframer{src: resp.Body}
+		resp.Body = &reframer{src: resp.Body, log: t.log()}
 	}
 	return resp, nil
 }
@@ -311,13 +317,13 @@ func errorType(exception string) string {
 // anthropicError is a Bedrock error response in Anthropic's shape, its
 // status kept (429 throttling, 503 unavailable, 400 validation): the
 // caller sees the dialect it called.
-func anthropicError(resp *http.Response) (*http.Response, error) {
+func anthropicError(resp *http.Response, log *slog.Logger) (*http.Response, error) {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
 	exception := resp.Header.Get("X-Amzn-Errortype")
 	exception, _, _ = strings.Cut(exception, ":")
 	if credentialsRefused(exception) || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return withJSON(resp, refusedJSON(errorType(exception), exception, resp.StatusCode, raw)), nil
+		return withJSON(resp, refusedJSON(log, errorType(exception), exception, resp.StatusCode, raw)), nil
 	}
 	return withJSON(resp, errorJSON(errorType(exception), bedrockMessage(raw))), nil
 }
@@ -340,8 +346,8 @@ const refusedMessage = "the gateway's credentials for this provider were refused
 
 // refusedJSON is an Anthropic error carrying golem's message for a
 // credentials refusal, Bedrock's text logged for the platform team.
-func refusedJSON(typ, exception string, status int, raw []byte) []byte {
-	slog.Error("bedrock: the provider refused the gateway's credentials; check the gateway's role and its bedrock:InvokeModel permissions (operations.md)",
+func refusedJSON(log *slog.Logger, typ, exception string, status int, raw []byte) []byte {
+	log.Error("bedrock: the provider refused the gateway's credentials; check the gateway's role and its bedrock:InvokeModel permissions (operations.md)",
 		"exception", exception, "status", status, "message", bedrockMessage(raw))
 	b := []byte(`{"type":"error","error":{"type":`)
 	b, _ = jsontext.AppendQuote(b, typ)

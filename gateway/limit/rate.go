@@ -3,7 +3,6 @@ package limit
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"math"
 	"time"
 
@@ -146,5 +145,5 @@ func (l *Limiter) failedOpen(err error) {
 		return
 	}
 	l.openLogged.Store(now.UnixNano())
-	slog.Warn("limit: the site store is unreachable; admitting without rate limit checks (they fail open)", "err", err)
+	l.log().Warn("limit: the site store is unreachable; admitting without rate limit checks (they fail open)", "err", err)
 }
