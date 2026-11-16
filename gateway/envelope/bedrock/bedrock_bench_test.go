@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 )
 
 // BenchmarkReframe is a 200-delta Bedrock stream reframed as Messages SSE,
@@ -26,7 +24,7 @@ func BenchmarkReframe(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		br.Reset(stream)
-		f := &reframer{src: io.NopCloser(&br), dec: eventstream.NewDecoder()}
+		f := &reframer{src: io.NopCloser(&br)}
 		for {
 			if _, err := f.Read(buf); err != nil {
 				if err != io.EOF {

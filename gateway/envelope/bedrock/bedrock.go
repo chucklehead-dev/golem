@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 
 	"github.com/chucklehead-dev/golem/gateway/envelope"
@@ -158,7 +157,7 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		resp.Header.Set("Content-Type", "text/event-stream")
 		resp.Header.Del("Content-Length")
 		resp.ContentLength = -1
-		resp.Body = &reframer{src: resp.Body, dec: eventstream.NewDecoder()}
+		resp.Body = &reframer{src: resp.Body}
 	}
 	return resp, nil
 }
@@ -454,97 +453,4 @@ func errorJSON(typ, msg string) []byte {
 	b = append(b, `,"message":`...)
 	b, _ = jsontext.AppendQuote(b, "bedrock: "+msg)
 	return append(b, "}}"...)
-}
-
-// reframer reads an AWS event stream and yields the Messages SSE it
-// carries: each chunk's base64 bytes, an Anthropic event, as
-// `event: <type>`, `data: <json>`; an exception as the dialect's error
-// event, then the end. A message whose CRC fails, or a stream cut, is a
-// read error: the request path's cut.
-type reframer struct {
-	src  io.ReadCloser
-	dec  *eventstream.Decoder
-	buf  []byte // payload buffer, reused
-	out  []byte // SSE not yet read
-	done bool
-}
-
-func (f *reframer) Read(p []byte) (int, error) {
-	for len(f.out) == 0 {
-		if f.done {
-			return 0, io.EOF
-		}
-		if err := f.next(); err != nil {
-			return 0, err
-		}
-	}
-	n := copy(p, f.out)
-	f.out = f.out[n:]
-	return n, nil
-}
-
-func (f *reframer) Close() error { return f.src.Close() }
-
-// next decodes one event-stream message into f.out.
-func (f *reframer) next() error {
-	msg, err := f.dec.Decode(f.src, f.buf[:0])
-	if err == io.EOF {
-		f.done = true
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("bedrock: the event stream: %w", err)
-	}
-	f.buf = msg.Payload[:0]
-	header := func(name string) string {
-		if v := msg.Headers.Get(name); v != nil {
-			return v.String()
-		}
-		return ""
-	}
-	switch header(":message-type") {
-	case "event":
-		if header(":event-type") != "chunk" {
-			return nil // an event that carries no Messages event
-		}
-		ev, err := chunkEvent(msg.Payload)
-		if err != nil {
-			return err
-		}
-		typ := eventType(ev)
-		f.out = append(append(append(append(append(f.out[:0], "event: "...), typ...), "\ndata: "...), ev...), "\n\n"...)
-	case "exception", "error":
-		name := header(":exception-type")
-		if name == "" {
-			name = header(":error-code")
-		}
-		ev := errorJSON(errorType(name), bedrockMessage(msg.Payload))
-		if credentialsRefused(name) {
-			ev = refusedJSON(errorType(name), name, 0, msg.Payload)
-		}
-		f.out = append(append(append(f.out[:0], "event: error\ndata: "...), ev...), "\n\n"...)
-		f.done = true
-	}
-	return nil
-}
-
-// chunkEvent is a chunk's Anthropic event: its "bytes", base64.
-func chunkEvent(payload []byte) ([]byte, error) {
-	raw, ok := member(payload, "bytes")
-	if !ok {
-		return nil, errors.New("bedrock: a chunk with no bytes")
-	}
-	out, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil, fmt.Errorf("bedrock: a chunk's bytes: %w", err)
-	}
-	return out, nil
-}
-
-// eventType is an Anthropic event's "type" member (its SSE event name).
-func eventType(ev []byte) string {
-	if t, ok := member(ev, "type"); ok && t != "" {
-		return t
-	}
-	return "message"
 }

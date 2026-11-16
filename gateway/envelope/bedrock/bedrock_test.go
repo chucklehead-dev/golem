@@ -347,7 +347,7 @@ func TestCredentialsRefused(t *testing.T) {
 	m.Payload = []byte(`{"message":"` + leak + `"}`)
 	var buf bytes.Buffer
 	eventstream.NewEncoder().Encode(&buf, m)
-	out, err := io.ReadAll(&reframer{src: io.NopCloser(&buf), dec: eventstream.NewDecoder()})
+	out, err := io.ReadAll(&reframer{src: io.NopCloser(&buf)})
 	if err != nil || !strings.Contains(string(out), refusedMessage) || strings.Contains(string(out), "123456789012") {
 		t.Fatalf("a stream's exception: %v\n%s", err, out)
 	}
