@@ -172,7 +172,9 @@ module exposure {
       graceEnds(gateway),
     }
   }
+  /// The in-flight limits bound the calls the provider is running, whatever Valkey counts.
   val limitsHonoured = not(overAdmit)
+  /// A scope's billed spend stays within its budget plus lag, SCOPE_LIMIT × WORST, uncounted spend and waivers.
   val withinBound =
     totalBilled <= BUDGET + lag + SCOPE_LIMIT * WORST + uncounted + waived.size() * WORST
 

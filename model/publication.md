@@ -581,6 +581,7 @@ this model).
 one lease. This is the property the whole design exists for.
 
 ```quint publication.qnt +=
+  /// No gateway serves a key at or after its revocation time plus one lease.
   val revocationBounded = not(badServe)
 ```
 
@@ -588,6 +589,7 @@ one lease. This is the property the whole design exists for.
 snapshot whose authorization has ended, connected or not.
 
 ```quint publication.qnt +=
+  /// No gateway serves from a snapshot whose authorization has ended.
   val noExpiredServe = not(expiredServe)
 ```
 
@@ -595,6 +597,7 @@ snapshot whose authorization has ended, connected or not.
 moves to a publication built from older state than the one it holds.
 
 ```quint publication.qnt +=
+  /// A gateway that has not restarted never moves to a publication of older state.
   val noRollback = not(rollback)
 ```
 
@@ -603,6 +606,7 @@ with an empty disk never accepts a publication older than the authoritative
 record was at its restart.
 
 ```quint publication.qnt +=
+  /// A gateway restarted empty never accepts a publication older than the record at its restart.
   val noRollbackBelowCheckpoint = not(belowCheckpoint)
 ```
 
@@ -610,6 +614,7 @@ record was at its restart.
 carries older state than the one before it.
 
 ```quint publication.qnt +=
+  /// A publication with a higher sequence never carries older state than the one before it.
   val publicationsOrdered = not(outOfOrder)
 ```
 
@@ -617,6 +622,7 @@ carries older state than the one before it.
 revoked.
 
 ```quint publication.qnt +=
+  /// Every key ever revoked is still revoked, across restores.
   val revocationsSurviveRestore = everRevoked.subseteq(revoked)
 ```
 

@@ -364,6 +364,7 @@ bookkeeping: a call the provider is still running counts, whatever Valkey
 thinks.
 
 ```quint exposure.qnt +=
+  /// The in-flight limits bound the calls the provider is running, whatever Valkey counts.
   val limitsHonoured = not(overAdmit)
 ```
 
@@ -376,6 +377,7 @@ known spend lacked at most `lag` of what golem had observed. To that add
 what golem never heard of and what was admitted under waiver.
 
 ```quint exposure.qnt +=
+  /// A scope's billed spend stays within its budget plus lag, SCOPE_LIMIT × WORST, uncounted spend and waivers.
   val withinBound =
     totalBilled <= BUDGET + lag + SCOPE_LIMIT * WORST + uncounted + waived.size() * WORST
 

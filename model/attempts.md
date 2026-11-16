@@ -364,12 +364,11 @@ most the worst case; a failed call's slot is then free.
 ```quint attempts.qnt +=
   // A caller gets at most one answer.
   val oneCommit = CALLS.forall(c => commits.get(c) <= 1)
-  // Every charge reaches the ledger, once: the ledger's deduplicated sum
-  // is the counter's.
+  // Every charge reaches the ledger once: its deduplicated sum is the counter's.
   val ledgerMatches = ledgerSpend == known
-  // What the provider billed is charged (an uncertain attempt's worst
-  // case covers its tail).
+  // What the provider billed is charged; an uncertain attempt's worst case covers its tail.
   val covered = billed <= known
+  // Billed spend stays within the budget plus LIMIT × WORST, however calls are retried.
   // The accounting model's bound, for calls of several attempts. A call is
   // admitted below the budget at its first attempt and bills at most once
   // (refused and unreached attempts are free, an uncertain one ends it),
@@ -381,8 +380,11 @@ most the worst case; a failed call's slot is then free.
   val withinBound = billed <= BUDGET + LIMIT * WORST
   // The provider's work for the principal stays within its slots.
   val workWithinLimit = work <= LIMIT
+  // No deployment has more attempts in flight than its ceiling (QUOTA).
   val quotaHonoured = DEPLOYMENTS.forall(d => load.get(d) <= QUOTA)
+  // No call makes more than MAX_ATTEMPTS attempts.
   val attemptsBounded = CALLS.forall(c => attempts.get(c) <= MAX_ATTEMPTS)
+  // The route's retries stay within its retry budget (POOL_RETRIES).
   val retriesCapped = retries <= POOL_RETRIES
   // An ejected deployment has at most one probe in flight.
   val probeOnly = DEPLOYMENTS.forall(d => probes.get(d) <= 1)

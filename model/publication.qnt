@@ -256,11 +256,17 @@ module publication {
       tick,
     }
   }
+  /// No gateway serves a key at or after its revocation time plus one lease.
   val revocationBounded = not(badServe)
+  /// No gateway serves from a snapshot whose authorization has ended.
   val noExpiredServe = not(expiredServe)
+  /// A gateway that has not restarted never moves to a publication of older state.
   val noRollback = not(rollback)
+  /// A gateway restarted empty never accepts a publication older than the record at its restart.
   val noRollbackBelowCheckpoint = not(belowCheckpoint)
+  /// A publication with a higher sequence never carries older state than the one before it.
   val publicationsOrdered = not(outOfOrder)
+  /// Every key ever revoked is still revoked, across restores.
   val revocationsSurviveRestore = everRevoked.subseteq(revoked)
   val safe = and {
     revocationBounded,
