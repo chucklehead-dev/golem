@@ -39,25 +39,25 @@ func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 	var grant auth.Grant
 	p, no := h.prepare(w, r, ex, in, &grant)
 	if no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	rt := p.rt
 	if no := inputCeiling(p.principal, int64(len(p.body))); no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	if no := incapable(rt, p.betas); no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	if no := h.takeRate(context.WithoutCancel(ctx), p.principal); no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	target, lease, retryAt, own := pick(h.health(), rt, make([]bool, len(rt.Pool)), p.principal.ID, p.betas)
 	if target == nil {
-		h.fail(ctx, w, noDeployment(retryAt, own))
+		h.fail(ctx, w, reqIDs, &p, noDeployment(retryAt, own))
 		return
 	}
 	defer lease.Release() // a count says nothing of the deployment's health

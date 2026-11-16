@@ -165,7 +165,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		no = h.policy(ex, p.principal, p.req, int64(len(p.body)))
 	}
 	if no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	body, req, rt := p.body, p.req, p.rt
@@ -183,18 +183,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only deployments that accept the request's betas are its pool here
 	// (ADR 0028): none, and it is refused before anything is counted.
 	if no := incapable(rt, c.betas); no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	// The call takes a request from its rate limits once (PRD §5.5).
 	if no := h.takeRate(c.bg, c.principal); no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	var retryAt time.Time
 	var own bool
 	if c.target, c.lease, retryAt, own = c.next(); c.target == nil {
-		h.fail(ctx, w, noDeployment(retryAt, own))
+		h.fail(ctx, w, reqIDs, &p, noDeployment(retryAt, own))
 		return
 	}
 	defer func() { c.lease.Release() }() // the last attempt's: when the call is over
@@ -205,13 +205,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	worst, ok := price.Worst(c.requestBytes, req.maxTokens, req.n, p.snap.Prices[c.target.Model])
 	if !ok {
-		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: "the request's token count is too large to price safely: lower max_tokens or n"})
+		h.fail(ctx, w, reqIDs, &p, &refusal{code: contract.RequestInvalid, msg: "the request's token count is too large to price safely: lower max_tokens or n"})
 		return
 	}
 	ticket, no := h.admit(ctx, c.principal, admission.Call{ID: reqIDs, Alias: rt.Alias, Deployment: c.target.Key(),
 		Model: c.target.Model, Started: started, Deadline: deadline})
 	if no != nil {
-		h.fail(ctx, w, no)
+		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
 	// Only an admitted call earns its route retries: refused ones would
@@ -1055,13 +1055,21 @@ func (e errUpstreamCut) Error() string {
 }
 func (e errUpstreamCut) Unwrap() error { return e.err }
 
-// fail refuses a request: the refusal recorded, and written in the
-// caller's dialect.
-func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, no *refusal) {
+// fail refuses a request: the refusal recorded (with as much of p as the
+// request got to: its principal, its route), and written in the caller's
+// dialect.
+func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, reqID string, p *prepared, no *refusal) {
 	if no.callerGone {
 		return // no one to tell, nothing refused
 	}
-	h.Telemetry.Refused(ctx, no.code)
+	r := telemetry.Refusal{Code: no.code, Message: no.msg, RequestID: reqID}
+	if pr := p.principal; pr != nil {
+		r.Principal, r.Scope, r.Key = pr.ID, pr.Scope, pr.Key
+	}
+	if p.rt != nil {
+		r.Alias = p.rt.Alias
+	}
+	h.Telemetry.Refused(ctx, r)
 	refuse(w, h.Dialect, no.code, no.msg, no.retryAfter)
 }
 

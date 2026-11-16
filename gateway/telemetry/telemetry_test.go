@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -103,11 +104,27 @@ func TestEnded(t *testing.T) {
 	}
 }
 
+// TestRefused: a refusal is on its span (code, message, who), counted,
+// and logged, a code and scope at most once a second, the next line
+// saying how many it left out; it writes no ledger row.
 func TestRefused(t *testing.T) {
 	r := newRig(t)
+	var logs bytes.Buffer
+	r.t.refusalLog.log = slog.New(slog.NewJSONHandler(&logs, nil))
+	no := Refusal{Code: contract.BudgetPoolExhausted, Message: "the scope's budget is spent", RequestID: "req-1",
+		Principal: "alice", Scope: "team-a", Key: "glm_live_abc", Alias: "fast"}
 	ctx, span := r.t.Start(t.Context(), "openai.chat")
-	r.t.Refused(ctx, contract.BudgetPoolExhausted)
+	r.t.Refused(ctx, no)
 	span.End()
+	got := map[attribute.Key]attribute.Value{}
+	for _, kv := range r.spans.Ended()[0].Attributes() {
+		got[kv.Key] = kv.Value
+	}
+	if got["golem.error.code"].AsString() != "budget.pool_exhausted" || got["golem.principal"].AsString() != "alice" ||
+		got["golem.scope"].AsString() != "team-a" || got["golem.request_id"].AsString() != "req-1" ||
+		got["golem.error.message"].AsString() != no.Message || got[attrRequestModel].AsString() != "fast" {
+		t.Fatalf("span attributes %v", got)
+	}
 	var rm metricdata.ResourceMetrics
 	r.reads.Collect(context.Background(), &rm)
 	found := false
@@ -118,6 +135,22 @@ func TestRefused(t *testing.T) {
 	}
 	if !found || len(r.ledgerRows(t)) != 0 {
 		t.Fatal("a refusal is counted and writes no ledger row")
+	}
+
+	// A storm: one line, then the rest left out until a second has passed.
+	for range 5 {
+		r.t.Refused(t.Context(), no)
+	}
+	other := no
+	other.Scope = "team-b"
+	r.t.Refused(t.Context(), other) // another scope is not hidden by the storm
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"scope":"team-a"`) || !strings.Contains(lines[0], `"code":"budget.pool_exhausted"`) ||
+		!strings.Contains(lines[0], `"request_id":"req-1"`) || !strings.Contains(lines[1], `"scope":"team-b"`) {
+		t.Fatalf("log lines %q", lines)
+	}
+	if left, ok := r.t.refusalLog.take("budget.pool_exhausted", "team-a", time.Now().Add(2*time.Second)); !ok || left != 5 {
+		t.Fatalf("after a second: logged %v, %d left out; want true, 5", ok, left)
 	}
 }
 

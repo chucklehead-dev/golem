@@ -9,9 +9,11 @@
 package telemetry
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha1"
 	"errors"
+	"log/slog"
 	"slices"
 	"strconv"
 	"sync"
@@ -26,7 +28,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
-	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
 // GenAI semantic-convention names (the OTel Go release golem uses does not
@@ -204,6 +205,7 @@ type Telemetry struct {
 	attempts metric.Int64Counter
 	refusals metric.Int64Counter
 	Ledger   *Ledger
+	refusalLog
 
 	// Attribute sets are built once per route and per refusal code, not per
 	// request: building and merging them was a quarter of a call's
@@ -286,6 +288,8 @@ type Providers struct {
 	Tracer trace.TracerProvider
 	Meter  metric.MeterProvider
 	Logger otellog.LoggerProvider // the ledger's rows; nil: the global one
+	// Log is where refusals are logged (Refused); nil: slog.Default().
+	Log *slog.Logger
 	// Ledger, if set, is the rows' queue: its losses are reported as the
 	// golem.ledger.dropped and golem.ledger.failed counters.
 	Ledger *LedgerQueue
@@ -334,7 +338,8 @@ func New(p Providers, site, pool string) (*Telemetry, error) {
 		lp = global.GetLoggerProvider()
 	}
 	return &Telemetry{tracer: p.Tracer.Tracer("golem/gateway"), tokens: tokens, duration: duration, ttft: ttft,
-		calls: calls, attempts: attempts, refusals: refusals, Ledger: NewLedger(lp.Logger("golem/ledger"), site, pool)}, nil
+		calls: calls, attempts: attempts, refusals: refusals, Ledger: NewLedger(lp.Logger("golem/ledger"), site, pool),
+		refusalLog: refusalLog{log: cmp.Or(p.Log, slog.Default())}}, nil
 }
 
 // Start begins a request's span; the request path ends it with Ended or
@@ -406,19 +411,4 @@ func (t *Telemetry) Retried(ctx context.Context, c Call) {
 		attribute.Int("http.response.status_code", c.Status)))
 	t.attempted(ctx, t.routeSets(&c), &c)
 	t.Ledger.Ended(ctx, c)
-}
-
-// Refused records a request golem refused (no provider call, no ledger row).
-func (t *Telemetry) Refused(ctx context.Context, code contract.Code) {
-	if t == nil {
-		return
-	}
-	span := trace.SpanFromContext(ctx)
-	span.SetAttributes(attribute.String("golem.error.origin", string(code.Origin)), attribute.String("golem.error.code", code.Name),
-		attribute.Int("http.response.status_code", code.Status))
-	opts := cached(&t.refused, code.Name, func() []metric.AddOption {
-		return []metric.AddOption{metric.WithAttributeSet(attribute.NewSet(
-			attribute.String("golem.error.code", code.Name), attribute.String("golem.error.origin", string(code.Origin))))}
-	})
-	t.refusals.Add(ctx, 1, opts...) // a 429 storm costs no allocation here
 }

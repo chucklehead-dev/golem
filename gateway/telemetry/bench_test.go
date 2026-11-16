@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 // meter, with the ledger's rows written to a discarding logger: its
 // allocations are the metrics' and the row's, none per label set.
 func BenchmarkCall(b *testing.B) {
-	p := Providers{Tracer: tracenoop.NewTracerProvider(), Meter: sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader())),
+	p := Providers{Log: slog.New(slog.DiscardHandler), Tracer: tracenoop.NewTracerProvider(), Meter: sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader())),
 		Logger: Stdout(discardWriter{}).Logger}
 	tel, err := New(p, "us-east-2", "internal")
 	if err != nil {
@@ -29,7 +30,7 @@ func BenchmarkCall(b *testing.B) {
 	for b.Loop() {
 		tel.Retried(ctx, retried)
 		tel.Ended(ctx, ended)
-		tel.Refused(ctx, contract.BudgetPoolExhausted)
+		tel.Refused(ctx, Refusal{Code: contract.BudgetPoolExhausted, RequestID: "r", Principal: "alice", Scope: "team-a"})
 	}
 }
 

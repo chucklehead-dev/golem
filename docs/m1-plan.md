@@ -159,9 +159,8 @@ Done when:
 - the first refusal in enforce is seen: the `golem.refusals` metric's
   count for `golem.error.code` `budget.pool_exhausted`, and the refused
   request itself, found by its request ID (the 402's `golem-request-id`)
-  in the gateway's refusal record: today its span, which carries
-  `golem.error.code` (refusals write no ledger row, and the gateway logs
-  no refusal line).
+  in the gateway's `refused` log line or its span (refusals write no
+  ledger row).
 
 ## Not building in M1
 
