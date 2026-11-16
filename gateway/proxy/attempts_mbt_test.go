@@ -111,8 +111,10 @@ func (p *mbtProvider) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 }
 
+// attemptsDriver is the gateway under one trace: connect.Bind maps each of
+// the model's actions to one of its methods, the steps' picks to their
+// parameters by name, and its state to attemptsState.
 type attemptsDriver struct {
-	t       testing.TB
 	ceiling int      // each deployment's MaxInFlight: the instance's QUOTA
 	retries int      // the route's retry budget: its POOL_RETRIES
 	deps    []string // its ORDER
@@ -129,125 +131,146 @@ const wait = 5 * time.Second
 
 func (d *attemptsDriver) call(name string) *mbtCall { return d.calls[name] }
 
-func (d *attemptsDriver) Step(s *connect.Step) error {
-	c := func() *mbtCall { return d.calls[connect.MustPick[string](s, "c")] }
-	return connect.Switch{
-		"init": func(*connect.Step) error {
-			d.health = &route.Health{EjectAfter: 1, Ejection: time.Nanosecond, RetryBurst: float64(d.retries), RetryRatio: 1e-9,
-				Now: (&tick{at: time.Unix(0, 0)}).now}
-			d.rt = &route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(), MaxAttempts: 2}
-			for _, dep := range d.deps {
-				d.rt.Pool = append(d.rt.Pool, &route.Target{Backend: "b", Deployment: dep, ID: dep, Model: "m", URL: upstreamURL,
-					MaxInFlight: d.ceiling, Transport: &mbtProvider{dep: dep, calls: d.call}})
+// bindAttempts is the binding for an instance: its deployments' ceiling,
+// the route's retry budget, its deployments and calls.
+func bindAttempts(ceiling, retries int, deps, names []string) *connect.Binding[*attemptsDriver] {
+	return connect.Bind(func(testing.TB) *attemptsDriver {
+		d := &attemptsDriver{ceiling: ceiling, retries: retries, deps: deps, names: names}
+		d.init()
+		return d
+	}).
+		Action("start", (*attemptsDriver).Start, "c").
+		// The deployment an attempt takes is the gateway's choice, which the
+		// model picks: Observes compares the one it reached with d.
+		Action("attempt", (*attemptsDriver).Attempt, "c").Observes("attempt", "d").
+		Action("failed", (*attemptsDriver).Failed, "c", "outcome").
+		Action("commit", (*attemptsDriver).Commit, "c").
+		Action("end", (*attemptsDriver).End, "c", "cut", "cost").
+		Action("giveUp", (*attemptsDriver).GiveUp, "c").
+		Skip("tailEnds"). // the slot's: the limiter's, not here
+		State(func(d *attemptsDriver) any { return d.state() })
+}
+
+func (d *attemptsDriver) init() {
+	d.health = &route.Health{EjectAfter: 1, Ejection: time.Nanosecond, RetryBurst: float64(d.retries), RetryRatio: 1e-9,
+		Now: (&tick{at: time.Unix(0, 0)}).now}
+	d.rt = &route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(), MaxAttempts: 2}
+	for _, dep := range d.deps {
+		d.rt.Pool = append(d.rt.Pool, &route.Target{Backend: "b", Deployment: dep, ID: dep, Model: "m", URL: upstreamURL,
+			MaxInFlight: d.ceiling, Transport: &mbtProvider{dep: dep, calls: d.call}})
+	}
+	d.calls = map[string]*mbtCall{}
+	for _, name := range d.names {
+		d.calls[name] = &mbtCall{paused: make(chan chan struct{}, 1), arrived: make(chan *arrival, 1),
+			done: make(chan struct{}), phase: "idle"}
+	}
+	d.h = &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Health: d.health,
+		Snapshots: gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(d.rt)}),
+		beforePick: func(r *http.Request) {
+			release := make(chan struct{})
+			d.calls[r.Header.Get("X-Mbt-Call")].paused <- release
+			<-release
+		}}
+}
+
+// Start sends call c, which runs until it pauses before its first pick.
+func (d *attemptsDriver) Start(c string) error {
+	m := d.calls[c]
+	m.w = &mbtWriter{h: http.Header{}, headers: make(chan struct{})}
+	n, _ := strconv.Atoi(c[1:])
+	req := httptest.NewRequest("POST", "/v1/messages",
+		bytes.NewReader(fmt.Appendf(nil, `{"model":"claude","max_tokens":%d,"stream":true,"messages":[]}`, 100+n)))
+	req.Header.Set("X-Mbt-Call", c)
+	go func() {
+		defer close(m.done)
+		defer func() { recover() }() // a cut response's abort
+		d.h.ServeHTTP(m.w, req)
+	}()
+	return d.settle(m)
+}
+
+// Attempt lets call c pick, and reports the deployment its attempt
+// reached.
+func (d *attemptsDriver) Attempt(c string) (string, error) {
+	m := d.calls[c]
+	if m.release == nil {
+		return "", fmt.Errorf("the gateway is not about to pick a deployment for this call (it is %s)", m.phase)
+	}
+	close(m.release)
+	m.release = nil
+	select {
+	case a := <-m.arrived:
+		m.pending, m.phase = a, "trying"
+		m.attempts++
+		return a.dep, nil
+	case <-m.done:
+		m.phase = "failed"
+		return "", fmt.Errorf("the gateway ended the call (status %d) where the model attempts", m.w.status)
+	case <-time.After(wait):
+		return "", errors.New("no attempt reached a provider")
+	}
+}
+
+// Failed answers call c's attempt as outcome says: unreached, refused (a
+// 503, or a 200 whose first event is an error, alternately) or uncertain.
+func (d *attemptsDriver) Failed(c, outcome string) error {
+	m := d.calls[c]
+	answer := map[string]func() (*http.Response, error){
+		"unreached": func() (*http.Response, error) { return nil, dialFailed },
+		"refused": func() (*http.Response, error) {
+			if m.attempts%2 == 0 {
+				return streamOf([][]byte{overloaded}), nil
 			}
-			d.calls = map[string]*mbtCall{}
-			for _, name := range d.names {
-				d.calls[name] = &mbtCall{paused: make(chan chan struct{}, 1), arrived: make(chan *arrival, 1),
-					done: make(chan struct{}), phase: "idle"}
-			}
-			d.h = &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Health: d.health,
-				Snapshots: gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(d.rt)}),
-				beforePick: func(r *http.Request) {
-					release := make(chan struct{})
-					d.calls[r.Header.Get("X-Mbt-Call")].paused <- release
-					<-release
-				}}
-			return nil
+			return statusOf(503, ""), nil
 		},
-		"start": func(s *connect.Step) error {
-			name := connect.MustPick[string](s, "c")
-			m := d.calls[name]
-			m.w = &mbtWriter{h: http.Header{}, headers: make(chan struct{})}
-			n, _ := strconv.Atoi(name[1:])
-			req := httptest.NewRequest("POST", "/v1/messages",
-				bytes.NewReader(fmt.Appendf(nil, `{"model":"claude","max_tokens":%d,"stream":true,"messages":[]}`, 100+n)))
-			req.Header.Set("X-Mbt-Call", name)
-			go func() {
-				defer close(m.done)
-				defer func() { recover() }() // a cut response's abort
-				d.h.ServeHTTP(m.w, req)
-			}()
-			return d.settle(m)
-		},
-		"attempt": func(s *connect.Step) error {
-			m, dep := c(), connect.MustPick[string](s, "d")
-			if m.release == nil {
-				return fmt.Errorf("the gateway is not about to pick a deployment for this call (it is %s)", m.phase)
-			}
-			close(m.release)
-			m.release = nil
-			select {
-			case a := <-m.arrived:
-				if a.dep != dep {
-					return fmt.Errorf("the gateway sent the attempt to %s; the model's choice is %s", a.dep, dep)
-				}
-				m.pending, m.phase = a, "trying"
-				m.attempts++
-				return nil
-			case <-m.done:
-				m.phase = "failed"
-				return fmt.Errorf("the gateway ended the call (status %d) where the model attempts %s", m.w.status, dep)
-			case <-time.After(wait):
-				return errors.New("no attempt reached a provider")
-			}
-		},
-		"failed": func(s *connect.Step) error {
-			m := c()
-			answer := map[string]func() (*http.Response, error){
-				"unreached": func() (*http.Response, error) { return nil, dialFailed },
-				// A refusal both ways the gateway meets one: a 503, and a
-				// 200 whose first event is an error (alternately).
-				"refused": func() (*http.Response, error) {
-					if m.attempts%2 == 0 {
-						return streamOf([][]byte{overloaded}), nil
-					}
-					return statusOf(503, ""), nil
-				},
-				"uncertain": func() (*http.Response, error) { return nil, errors.New("read: connection reset by peer") },
-			}[connect.MustPick[string](s, "outcome")]
-			m.pending.reply <- answer
-			m.pending = nil
-			return d.settle(m)
-		},
-		"commit": func(*connect.Step) error {
-			m := c()
-			pr, pw := io.Pipe()
-			m.stream = pw
-			m.pending.reply <- func() (*http.Response, error) {
-				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: pr}, nil
-			}
-			m.pending = nil
-			go pw.Write(anthropicStream(0)[0]) // message_start: the first event, which commits it
-			select {
-			case <-m.w.headers:
-				m.phase = "streaming"
-				return nil
-			case <-time.After(wait):
-				return errors.New("the stream did not commit at its first event")
-			}
-		},
-		"end": func(s *connect.Step) error {
-			m := c()
-			if connect.MustPick[bool](s, "cut") {
-				m.stream.CloseWithError(errors.New("connection reset by peer"))
-			} else {
-				fmt.Fprintf(m.stream, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":%d}}\n\n", connect.MustPick[int](s, "cost"))
-				m.stream.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
-				m.stream.Close()
-			}
-			return d.settle(m)
-		},
-		"giveUp": func(*connect.Step) error {
-			m := c()
-			if m.release == nil {
-				return fmt.Errorf("the gateway is not about to pick a deployment for this call (it is %s)", m.phase)
-			}
-			close(m.release)
-			m.release = nil
-			return d.settle(m)
-		},
-		"tailEnds": func(*connect.Step) error { return nil }, // the slot's: the limiter's, not here
-	}.Step(s)
+		"uncertain": func() (*http.Response, error) { return nil, errors.New("read: connection reset by peer") },
+	}[outcome]
+	m.pending.reply <- answer
+	m.pending = nil
+	return d.settle(m)
+}
+
+// Commit answers call c's attempt with a stream and its first event.
+func (d *attemptsDriver) Commit(c string) error {
+	m := d.calls[c]
+	pr, pw := io.Pipe()
+	m.stream = pw
+	m.pending.reply <- func() (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: pr}, nil
+	}
+	m.pending = nil
+	go pw.Write(anthropicStream(0)[0]) // message_start: the first event, which commits it
+	select {
+	case <-m.w.headers:
+		m.phase = "streaming"
+		return nil
+	case <-time.After(wait):
+		return errors.New("the stream did not commit at its first event")
+	}
+}
+
+// End ends call c's stream: cut, or finished at cost output tokens.
+func (d *attemptsDriver) End(c string, cut bool, cost int) error {
+	m := d.calls[c]
+	if cut {
+		m.stream.CloseWithError(errors.New("connection reset by peer"))
+	} else {
+		fmt.Fprintf(m.stream, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":%d}}\n\n", cost)
+		m.stream.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		m.stream.Close()
+	}
+	return d.settle(m)
+}
+
+// GiveUp lets call c pick when the model has it give up: it must end.
+func (d *attemptsDriver) GiveUp(c string) error {
+	m := d.calls[c]
+	if m.release == nil {
+		return fmt.Errorf("the gateway is not about to pick a deployment for this call (it is %s)", m.phase)
+	}
+	close(m.release)
+	m.release = nil
+	return d.settle(m)
 }
 
 // settle waits for call m to reach its next point after an answer: paused
@@ -278,7 +301,7 @@ type attemptsState struct {
 	Retries  int
 }
 
-func (d *attemptsDriver) State() (any, error) {
+func (d *attemptsDriver) state() attemptsState {
 	st := attemptsState{Phase: map[string]string{}, Attempts: map[string]int{}, Commits: map[string]int{},
 		Load: map[string]int{}, Ejected: map[string]bool{}, Probes: map[string]int{}}
 	for name, m := range d.calls {
@@ -299,7 +322,7 @@ func (d *attemptsDriver) State() (any, error) {
 		}
 	}
 	st.Retries = int(float64(d.retries) - d.health.Retries("claude") + 0.5)
-	return st, nil
+	return st
 }
 
 // tick is a clock that moves a second each time it is read: an ejection
@@ -326,17 +349,11 @@ func TestAttemptsModel(t *testing.T) {
 	t.Run("ceiling one", func(t *testing.T) {
 		connect.Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gateway", MaxSamples: 50, MaxSteps: 20,
 			Require: []string{"failedOver", "ejectedThenProbed", "retriesSpent", "attemptsSpent"}},
-			func(t testing.TB) connect.Driver {
-				return &attemptsDriver{t: t, ceiling: 1, retries: 2,
-					deps: []string{"d1", "d2", "d3"}, names: []string{"c1", "c2"}}
-			})
+			bindAttempts(1, 2, []string{"d1", "d2", "d3"}, []string{"c1", "c2"}).Driver)
 	})
 	t.Run("ceiling two", func(t *testing.T) {
 		connect.Run(t, connect.Config{Spec: "../../model/attempts.qnt", Main: "gatewayWide", MaxSamples: 50, MaxSteps: 20,
 			Require: []string{"probePassedBy"}},
-			func(t testing.TB) connect.Driver {
-				return &attemptsDriver{t: t, ceiling: 2, retries: 2,
-					deps: []string{"d1", "d2"}, names: []string{"c1", "c2", "c3"}}
-			})
+			bindAttempts(2, 2, []string{"d1", "d2"}, []string{"c1", "c2", "c3"}).Driver)
 	})
 }
