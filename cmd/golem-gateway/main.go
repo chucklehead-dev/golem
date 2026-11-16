@@ -422,8 +422,9 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 		proxy.Refuse(w, proxy.OpenAIResponses, contract.AuthzProviderStorageForbidden,
 			"golem serves stateless responses only: no response is stored to retrieve, delete or cancel")
 	})
-	// Anthropic's token count: free, no admission, no ledger row.
-	count := http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody, Guard: guard}).ServeCountTokens)
+	// Anthropic's token count: free, no admission, no ledger row; but the
+	// calls' health (ejections, ceilings) and rate limits.
+	count := http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, Meters: limiter, MaxBody: o.maxBody, Health: health, Guard: guard}).ServeCountTokens)
 	handle("POST /v1/messages/count_tokens", proxy.AnthropicMessages, count, localOnly)
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	// Ready once a snapshot is applied and its authorization holds.

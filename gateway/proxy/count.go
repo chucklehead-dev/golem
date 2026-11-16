@@ -20,11 +20,14 @@ const maxCountResponse = 64 << 10
 
 // ServeCountTokens serves POST /v1/messages/count_tokens: the request is
 // authenticated, routed and checked as a Messages call is (its alias the
-// scope's, its features the route's), then sent to the route's first
-// deployment that takes it, at the deployment's count endpoint (a bedrock
-// deployment's envelope sends it to Bedrock's CountTokens). It is free:
-// nothing is admitted, charged or written to the ledger, and it takes no
-// slot and no rate limit; the provider bills no count.
+// scope's, its features the route's, its betas a deployment's, its size
+// the scope's ceiling), takes a request from the scope's rate limits, and
+// is sent to the route's first deployment that takes it (the shared
+// health's: ejections and ceilings, the principal's share included), at
+// the deployment's count endpoint (a bedrock deployment's envelope sends
+// it to Bedrock's CountTokens). It is free: nothing is admitted, charged
+// or written to the ledger, and it takes no slot; the provider bills no
+// count.
 func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 	_, reqIDs := newRequestID()
 	w.Header()[contract.HeaderRequestID] = []string{reqIDs}
@@ -40,6 +43,18 @@ func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt := p.rt
+	if no := inputCeiling(p.principal, int64(len(p.body))); no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
+	if no := incapable(rt, p.betas); no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
+	if no := h.takeRate(context.WithoutCancel(ctx), p.principal); no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
 	target, lease, retryAt, own := pick(h.health(), rt, make([]bool, len(rt.Pool)), p.principal.ID, p.betas)
 	if target == nil {
 		h.fail(ctx, w, noDeployment(retryAt, own))

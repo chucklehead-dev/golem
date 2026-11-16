@@ -728,8 +728,8 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 // and the state M1 never keeps at the provider.
 func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
 	lim := p.Limits
-	if c := lim.MaxInputBytes; c > 0 && requestBytes > c {
-		return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}
+	if no := inputCeiling(p, requestBytes); no != nil {
+		return no
 	}
 	if c := lim.MaxOutputTokens; c > 0 {
 		switch {
@@ -756,6 +756,15 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 		if req.store {
 			ex.forbidStorage(h.Dialect)
 		}
+	}
+	return nil
+}
+
+// inputCeiling is the scope's ceiling on a request's size (ADR 0038), a
+// token count's too.
+func inputCeiling(p *auth.Principal, requestBytes int64) *refusal {
+	if c := p.Limits.MaxInputBytes; c > 0 && requestBytes > c {
+		return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}
 	}
 	return nil
 }
