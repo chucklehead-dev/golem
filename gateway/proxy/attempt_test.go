@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -206,4 +207,66 @@ func TestKeptBound(t *testing.T) {
 	if h.kept.Load() != 0 {
 		t.Fatalf("%d bytes still counted as kept", h.kept.Load())
 	}
+}
+
+// TestCallerGoneIsNoFailure: a call its caller cancelled, or a sweep
+// withdrew, ends its attempt without a failure of its deployment's: a few
+// Esc presses (or one revocation) must not eject a healthy deployment.
+// Each case ends one attempt so with EjectAfter 1, which a failure would
+// eject.
+func TestCallerGoneIsNoFailure(t *testing.T) {
+	// waitThen is a provider that answers, once its caller has left, as
+	// then says.
+	waitThen := func(arrived chan<- struct{}, then func(*http.Request) (*http.Response, error)) http.RoundTripper {
+		return roundTrip(func(r *http.Request) (*http.Response, error) {
+			io.Copy(io.Discard, r.Body)
+			r.Body.Close()
+			arrived <- struct{}{}
+			<-r.Context().Done()
+			return then(r)
+		})
+	}
+	cancelled := func(t *testing.T, h *Handler, arrived <-chan struct{}) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() { <-arrived; cancel() }()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, "POST", "/v1/messages", bytes.NewReader(smallRequest)))
+	}
+	t.Run("unanswered", func(t *testing.T) {
+		arrived := make(chan struct{}, 1)
+		h, _ := poolHandler(t, 1, waitThen(arrived, func(r *http.Request) (*http.Response, error) { return nil, r.Context().Err() }))
+		h.Health = &route.Health{EjectAfter: 1}
+		cancelled(t, h, arrived)
+		c, _ := h.Snapshots.Current()
+		if dh := h.Health.Deployment(c.Routes.Lookup([]byte("claude")).Pool[0]); dh.Ejected || dh.InFlight != 0 {
+			t.Fatalf("deployment %+v after its caller left: want it neither ejected nor held", dh)
+		}
+	})
+	t.Run("refused as the caller left", func(t *testing.T) {
+		arrived := make(chan struct{}, 1)
+		d2 := &counting{fn: func(int32) (*http.Response, error) { return streamOf(anthropicStream(1)), nil }}
+		h, _ := poolHandler(t, 2, waitThen(arrived, func(*http.Request) (*http.Response, error) { return statusOf(529, ""), nil }), d2)
+		h.Health = &route.Health{EjectAfter: 1}
+		cancelled(t, h, arrived)
+		c, _ := h.Snapshots.Current()
+		if dh := h.Health.Deployment(c.Routes.Lookup([]byte("claude")).Pool[0]); dh.Ejected || dh.InFlight != 0 || d2.n.Load() != 0 {
+			t.Fatalf("deployment %+v, d2 attempts %d after the caller left: want it neither ejected nor held, and no retry", dh, d2.n.Load())
+		}
+	})
+	t.Run("withdrawn", func(t *testing.T) {
+		g := newTGW(t, AnthropicMessages, true)
+		hl := &route.Health{EjectAfter: 1}
+		g.srv.Config.Handler.(*Handler).Health = hl
+		target := g.src.Holder.Applied().Routes.Lookup([]byte("claude")).Pool[0]
+		alice := g.call(g.keyA, false).Body.(*lateBody)
+		g.apply(true)
+		resp, err := alice.done()
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if dh := hl.Deployment(target); dh.Ejected || resp.StatusCode != 401 {
+			t.Fatalf("status %d, deployment %+v after a sweep withdrew its call: want 401 and it not ejected", resp.StatusCode, dh)
+		}
+	})
 }

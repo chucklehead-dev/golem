@@ -113,7 +113,8 @@ func (c *callState) next() (*route.Target, *route.Lease, time.Time) {
 // provider saw nothing, or refused before any output) and reports whether
 // the call goes on.
 func (c *callState) retry(status int, after time.Duration) bool {
-	c.lease.Fail(after)
+	gone := c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil
+	c.endLease(after, gone)
 	c.h.paused(c.r)
 	if !c.kept || c.attempt >= c.rt.MaxAttempts || c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil {
 		return false
@@ -133,6 +134,19 @@ func (c *callState) retry(status int, after time.Duration) bool {
 	c.row.ProviderRequestID, c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = "", "", "", ""
 	c.target, c.lease = next, nl
 	return true
+}
+
+// endLease ends a failed attempt's lease: a failure of its deployment's
+// (after, the provider's Retry-After), unless the call itself was ended,
+// its caller gone or a sweep withdrawing it (gone). Then the attempt's end
+// says nothing of the deployment: it is released, so callers cancelling
+// cannot eject a healthy deployment.
+func (c *callState) endLease(after time.Duration, gone bool) {
+	if gone {
+		c.lease.Release()
+		return
+	}
+	c.lease.Fail(after)
 }
 
 // paused runs beforePick, if set (tests).

@@ -415,10 +415,10 @@ func (c *callState) endWithdrawn(t *errTerminated) {
 // upstream.unavailable, naming the route's timeout if one cut it, or with
 // the refusal of the sweep that withdrew it.
 func (c *callState) endUnanswered(err error) {
-	c.lease.Fail(0)
 	callerLeft := c.r.Context().Err() != nil
 	code, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(c.upCtx)) // the cause as the call failed
 	ended := terminatedBy(c.upCtx)
+	c.endLease(0, callerLeft || ended != nil)
 	if ended != nil && !callerLeft { // the headers not yet sent: the dialect's error
 		code, msg = ended.code, ended.message()
 	}
