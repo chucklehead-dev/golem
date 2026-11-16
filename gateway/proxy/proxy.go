@@ -184,8 +184,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var retryAt time.Time
-	if c.target, c.lease, retryAt = c.next(); c.target == nil {
-		h.fail(ctx, w, noDeployment(retryAt))
+	var own bool
+	if c.target, c.lease, retryAt, own = c.next(); c.target == nil {
+		h.fail(ctx, w, noDeployment(retryAt, own))
 		return
 	}
 	defer func() { c.lease.Release() }() // the last attempt's: when the call is over

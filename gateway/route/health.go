@@ -86,13 +86,37 @@ type Lease struct {
 	freed     bool
 }
 
+// Refused is why Acquire refused an attempt: the deployment's state, or
+// the principal's own share of it.
+type Refused int
+
+const (
+	// NotRefused: a lease was taken.
+	NotRefused Refused = iota
+	// Ejected: the deployment rests after failures, or its one probe is
+	// in flight.
+	Ejected
+	// AtCeiling: the deployment holds its ceiling's attempts.
+	AtCeiling
+	// AtPrincipalCeiling: the principal holds its own share of the
+	// deployment (Target.MaxPerPrincipal); others' attempts are taken.
+	AtPrincipalCeiling
+)
+
 // Acquire takes a place on t for one attempt of principal's, unless t is
 // at its ceiling or principal at its per-principal one (a shared box, ADR
 // 0017: one principal must not fill it), or t is ejected (an ejected
 // deployment past its ejection takes one probe at a time). It reports,
 // when it refuses, when t may take one again (zero: unknown, a ceiling
-// frees when an attempt ends).
+// frees when an attempt ends). AcquireWhy says why, too.
 func (h *Health) Acquire(t *Target, principal string) (*Lease, time.Time) {
+	l, at, _ := h.AcquireWhy(t, principal)
+	return l, at
+}
+
+// AcquireWhy is Acquire, with why it refused: a principal at its own
+// per-principal ceiling is told so, not that the deployment is down.
+func (h *Health) AcquireWhy(t *Target, principal string) (*Lease, time.Time, Refused) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.dep(t)
@@ -100,19 +124,19 @@ func (h *Health) Acquire(t *Target, principal string) (*Lease, time.Time) {
 	if !d.until.IsZero() {
 		switch now := h.now(); {
 		case now.Before(d.until):
-			return nil, d.until
+			return nil, d.until, Ejected
 		case d.probing:
-			return nil, now.Add(cmp.Or(h.Ejection, 10*time.Second))
+			return nil, now.Add(cmp.Or(h.Ejection, 10*time.Second)), Ejected
 		}
 		probe = true
 	}
 	if t.MaxInFlight > 0 && d.inflight >= t.MaxInFlight {
-		return nil, time.Time{}
+		return nil, time.Time{}, AtCeiling
 	}
 	l := &Lease{h: h, d: d, probe: probe, epoch: d.admitted}
 	if t.MaxPerPrincipal > 0 {
 		if d.byPrincipal[principal] >= t.MaxPerPrincipal {
-			return nil, time.Time{}
+			return nil, time.Time{}, AtPrincipalCeiling
 		}
 		if d.byPrincipal == nil {
 			d.byPrincipal = map[string]int{}
@@ -122,7 +146,7 @@ func (h *Health) Acquire(t *Target, principal string) (*Lease, time.Time) {
 	}
 	d.inflight++
 	d.probing = d.probing || probe
-	return l, time.Time{}
+	return l, time.Time{}, NotRefused
 }
 
 // isProbe reports whether the lease is its deployment's probe still: one

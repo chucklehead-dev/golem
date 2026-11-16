@@ -40,9 +40,9 @@ func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt := p.rt
-	target, lease, retryAt := pick(h.health(), rt, make([]bool, len(rt.Pool)), p.principal.ID, p.betas)
+	target, lease, retryAt, own := pick(h.health(), rt, make([]bool, len(rt.Pool)), p.principal.ID, p.betas)
 	if target == nil {
-		h.fail(ctx, w, noDeployment(retryAt))
+		h.fail(ctx, w, noDeployment(retryAt, own))
 		return
 	}
 	defer lease.Release() // a count says nothing of the deployment's health

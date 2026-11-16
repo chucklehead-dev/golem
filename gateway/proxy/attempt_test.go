@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -295,5 +296,40 @@ func TestRefusedCallsEarnNoRetries(t *testing.T) {
 	serveOne(h)
 	if n := h.Health.Retries("claude"); n != 1 {
 		t.Fatalf("%v retries after one admitted call: want its credit, 1", n)
+	}
+}
+
+// TestOwnShareIsTheCallersLimit: a principal at its own per-principal
+// ceiling on every deployment of the route is refused limit.concurrency,
+// its own calls being what it waits on, not upstream.unavailable; a pool
+// passed over for other reasons too (one ejected) is still unavailable.
+func TestOwnShareIsTheCallersLimit(t *testing.T) {
+	release := make(chan struct{})
+	held := func(int32) (*http.Response, error) { <-release; return streamOf(anthropicStream(1)), nil }
+	d1, d2 := &counting{fn: held}, &counting{fn: held}
+	h, _ := poolHandler(t, 2, d1, d2)
+	c, _ := h.Snapshots.Current()
+	pool := c.Routes.Lookup([]byte("claude")).Pool
+	for _, d := range pool {
+		d.MaxPerPrincipal = 1
+	}
+	var done sync.WaitGroup
+	for range 2 { // the caller's two calls, one on each deployment
+		done.Go(func() { serveOne(h) })
+	}
+	defer done.Wait()
+	defer close(release)
+	for d1.n.Load()+d2.n.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	w := serveOne(h)
+	if w.Code != 429 || !strings.Contains(w.Body.String(), "limit.concurrency") || !strings.Contains(w.Body.String(), "for you") {
+		t.Fatalf("%d %s: want limit.concurrency, the caller's own share", w.Code, w.Body)
+	}
+	l, _ := h.health().Acquire(pool[0], "someone else") // d1 at its ceiling for others too
+	pool[0].MaxInFlight = 2
+	defer l.Release()
+	if w := serveOne(h); w.Code != 503 || !strings.Contains(w.Body.String(), "upstream.unavailable") {
+		t.Fatalf("%d %s: a deployment at its ceiling: want upstream.unavailable", w.Code, w.Body)
 	}
 }
