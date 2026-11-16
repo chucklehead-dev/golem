@@ -144,13 +144,13 @@ the epoch (it counts golem-control's starts).
 With `-clickhouse` (its password in `$CLICKHOUSE_PASSWORD`, read-only on
 `golem.spend`): per scope and period (`-period-zone`, stated in every
 snapshot and checked by every gateway), the spend in `golem.spend_dedup` of
-calls that ended before a boundary B, a whole minute `-spend-allowance`
+calls that ended before a boundary, a whole minute `-spend-allowance`
 (5 minutes) before now: one query every 30 s, its values bound as parameters.
 A failure keeps the last result for its period and reports it stale
 (`golem.control.spend.stale`); a new period starts from nothing. Each
 site's ingestion lag (now less its latest `ended_at`, from
 `golem.ingest_by_site`) is reported, behind once past the allowance
-(`golem.control.spend.ingestion_behind`); B is not moved for it. Without
+(`golem.control.spend.ingestion_behind`); the boundary is not moved for it. Without
 `-clickhouse` snapshots carry no known spend and no budget refuses.
 
 The ledger reaches ClickHouse through the gateway pod's collector sidecar

@@ -108,11 +108,11 @@ prevent double counting.
 | `over_budget` | Bool | admitted over its scope's budget because the scope's budget mode is `observe` or `warn` (§1, ADR 0050): a call `enforce` would have refused |
 
 - Known spend (ADR 0031): a snapshot carries, per scope and period, a
-  boundary B (a minute, an ingestion allowance before the snapshot's
+  spend boundary (a minute, an ingestion allowance before the snapshot's
   time) and the sum of `cost_micros` over `golem.spend_dedup`'s rows of
-  that scope and period with `ended_at` before B, deduplicated by
+  that scope and period with `ended_at` before the boundary, deduplicated by
   `event_id`. The gateway checks it alone (there is no site counter), so a
-  call that ended after B is not yet in known spend. A row that
+  call that ended after the boundary is not yet in known spend. A row that
   arrives later than the allowance is counted from the next snapshot
   whose boundary passes it, and by reconciliation; golem-control reports
   each site whose latest ingested `ended_at` is more than the allowance

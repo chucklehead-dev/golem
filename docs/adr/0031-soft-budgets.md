@@ -69,7 +69,7 @@ deployment requirement (operations.md), not a check golem makes.
 **Known spend is the snapshot's.** golem-control's known-spend job
 (control/spend) publishes, in every snapshot (about every minute), each
 scope's spend this period: the ledger's spend (`golem.spend_dedup`,
-deduplicated by `event_id`) of the calls that ended before a boundary B, a
+deduplicated by `event_id`) of the calls that ended before a boundary, a
 whole minute an ingestion allowance (default 5 minutes) before the
 snapshot's time. The gateway checks it against the budget at admission; it
 keeps no spend counter of its own. A call belongs to the period it started
@@ -77,7 +77,7 @@ in (`lib/period`, one installation-wide period zone that every snapshot
 states and every gateway checks); a snapshot of another period counts as
 none. A failed job keeps its last result for its own period and reports it
 stale; a site whose rows arrive later than the allowance is reported
-behind (`Job.Lags`), B unmoved.
+behind (`Job.Lags`), the boundary unmoved.
 
 **Admission is one store call.** The site's Valkey (ElastiCache, one
 primary and a replica; in-memory for development and standalone) holds the
