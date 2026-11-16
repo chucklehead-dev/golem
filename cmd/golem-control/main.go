@@ -344,7 +344,7 @@ func run() error {
 		})
 	}
 	if o.listen != "" {
-		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, &service.Service{State: st, ScopeModels: c.ScopeModels})
+		srv, err := apiServer(ctx, o.listen, o.tenant, o.audience, "", &service.Service{State: st, ScopeModels: c.ScopeModels})
 		if err != nil {
 			return fmt.Errorf("-listen: %w", err)
 		}
@@ -432,16 +432,20 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 
 // apiServer serves the control API, authenticated by Entra tokens: no
 // API without a tenant, since an unauthenticated one would let anyone
-// mint keys.
-func apiServer(ctx context.Context, listen, tenant, audience string, svc *service.Service) (*http.Server, error) {
+// mint keys. jwks is Entra's key set URL (empty: the tenant's).
+//
+// Entra's signing keys are fetched in the background, not before the API
+// starts: a replica started during an Entra outage serves all the same,
+// refusing tokens as unavailable until the keys arrive (as the gateway's
+// verifier does), and the publisher runs regardless. A replica that
+// refused to start would stop publication, and every gateway's lease
+// would run out with it.
+func apiServer(ctx context.Context, listen, tenant, audience, jwks string, svc *service.Service) (*http.Server, error) {
 	if tenant == "" {
 		return nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
 	}
-	e := &entra.Verifier{Tenant: tenant, Audiences: list(audience), Scope: entra.ScopeManage}
-	if err := e.Refresh(ctx); err != nil {
-		return nil, fmt.Errorf("Entra's signing keys: %w", err)
-	}
-	go e.Run(ctx) //qenv:ok the key refresh loop, ended by ctx
+	e := &entra.Verifier{Tenant: tenant, Audiences: list(audience), Scope: entra.ScopeManage, JWKS: jwks}
+	go e.Run(ctx) //qenv:ok the key refresh loop, ended by ctx: it fetches at once, retrying until Entra answers
 	h := (&api.Server{Service: svc, Auth: api.EntraAuth{Entra: e, State: svc.State}}).Handler()
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)

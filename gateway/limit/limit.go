@@ -63,7 +63,7 @@ type Limiter struct {
 	known       map[string]Known        // by scope, from the snapshot
 	running     map[string]*Ticket      // this gateway's calls the provider may still be working on
 	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer
-	byPrincipal map[string]int          // running calls, counted: an outage's local check is O(1)
+	byPrincipal map[principalIn]int     // running calls, counted: an outage's local check is O(1)
 	byScope     map[string]int
 	graceUntil  time.Time
 	// A renewal copies the running calls' slots, then registers them
@@ -88,7 +88,7 @@ const renewInterval = 30 * time.Second
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{},
-		running: map[string]*Ticket{}, tails: map[*Ticket]*time.Timer{}, byPrincipal: map[string]int{}, byScope: map[string]int{},
+		running: map[string]*Ticket{}, tails: map[*Ticket]*time.Timer{}, byPrincipal: map[principalIn]int{}, byScope: map[string]int{},
 		Grace: 2 * renewInterval, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
 }
 
@@ -181,12 +181,23 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	if !l.Down() {
 		a := Admission{Slot: slotOf(c), Known: known, Budget: refusing(c),
 			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit}
-		sctx, cancel := l.storeContext(ctx)
+		// The store call runs to its own bound, not the caller's: a call
+		// cut by the caller leaving may have taken the slot at the store
+		// without this gateway tracking it, a phantom for the slot's TTL.
+		// Run whole, the answer is known, and an admission the caller no
+		// longer waits for is ended at once.
+		bg := context.WithoutCancel(ctx)
+		sctx, cancel := l.storeContext(bg)
 		o, err := l.store.Admit(sctx, a)
 		cancel()
 		switch {
 		case err == nil:
-			return l.admitted(c, period, known, o)
+			t, err := l.admitted(c, period, known, o)
+			if t != nil && ctx.Err() != nil {
+				t.Complete(bg, 0) // frees the slot: the call never ran
+				return nil, ctx.Err()
+			}
+			return t, err
 		case ctx.Err() != nil:
 			return nil, ctx.Err() // the caller went away: no outage
 		}
@@ -228,7 +239,7 @@ func (l *Limiter) admitLocally(c Call, period string, known int64) (*Ticket, err
 	if overBudget(known, refusing(c)) {
 		return nil, ErrBudget
 	}
-	if atLimit(l.byPrincipal[c.Principal], c.PrincipalLimit) || atLimit(l.byScope[c.Scope], c.ScopeLimit) {
+	if atLimit(l.byPrincipal[principalOf(c)], c.PrincipalLimit) || atLimit(l.byScope[c.Scope], c.ScopeLimit) {
 		return nil, ErrConcurrency
 	}
 	return l.track(c, period, true, known), nil
@@ -269,7 +280,7 @@ func (l *Limiter) track(c Call, period string, waived bool, known int64) *Ticket
 		l.Waived.Add(1)
 	}
 	l.running[c.ID] = t
-	l.byPrincipal[c.Principal]++
+	l.byPrincipal[principalOf(c)]++
 	l.byScope[c.Scope]++
 	return t
 }
@@ -287,20 +298,28 @@ func (l *Limiter) finish(t *Ticket) bool {
 	if l.reacquiring > 0 {
 		l.endedDuring = append(l.endedDuring, t.slot())
 	}
-	decr(l.byPrincipal, t.call.Principal)
+	decr(l.byPrincipal, principalOf(t.call))
 	decr(l.byScope, t.call.Scope)
 	return true
 }
 
 // decr counts one fewer, forgetting a count at zero so the maps stay as
 // small as the calls running.
-func decr(m map[string]int, k string) {
+func decr[K comparable](m map[K]int, k K) {
 	if m[k] <= 1 {
 		delete(m, k)
 		return
 	}
 	m[k]--
 }
+
+// principalIn is a principal in one scope: what a principal's in-flight
+// limit counts. A principal's limit is its scope's policy, so its calls in
+// another scope are not counted against it (nor could another scope's
+// calls exhaust it).
+type principalIn struct{ scope, principal string }
+
+func principalOf(c Call) principalIn { return principalIn{c.Scope, c.Principal} }
 
 // slotOf is the slot a call holds while it runs.
 func slotOf(c Call) Slot { return Slot{c.ID, c.Principal, c.Scope} }

@@ -613,8 +613,13 @@ const uncertainOutput = 8192
 
 // reachedProvider reports whether a failed round trip may have reached the
 // provider: only a name that did not resolve, a connection that was never
-// made or a TLS handshake that failed certainly did not.
+// made, a TLS handshake that failed or an envelope's request that never
+// left the gateway (envelope.ErrNotSent: unsigned, unreadable) certainly
+// did not.
 func reachedProvider(err error) bool {
+	if errors.Is(err, envelope.ErrNotSent) {
+		return false
+	}
 	if _, ok := errors.AsType[*net.DNSError](err); ok {
 		return false
 	}

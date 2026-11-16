@@ -188,9 +188,10 @@ type Member struct {
 // AddMember makes m a member of scope: the scope's managers, or admins.
 // Who a principal is in Entra is never a manager's to say (ADR 0047): users
 // come from the groups bound to scopes, and an Entra ID is bound only by
-// the sync or an admin. So a manager adds a principal that exists, or
-// creates a service that authenticates by key only; an admin may also
-// create a user or service with its Entra ID. A principal that exists
+// the sync or an admin. So a manager adds a user that exists, or a service
+// that is a member of a scope it manages, or creates a service that
+// authenticates by key only; an admin may also create a user or service
+// with its Entra ID. A principal that exists
 // keeps its kind and Entra ID; a different one given is refused.
 func (s *Service) AddMember(ctx context.Context, c Caller, o Options, scope string, m Member) error {
 	if m.ID == "" {
@@ -226,6 +227,13 @@ func principalToAdd(d *state.Document, c Caller, m Member) (state.Principal, err
 	if p, exists := d.Principals[m.ID]; exists {
 		if m.Kind != "" && m.Kind != p.Kind || m.Entra != "" && m.Entra != p.Entra {
 			return state.Principal{}, invalid("member", "principal %s exists as a %s with another identity", m.ID, p.Kind)
+		}
+		// Adding a service to a scope is its existing scopes' managers' to
+		// do: a manager who could take any other team's service into their
+		// scope would share it, and its keys (mayMint), with that team. A
+		// user is anyone's to add: a user's keys are its own alone.
+		if !c.Admin && p.Kind == "service" && !slices.ContainsFunc(p.Members(), func(sc string) bool { return manages(d, c, sc) }) {
+			return state.Principal{}, denied("principal %s exists and is a member of no scope you manage: a manager of one of its scopes, or an admin, adds it to another", m.ID)
 		}
 		return p, nil
 	}
@@ -409,6 +417,9 @@ func (s *Service) mintKey(ctx context.Context, c Caller, o Options, r KeyRequest
 			return invalid("key.owner", "%s is not a member of %s: add them first", r.Owner, r.Scope)
 		}
 		if !mayMint(d, c, r, owner) {
+			if owner.Kind == "service" && manages(d, c, r.Scope) {
+				return denied("service %s is also a member of scopes you do not manage: a manager of every one of its scopes, or an admin, mints its keys", r.Owner)
+			}
 			return denied("a member mints its own keys; a scope's managers mint its services' keys")
 		}
 		if err := s.narrows(r); err != nil {
@@ -450,9 +461,16 @@ func (s *Service) narrows(r KeyRequest) error {
 }
 
 // mayMint reports whether c may mint r for owner: admins any key, a
-// member its own, and a scope's managers its services'.
+// member its own, and a scope's managers its services' when they manage
+// every scope the service is a member of. A key acts as its owner, so a
+// service shared with another team is not one scope's managers' alone to
+// mint for: its keys would be invisible to the other's.
 func mayMint(d *state.Document, c Caller, r KeyRequest, owner state.Principal) bool {
-	return c.Admin || r.Owner == c.Principal || owner.Kind == "service" && manages(d, c, r.Scope)
+	if c.Admin || r.Owner == c.Principal {
+		return true
+	}
+	return owner.Kind == "service" && manages(d, c, r.Scope) &&
+		!slices.ContainsFunc(owner.Members(), func(sc string) bool { return !manages(d, c, sc) })
 }
 
 // keyExpiry is when a key for owner expires, asked to at asked (zero: not

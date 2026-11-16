@@ -59,7 +59,7 @@ func (f *valkeyFaults) SetDown(down bool) {
 	if down {
 		var keys []string
 		for _, p := range []string{"p1", "p2", "p3"} {
-			keys = append(keys, f.principalKey(p))
+			keys = append(keys, f.principalKey(scope, p))
 		}
 		keys = append(keys, f.scopeKey(scope))
 		f.mustClient().Do(ctx, f.mustClient().B().Del().Key(keys...).Build())

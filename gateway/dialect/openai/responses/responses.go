@@ -5,12 +5,12 @@
 // ADR 0027): store is false whatever the caller or scope asks (an absent
 // store, which the provider takes as true, is written false); a request
 // that needs state the provider keeps (previous_response_id, a
-// conversation, background execution, a stored prompt, a provider-managed
-// file or vector store) is refused, as Scan reports by Stateful.
+// conversation, background execution, a stored prompt, an earlier item by
+// reference, a provider-managed file or vector store) is refused, as Scan
+// reports by Stateful.
 package responses
 
 import (
-	"bytes"
 	"encoding/json/jsontext"
 	"errors"
 
@@ -61,8 +61,6 @@ var (
 	ErrNoModel = errors.New(`responses: the request has no "model" string; name a model or alias`)
 	ErrField   = errors.New("responses: a routing or policy field has the wrong type")
 )
-
-var fileID = []byte(`"file_id"`)
 
 // Scan reads the routing and policy fields of body.
 func (r *Request) Scan(body []byte) error {
@@ -116,12 +114,11 @@ func (r *Request) Scan(body []byte) error {
 			if v.Kind() == 't' {
 				r.stateful(n)
 			}
-		case "input":
-			// A provider-managed file, anywhere in the input: a reference to
-			// state another call stored. Conservative: the key itself.
-			if bytes.Contains(v, fileID) {
-				r.stateful("input (a file_id)")
+		case "input", "instructions":
+			if v.Kind() != '[' {
+				return nil // text
 			}
+			return r.references(n, v)
 		case "tools":
 			if v.Kind() != '[' {
 				return nil
@@ -156,6 +153,26 @@ func (r *Request) Scan(body []byte) error {
 		return ErrNoModel
 	}
 	return nil
+}
+
+// references marks Stateful if items (input or instructions, an array of
+// items) refers to state another call stored: a provider-managed file (a
+// file_id, not null, in any object: an input_file's, an input_image's, a
+// screenshot's) or an earlier item (an item_reference, or an item with an
+// id and neither type nor role, which the API takes as one). The tree is
+// decoded, its member names compared unescaped: a JSON escape cannot hide
+// either.
+func (r *Request) references(member string, items []byte) error {
+	return jsonscan.Objects(items, nil, func(o *jsonscan.ObjectInfo) error {
+		switch {
+		case o.Has("file_id"):
+			r.stateful(member + " (a file_id)")
+		case string(o.Type) == "item_reference",
+			o.Depth == 1 && o.Type == nil && !o.HasExactly("role") && o.Has("id"):
+			r.stateful(member + " (an item_reference)")
+		}
+		return nil
+	})
 }
 
 func (r *Request) stateful(member string) {

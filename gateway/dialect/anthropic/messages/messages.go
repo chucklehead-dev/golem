@@ -81,6 +81,10 @@ type Request struct {
 	HasMaxTokens bool
 	Flags        Flags
 	Unknown      int
+	// Stateful names the first content that refers to state the provider
+	// keeps (a file uploaded to the Files API), which M1 refuses whatever
+	// the scope allows (security-and-correctness.md §4), or is empty.
+	Stateful string
 }
 
 // Scan's refusals: a body with no model to route by, and a member golem
@@ -129,6 +133,14 @@ func (r *Request) Scan(body []byte) error {
 				return ErrField
 			}
 			r.MaxTokens, r.HasMaxTokens = n, true
+		case "messages":
+			v, _, err := d.ReadValue()
+			if err != nil {
+				return err
+			}
+			if v.Kind() == '[' {
+				return r.fileReferences(v)
+			}
 		case "tools":
 			v, _, err := d.ReadValue()
 			if err != nil {
@@ -163,6 +175,28 @@ func (r *Request) Scan(body []byte) error {
 	}
 	return nil
 }
+
+// fileReferences marks Stateful if messages refers to a file the
+// provider stores: a content block's source of type "file" (an image's,
+// a document's), or a file_id, not null, in any block (a container
+// upload's), tool results' nested blocks included. The tree is decoded,
+// member names compared unescaped (a JSON escape cannot hide one); a tool
+// call's input, arbitrary JSON of the caller's tools, is not read.
+func (r *Request) fileReferences(messages []byte) error {
+	return jsonscan.Objects(messages, toolInput, func(o *jsonscan.ObjectInfo) error {
+		switch {
+		case r.Stateful != "":
+		case bytes.EqualFold(o.In, []byte("source")) && string(o.Type) == "file":
+			r.Stateful = "messages (a file source)"
+		case o.Has("file_id"):
+			r.Stateful = "messages (a file_id)"
+		}
+		return nil
+	})
+}
+
+// toolInput reports a tool call's input member, which Objects skips.
+func toolInput(name []byte) bool { return string(name) == "input" }
 
 // Rewrite appends body to dst with the model replaced by model, which comes
 // from validated config and so is valid UTF-8.

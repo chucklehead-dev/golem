@@ -18,8 +18,9 @@ import (
 // carries the hash tag {golem:<site>}: in cluster mode they share a slot,
 // as the scripts need.
 //
-// Slots are sorted sets per principal and per scope, scored by their expiry
-// on the server's clock (TIME), so a gateway's clock cannot extend one.
+// Slots are sorted sets per principal in a scope and per scope, scored by
+// their expiry on the server's clock (TIME), so a gateway's clock cannot
+// extend one.
 // It keeps no spend: known spend is the snapshot's (ADR 0052).
 type Valkey struct {
 	// cl is the client, nil until DialValkey's dial has made one: every
@@ -207,8 +208,14 @@ for i = 1, #ARGV - 1 do
 end
 return 1`)
 
-func (v *Valkey) principalKey(p string) string { return v.prefix + "slots:p:" + p }
-func (v *Valkey) scopeKey(s string) string     { return v.prefix + "slots:s:" + s }
+// principalKey is a principal's slots in one scope: its limit is the
+// scope's, so its calls elsewhere count against neither. The scope is
+// length-prefixed, so no scope and principal IDs (either may hold a colon)
+// name another pair's key.
+func (v *Valkey) principalKey(scope, p string) string {
+	return v.prefix + "slots:p:" + strconv.Itoa(len(scope)) + ":" + scope + ":" + p
+}
+func (v *Valkey) scopeKey(s string) string { return v.prefix + "slots:s:" + s }
 
 func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
 
@@ -219,7 +226,7 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, error) {
 	if err != nil {
 		return 0, err
 	}
-	o, err := admitScript.Exec(ctx, c, []string{v.principalKey(a.Principal), v.scopeKey(a.Scope)},
+	o, err := admitScript.Exec(ctx, c, []string{v.principalKey(a.Scope, a.Principal), v.scopeKey(a.Scope)},
 		[]string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.ttlMs(), i64(a.Known), i64(a.Budget)}).AsInt64()
 	if err != nil {
 		return 0, wrap(err)
@@ -233,7 +240,7 @@ func (v *Valkey) Release(ctx context.Context, s Slot) error {
 		return err
 	}
 	cmds := valkey.Commands{
-		c.B().Zrem().Key(v.principalKey(s.Principal)).Member(s.Call).Build(),
+		c.B().Zrem().Key(v.principalKey(s.Scope, s.Principal)).Member(s.Call).Build(),
 		c.B().Zrem().Key(v.scopeKey(s.Scope)).Member(s.Call).Build(),
 	}
 	for _, r := range c.DoMulti(ctx, cmds...) {
@@ -260,7 +267,7 @@ func (v *Valkey) Reacquire(ctx context.Context, slots []Slot) error {
 		keys := make([]string, 0, 2*len(chunk))
 		args := append(make([]string, 0, 1+len(chunk)), ttl)
 		for _, s := range chunk {
-			keys = append(keys, v.principalKey(s.Principal), v.scopeKey(s.Scope))
+			keys = append(keys, v.principalKey(s.Scope, s.Principal), v.scopeKey(s.Scope))
 			args = append(args, s.Call)
 		}
 		if err := registerScript.Exec(ctx, c, keys, args).Error(); err != nil {

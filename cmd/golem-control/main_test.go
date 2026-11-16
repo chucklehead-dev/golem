@@ -3,13 +3,24 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/sign"
@@ -56,8 +67,57 @@ func TestOpenSigner(t *testing.T) {
 }
 
 func TestAPINeedsTenant(t *testing.T) {
-	if _, err := apiServer(t.Context(), "127.0.0.1:0", "", "api://golem", nil); err == nil || !strings.Contains(err.Error(), "-entra-tenant") {
+	if _, err := apiServer(t.Context(), "127.0.0.1:0", "", "api://golem", "", nil); err == nil || !strings.Contains(err.Error(), "-entra-tenant") {
 		t.Fatalf("an API without a tenant: %v", err)
+	}
+}
+
+// TestAPIStartsWithoutEntra: a replica started while Entra's key set
+// cannot be fetched still serves its API (and so its publisher runs),
+// refusing tokens as unavailable, not unauthenticated, until the keys
+// arrive in the background.
+func TestAPIStartsWithoutEntra(t *testing.T) {
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, _ := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &pk.PublicKey, KeyID: "k1", Use: "sig"}}})
+	var up atomic.Bool
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !up.Load() {
+			http.Error(w, "Entra is down", http.StatusServiceUnavailable)
+			return
+		}
+		w.Write(set)
+	}))
+	defer jwks.Close()
+	srv, err := apiServer(t.Context(), "127.0.0.1:0", "tid", "api://golem-control", jwks.URL, &service.Service{State: &state.Store{}})
+	if err != nil {
+		t.Fatalf("the API with Entra unreachable: %v; it must start, and the publisher with it", err)
+	}
+	s, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, (&jose.SignerOptions{}).WithHeader("kid", "other"))
+	tok, _ := jwt.Signed(s).Claims(map[string]any{"iss": "https://login.microsoftonline.com/tid/v2.0", "aud": "api://golem-control"}).Serialize()
+	call := func() int {
+		r := httptest.NewRequest("POST", "/golem.org.v1.OrgService/Whoami", strings.NewReader("{}"))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := call(); code != http.StatusServiceUnavailable {
+		t.Fatalf("a token before the keys: %d, want 503 (unavailable: retry)", code)
+	}
+	up.Store(true)
+	deadline := time.Now().Add(10 * time.Second)
+	for call() == http.StatusServiceUnavailable {
+		if time.Now().After(deadline) {
+			t.Fatal("the keys were never fetched in the background")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if code := call(); code != http.StatusUnauthorized {
+		t.Fatalf("a token of an unknown key once the keys are fetched: %d, want 401", code)
 	}
 }
 

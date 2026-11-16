@@ -21,6 +21,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/gen/golem/keys/v1/keysv1connect"
 	"github.com/chucklehead-dev/golem/gen/golem/org/v1/orgv1connect"
+	"github.com/chucklehead-dev/golem/lib/entra"
 )
 
 // Authenticator says who a request is from.
@@ -58,7 +59,13 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := s.Auth.Authenticate(r.Context(), r.Header)
 		if err != nil {
-			errs.Write(w, r, connect.NewError(connect.CodeUnauthenticated, err))
+			code := connect.CodeUnauthenticated
+			if ve, ok := errors.AsType[*entra.Error](err); ok && ve.Unavailable {
+				// Not the token's fault: the signing keys are not yet
+				// fetched. Retryable, not a credential to replace.
+				code = connect.CodeUnavailable
+			}
+			errs.Write(w, r, connect.NewError(code, err))
 			return
 		}
 		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, c)))

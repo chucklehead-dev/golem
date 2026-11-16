@@ -137,6 +137,64 @@ func TestCallerCancelIsNoOutage(t *testing.T) {
 	}
 }
 
+// TestPrincipalPerScope: a principal's in-flight limit counts its calls in
+// the call's scope only, at the store and on an outage's local counts.
+func TestPrincipalPerScope(t *testing.T) {
+	ctx := t.Context()
+	in := func(id, scope string) Call {
+		return Call{ID: id, Principal: "p1", Scope: scope, PrincipalLimit: 1}
+	}
+	for _, down := range []bool{false, true} {
+		st := NewMem()
+		st.SetDown(down)
+		l := New(st)
+		if _, err := l.Admit(ctx, in("a", "other")); err != nil {
+			t.Fatalf("down %v: %v", down, err)
+		}
+		if _, err := l.Admit(ctx, in("b", "s")); err != nil {
+			t.Fatalf("down %v: p1's first call in s: %v; its call in another scope was counted", down, err)
+		}
+		if _, err := l.Admit(ctx, in("c", "s")); !errors.Is(err, ErrConcurrency) {
+			t.Fatalf("down %v: p1's second call in s: %v, want ErrConcurrency", down, err)
+		}
+	}
+}
+
+// leaving is a store over which the caller goes away while its admission
+// is at the store, which then admits it.
+type leaving struct {
+	*Mem
+	leave context.CancelFunc
+}
+
+func (s leaving) Admit(ctx context.Context, a Admission) (Outcome, error) {
+	s.leave()
+	o, err := s.Mem.Admit(ctx, a) // the script runs at Valkey...
+	if ctx.Err() != nil {
+		return 0, ctx.Err() // ...and its answer is lost to the cut: a slot nobody tracks
+	}
+	return o, err
+}
+
+// TestCallerLeavesDuringAdmission: the store call is not cut by the
+// caller going away (a cut call may have taken a slot the gateway does
+// not track, held for its TTL); an admission the caller no longer waits
+// for is ended at once, its slot freed, and the caller's error returned.
+func TestCallerLeavesDuringAdmission(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	st := leaving{NewMem(), cancel}
+	l := New(st)
+	if tk, err := l.Admit(ctx, scopeCall("a", "p1")); tk != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Admit = %v, %v; want the caller's context.Canceled", tk, err)
+	}
+	if s := st.Slots(); len(s) != 0 || l.Down() {
+		t.Fatalf("slots %v, down %v: the admission the caller left must be freed at once, no outage", s, l.Down())
+	}
+	if tk, err := New(st.Mem).Admit(t.Context(), scopeCall("b", "p1")); err != nil {
+		t.Fatalf("p1's next call: %v, %v; the left call's slot is held", tk, err)
+	}
+}
+
 // TestPeriodRollover: a new month starts from nothing. The snapshot of the
 // old month is not counted against the new one, so the old month's spend
 // cannot refuse every call.

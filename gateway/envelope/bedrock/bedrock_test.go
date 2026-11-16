@@ -142,6 +142,48 @@ func TestNoCredentials(t *testing.T) {
 	}
 }
 
+// TestNotSent: a request that never left the gateway (a body that cannot
+// be read or rewritten, credentials missing or that cannot be retrieved)
+// fails with envelope.ErrNotSent, its message kept, and Base is never
+// called; a failure of Base's round trip is not marked.
+func TestNotSent(t *testing.T) {
+	failing := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{}, errors.New("no web identity token")
+	})
+	for name, c := range map[string]struct {
+		creds aws.CredentialsProvider
+		body  io.Reader
+		want  string
+	}{
+		"nil credentials": {nil, strings.NewReader(`{"model":"m"}`), "IRSA"},
+		"retrieve fails":  {failing, strings.NewReader(`{"model":"m"}`), "no web identity token"},
+		"not an object":   {creds, strings.NewReader(`[1]`), "the request body"},
+		"body read fails": {creds, io.MultiReader(strings.NewReader(`{`), errReader{}), "read failed"},
+	} {
+		base := &capture{}
+		tr := transport(base)
+		tr.Credentials = c.creds
+		r, _ := http.NewRequest("POST", "https://x/v1/messages", c.body)
+		_, err := tr.RoundTrip(r)
+		if !errors.Is(err, envelope.ErrNotSent) || !strings.Contains(err.Error(), c.want) || base.req != nil {
+			t.Errorf("%s: %v (sent %v): want ErrNotSent naming %q, nothing sent", name, err, base.req != nil, c.want)
+		}
+	}
+	tr := transport(roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("reset") }))
+	r, _ := http.NewRequest("POST", "https://x/v1/messages", strings.NewReader(`{"model":"m"}`))
+	if _, err := tr.RoundTrip(r); err == nil || errors.Is(err, envelope.ErrNotSent) {
+		t.Fatalf("a failed send %v: must not be ErrNotSent", err)
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // encode is an event stream of chunks, each an Anthropic event, then the
 // exception given (if any).
 func encode(t *testing.T, events []string, exception string) []byte {
@@ -247,7 +289,6 @@ func TestErrorResponse(t *testing.T) {
 		{429, "ThrottlingException", "rate_limit_error"},
 		{503, "ServiceUnavailableException", "overloaded_error"},
 		{400, "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/", "invalid_request_error"},
-		{403, "AccessDeniedException", "permission_error"},
 	} {
 		cp := &capture{resp: &http.Response{StatusCode: c.status, Header: http.Header{"X-Amzn-Errortype": {c.exception}},
 			Body: io.NopCloser(strings.NewReader(`{"message":"no"}`))}}
@@ -265,6 +306,50 @@ func TestErrorResponse(t *testing.T) {
 		if resp.StatusCode != c.status || e.Type != "error" || e.Error.Type != c.want || e.Error.Message != "bedrock: no" {
 			t.Errorf("%s: status %d, %s", c.exception, resp.StatusCode, b)
 		}
+	}
+}
+
+// TestCredentialsRefused: Bedrock's refusal of the gateway's own
+// credentials names golem's role and account; the caller is told golem's
+// message instead, in an answer and in a stream's exception alike, the
+// status and error type kept.
+func TestCredentialsRefused(t *testing.T) {
+	const leak = "User: arn:aws:sts::123456789012:assumed-role/golem-gateway/i-1 is not authorized to perform: bedrock:InvokeModel"
+	for _, c := range []struct {
+		status    int
+		exception string
+		want      string
+	}{
+		{403, "AccessDeniedException", "permission_error"},
+		{403, "UnrecognizedClientException", "api_error"},
+		{400, "ExpiredTokenException", "api_error"},
+		{403, "", "api_error"},
+	} {
+		cp := &capture{resp: &http.Response{StatusCode: c.status, Header: http.Header{"X-Amzn-Errortype": {c.exception}},
+			Body: io.NopCloser(strings.NewReader(`{"message":"` + leak + `"}`))}}
+		r, _ := http.NewRequest("POST", "https://x/v1/messages", strings.NewReader(`{"model":"m"}`))
+		resp, err := transport(cp).RoundTrip(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		var e struct {
+			Error struct{ Type, Message string }
+		}
+		json.Unmarshal(b, &e)
+		if resp.StatusCode != c.status || e.Error.Type != c.want || e.Error.Message != refusedMessage || strings.Contains(string(b), "123456789012") {
+			t.Errorf("%q: status %d, %s", c.exception, resp.StatusCode, b)
+		}
+	}
+	var m eventstream.Message
+	m.Headers.Set(":message-type", eventstream.StringValue("exception"))
+	m.Headers.Set(":exception-type", eventstream.StringValue("accessDeniedException"))
+	m.Payload = []byte(`{"message":"` + leak + `"}`)
+	var buf bytes.Buffer
+	eventstream.NewEncoder().Encode(&buf, m)
+	out, err := io.ReadAll(&reframer{src: io.NopCloser(&buf), dec: eventstream.NewDecoder()})
+	if err != nil || !strings.Contains(string(out), refusedMessage) || strings.Contains(string(out), "123456789012") {
+		t.Fatalf("a stream's exception: %v\n%s", err, out)
 	}
 }
 

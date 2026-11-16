@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -96,12 +97,12 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
-		return nil, err
+		return nil, envelope.NotSent(err)
 	}
 	count := strings.HasSuffix(r.URL.Path, "/count_tokens")
 	body, stream, err := rewrite(body, betas(r.Header))
 	if err != nil {
-		return nil, fmt.Errorf("bedrock: the request body: %w", err)
+		return nil, envelope.NotSent(fmt.Errorf("bedrock: the request body: %w", err))
 	}
 	action := "invoke"
 	switch {
@@ -139,8 +140,10 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if a := envelope.AttributionOf(r.Context()); a != nil {
 		up.Header.Set(MetadataHeader, metadata(a))
 	}
+	// Nothing has left the gateway until Base's round trip: a failure to
+	// sign (credentials that cannot be retrieved) is free and fails over.
 	if err := t.sign(r.Context(), up, body); err != nil {
-		return nil, err
+		return nil, envelope.NotSent(err)
 	}
 	resp, err := t.Base.RoundTrip(up)
 	if err != nil {
@@ -378,7 +381,38 @@ func anthropicError(resp *http.Response) (*http.Response, error) {
 	resp.Body.Close()
 	exception := resp.Header.Get("X-Amzn-Errortype")
 	exception, _, _ = strings.Cut(exception, ":")
+	if credentialsRefused(exception) || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return withJSON(resp, refusedJSON(errorType(exception), exception, resp.StatusCode, raw)), nil
+	}
 	return withJSON(resp, errorJSON(errorType(exception), bedrockMessage(raw))), nil
+}
+
+// credentialsRefused reports an exception that refuses the gateway's own
+// credentials or rights (its role), not the caller's request.
+func credentialsRefused(exception string) bool {
+	switch strings.ToLower(strings.TrimSuffix(exception, "Exception")) {
+	case "accessdenied", "unrecognizedclient", "expiredtoken", "invalidsignature", "incompletesignature",
+		"missingauthenticationtoken", "invalidclienttokenid", "signaturedoesnotmatch", "unauthorized", "notauthorized":
+		return true
+	}
+	return false
+}
+
+// refusedMessage is what a caller is told when Bedrock refuses the
+// gateway's credentials: Bedrock's own text names golem's role ARN and
+// account, which are not the caller's to learn, so it is logged instead.
+const refusedMessage = "the gateway's credentials for this provider were refused; the platform team is alerted"
+
+// refusedJSON is an Anthropic error carrying golem's message for a
+// credentials refusal, Bedrock's text logged for the platform team.
+func refusedJSON(typ, exception string, status int, raw []byte) []byte {
+	slog.Error("bedrock: the provider refused the gateway's credentials; check the gateway's role and its bedrock:InvokeModel permissions (operations.md)",
+		"exception", exception, "status", status, "message", bedrockMessage(raw))
+	b := []byte(`{"type":"error","error":{"type":`)
+	b, _ = jsontext.AppendQuote(b, typ)
+	b = append(b, `,"message":`...)
+	b, _ = jsontext.AppendQuote(b, refusedMessage)
+	return append(b, "}}"...)
 }
 
 // bedrockMessage is a Bedrock error body's message, or the body itself.
@@ -485,6 +519,9 @@ func (f *reframer) next() error {
 			name = header(":error-code")
 		}
 		ev := errorJSON(errorType(name), bedrockMessage(msg.Payload))
+		if credentialsRefused(name) {
+			ev = refusedJSON(errorType(name), name, 0, msg.Payload)
+		}
 		f.out = append(append(append(f.out[:0], "event: error\ndata: "...), ev...), "\n\n"...)
 		f.done = true
 	}

@@ -190,15 +190,23 @@ func (e *Verifier) key(kid string) *rsa.PublicKey {
 }
 
 // SetKeys replaces the cached key set (Refresh's, or a test's).
-func (e *Verifier) SetKeys(set jose.JSONWebKeySet) {
+func (e *Verifier) SetKeys(set jose.JSONWebKeySet) { e.setKeys(signingKeys(set)) }
+
+func (e *Verifier) setKeys(m map[string]*rsa.PublicKey) {
+	e.keys.Store(&m)
+	e.keysAt.Store(e.now().UnixNano())
+}
+
+// signingKeys are a key set's RSA signing keys, by key ID: the keys Verify
+// can check a token with.
+func signingKeys(set jose.JSONWebKeySet) map[string]*rsa.PublicKey {
 	m := map[string]*rsa.PublicKey{}
 	for _, k := range set.Keys {
 		if pk, ok := k.Key.(*rsa.PublicKey); ok && k.KeyID != "" && (k.Use == "" || k.Use == "sig") {
 			m[k.KeyID] = pk
 		}
 	}
-	e.keys.Store(&m)
-	e.keysAt.Store(e.now().UnixNano())
+	return m
 }
 
 // keysClient fetches key sets when Verifier.Client is nil (read-only): a hung
@@ -227,7 +235,14 @@ func (e *Verifier) Refresh(ctx context.Context) error {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxKeySet)).Decode(&set); err != nil {
 		return fmt.Errorf("entra keys: %w", err)
 	}
-	e.SetKeys(set)
+	// A set with no key Verify can use (an empty one, a proxy's or a
+	// misconfigured endpoint's answer) is a failed refresh: replacing a
+	// good cached set with it would refuse every token.
+	m := signingKeys(set)
+	if len(m) == 0 {
+		return fmt.Errorf("entra keys: %s answered a key set with no RSA signing keys; keeping the keys cached", url)
+	}
+	e.setKeys(m)
 	return nil
 }
 
@@ -269,7 +284,7 @@ func (e *Verifier) Run(ctx context.Context) {
 	var last time.Time // the last refresh tried
 	retry := retryFirst
 	next := e.now()
-	if e.Ready() { // fetched before Run (golem-control fetches at its start)
+	if e.Ready() { // fetched before Run (by a caller's Refresh)
 		last = time.Unix(0, e.keysAt.Load())
 		next = last.Add(refreshEvery)
 	}
