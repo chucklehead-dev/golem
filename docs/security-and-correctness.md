@@ -1,6 +1,6 @@
 # Security and correctness requirements
 
-Status: accepted design revision (ADRs 0029, 0041). Much is built (docs/walkthroughs);
+Status: accepted design revision (ADRs 0029, 0041). Much is built ([orientation](walkthroughs/README.md));
 validation against deployments is tracked in golem#7, and the M1 gates below say what remains.
 Decisions: [ADR 0029](adr/0029-security-and-correctness-revision.md), amended
 by [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md). ADR 0041 governs the

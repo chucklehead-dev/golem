@@ -24,6 +24,10 @@ config directory to a bucket while it leads (`golem-control keygen ./keys`, then
 pool from them, behind `-accept-unreleased` until golem#7's deployment
 evidence is in.
 
+- [docs/walkthroughs/](docs/walkthroughs/README.md): the code's orientation:
+  the package map, a request's path, the control plane's loop, the
+  invariants with their enforcing functions and tests. Start here to read
+  the code.
 - [docs/prd.md](docs/prd.md): what it does and for whom, the feature set,
   cross-cutting requirements, and the open questions.
 - [docs/roadmap.md](docs/roadmap.md): the phases, from spikes to

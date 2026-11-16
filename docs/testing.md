@@ -2,9 +2,9 @@
 
 Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
 and [security-and-correctness.md](security-and-correctness.md) govern the
-affected guarantees and release gates. Built so far: see the walkthroughs
-(docs/walkthroughs) and the "Built" notes; release evidence is tracked in
-golem#7.
+affected guarantees and release gates. What is built: the code's
+[orientation](walkthroughs/README.md) and the "Built" notes; release
+evidence is tracked in golem#7.
 
 Status: draft. How golem is tested, chosen by value: the most effort where
 a bug costs money, leaks data, or breaks every caller at once (budgets,

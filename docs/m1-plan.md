@@ -5,7 +5,7 @@ left and the evidence that it is done. Evidence is a test, a model check or
 a drill with a written record in docs/acceptance/, never a claim. A test
 that shows an invariant is ablated (run with the fix removed, and seen to
 fail), as m1-security-gates.md records. Update a step in place when it
-lands; dated progress goes in the walkthroughs and the commit log.
+lands; dated progress goes in the commit log.
 
 ## The exit, made measurable
 
