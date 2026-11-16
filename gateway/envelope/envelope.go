@@ -1,8 +1,8 @@
-// Package envelope is what the request path tells an envelope about a
-// call beyond its HTTP request (ADR 0001: an envelope carries a dialect's
-// request to a provider): the attempt's attribution, which an envelope
-// may pass to the provider for its own records (Bedrock's request
-// metadata). It is a leaf: the proxy sets it, envelopes read it.
+// Package envelope is what the request path tells an envelope about a call
+// beyond its HTTP request. An envelope carries a dialect's request to a
+// provider. The request path gives it the attempt's attribution, which it
+// may pass to the provider for the provider's own records. The package is
+// a leaf. The proxy sets the attribution and envelopes read it. ADR 0001.
 package envelope
 
 import (

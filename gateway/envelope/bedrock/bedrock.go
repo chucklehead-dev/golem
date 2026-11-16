@@ -1,12 +1,13 @@
-// Package bedrock is the envelope for Claude on Amazon Bedrock (ADR 0001:
-// an envelope carries a dialect's request to a provider and its answer
-// back, translating nothing). The Anthropic Messages body goes to
-// InvokeModel or InvokeModelWithResponseStream with its model in the path
-// and its betas in the body, signed with SigV4; a streamed answer's AWS
-// event stream comes back as the Messages SSE the request path reads, a
-// Bedrock exception as the dialect's error event, so the commit point
-// (gateway/proxy/commit.go) refuses an exception before any output and
-// the attempt loop fails over (ADR 0051).
+// Package bedrock is the envelope for Claude on Amazon Bedrock. An envelope
+// carries a dialect's request to a provider and its answer back,
+// translating nothing. The Anthropic Messages body goes to InvokeModel or
+// InvokeModelWithResponseStream, signed with SigV4. The model goes in the
+// path and the betas in the body.
+//
+// A streamed answer's AWS event stream comes back as the Messages SSE the
+// request path reads. A Bedrock exception comes back as the dialect's error
+// event. So the commit point refuses an exception before any output, and
+// the attempt loop fails over. ADR 0001, ADR 0051.
 //
 // It is an http.RoundTripper over the deployment's transport: the request
 // path sees an Anthropic provider.
@@ -295,9 +296,9 @@ func stringList(v jsontext.Value) (out []string, ok bool) {
 	return out, true
 }
 
-// errorType is an Anthropic error type for a Bedrock exception: what the
-// request path and the SDKs read (a rate limit and an overload retried,
-// ADR 0051; the rest not).
+// errorType maps a Bedrock exception to the Anthropic error type that the
+// request path and the SDKs read. A rate limit and an overload are retried,
+// and the rest are not. ADR 0051.
 func errorType(exception string) string {
 	switch strings.ToLower(strings.TrimSuffix(exception, "Exception")) {
 	case "throttling":

@@ -1,6 +1,8 @@
 // Package messages is Anthropic's Messages API (POST /v1/messages): the
 // pass-through scan and splice of a request, and usage from its response,
 // streamed or not.
+//
+// Package variables marked read-only are never written after init.
 package messages
 
 import (
@@ -62,8 +64,9 @@ func serverTool(tools []byte) (found bool, err error) {
 	return found, err
 }
 
-// known lists the request members golem forwards without comment; others
-// are forwarded and counted (restricted mode refuses them, ADR 0037).
+// known lists the request members golem forwards as they are. Other
+// members are forwarded and counted, and restricted mode refuses them.
+// ADR 0037.
 var known = map[string]bool{ // read-only
 	"model": true, "messages": true, "max_tokens": true, "system": true, "metadata": true,
 	"stop_sequences": true, "stream": true, "temperature": true, "top_p": true, "top_k": true,
