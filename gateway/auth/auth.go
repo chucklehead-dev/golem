@@ -1,7 +1,10 @@
-// Package auth turns a request's credential into a Principal: who is
-// calling, in which scope, with which rights (ADR 0009, org-model.md).
-// Everything is decided from the snapshot, with no network call: golem keys
-// by their hash, Entra tokens by the tenant's cached signing keys.
+// Package auth turns a request's credential into a Principal, which says
+// who is calling, in which scope and with which rights (org-model.md).
+// Everything is decided from the snapshot, with no network call. Golem keys
+// are checked by their hash, and Entra tokens by the tenant's cached
+// signing keys. ADR 0009.
+//
+// Package variables marked read-only are never written after init.
 package auth
 
 import (
@@ -26,36 +29,37 @@ type Principal struct {
 	ID, Kind string
 	Scope    string
 	Key      string // the key's display prefix, if a key was used
-	// models is the scope's aliases narrowed by the key's; nil allows every
-	// route (standalone's implicit principal only).
+	// models is the scope's aliases, narrowed by the key's. Nil allows every
+	// route, which only standalone's implicit principal has.
 	models  map[string]bool
 	entraID string // the Entra ID a token named, for the denylist
 	Limits  Limits
 }
 
-// Limits are the scope's, for the limiter.
+// Limits are the scope's limits and request policy, for the limiter and
+// the request path.
 type Limits struct {
 	BudgetMicros int64
-	// MemberRPM and ScopeRPM are the scope's rate limits, requests a
-	// minute: each member's, and the whole scope's (prd.md); 0: none.
+	// MemberRPM and ScopeRPM are the scope's rate limits in requests a
+	// minute, for each member and for the whole scope. 0 is none.
 	MemberRPM, ScopeRPM int64
-	BudgetMode          admission.BudgetMode // the snapshot's; an unknown one is enforce
+	BudgetMode          admission.BudgetMode // from the snapshot; an unknown mode enforces
 	PrincipalInFlight   int
 	ScopeInFlight       int
 	// The scope's request policy (contracts.md).
 	StorageAllowed  bool
-	MaxOutputTokens int64  // max_tokens times n; 0: none
-	MaxInputBytes   int64  // 0: none
-	Features        string // restricted, compatible, or "" (by the route)
+	MaxOutputTokens int64  // max_tokens times n; 0 is none
+	MaxInputBytes   int64  // 0 is none
+	Features        string // restricted, compatible, or "" to follow the route
 }
 
-// Allows reports whether the principal may call an alias: the intersection
-// of the scope's policy and the key's constraints (org-model.md).
+// Allows reports whether the principal may call an alias. The scope's
+// policy and the key's constraints must both allow it.
 func (p *Principal) Allows(alias []byte) bool { return p.models == nil || p.models[string(alias)] }
 
-// Keys authenticates against one snapshot's entitlements: golem keys, and
-// Entra tokens when an Entra verifier is configured. The chain picks by the
-// credential's shape, and whichever recognises it decides (ADR 0009).
+// Keys authenticates against one snapshot's entitlements. It takes golem
+// keys, and Entra tokens when an Entra verifier is configured. The
+// credential's shape picks which of them decides. ADR 0009.
 type Keys struct {
 	env      key.Env
 	byHash   map[[32]byte]*entry
@@ -65,8 +69,8 @@ type Keys struct {
 	now      func() time.Time
 	entra    *entra.Verifier
 	deny     *DenyFile // the site's emergency denylist, applied over the snapshot
-	// byEntra: a user's oid or a service's app ID, then a scope, to the
-	// principal acting there; the empty scope is the default's.
+	// byEntra maps a user's oid or a service's app ID, then a scope, to the
+	// principal acting there. The empty scope holds the default one.
 	byEntra map[string]map[string]*Principal
 }
 
@@ -74,13 +78,13 @@ type entry struct {
 	p       Principal
 	expires time.Time
 	revoked bool
-	// refused, if set, is why the key cannot be used whatever its state:
-	// its scope is gone from the snapshot, or its principal left it.
+	// refused, if set, is why the key cannot be used whatever its state.
+	// Either its scope is gone from the snapshot, or its principal left it.
 	refused *Refusal
 }
 
-// The standalone implicit principal's in-flight limit: generous, since one
-// developer's agents may run many calls at once.
+// The standalone implicit principal's in-flight limit is generous, since
+// one developer's agents may run many calls at once.
 const implicitInFlight = 16
 
 // rights are a scope's, shared by every principal acting in it.
@@ -89,11 +93,11 @@ type rights struct {
 	limits Limits
 }
 
-// Compile indexes a snapshot's entitlements for an installation: env is the
-// key prefix this gateway accepts (Live in production, Dev standalone), and
-// v verifies Entra tokens (nil: they are refused). Whatever names a
-// scope the snapshot lacks is refused, never given a zero (unlimited)
-// budget.
+// Compile indexes a snapshot's entitlements for an installation. The key
+// environment is the one this gateway accepts, Live in production and Dev
+// standalone. The verifier checks Entra tokens, and without one they are
+// refused. Anything that names a scope the snapshot lacks is refused,
+// never given an unlimited budget.
 func Compile(e snapshot.Entitlements, env key.Env, now func() time.Time, v *entra.Verifier) *Keys {
 	k := &Keys{env: env, prefix: "glm_" + string(env) + "_", byHash: map[[32]byte]*entry{}, now: now, entra: v, byEntra: map[string]map[string]*Principal{}}
 	if e.Implicit && env == key.Dev { // never for a live installation
@@ -190,8 +194,8 @@ func keyEntry(sk snapshot.Key, scopes map[string]*rights, owners map[string]owne
 	return en
 }
 
-// Anyone is the principal of a snapshot with no entitlements to check
-// (tests): every route, no limits.
+// Anyone is the principal of a snapshot with no entitlements to check, as
+// in tests. It may call every route, with no limits.
 var Anyone = &Principal{ID: "anyone", Kind: "user", Scope: "any"} // read-only
 
 // Refusal is why a request was not authenticated: its contract code and a
@@ -214,10 +218,10 @@ func (k *Keys) Authenticate(h http.Header) (*Principal, *Refusal) {
 	return k.AuthenticateGrant(h, &g)
 }
 
-// AuthenticateGrant is Authenticate, recording in g what it honoured, so
-// a call in flight can later ask another snapshot's keys whether they
-// still would (Honours). g is the caller's, kept where it keeps the call
-// (the request path's pooled exchange), so nothing is allocated for it.
+// AuthenticateGrant is Authenticate, and also records in the grant what it
+// honoured. A call in flight can then ask another snapshot's keys whether
+// they still honour it (Honours). The caller keeps the grant with the call,
+// so nothing is allocated for it.
 func (k *Keys) AuthenticateGrant(h http.Header, g *Grant) (*Principal, *Refusal) {
 	*g = Grant{}
 	cred, conflict := credential(h)
@@ -237,14 +241,14 @@ func (k *Keys) AuthenticateGrant(h http.Header, g *Grant) (*Principal, *Refusal)
 	return p, nil
 }
 
-// Grant is what one authentication honoured: the credential's identity (a
-// key's hash and text, a token's Entra ID by its principal) and the
-// principal it acted as. The zero Grant is none (a snapshot without
-// entitlements), which every Keys honours.
+// Grant is what one authentication honoured. It holds the credential's
+// identity and the principal it acted as. A key is held by its hash and
+// text, a token by its principal's Entra ID. The zero Grant, from a
+// snapshot without entitlements, is honoured by every Keys.
 type Grant struct {
 	p    *Principal
 	kind grantKind
-	hash [32]byte // a key's
+	hash [32]byte // a key's hash
 	cred string   // a key's text, for the denylist's prefixes
 }
 
@@ -257,18 +261,22 @@ const (
 	grantToken
 )
 
-// Principal is the principal the grant authenticated; nil for none.
+// Principal is the principal the grant authenticated, or nil for none.
 func (g *Grant) Principal() *Principal { return g.p }
 
-// Honours reports whether these keys, with the denylist in force now,
-// still honour a grant another snapshot's keys made, by the rules
-// Authenticate applies: a key while it is listed and not revoked, its
-// scope exists and its principal is a listed member of it; a token while
-// its principal is a member of the scope it acted in; neither while the
-// denylist names it. It returns the refusal a call in flight is ended
-// with, nil if honoured. Expiry (a key's, a token's) is not checked: the
-// passing of time ends no call that began in time, as the authorization
-// lease's expiry stops only new requests (ADR 0041).
+// Honours reports whether these keys, with the current denylist, still
+// honour a grant that another snapshot's keys made. It applies
+// Authenticate's rules:
+//   - a key is honoured while it is listed and not revoked, its scope
+//     exists, and its principal is a listed member of that scope;
+//   - a token is honoured while its principal is a member of the scope it
+//     acted in;
+//   - neither is honoured while the denylist names it.
+//
+// It returns the refusal to end a call in flight with, or nil if honoured.
+// Expiry is not checked, since time passing ends no call that began in
+// time. The authorization lease's expiry likewise stops only new requests.
+// ADR 0041.
 func (k *Keys) Honours(g *Grant) *Refusal {
 	var p *Principal
 	switch g.kind {
@@ -317,10 +325,10 @@ func keyCred(cred string) string {
 // golem-scope header names, or a golem key's.
 func (k *Keys) principal(cred string, h http.Header, g *Grant) (*Principal, *Refusal) {
 	if k.implicit != nil {
-		// Standalone without a LocalIdentity: the one local principal, for
-		// the gateway's own generated key alone (ADR 0023). Its
-		// browser guard keeps web pages out; the key keeps out other
-		// programs and users of the machine.
+		// Standalone without a LocalIdentity has one local principal, for
+		// the gateway's own generated key alone. Its browser guard keeps web
+		// pages out, and the key keeps out the machine's other programs and
+		// users. ADR 0023.
 		if sum := key.Hash(cred); k.local != ([32]byte{}) && subtle.ConstantTimeCompare(sum[:], k.local[:]) == 1 {
 			g.kind, g.cred = grantImplicit, cred
 			return k.implicit, nil
@@ -334,10 +342,10 @@ func (k *Keys) principal(cred string, h http.Header, g *Grant) (*Principal, *Ref
 		g.kind = grantToken
 		return k.token(cred, h.Get(contract.HeaderScope))
 	}
-	// A known hash is a valid key: parsing it (base62 through math/big) is
-	// needed only to say why an unknown one is refused. The installation's
-	// prefix is checked first all the same, cheaply: the snapshot's keys
-	// carry no environment, and a publisher's mistake must not let another
+	// A known hash is a valid key. Parsing a key is costly and needed only
+	// to say why an unknown one is refused. The installation's prefix is
+	// still checked first, cheaply. The snapshot's keys carry no
+	// environment, and a publisher's mistake must not let another
 	// installation's key in.
 	var e *entry
 	if strings.HasPrefix(cred, k.prefix) {
@@ -369,8 +377,8 @@ func (k *Keys) principal(cred string, h http.Header, g *Grant) (*Principal, *Ref
 	return &e.p, nil
 }
 
-// token authenticates an Entra token and finds the principal in the scope
-// the golem-scope header names, else its default (contracts.md).
+// token authenticates an Entra token and finds its principal, in the scope
+// the golem-scope header names or else the default one (contracts.md).
 func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 	if k.entra == nil {
 		return nil, &Refusal{contract.AuthTokenInvalid, "this gateway does not take Entra tokens; use a golem key"}
@@ -381,8 +389,8 @@ func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 		if e, ok := errors.AsType[*entra.Error](err); ok && e.Expired {
 			code = contract.AuthTokenExpired
 		} else if ok && e.Unavailable {
-			// The keys are not fetched yet: the gateway's state, not the
-			// token's fault, and retryable (503 with Retry-After).
+			// Entra's keys are not fetched yet. That is the gateway's state,
+			// not the token's fault, so it is retryable with a 503.
 			code = contract.GatewayNotReady
 		}
 		return nil, &Refusal{code, err.Error()}
@@ -402,8 +410,8 @@ func (k *Keys) token(raw, scope string) (*Principal, *Refusal) {
 	return p, nil
 }
 
-// credential is the request's credential, from Authorization: Bearer or
-// x-api-key; conflict reports both present and different, which is
+// credential returns the request's credential, from Authorization: Bearer
+// or x-api-key. conflict reports both present and different, which is
 // refused rather than one silently preferred.
 func credential(h http.Header) (cred string, conflict bool) {
 	var bearer string
@@ -417,12 +425,12 @@ func credential(h http.Header) (cred string, conflict bool) {
 	return cmp.Or(bearer, apiKey), false
 }
 
-// RequireLocalKey sets the standalone implicit principal's key: without
-// one the implicit principal admits no one.
+// RequireLocalKey sets the standalone implicit principal's key. Without
+// one, the implicit principal admits no one.
 func (k *Keys) RequireLocalKey(local string) { k.local = key.Hash(local) }
 
-// looksLikeJWS is the chain's test for an Entra token: three base64url
-// parts, the first a JSON object.
+// looksLikeJWS is the chain's test for an Entra token. A token has three
+// base64url parts, the first a JSON object.
 func looksLikeJWS(s string) bool {
 	return strings.Count(s, ".") == 2 && strings.HasPrefix(s, "eyJ")
 }
