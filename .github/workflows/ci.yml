@@ -76,6 +76,10 @@ jobs:
         run: make -C model check
         env:
           QUINT_BACKEND: typescript
+      - name: install the gotogether CLI at go.mod's version
+        run: go install "github.com/chucklehead-dev/gotogether/cmd/gotogether@$(go list -m -f '{{.Version}}' github.com/chucklehead-dev/gotogether)"
+      - name: the invariant tables are current, each invariant enforced and checked
+        run: model/invariants.sh -check
       - name: "the gateway against its models (connect: the model drives)"
         run: go test -count=1 -run 'TestPublicationModel|TestExposureModel|TestAttemptsModel' ./gateway/... ./control/...   # TestExposureModelValkey too
         env:

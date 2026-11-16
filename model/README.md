@@ -18,6 +18,14 @@ is not a proof. The Go code is checked against publication, exposure and
 attempts by connect (`TestPublicationModel`, `TestExposureModel`,
 `TestAttemptsModel`: the model's traces drive the code).
 
+Each model's invariants (its `safe` val's conjuncts) are listed in its
+`<model>.invariants.yaml`, which exists only to name them for `gotogether
+invariants`. `make invariants` (`./invariants.sh`) writes their tables in
+the [orientation page](../docs/walkthroughs/README.md#each-models-invariants):
+what each means, the code that enforces it (`//quint:enforces`) and the
+tests that check it (`//quint:checks`). `make check-invariants` is CI's
+check.
+
 ## Retired models
 
 Removed in the commit after dc20b0c (`git show dc20b0c:model/<name>.md`

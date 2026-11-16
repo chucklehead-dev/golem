@@ -4,7 +4,7 @@ QUINT ?= quint
 LMT ?= lmt
 MODELS = publication exposure attempts
 
-.PHONY: all check tangle verify-tangled
+.PHONY: all check tangle verify-tangled invariants check-invariants
 all: check
 
 %.qnt: %.md
@@ -23,3 +23,12 @@ verify-tangled:
 	@for m in $(MODELS); do cp $$m.qnt /tmp/$$m.qnt.committed; done
 	$(LMT) $(MODELS:=.md)
 	@for m in $(MODELS); do diff -u /tmp/$$m.qnt.committed $$m.qnt; done
+
+# The invariant tables in docs/walkthroughs/README.md (gotogether invariants):
+# invariants writes them, check-invariants fails when one is stale or an
+# invariant lacks its //quint:enforces or //quint:checks (CI).
+invariants:
+	./invariants.sh
+
+check-invariants:
+	./invariants.sh -check

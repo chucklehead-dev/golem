@@ -22,10 +22,30 @@ Dockerfile's `GO_VERSION` and CI (`go-version-file: go.mod`) follow
 - After editing a config kind's field comments in `lib/api/v1alpha1`,
   regenerate the chart's CRDs: `GOLEM_UPDATE_CRDS=1 go test ./internal/crdgen/`.
 - `helm lint deploy/charts/*` after a chart change.
+- `model/invariants.sh -check` after changing a model's invariants or code
+  annotated with them (see Model invariants, below).
 
 `internal/doccheck` fails when a Go comment cites an ADR that is now a
 stub, or a doc's section number (see below). `internal/archtest` fails on
 an import that crosses the layers.
+
+## Model invariants
+
+A model's invariants are the conjuncts of its `safe` val. A new one needs
+three things, or CI's `model/invariants.sh -check` fails:
+
+- its name in the model's `model/<model>.invariants.yaml`, and a one-line
+  comment directly above the val saying what it means (the table shows
+  that first line only);
+- `//quint:enforces <name>` on the function, type or statement whose logic
+  makes it hold, and `//quint:checks <name>` on each Test or Fuzz function
+  that fails if it breaks, in a package `model/invariants.sh` scans for
+  that model;
+- the tables written again: `model/invariants.sh` (needs quint and the
+  gotogether CLI at go.mod's version; the script says how to install it).
+
+The tables carry line numbers, so moving annotated code also needs the
+script run again.
 
 ## Writing comments
 
