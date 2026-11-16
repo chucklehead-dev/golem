@@ -63,6 +63,9 @@ func (h *Handler) prepare(w http.ResponseWriter, r *http.Request, ex *exchange, 
 		return p, no
 	}
 	p.betas = requestBetas(h.Dialect, r.Header)
+	if no := invalidBetas(p.betas); no != nil {
+		return p, no
+	}
 	return p, h.features(r.Header, p.principal, p.rt, p.req, p.betas)
 }
 

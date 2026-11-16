@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/lib/contract"
@@ -93,6 +94,19 @@ func requestBetas(d Dialect, hdr http.Header) []string {
 		}
 	}
 	return out
+}
+
+// invalidBetas refuses betas that are not valid UTF-8. Bedrock takes betas
+// as JSON strings, which would carry such a value as U+FFFD, a beta the
+// caller never named.
+func invalidBetas(betas []string) *refusal {
+	for _, b := range betas {
+		if !utf8.ValidString(b) {
+			return &refusal{code: contract.RequestInvalid,
+				msg: "the anthropic-beta header has a value that is not valid UTF-8: send each beta's name as its provider documents it"}
+		}
+	}
+	return nil
 }
 
 // incapable is the refusal of a request no deployment of rt accepts, for
