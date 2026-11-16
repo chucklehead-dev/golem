@@ -14,24 +14,24 @@ import (
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
-// prepared is a request ready for its route's deployments: authenticated,
-// read, scanned, routed, and its features checked.
+// prepared is a request ready for its route's deployments. It has been
+// authenticated, read, scanned and routed, and its features checked.
 type prepared struct {
 	snap      *snapshot.Compiled
 	principal *auth.Principal
 	body      []byte // in the pooled buffer readBody was given
 	req       scanned
 	rt        *route.Route
-	betas     []string // its anthropic-beta values (requestBetas)
+	betas     []string // the request's anthropic-beta values
 }
 
-// prepare takes a request to its route: the steps ServeHTTP and
-// ServeCountTokens share. Authentication fills g; the body is read into
-// in.
+// prepare takes a request to its route, the steps ServeHTTP and
+// ServeCountTokens share. Authentication fills the grant, and the body is
+// read into the pooled buffer given.
 func (h *Handler) prepare(w http.ResponseWriter, r *http.Request, ex *exchange, in *[]byte, g *auth.Grant) (prepared, *refusal) {
 	var p prepared
-	// Before authentication: a credential sent twice must not be judged by
-	// its first copy alone.
+	// Check this before authentication, so a credential sent twice is not
+	// judged by its first copy alone.
 	if err := contract.CheckSingleHeaders(r.Header); err != nil {
 		return p, &refusal{code: contract.RequestInvalid, msg: err.Error()}
 	}
@@ -39,10 +39,9 @@ func (h *Handler) prepare(w http.ResponseWriter, r *http.Request, ex *exchange, 
 	if p.snap, p.principal, no = h.authenticate(r, g); no != nil {
 		return p, no
 	}
-	// Before the body is read: a claimed length past the scope's ceiling is
-	// refused unread, and the bodies being read at once are bounded, the
-	// gateway's bytes and the principal's bodies (Reading).
-	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero is the default, not "no body"
+	// Before reading, refuse a claimed length past the scope's ceiling, and
+	// bound the bodies being read at once (Reading).
+	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero means the default, not "no body"
 	if c := p.principal.Limits.MaxInputBytes; c > 0 && r.ContentLength > c {
 		return p, inputCeiling(p.principal, r.ContentLength)
 	}
@@ -69,14 +68,14 @@ func (h *Handler) prepare(w http.ResponseWriter, r *http.Request, ex *exchange, 
 	return p, h.features(r.Header, p.principal, p.rt, p.req, p.betas)
 }
 
-// authenticate takes the request's snapshot and finds its principal.
+// authenticate takes the current snapshot and finds the request's
+// principal in it.
 func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compiled, *auth.Principal, *refusal) {
-	// The floor before anything is checked (gateway/guard): a source's
-	// requests, and its failed authentications, bounded. A source past its
-	// failures (a flood of bad credentials, perhaps behind the same sidecar
-	// as valid callers) still has a golem key looked up, cheaply, and is
-	// refused only if that fails too; an Entra token from it is refused
-	// before its signature is checked.
+	// The guard bounds each source's requests and failed authentications.
+	// A source past its failures may share a sidecar with valid callers. Its
+	// golem keys are still looked up, since that is cheap, and refused only
+	// if they fail too. Its Entra tokens are refused before any signature
+	// check.
 	src := h.Guard.Source(r)
 	if no := h.Guard.Admit(src); no != nil {
 		return nil, nil, &refusal{code: contract.LimitSource, msg: no.Msg, retryAfter: no.RetryAfter}
@@ -109,22 +108,22 @@ func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compil
 }
 
 // credentialsFault reports whether an authentication's refusal was the
-// credential's fault, and so counts against its source's failures
-// (gateway/guard): a key unknown, revoked, expired or of another
-// installation, a token invalid or expired, none sent. Not the gateway's
-// state (gateway.not_ready: Entra's keys not yet fetched), nor a token
-// refused for golem's copy of Entra's keys (too old, or without the key
-// that signed it: Entra rotated): those are golem's or Entra's, and would
-// lock out every caller of a shared address at once. Nor a valid
-// credential refused by policy (authz.*, the denylist).
+// credential's fault, so it counts against the source's failures. A key
+// unknown, revoked, expired or of another installation counts, as does a
+// token invalid or expired, or no credential at all.
+//
+// Some refusals are golem's or Entra's fault and would lock out every
+// caller of a shared address. Those are the gateway not being ready and a
+// token refused for golem's copy of Entra's signing keys. A valid
+// credential refused by policy does not count either.
 func credentialsFault(no *auth.Refusal) bool {
 	switch no.Code {
 	case contract.AuthKeyUnknown, contract.AuthKeyRevoked, contract.AuthKeyExpired, contract.AuthKeyWrongInstallation,
 		contract.AuthTokenExpired, contract.AuthMissing:
 		return true
 	case contract.AuthTokenInvalid:
-		// lib/entra says these only in its message (its Error has no
-		// field for them): TestEntraKeyTroubleIsNoFailure pins them.
+		// lib/entra says these only in its message, since its Error has no
+		// field for them. TestEntraKeyTroubleIsNoFailure pins the text.
 		return !strings.Contains(no.Msg, entraKeysTooOld) && !strings.Contains(no.Msg, entraUnknownKey)
 	}
 	return false
@@ -136,9 +135,9 @@ const (
 	entraUnknownKey = "signed by an unknown key"
 )
 
-// sendsGolemKey reports whether the request's credential (x-api-key, or
-// Authorization: Bearer) is a golem key, not an Entra token: a key is a
-// hash lookup, a token a signature check.
+// sendsGolemKey reports whether the request's credential, in x-api-key or
+// Authorization: Bearer, is a golem key rather than an Entra token. A key
+// costs a hash lookup, a token a signature check.
 func sendsGolemKey(h http.Header) bool {
 	cred := h.Get("X-Api-Key")
 	if cred == "" {
@@ -150,21 +149,20 @@ func sendsGolemKey(h http.Header) bool {
 }
 
 // preallocMax is the most readBody allocates on a body's claimed length
-// alone: an agent's request (about 200 KB) in one allocation.
+// alone. It fits an agent's request, about 200 KB, in one allocation.
 const preallocMax = 1 << 20
 
-// readBody reads the request body into the pooled buffer in, at most
-// maxBody bytes, counting them in br (the bound on bodies being read).
+// readBody reads at most maxBody bytes of the request body into the pooled
+// buffer given. It counts them against the bound on bodies being read.
 func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte, maxBody int64, br *bodyRead) ([]byte, *refusal) {
-	// One allocation, not a doubling series, for a body up to preallocMax:
-	// past it the claimed length is not trusted (a client could claim 32
-	// MiB, send two bytes, and hold the buffer until BodyTimeout), and
-	// readAll grows the buffer as the bytes actually arrive.
+	// Allocate once for a body up to preallocMax, rather than doubling.
+	// Larger claims are not trusted, since a client could claim 32 MiB and
+	// send two bytes. readAll then grows the buffer as bytes arrive.
 	if n := r.ContentLength; n > 0 && n <= maxBody && int64(cap(*in)) < n+1 {
 		*in = make([]byte, 0, min(n+1, preallocMax))
 	}
-	// The body must arrive within BodyTimeout: a client trickling it in
-	// would hold a connection and a buffer before any admission.
+	// The body must arrive within BodyTimeout. A client trickling it in
+	// would otherwise hold a connection and a buffer before any admission.
 	rc := http.NewResponseController(w)
 	rc.SetReadDeadline(time.Now().Add(cmp.Or(h.BodyTimeout, 30*time.Second))) // a test's recorder has none
 	var err error
@@ -181,7 +179,8 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte, m
 	return *in, nil
 }
 
-// route finds the alias's route, and checks the principal may call it here.
+// route finds the alias's route and checks that the principal may call it
+// at this endpoint.
 func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte) (*route.Route, *refusal) {
 	rt := snap.Routes.Lookup(alias)
 	switch {
@@ -195,10 +194,10 @@ func (h *Handler) route(snap *snapshot.Compiled, p *auth.Principal, alias []byte
 	return rt, nil
 }
 
-// features applies the request-feature mode (ADR 0037, 0041):
-// in restricted mode (the default, but for agent routes) only approved
-// request members, betas and API versions are forwarded; compatible mode
-// forwards unknown ones. Known policy (policy below) applies in both.
+// features applies the scope's request-feature mode. Restricted mode
+// forwards only approved request members, betas and API versions. It is
+// the default, except on agent routes. Compatible mode forwards unknown
+// ones. The scope's policy applies in both modes. ADR 0037.
 func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, req scanned, betas []string) *refusal {
 	mode := p.Limits.Features
 	if mode == "" {
@@ -216,10 +215,10 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 	return h.Dialect.restrictedHeaders(hdr, rt, betas)
 }
 
-// policy applies the scope's request policy (contracts.md): its
-// ceilings on output asked for and on input size (ADR 0031), provider-side
-// storage (ADR 0027: turned off where it can be, refused where it cannot),
-// and the state M1 never keeps at the provider.
+// policy applies the scope's request policy (contracts.md). It enforces the
+// ceilings on output and input size, and refuses state kept at the
+// provider. Provider-side storage is turned off where it can be and
+// refused where it cannot. ADR 0027.
 func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
 	lim := p.Limits
 	if no := inputCeiling(p, requestBytes); no != nil {
@@ -233,9 +232,9 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 			return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("max_tokens %d for %d completions is over this scope's ceiling of %d tokens a request", req.maxTokens, req.n, c)}
 		}
 	}
-	// M1 refers to nothing the provider keeps, whatever the scope allows
-	// (security-and-correctness.md): no stored responses, no uploaded
-	// files, no item references. A stable, not retryable, policy refusal.
+	// M1 refers to nothing the provider keeps, whatever the scope allows.
+	// That rules out stored responses, uploaded files and item references.
+	// The refusal is stable policy, not retryable.
 	switch {
 	case req.stateful != "":
 		return &refusal{code: contract.AuthzProviderStorageForbidden, msg: "golem refers to nothing the provider keeps, and " + req.stateful +
@@ -254,8 +253,8 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 	return nil
 }
 
-// inputCeiling is the scope's ceiling on a request's size (ADR 0031), a
-// token count's too.
+// inputCeiling refuses a request past the scope's ceiling on its size,
+// which applies to a token count too.
 func inputCeiling(p *auth.Principal, requestBytes int64) *refusal {
 	if c := p.Limits.MaxInputBytes; c > 0 && requestBytes > c {
 		return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}

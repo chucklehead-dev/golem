@@ -116,9 +116,9 @@ func (ex *exchange) startWrites(w http.ResponseWriter, stall time.Duration) {
 	ex.watch.arm(http.NewResponseController(w), stall)
 }
 
-// send writes b to the caller (and flushes it, for a stream). A failed
-// write, or one the caller has not taken within the stall (writeWatch), is
-// the caller gone (ADR 0041): send then reports false.
+// send writes b to the caller, flushing it for a stream. It reports false
+// when the caller is gone, meaning the write failed or the caller did not
+// take it within the stall bound (writeWatch). ADR 0041.
 func (ex *exchange) send(b []byte, flush bool) bool {
 	if len(b) == 0 {
 		return true

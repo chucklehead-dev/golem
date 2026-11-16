@@ -10,41 +10,44 @@ import (
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
-var defaultRetryAfter = []string{"5"} // read-only: a retryable refusal's, when its refuser gave none
+// defaultRetryAfter is a retryable refusal's Retry-After when its refuser
+// gave none.
+var defaultRetryAfter = []string{"5"} // read-only
 
-// refusal is a request the path will not serve: a contract code and a
-// message that says what to do next.
+// refusal is a request the path will not serve. It carries a contract code
+// and a message that says what to do next.
 type refusal struct {
 	code       contract.Code
 	msg        string
-	retryAfter time.Duration // the admitter's, if it said when to retry
-	callerGone bool          // nothing to tell: the caller left first
+	retryAfter time.Duration // the refuser's, if it said when to retry
+	callerGone bool          // the caller left first, so there is no one to tell
 }
 
-// The ledger outcomes of a call that did not complete (contracts.md);
-// terminated: the gateway ended it in flight, its authorization withdrawn.
+// The ledger outcomes of a call that did not complete (contracts.md). A
+// terminated call is one the gateway ended because its authorization was
+// withdrawn.
 const (
 	outcomeFailed     = "failed"
 	outcomeCancelled  = "cancelled"
 	outcomeTerminated = "terminated"
 )
 
-// coded is an outcome with its failure's origin and code, a contract code's.
+// coded returns an outcome with the origin and name of its contract code.
 func coded(outcome string, c contract.Code) (string, string, string) {
 	return outcome, string(c.Origin), c.Name
 }
 
-// outcome is a finished call's ledger outcome, and the failure's origin and
-// code (contracts.md). cut is a response that ended early, or a stream
-// that carried its provider's error event after its output began: either
-// is a failure, however much was delivered (and charged) before it.
+// outcome returns a finished call's ledger outcome, with its failure's
+// origin and code (contracts.md). cut is set for a response that ended
+// early, or a stream that sent the provider's error event after output
+// began. Either is a failure, however much was delivered and charged.
 func outcome(res Result, cut bool, ended *errTerminated) (outcome, origin, code string) {
 	switch {
 	case res.CallerGone:
 		return outcomeCancelled, string(contract.OriginClient), ""
 	case res.Terminated:
 		return coded(outcomeTerminated, ended.code)
-	case cut: // or a stream whose provider sent its error event
+	case cut:
 		return coded(outcomeFailed, contract.UpstreamStreamFailed)
 	case res.Status >= 400:
 		return outcomeFailed, string(contract.OriginProvider), ""
@@ -52,12 +55,12 @@ func outcome(res Result, cut bool, ended *errTerminated) (outcome, origin, code 
 	return "completed", "", ""
 }
 
-// fail refuses a request: the refusal recorded (with as much of p as the
-// request got to: its principal, its route), and written in the caller's
+// fail refuses a request. It records the refusal with the principal and
+// route, if the request got that far, and writes it in the caller's
 // dialect.
 func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, reqID string, p *prepared, no *refusal) {
 	if no.callerGone {
-		return // no one to tell, nothing refused
+		return // no one to tell, and nothing refused
 	}
 	r := telemetry.Refusal{Code: no.code, Message: no.msg, RequestID: reqID}
 	if pr := p.principal; pr != nil {
@@ -70,9 +73,9 @@ func (h *Handler) fail(ctx context.Context, w http.ResponseWriter, reqID string,
 	refuse(w, h.Dialect, no.code, no.msg, no.retryAfter)
 }
 
-// Refuse writes a refusal in a dialect's error shape, with golem's code, a
-// message that says what to do next, and the request ID if the response has
-// one (contracts.md). Only contract codes can be sent.
+// Refuse writes a refusal in a dialect's error shape (contracts.md). It
+// carries golem's code, a message that says what to do next, and the
+// request ID if the response has one. Only contract codes can be sent.
 func Refuse(w http.ResponseWriter, d Dialect, c contract.Code, msg string) { refuse(w, d, c, msg, 0) }
 
 // refuse is Refuse with the refuser's own Retry-After, when it gave one.

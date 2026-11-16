@@ -11,10 +11,11 @@ import (
 	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
-// The attempt loop's parts (model/attempts.md); the loop is ServeHTTP's.
+// The attempt loop's parts. The loop itself is callState.attempts, and
+// model/attempts.md is its model.
 
-// health is the handler's Health, or its own if none was given (each
-// handler then judges its deployments alone: a test's).
+// health is the handler's Health, or its own if none was given. Tests use
+// their own, so each handler judges its deployments alone.
 func (h *Handler) health() *route.Health {
 	if h.Health != nil {
 		return h.Health
@@ -32,16 +33,18 @@ func (h *Handler) reading() *Reading {
 	return h.ownReading
 }
 
-// pick is the pool's next deployment for an attempt, in pool order: one
-// the call has not tried, that accepts the request's betas, and whose
-// health takes the attempt. A call is never retried on a deployment it
-// tried (ADR 0051): the client's SDK already retries the same endpoint
-// with backoff, so the gateway's retry is a failover or nothing, and a pool
-// of one makes one attempt. It marks the one it takes in tried. With none,
-// it returns the earliest time one may take an attempt again (zero:
-// unknown), and whether every one it passed over was for the principal's
-// own share of it (route.AtPrincipalCeiling): its own calls, not the
-// deployments, are what it waits on.
+// pick takes the pool's next deployment for an attempt, in pool order. It
+// skips deployments the call has tried, those its betas rule out, and
+// those whose health refuses. It marks the one it takes in tried.
+//
+// A call never retries a deployment it tried. The client's SDK already
+// retries the same endpoint with backoff, so the gateway's retry is a
+// failover. A pool of one makes one attempt. ADR 0051.
+//
+// When it takes none, it returns the earliest time one may take an
+// attempt again, zero if unknown. It also reports whether every deployment
+// passed over was at the principal's own share (route.AtPrincipalCeiling).
+// The principal then waits on its own calls, not on the deployments.
 func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string) (*route.Target, *route.Hold, time.Time, bool) {
 	var earliest time.Time
 	later := func(at time.Time) {
@@ -52,7 +55,7 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, bet
 	own, passed := true, false
 	for i, t := range rt.Pool {
 		if tried[i] || !t.Accepts(betas) {
-			continue // a deployment the request's betas would be refused by is no failover (ADR 0028)
+			continue // a deployment that would refuse the betas is no failover
 		}
 		l, at, why := hl.AcquireWhy(t, principal)
 		if l == nil {
@@ -66,10 +69,10 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, bet
 	return nil, nil, earliest, passed && own
 }
 
-// noDeployment is the refusal of a call no deployment of its route takes
-// now, with the earliest time one may (retryAt): every one resting or at
-// its ceiling; or, if every one is at the principal's own share of it
-// (own), the principal's limit.
+// noDeployment refuses a call that no deployment of its route takes now.
+// If every deployment is at the principal's own share, the refusal is the
+// principal's in-flight limit. Otherwise the deployments are resting or
+// full, and retryAt is when one may take a call again.
 func noDeployment(retryAt time.Time, own bool) *refusal {
 	if own {
 		return &refusal{code: contract.LimitConcurrency,
@@ -79,8 +82,8 @@ func noDeployment(retryAt time.Time, own bool) *refusal {
 		msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"}
 }
 
-// requestBetas are an Anthropic request's anthropic-beta values, each
-// comma list split; another dialect's, none.
+// requestBetas lists an Anthropic request's anthropic-beta values, with
+// each comma-separated list split. Other dialects have none.
 func requestBetas(d Dialect, hdr http.Header) []string {
 	if d != AnthropicMessages {
 		return nil
@@ -109,9 +112,9 @@ func invalidBetas(betas []string) *refusal {
 	return nil
 }
 
-// incapable is the refusal of a request no deployment of rt accepts, for
-// its betas (ADR 0028), or nil: the first beta no deployment takes, or
-// the combination none takes whole.
+// incapable refuses a request whose betas no deployment of the route
+// accepts, or returns nil. The refusal names the first beta no deployment
+// takes, or else the combination none takes whole. ADR 0028.
 func incapable(rt *route.Route, betas []string) *refusal {
 	if len(betas) == 0 {
 		return nil
@@ -133,19 +136,20 @@ func incapable(rt *route.Route, betas []string) *refusal {
 	return &refusal{code: contract.RouteNoCapableDeployment, msg: "no deployment of route " + rt.Alias + " accepts these anthropic-beta values together (" + strings.Join(betas, ", ") + "): send fewer"}
 }
 
-// next picks the call's next deployment (pick).
+// next picks the call's next deployment.
 func (c *callState) next() (*route.Target, *route.Hold, time.Time, bool) {
 	return pick(c.hl, c.rt, c.tried, c.principal.ID, c.betas)
 }
 
-// retry, given an attempt's failure before it committed, takes the pool's
-// next deployment if the call may retry: it was kept, has attempts left,
-// its caller is there, nothing withdrew it, its upstream context is not
-// done (a route's alarm that fired would fail the retry at once, after it
-// took the next deployment's hold and a retry from the budget), and the
-// pool's budget has a retry. It records the failed attempt's row (charged nothing: the
-// provider saw nothing, or refused before any output), its result one of
-// telemetry's (unreached or refused), and reports whether the call goes on.
+// retry ends an attempt that failed before it committed, and reports
+// whether the call goes on to the pool's next deployment. It goes on only
+// if its body was kept, it has attempts left, its caller and its upstream
+// context are live, a deployment takes it, and the route's budget has a
+// retry.
+//
+// A retry records the failed attempt's row with its result, unreached or
+// refused. The row charges nothing, since the provider saw nothing or
+// refused before any output.
 func (c *callState) retry(result string, status int, after time.Duration) bool {
 	gone := c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil
 	c.endHold(after, gone)
@@ -171,11 +175,10 @@ func (c *callState) retry(result string, status int, after time.Duration) bool {
 	return true
 }
 
-// endHold ends a failed attempt's hold: a failure of its deployment's
-// (after, the provider's Retry-After), unless the call itself was ended,
-// its caller gone or a sweep withdrawing it (gone). Then the attempt's end
-// says nothing of the deployment: it is released, so callers cancelling
-// cannot eject a healthy deployment.
+// endHold ends a failed attempt's hold. Normally the deployment is charged
+// a failure, with the provider's Retry-After. If the call itself ended,
+// because its caller left or a sweep withdrew it, the hold is only
+// released. Callers cancelling then cannot eject a healthy deployment.
 func (c *callState) endHold(after time.Duration, gone bool) {
 	if gone {
 		c.hold.Release()
@@ -191,12 +194,10 @@ func (h *Handler) runBeforePick(r *http.Request) {
 	}
 }
 
-// retryable reports a provider's status for a request it refused before
-// any output, which another deployment may serve: a rate limit,
-// unavailability, Anthropic's overload (ADR 0051). Not 500, which a
-// provider may send after the model has worked; nor 502 or 504, which a
-// proxy in front of the provider sends after it may have passed the
-// request on: uncertain, not refused.
+// retryable reports whether a status refuses a request before any output,
+// so another deployment may serve it. Those are 429, 503 and Anthropic's
+// 529 overload. A 500 may come after the model worked, and a 502 or 504
+// after a proxy passed the request on, so those are uncertain. ADR 0051.
 func retryable(status int) bool {
 	switch status {
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable, 529:
@@ -205,11 +206,11 @@ func retryable(status int) bool {
 	return false
 }
 
-// defaultMaxKept is MaxKept's default: about a thousand agent requests.
+// defaultMaxKept is MaxKept's default, about a thousand agent requests.
 const defaultMaxKept = 256 << 20
 
-// keep counts n bytes of a request body kept for retries against MaxKept,
-// reporting false (nothing counted) if they would not fit.
+// keep counts n bytes of a request body kept for retries against MaxKept.
+// It reports false, counting nothing, if they would not fit.
 func (h *Handler) keep(n int64) bool {
 	limit := int64(cmp.Or(h.MaxKept, defaultMaxKept))
 	if h.kept.Add(n) > limit {
@@ -219,4 +220,5 @@ func (h *Handler) keep(n int64) bool {
 	return true
 }
 
+// unkeep stops counting n bytes kept for retries.
 func (h *Handler) unkeep(n int64) { h.kept.Add(-n) }
