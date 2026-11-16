@@ -181,6 +181,18 @@ func String(dst []byte, v jsontext.Value) ([]byte, bool) {
 	return out, err == nil
 }
 
+// Bool reads a JSON boolean, null as false (the default of every flag a
+// dialect reads, stream among them).
+func Bool(v jsontext.Value) (b, ok bool) {
+	switch v.Kind() {
+	case 't':
+		return true, true
+	case 'f', 'n':
+		return false, true
+	}
+	return false, false
+}
+
 // Quote appends s as a JSON string to dst.
 func Quote(dst []byte, s string) []byte {
 	dst, _ = jsontext.AppendQuote(dst, s)

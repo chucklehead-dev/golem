@@ -58,20 +58,22 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-// options are the command line.
+// options are the command line, grouped as parse declares them.
 type options struct {
-	standalone, listen, tenant, audience, jwks, telem, localKeyFile, zoneName, denylist string
-	maxBody                                                                             int64
-	drainFor, unready                                                                   time.Duration
+	standalone, listen, telem, localKeyFile, zoneName, denylist string
+	maxBody                                                     int64
+	drainFor, unready                                           time.Duration
+	// Entra tokens
+	tenant, audience, jwks string
 	// pool mode
-	pool, bucket, keys, checkpoint, gatewayID, valkeyAddr, site, secrets string
-	replicaAcks                                                          int
-	acceptUnreleased                                                     bool
-	maxSkew, maxLease                                                    time.Duration
+	pool, bucket, keys, checkpoint, gatewayID, site, secrets string
+	acceptUnreleased                                         bool
+	maxSkew, maxLease                                        time.Duration
 	// the site's Valkey: TLS (with a CA file's roots, else the system's)
 	// and an AUTH user; the password is $VALKEY_PASSWORD's, never a flag
-	valkeyTLS            bool
-	valkeyCA, valkeyUser string
+	valkeyAddr, valkeyCA, valkeyUser string
+	valkeyTLS                        bool
+	replicaAcks                      int
 	// the floor before authentication (gateway/guard)
 	sourceHeader                                         string
 	sourceRate, sourceBurst, authFailRate, authFailBurst float64
@@ -84,30 +86,34 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.standalone, "standalone", "", "run from the CRD YAML in this directory, on this machine only (ADR 0023)")
 	fs.StringVar(&o.listen, "listen", "127.0.0.1:8080", "address to serve on")
 	fs.Int64Var(&o.maxBody, "max-body", 32<<20, "largest request body accepted, in bytes")
-	fs.StringVar(&o.tenant, "entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
 	fs.DurationVar(&o.drainFor, "drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
 	fs.DurationVar(&o.unready, "unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
 	fs.StringVar(&o.telem, "telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless a literal loopback address: 127.0.0.1:4318, [::1]:4318)")
 	fs.StringVar(&o.localKeyFile, "local-key", "", "standalone: the file holding the local key (generated on first use); default <user config dir>/golem/standalone-key")
 	fs.StringVar(&o.zoneName, "period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
+	fs.StringVar(&o.denylist, "denylist", "", "the site's emergency denylist file (a mounted ConfigMap), re-read as it changes; empty: none")
+
+	fs.StringVar(&o.tenant, "entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
 	fs.StringVar(&o.jwks, "entra-jwks", "", "the tenant's signing key set URL; default Entra's public cloud's, https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys")
 	fs.StringVar(&o.audience, "entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
-	fs.StringVar(&o.denylist, "denylist", "", "the site's emergency denylist file (a mounted ConfigMap), re-read as it changes; empty: none")
+
 	fs.StringVar(&o.pool, "pool", "", "pool mode: the gateway pool whose snapshots this gateway serves")
 	fs.StringVar(&o.bucket, "bucket", "", "pool mode: the state bucket, s3://<bucket>/<prefix> (or a directory, for tests)")
 	fs.StringVar(&o.keys, "keys", "", "pool mode: a directory of the publishing keys this gateway trusts (*.pub, PEM; a KMS key's with a Key-ID header)")
 	fs.StringVar(&o.checkpoint, "checkpoint", "", "pool mode: a file on this gateway's own disk for the last publication applied (its floor across restarts), with last-good.json beside it (the publication itself, served at a restart while the bucket is unreachable); empty: the trusted checkpoint alone")
 	fs.StringVar(&o.gatewayID, "id", "", "pool mode: this gateway's name, for its status object (default the host name)")
-	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey (host:port) for the limiter")
-	fs.IntVar(&o.replicaAcks, "valkey-replica-acks", 0, "pool mode: replicas each spend add waits for (WAIT), so a failover cannot lose it")
-	fs.BoolVar(&o.valkeyTLS, "valkey-tls", false, "pool mode: connect to Valkey over TLS (ElastiCache's in-transit encryption), verifying its certificate against the system's roots for the address's host name")
-	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "pool mode, with -valkey-tls: a PEM file of the CA certificates to verify Valkey's certificate against, in place of the system's roots")
-	fs.StringVar(&o.valkeyUser, "valkey-user", "", "pool mode: the Valkey user to AUTH as (an ACL user; ElastiCache RBAC); its password in $VALKEY_PASSWORD. Empty with the password set: AUTH as the default user")
 	fs.StringVar(&o.site, "site", "", "pool mode: this gateway's site (its Valkey's keys and ledger rows)")
 	fs.DurationVar(&o.maxSkew, "clock-skew", 2*time.Minute, "pool mode: how far the publisher's clock may run ahead of this gateway's: a pointer issued further in its future is refused")
 	fs.DurationVar(&o.maxLease, "max-lease", 4*time.Hour, "pool mode: the longest authorization lease the pool's publisher grants (golem-control's -lease): a snapshot whose lease runs further ahead, plus -clock-skew, is refused")
 	fs.StringVar(&o.secrets, "secrets", "/var/run/golem/secrets", "pool mode: where provider Secrets are mounted, one directory per Secret")
 	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run although golem#7's deployment evidence is not in (test sites only)")
+
+	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey (host:port) for the limiter")
+	fs.IntVar(&o.replicaAcks, "valkey-replica-acks", 0, "pool mode: replicas each spend add waits for (WAIT), so a failover cannot lose it")
+	fs.BoolVar(&o.valkeyTLS, "valkey-tls", false, "pool mode: connect to Valkey over TLS (ElastiCache's in-transit encryption), verifying its certificate against the system's roots for the address's host name")
+	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "pool mode, with -valkey-tls: a PEM file of the CA certificates to verify Valkey's certificate against, in place of the system's roots")
+	fs.StringVar(&o.valkeyUser, "valkey-user", "", "pool mode: the Valkey user to AUTH as (an ACL user; ElastiCache RBAC); its password in $VALKEY_PASSWORD. Empty with the password set: AUTH as the default user")
+
 	fs.StringVar(&o.sourceHeader, "source-header", "", "the header the proxy in front sets to the caller's address (its last value is taken, e.g. X-Forwarded-For); empty: the connection's address, which behind a sidecar is the sidecar's, so the per-source limits are the pod's")
 	fs.Float64Var(&o.sourceRate, "source-rate", 0, "requests a second each source may make before authentication; 0: no limit (authenticated callers' limits are the policy's)")
 	fs.Float64Var(&o.sourceBurst, "source-burst", 0, "the requests a quiet source may make at once (default -source-rate)")
@@ -200,20 +206,9 @@ func run(ctx context.Context, args []string) int {
 		wg.Go(func() { entra.Run(bg) })
 	}
 
+	health, check := newHealth(holder)
+	wg.Go(func() { check(bg) })
 	lc := &lifecycle{unready: o.unready, drain: o.drainFor, cut: 10 * time.Second}
-	// One view of the deployments' health and the routes' retry budgets for
-	// every dialect's calls, as they share deployments, kept by the active
-	// checks of those that have one (a local box).
-	health := &route.Health{}
-	checker := &route.Checker{Health: health}
-	wg.Go(func() {
-		checker.Run(bg, func() []*route.Target {
-			if c := holder.Applied(); c != nil {
-				return c.Routes.Targets()
-			}
-			return nil
-		})
-	})
 	srv := newServer(o.listen, newMux(o, lc, holder, limiter, tel, calls, health))
 	lc.srv = srv
 	drained := make(chan struct{})
@@ -302,12 +297,23 @@ func valkeyOption(o options, getenv func(string) string) (valkey.ClientOption, e
 	return opt, nil
 }
 
-// newHolder is the snapshot holder of a live installation (startSource
-// makes it a dev one standalone), handing each snapshot's known spend to
-// the limiter as it is applied (ADR 0048).
-// It also ends the calls in flight the snapshot withdraws (a key revoked,
-// a principal gone from the key's scope or from golem), as soon as it is
-// in force: calls is the gateway's registry of them.
+// newHealth is one view of the deployments' health and the routes' retry
+// budgets for every dialect's calls, as they share deployments, and check,
+// the loop of active checks of the applied snapshot's deployments that have
+// one (a local box).
+func newHealth(holder *snapshot.Holder) (*route.Health, func(context.Context)) {
+	health := &route.Health{}
+	checker := &route.Checker{Health: health}
+	return health, func(ctx context.Context) {
+		checker.Run(ctx, func() []*route.Target {
+			if c := holder.Applied(); c != nil {
+				return c.Routes.Targets()
+			}
+			return nil
+		})
+	}
+}
+
 // applyKnown hands the limiter each account's known spend: every scope's,
 // its members' and its capped keys' (org-model.md §4.2), in the scope's
 // period and from its boundary.
@@ -331,6 +337,12 @@ func applyKnown(l *limit.Limiter, e *gsnapshot.Entitlements) {
 	}
 }
 
+// newHolder is the snapshot holder of a live installation (startSource
+// makes it a dev one standalone), handing each snapshot's known spend to
+// the limiter as it is applied (ADR 0048). It also ends the calls in flight
+// the snapshot withdraws (a key revoked, a principal gone from the key's
+// scope or from golem), as soon as it is in force: calls is the gateway's
+// registry of them.
 func newHolder(v *entra.Verifier, limiter *limit.Limiter, calls *proxy.InFlight) *snapshot.Holder {
 	h := &snapshot.Holder{Env: key.Live, Entra: v, AWS: awsCredentials()}
 	h.OnApply = func(c *snapshot.Compiled) {
@@ -397,28 +409,29 @@ func startSource(ctx context.Context, o options, holder *snapshot.Holder) (src i
 	return dir, keyPath, nil
 }
 
-// newMux is the gateway's routes: the two dialects' APIs, each call
-// counted by lc (and, standalone, behind localOnly), and registered in
-// calls while in flight; and the probes.
+// newMux is the gateway's routes: the dialects' APIs, each call counted by
+// lc (and, standalone, behind localOnly), and registered in calls while in
+// flight; and the probes.
 func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry, calls *proxy.InFlight, health *route.Health) *http.ServeMux {
 	mux := http.NewServeMux()
 	guard := newGuard(o)
-	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat,
-		"POST /v1/responses": proxy.OpenAIResponses} {
-		var h http.Handler = &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), Meters: limiter, MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health, Guard: guard}
+	// handle registers h, refusing in d's dialect; standalone puts it behind
+	// local: localOnly, or loopbackOnly for a GET (no body).
+	handle := func(pattern string, d proxy.Dialect, h http.Handler, local func(proxy.Dialect, http.Handler) http.Handler) {
 		if o.standalone != "" {
-			h = localOnly(d, h)
+			h = local(d, h)
 		}
 		mux.Handle(pattern, lc.track(d, h))
 	}
+	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat,
+		"POST /v1/responses": proxy.OpenAIResponses} {
+		handle(pattern, d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), Meters: limiter, MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health, Guard: guard}, localOnly)
+	}
 	// The models list, either dialect's shape (ServeModels picks it): the
 	// Messages handler serves it, with the same snapshots and identity.
-	var models http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, Guard: guard}).ServeModels)
-	if o.standalone != "" {
-		models = loopbackOnly(proxy.AnthropicMessages, models)
-	}
+	models := http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, Guard: guard}).ServeModels)
 	for _, pattern := range []string{"GET /v1/models", "GET /v1/models/{id}"} {
-		mux.Handle(pattern, lc.track(proxy.AnthropicMessages, models))
+		handle(pattern, proxy.AnthropicMessages, models, loopbackOnly)
 	}
 	// A stored response's retrieval, deletion, cancellation or input items:
 	// M1 stores none (security-and-correctness.md §4).
@@ -427,11 +440,8 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 			"golem serves stateless responses only: no response is stored to retrieve, delete or cancel")
 	})
 	// Anthropic's token count: free, no admission, no ledger row.
-	var count http.Handler = http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody, Guard: guard}).ServeCountTokens)
-	if o.standalone != "" {
-		count = localOnly(proxy.AnthropicMessages, count)
-	}
-	mux.Handle("POST /v1/messages/count_tokens", lc.track(proxy.AnthropicMessages, count))
+	count := http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody, Guard: guard}).ServeCountTokens)
+	handle("POST /v1/messages/count_tokens", proxy.AnthropicMessages, count, localOnly)
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	// Ready once a snapshot is applied and its authorization holds.
 	mux.HandleFunc("GET /readyz", lc.readyz(func() error { _, err := holder.Current(); return err }))
@@ -508,8 +518,6 @@ func newEntra(tenant, audiences, jwks string) *entra.Verifier {
 	return e
 }
 
-// newServer is the API's server, its limits set for long streams over
-// HTTP/1.1 and h2c.
 // serve listens on srv's address, its connections bounded by -max-conns and
 // -max-conns-per-source, and serves until the shutdown.
 func serve(srv *http.Server, o options) error {
@@ -530,6 +538,8 @@ func newGuard(o options) *guard.Guard {
 		FailRate: max(o.authFailRate, 0), FailBurst: o.authFailBurst}
 }
 
+// newServer is the API's server, its limits set for long streams over
+// HTTP/1.1 and h2c.
 func newServer(addr string, h http.Handler) *http.Server {
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)

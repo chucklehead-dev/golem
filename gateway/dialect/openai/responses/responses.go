@@ -16,6 +16,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
+	"github.com/chucklehead-dev/golem/gateway/dialect/openai/internal/usage"
 )
 
 // known lists the request members golem forwards without comment; others
@@ -85,11 +86,8 @@ func (r *Request) Scan(body []byte) error {
 			}
 			r.Model, r.ModelSpan, hasModel = m, span, true
 		case "stream":
-			switch v.Kind() {
-			case 't':
-				r.Stream = true
-			case 'f', 'n':
-			default:
+			var ok bool
+			if r.Stream, ok = jsonscan.Bool(v); !ok {
 				return ErrField
 			}
 		case "max_output_tokens":
@@ -227,41 +225,9 @@ func (u *StreamUsage) OnEvent(event, data []byte) {
 	}
 }
 
-// Response reads usage from a response object. OpenAI's input_tokens
-// include the cached ones; canon.Usage.Input does not.
+// Response reads usage from a response object.
 func (u *StreamUsage) Response(body []byte) {
-	var got canon.Usage
-	seen, input, output := false, false, false
-	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
-		if string(name) != "usage" {
-			return d.SkipValue()
-		}
-		v, _, err := d.ReadValue()
-		if err != nil || v.Kind() != '{' {
-			return err
-		}
-		seen = true
-		return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
-			switch string(name) {
-			case "input_tokens":
-				var err error
-				input, err = readInt(d, &got.Input)
-				return err
-			case "output_tokens":
-				var err error
-				output, err = readInt(d, &got.Output)
-				return err
-			case "input_tokens_details":
-				return readDetail(d, "cached_tokens", &got.CacheRead)
-			case "output_tokens_details":
-				return readDetail(d, "reasoning_tokens", &got.Reasoning)
-			}
-			return d.SkipValue()
-		})
-	})
-	if err == nil && seen && (!input || !output) {
-		err = ErrField // a partial report must not suppress estimation
-	}
+	got, seen, err := usage.Read(body, usageNames, ErrField)
 	if err != nil {
 		if u.Err == nil {
 			u.Err = err
@@ -269,37 +235,12 @@ func (u *StreamUsage) Response(body []byte) {
 		return
 	}
 	if seen {
-		got.Input -= min(got.CacheRead, got.Input)
 		u.Usage, u.Final = got, true
 	}
 }
 
-func readInt(d *jsonscan.Decoder, dst *int64) (present bool, err error) {
-	v, _, err := d.ReadValue()
-	if err != nil || v.Kind() == 'n' {
-		return false, err
-	}
-	n, ok := jsonscan.Int(v)
-	if !ok || n < 0 {
-		return false, ErrField
-	}
-	*dst = n
-	return true, nil
-}
-
-func readDetail(d *jsonscan.Decoder, field string, dst *int64) error {
-	v, _, err := d.ReadValue()
-	if err != nil || v.Kind() != '{' {
-		return err
-	}
-	return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
-		if string(name) != field {
-			return d.SkipValue()
-		}
-		_, err := readInt(d, dst)
-		return err
-	})
-}
+var usageNames = usage.Names{Input: "input_tokens", Output: "output_tokens", // read-only
+	InputDetails: "input_tokens_details", OutputDetails: "output_tokens_details"}
 
 // IsError reports a stream event that is the response's failure before
 // any output: an error event (the commit point refuses it).

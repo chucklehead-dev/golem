@@ -12,6 +12,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/dialect/internal/jsonscan"
+	"github.com/chucklehead-dev/golem/gateway/dialect/openai/internal/usage"
 )
 
 // Flags mark policy-relevant members present in a request (contracts.md §8).
@@ -89,11 +90,8 @@ func (r *Request) Scan(body []byte) error {
 			if err != nil {
 				return err
 			}
-			switch v.Kind() {
-			case 't':
-				r.Stream = true
-			case 'f', 'n': // null: the default, not streamed
-			default:
+			var ok bool
+			if r.Stream, ok = jsonscan.Bool(v); !ok {
 				return ErrField
 			}
 		case "max_tokens", "max_completion_tokens":
@@ -330,40 +328,8 @@ func (u *StreamUsage) OnEvent(_, data []byte) {
 }
 
 // Response reads usage from a JSON object (a chunk or a whole response).
-// OpenAI's prompt_tokens include the cached ones; canon.Usage.Input does not.
 func (u *StreamUsage) Response(body []byte) {
-	var got canon.Usage
-	seen, input, output := false, false, false
-	err := jsonscan.Object(body, func(name []byte, d *jsonscan.Decoder) error {
-		if string(name) != "usage" {
-			return d.SkipValue()
-		}
-		v, _, err := d.ReadValue()
-		if err != nil || v.Kind() != '{' {
-			return err // null usage: an ordinary chunk
-		}
-		seen = true
-		return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
-			switch string(name) {
-			case "prompt_tokens": // null is not reported: not final
-				var err error
-				input, err = readInt(d, &got.Input)
-				return err
-			case "completion_tokens":
-				var err error
-				output, err = readInt(d, &got.Output)
-				return err
-			case "prompt_tokens_details":
-				return readDetail(d, "cached_tokens", &got.CacheRead)
-			case "completion_tokens_details":
-				return readDetail(d, "reasoning_tokens", &got.Reasoning)
-			}
-			return d.SkipValue()
-		})
-	})
-	if err == nil && seen && (!input || !output) {
-		err = ErrField // a partial report (a count absent or null) must not suppress estimation
-	}
+	got, seen, err := usage.Read(body, usageNames, ErrField)
 	if err != nil {
 		if u.Err == nil {
 			u.Err = err
@@ -371,38 +337,9 @@ func (u *StreamUsage) Response(body []byte) {
 		return
 	}
 	if seen {
-		got.Input -= min(got.CacheRead, got.Input)
-		u.Usage = got
-		u.Final = true
+		u.Usage, u.Final = got, true
 	}
 }
 
-// readInt reads a token count into dst: a non-negative integer (present),
-// or null (not reported: present false, dst unchanged).
-func readInt(d *jsonscan.Decoder, dst *int64) (present bool, err error) {
-	v, _, err := d.ReadValue()
-	if err != nil || v.Kind() == 'n' {
-		return false, err
-	}
-	n, ok := jsonscan.Int(v)
-	if !ok || n < 0 {
-		return false, ErrField
-	}
-	*dst = n
-	return true, nil
-}
-
-// readDetail reads one count from a usage details object, if it is one.
-func readDetail(d *jsonscan.Decoder, field string, dst *int64) error {
-	v, _, err := d.ReadValue()
-	if err != nil || v.Kind() != '{' {
-		return err
-	}
-	return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
-		if string(name) != field {
-			return d.SkipValue()
-		}
-		_, err := readInt(d, dst) // a null detail is only not reported
-		return err
-	})
-}
+var usageNames = usage.Names{Input: "prompt_tokens", Output: "completion_tokens", // read-only
+	InputDetails: "prompt_tokens_details", OutputDetails: "completion_tokens_details"}

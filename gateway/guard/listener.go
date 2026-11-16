@@ -49,9 +49,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 			l.mu.Unlock()
 			if over {
 				c.Close()
-				if l.slots != nil {
-					<-l.slots
-				}
+				l.free("")
 				continue
 			}
 		}

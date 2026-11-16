@@ -2,11 +2,12 @@
 
 The request path (`gateway/proxy`, `gateway/route`, `gateway/limit`, the
 dialects) is surrounded by three edges: who is calling
-(`gateway/auth`), what configuration the gateway serves
-(`gateway/snapshot`), and what it reports afterwards
-(`gateway/telemetry`). The binary, `cmd/golem-gateway`, wires them
-together and owns their lifecycle. This is a guided reading of those four
-packages for an engineer new to the repository; read it with the code
+(`gateway/auth`, with `gateway/guard`'s floor beneath it), what
+configuration the gateway serves (`gateway/snapshot`, down to each
+deployment's `route.Target`, its health and its envelope), and what it
+reports afterwards (`gateway/telemetry`). The binary, `cmd/golem-gateway`,
+wires them together and owns their lifecycle. This is a guided reading of
+those packages for an engineer new to the repository; read it with the code
 open. The design behind it is in [gateway.md](../gateway.md) (§3 the
 request path, §6 the snapshot lifecycle, §6a standalone mode),
 [control-plane.md §4](../control-plane.md#4-distribution) (distribution)
@@ -25,12 +26,19 @@ durability lives in the collector), [ADR 0044](../adr/0044-budgets-are-controls-
 |---|---|
 | `gateway/auth/auth.go` | `Compile` (a snapshot's entitlements indexed for lookup), `Keys.Authenticate`, `Principal`, `Refusal` |
 | `gateway/auth/deny.go` | `Denylist` (the site's emergency denylist, parsed), `DenyFile` (its mounted file, re-read as it changes) |
+| `gateway/guard/guard.go` | `Guard`: each source's requests and failed authentications before authentication |
+| `gateway/guard/listener.go` | `Listener`: connections open at once, in all and from one address |
 | `lib/entra/entra.go` | `Verifier`: local verification of Entra v2 tokens over a cached key set (shared with the control API) |
 | `gateway/snapshot/holder.go` | `Holder` (the current `Compiled` snapshot behind an atomic pointer, the floor), compilation, upstream transports and the dial check |
 | `gateway/snapshot/file.go` | `Dir`, the standalone source: CRD YAML in a directory |
 | `gateway/snapshot/bucket.go` | `Bucket`, the published source: a signed pointer in object storage, the local checkpoint and the last-good copy on disk |
 | `gateway/snapshot/secrets.go` | `Secrets`, `EnvSecrets` (standalone), `FileSecrets` (mounted Secrets) |
 | `gateway/snapshot/loop.go` | `repeat`, both sources' poll loop |
+| `gateway/route/route.go` | `Target` (one deployment as the request path uses it), `Route`, `Table` |
+| `gateway/route/health.go` | `Health`: each deployment's ceilings (in all and per principal), ejection and probe, each route's retry budget |
+| `gateway/route/check.go` | `Checker`: the active health checks of deployments that have one |
+| `gateway/envelope/envelope.go` | `Attribution`: an attempt's IDs and caller, for an envelope to pass on |
+| `gateway/envelope/bedrock/bedrock.go` | `Transport`: the Bedrock envelope, an `http.RoundTripper` |
 | `gateway/telemetry/telemetry.go` | `Telemetry`: spans, GenAI metrics, the refusal counter |
 | `gateway/telemetry/ledger.go` | `Ledger`: golem.spend rows |
 | `gateway/telemetry/queue.go` | `LedgerQueue`: the ledger's own bounded, counted log processor |
@@ -38,21 +46,21 @@ durability lives in the collector), [ADR 0044](../adr/0044-budgets-are-controls-
 | `gateway/telemetry/state.go` | `ObserveState`: the gateway's state gauges (snapshot age and lease, the pointer overdue, the limiter's outage), read at collection |
 | `lib/otlp/otlp.go` | the OTLP/HTTP exporters and the transport rule, shared with golem-control's metrics and audit |
 | `cmd/golem-gateway/main.go` | flags, the release gate, wiring (`run` and its steps), the shutdown order |
-| `cmd/golem-gateway/guard.go` | `localOnly`, standalone's browser guard |
+| `cmd/golem-gateway/guard.go` | `localOnly` and `loopbackOnly`, standalone's browser guard |
 | `cmd/golem-gateway/lifecycle.go` | readiness, the count of calls in flight, drain and cut |
 
 ## 1. Authentication (`gateway/auth`)
 
 Everything is decided from the snapshot, without a network call. When a
-snapshot is applied, `Holder.compileAuth` (`gateway/snapshot/holder.go:254`)
-calls `auth.Compile` (`gateway/auth/auth.go:93`), which builds a `Keys`:
+snapshot is applied, `Holder.compileAuth` (`gateway/snapshot/holder.go:274`)
+calls `auth.Compile` (`gateway/auth/auth.go:112`), which builds a `Keys`:
 
-- `compileScopes` (`auth.go:117`): each scope's `rights`, its allowed
+- `compileScopes` (`auth.go:136`): each scope's `rights`, its allowed
   aliases and its `Limits` (budget, in-flight limits, request policy).
-- `addMembers` (`auth.go:140`): users' and services' Entra identities,
+- `addMembers` (`auth.go:169`): users' and services' Entra identities,
   indexed by oid or app ID and then by scope (the empty scope is the
   member's default). Members are also recorded as key owners.
-- `keyEntry` (`auth.go:158`): each key by its SHA-256 hash. A key whose
+- `keyEntry` (`auth.go:187`): each key by its SHA-256 hash. A key whose
   scope no longer exists, whose owner is unlisted or of another kind, or
   whose owner left the scope gets a precomputed `refused`: it fails
   closed, never with a zero (unlimited) budget. A key's own model list
@@ -61,30 +69,30 @@ calls `auth.Compile` (`gateway/auth/auth.go:93`), which builds a `Keys`:
 `compileAuth` then attaches the site's denylist (`Keys.Deny`) and, standalone,
 the local key (`RequireLocalKey`).
 
-`Keys.Authenticate` (`auth.go:207`) is called once per request by
-`proxy.Handler.authenticate` (`gateway/proxy/proxy.go:474`). Its order:
+`Keys.Authenticate` (`auth.go:237`) is called once per request by
+`proxy.Handler.authenticate` (`gateway/proxy/proxy.go:609`). Its order:
 
-1. `credential` (`auth.go:317`) reads `Authorization: Bearer` and
+1. `credential` (`auth.go:433`) reads `Authorization: Bearer` and
    `x-api-key`. Two different credentials are refused rather than one
-   silently preferred (`auth.go:209`, golem#5).
-2. `principal` (`auth.go:231`) finds the snapshot's principal for the
+   silently preferred (`auth.go:249`, golem#5).
+2. `principal` (`auth.go:343`) finds the snapshot's principal for the
    credential:
    - The implicit principal. A standalone snapshot without a LocalIdentity
-     is `Implicit` (`lib/compile/entitlements.go:30`), and `Compile` makes
+     is `Implicit` (`lib/compile/entitlements.go:36`), and `Compile` makes
      one local principal for it only when the installation is `key.Dev`
-     (`auth.go:95`). It admits exactly one credential: the gateway's own
-     local key, compared by hash in constant time (`auth.go:237`). Without
+     (`auth.go:114`). It admits exactly one credential: the gateway's own
+     local key, compared by hash in constant time (`auth.go:349`). Without
      `RequireLocalKey` it admits no one.
-   - An Entra token, recognised by shape (`looksLikeJWS`, `auth.go:335`),
-     goes to `Keys.token` (`auth.go:283`): `entra.Verifier.Verify` proves who
+   - An Entra token, recognised by shape (`looksLikeJWS`, `auth.go:451`),
+     goes to `Keys.token` (`auth.go:399`): `entra.Verifier.Verify` proves who
      is calling, the snapshot says in which scope (`golem-scope` header,
      else the default) and with which rights; a user's token cannot act as
-     a service's principal or the reverse (`auth.go:308`).
+     a service's principal or the reverse (`auth.go:424`).
    - A golem key is looked up by hash only if it carries this
-     installation's prefix (`glm_live_` or `glm_dev_`, `auth.go:254`): a
+     installation's prefix (`glm_live_` or `glm_dev_`, `auth.go:368`): a
      publisher's mistake must not let another installation's key in.
      Parsing a key is needed only to explain why an unknown one is refused.
-3. The denylist (`auth.go:213`): a principal the snapshot admits is still
+3. The denylist (`auth.go:257`): a principal the snapshot admits is still
    refused, with `auth.denied`, if the site's emergency denylist names its
    key, its principal or its Entra ID.
 
@@ -112,10 +120,10 @@ site admin edits a ConfigMap mounted as a file (`-denylist`). Its lines
 are `key <hex SHA-256>`, `key-prefix <display prefix, 16+ characters>`,
 `principal <id>` and `entra <oid or app ID>`, with `#` comments.
 `ParseDenylist` (`deny.go:45`) fails the whole file on any line it cannot
-read, so a typo is noticed, not skipped. `DenyFile.Load` (`deny.go:127`)
+read, so a typo is noticed, not skipped. `DenyFile.Load` (`deny.go:130`)
 re-reads the file and swaps the parsed list in only when its content
 changed and parses; an error leaves the previous list in force (a bad
-edit must not clear it). `DenyFile.Run` (`deny.go:157`) reloads every five
+edit must not clear it). `DenyFile.Run` (`deny.go:163`) reloads every five
 seconds, logging a failure once until it changes. `Keys` holds the
 `DenyFile`, not a list, so a reload applies to the next request without a
 new snapshot. `denies` (`deny.go:94`) matches a key by hash or prefix (a
@@ -152,41 +160,159 @@ shard sees the changed generation and checks itself (`add`), so no call
 slips between. The cancelled upstream request then ends as a cut the
 gateway made (`terminatedBy`): see request-path.md, step 8.
 
+### The floor before authentication (`gateway/guard`)
+
+The limiter's budgets and rates are a principal's, so a flood that never
+authenticates (invalid keys, forged tokens) is not theirs to stop
+(security-and-correctness.md §8). `proxy.Handler.authenticate`
+(`proxy.go:609`) asks the shared `Guard` before it reads the snapshot or
+the credential, and tells it of every refused credential:
+
+- `Source` (`gateway/guard/guard.go:87`) names the caller: with
+  `-source-header`, the header's last value, its last comma-separated part
+  (the one the proxy in front appended), cut to 64 bytes; else the
+  connection's host. Behind
+  a sidecar every connection is the sidecar's, so without the header the
+  budgets are the pod's.
+- `Admit` (`guard.go:117`) checks two token buckets per source. The
+  failures bucket (`-auth-failures`, 20 a second, `-auth-failure-burst`
+  200) first: a source that has emptied it has every request refused until
+  it refills, valid ones included, since its flood cannot be told from its
+  calls and each failure (a token's signature checked) costs more than a
+  refusal. Then the requests bucket (`-source-rate`, off by default;
+  `-source-burst`, default the rate) takes one. A refusal is
+  `limit.source` with a Retry-After of the bucket's refill.
+- `Failed` (`guard.go:142`) takes a token from the failures bucket, never
+  below empty, when `AuthenticateGrant` refuses.
+- `source` (`guard.go:162`) keeps at most `MaxSources` (65,536): when
+  full, at most once a second, it forgets the sources whose buckets have
+  refilled (`bucket.full`, `guard.go:190`: a forgotten one starts full, as
+  it would be); if none were, the new source shares one overflow pair, so
+  a spray of addresses is limited as one.
+
+`newGuard` (`main.go:533`) returns nil, which admits everything, when both
+rates are off. Connections are bounded beneath it by `Listener`
+(`listener.go:13`), which `serve` (`main.go:523`) puts under the server:
+`-max-conns` (8192) slots, an `Accept` waiting for one before it accepts
+(the rest wait in the kernel's backlog), and `-max-conns-per-source` (off)
+from one remote address, a connection past it closed as it is accepted.
+`Close` ends an `Accept` waiting for a slot, so a shutdown does not wait
+for a connection to close first.
+
 ## 2. The snapshot holder and its sources (`gateway/snapshot`)
 
 `Holder` keeps the current `Compiled` in an `atomic.Pointer`. A request
-takes it once with `Current` (`holder.go:79`) and uses it to its end;
+takes it once with `Current` (`holder.go:86`) and uses it to its end;
 `Current` returns `ErrExpired` once the snapshot's authorization lease
-(`ValidUntil`) has passed (`holder.go:84`), and the proxy's `authenticate`
-then refuses every new request. `Apply` (`holder.go:113`), under the
+(`ValidUntil`) has passed (`holder.go:91`), and the proxy's `authenticate`
+then refuses every new request. `Apply` (`holder.go:120`), under the
 holder's mutex, refuses a snapshot that is below the floor
-(`holder.go:119`), not newer than the one applied (`holder.go:122`),
-already expired (`holder.go:125`) or that does not compile
-(`holder.go:128`), keeping the previous one. A compile failure is
-returned as an `applyError` (`holder.go:132`): it may pass (a Secret
+(`holder.go:126`), not newer than the one applied (`holder.go:129`),
+already expired (`holder.go:132`) or that does not compile
+(`holder.go:135`), keeping the previous one. A compile failure is
+returned as an `applyError` (`holder.go:139`): it may pass (a Secret
 mounted later), and the bucket source retries it. On success it raises the
 floor to the snapshot's sequence, swaps the pointer and calls `OnApply`.
 
 The floor is inclusive: it is the lowest publication the gateway may
-apply. It starts at zero, is raised by `RaiseFloor` (`holder.go:104`) from
+apply. It starts at zero, is raised by `RaiseFloor` (`holder.go:111`) from
 the checkpoints before anything is applied, and follows each apply.
 
-Compilation (`compile`, `holder.go:151`) resolves each backend's
+Compilation (`compile`, `holder.go:158`) resolves each backend's
 credential through `Secrets`, makes a `route.Target` per deployment
-(`targets`, `holder.go:195`), and builds the routes over them
-(`compileRoute`, `holder.go:231`). Each deployment's `http.Transport` is
+(`targets`, `holder.go:202`), and builds the routes over them
+(`compileRoute`, `holder.go:251`). Each deployment's `http.Transport` is
 kept across snapshots by its `transportKey` (backend, deployment, scheme,
 host, private grant), so connections survive a swap; transports that left
-the config have their idle connections closed (`holder.go:167`).
-`upstreamTransport` (`holder.go:289`) sets every pool setting deliberately
+the config have their idle connections closed (`holder.go:176`).
+`upstreamTransport` (`holder.go:309`) sets every pool setting deliberately
 (no proxy from the environment, per-host idle limits, HTTP/2 pings, no
 response-header timeout) and checks every dial's resolved address in the
-dialer's `ControlContext` (`holder.go:291`) with `checkDestination`
-(`holder.go:320`): cloud metadata, link-local, unspecified and multicast
+dialer's `ControlContext` (`holder.go:311`) with `checkDestination`
+(`holder.go:340`): cloud metadata, link-local, unspecified and multicast
 addresses are refused always; loopback, private and CGNAT addresses
 unless the backend is granted `allowPrivateAddresses` (golem#5). Because
 the check runs on the connection, a name that later re-resolves somewhere
 forbidden is refused at its next dial.
+
+### Deployments: `route.Target`, their health and their ceilings
+
+`targets` makes each deployment's `route.Target` (`route.go:18`,
+`holder.go:240`): its URL, transport and credential header, and what the
+request path decides by: `MaxInFlight` and `MaxPerPrincipal` (a
+Deployment's `maxInFlight` and `maxInFlightPerPrincipal`), the health
+check's path and interval, `QuotaRPM` (the site's share of the
+provider's quota, taken per attempt by the limiter's meters), `Betas`
+(the `anthropic-beta` values it accepts, nil for any: `Accepts`,
+`route.go:48`, narrows a call's pool) and `Envelope`. Its `ID`,
+"backend/deployment", is set here so the request path never builds it;
+`Key` (`route.go:62`) is what health is kept by across snapshots.
+
+golem-gateway has one `route.Health` for every dialect's calls
+(`newHealth`, `main.go:304`), since they share deployments. Each attempt
+takes a lease from it (`Acquire`, `health.go:95`, from the proxy's
+`pick`): refused while the deployment is ejected, while its one probe is
+in flight, at its `MaxInFlight` (`health.go:109`), or, on a shared box
+(ADR 0017), when the call's principal holds `MaxPerPrincipal` of its
+leases already (`health.go:113`): one principal must not fill it. A
+refused lease names when to try again; a ceiling's is unknown (zero), as
+it frees when an attempt ends. Failures in a row (three) or a failed
+probe eject it (`eject`, `health.go:155`: ten seconds, doubling each time
+in a row up to five minutes, or the provider's Retry-After if longer); a
+commit readmits it (`readmit`, `health.go:146`).
+
+A deployment with a `healthCheck` (a local box; not for bedrock) is also
+checked by `route.Checker` (`check.go:18`), run by `newHealth`'s loop over
+the applied snapshot's targets (`Table.Targets`, each deployment once).
+`Run` (`check.go:40`) ticks every second; `Check` (`check.go:55`) starts
+the checks that are due, in parallel, one in flight per deployment; `check` (`check.go:84`)
+GETs the path on the deployment's host with its credential and its
+transport, bounded by five seconds or the interval, a 2xx passing. Each
+result goes to `Health.Checked` (`health.go:217`): a failure ejects the
+box (unless its ejection is still running), so its routes fail over
+before a call finds it; a pass readmits it once its ejection is over, but
+neither cuts an ejection short nor forgets a call's failures, which a
+liveness check cannot speak for. A check cut short by the shutdown
+reports nothing.
+
+### The Bedrock envelope (`gateway/envelope`)
+
+A backend with `envelope: bedrock` has no credential header: `targets`
+gives each of its deployments a `bedrock.Transport` (`holder.go:238`,
+`bedrock.go:43`) over the deployment's kept transport, its endpoint the
+deployment's URL or the region's runtime (`EndpointFor`,
+`holder.go:222`), signing with `Holder.AWS`: golem-gateway's
+`awsCredentials` (`main.go:366`), the AWS SDK's default chain (the pod's
+role through IRSA or Pod Identity), nothing fetched until a bedrock call.
+The request path sees an Anthropic provider. `RoundTrip`
+(`bedrock.go:95`):
+
+1. `rewrite` (`bedrock.go:278`) takes `model` and `stream` out of the
+   Messages body (the model is the path's, streaming the action's), adds
+   `anthropic_version` if absent, and moves the `anthropic-beta` header's
+   values into `anthropic_beta`, after the body's own. A token count
+   becomes CountTokens' body (`countBody`, `bedrock.go:188`: the body
+   base64 in `input.invokeModel.body`, with a `max_tokens` added).
+2. The path is `/model/<id>/<action>` (`invoke`,
+   `invoke-with-response-stream` or `count-tokens`), the model one escaped
+   segment as the AWS SDK escapes it (an inference profile's ARN).
+3. The attempt's attribution (`envelope.Attribution`, set by the proxy
+   for an enveloped target only, `proxy.go:357`: the request and attempt
+   IDs, principal, scope and key's display ID) becomes Bedrock's
+   request-metadata header (`metadata`, `bedrock.go:71`), set before
+   signing, so Bedrock's invocation logs join the ledger's rows.
+4. `sign` (`bedrock.go:164`) signs with SigV4; with no credentials the
+   attempt fails saying what to configure.
+5. An error status comes back in Anthropic's shape, its status kept
+   (`anthropicError`, `bedrock.go:376`; `errorType`, `bedrock.go:357`:
+   throttling a `rate_limit_error`, unavailable an `overloaded_error`), a
+   count's answer as `{"input_tokens": n}` (`countAnswer`,
+   `bedrock.go:220`), and a stream's AWS event stream as the Messages SSE
+   (`reframer`, `bedrock.go:430`): each chunk's base64 event as
+   `event:`/`data:`, an exception as the dialect's error event and the
+   end, a failed CRC or a cut as a read error. So the commit point refuses
+   an exception before any output, and the attempt loop fails over (ADR
+   0051).
 
 ### The standalone source: `Dir`
 
@@ -276,7 +402,7 @@ snapshot object, the trusted checkpoint, then the signed pointer
    clamped: a lease the gateway cannot trust is not one to shorten and
    serve, so it fails closed, keeping what it holds until that expires.
    The last-good copy is held to both bounds too (`verify`).
-6. `Holder.Apply` (`bucket.go:393`, `holder.go:113`) rechecks the floor
+6. `Holder.Apply` (`bucket.go:393`, `holder.go:120`) rechecks the floor
    and the order under its mutex, refuses an expired lease, compiles
    (credentials, targets, routes, entitlements with the denylist, prices),
    stores the new `Compiled`, sets the floor to 7 and calls `OnApply` (the
@@ -308,12 +434,12 @@ compares every gateway's applied publication and floor with the model's.
 
 ## 3. Telemetry (`gateway/telemetry`)
 
-`Telemetry.Start` (`telemetry.go:182`) opens the request's server span;
-`Ended` (`telemetry.go:197`) names it "chat <alias>", sets the GenAI and
+`Telemetry.Start` (`telemetry.go:186`) opens the request's server span;
+`Ended` (`telemetry.go:201`) names it "chat <alias>", sets the GenAI and
 golem attributes, records the token and duration histograms and writes
-the ledger row; `Refused` (`telemetry.go:230`) marks the span with the
+the ledger row; `Refused` (`telemetry.go:248`) marks the span with the
 contract code and counts the refusal. Attribute sets are built once per
-route, frontend and refusal code (`cached`, `telemetry.go:124`), so a
+route, frontend and refusal code (`cached`, `telemetry.go:128`), so a
 call allocates little and a 429 storm nothing for its counter. Every
 method is a no-op on a nil `*Telemetry`.
 
@@ -324,7 +450,7 @@ when the call ends (`Ledger.Ended`, `ledger.go:36`; `row`, `ledger.go:55`:
 by `TestRowMatchesLedgerDDL`), whatever the site counter's state (ADR
 0043): a counter outage keeps no billing rows in memory. A row's period is
 the limiter's when given, else the call's start in the configured zone
-(`ledger.go:57`), so the counter and the ledger agree on the month.
+(`ledger.go:58`), so the counter and the ledger agree on the month.
 
 `LedgerQueue` (`queue.go:20`) is the ledger's log processor, because the
 SDK's batch processor silently overwrites the oldest records when full.
@@ -356,17 +482,17 @@ final drop and failure counts are exported after the rows they count.
 `Stdout` (`setup.go:67`) is standalone's: no spans or metrics, ledger rows
 as JSON lines. Standalone has no meter, so a row it cannot encode or write
 is counted in `jsonLogger.failed` and logged at each power of two
-(`setup.go:113`) rather than lost silently.
+(`setup.go:114`) rather than lost silently.
 
 **State gauges.** `ObserveState` (`state.go:51`) registers observable
 instruments that read the gateway's state when the meter collects (every
 minute over OTLP), so nothing is added to a request:
 `golem.snapshot.age` (now − the applied snapshot's `IssuedAt`, through
-`Holder.Applied`, `holder.go:92`), `golem.snapshot.lease_remaining`
+`Holder.Applied`, `holder.go:99`), `golem.snapshot.lease_remaining`
 (`ValidUntil` − now, negative once run out), `golem.snapshot.seq`, the bucket
 source's `golem.snapshot.pointer_overdue` and `golem.snapshot.last_good`
 (0/1), the limiter's `golem.limit.down` (0/1), `golem.limit.waivers`
-(`Limiter.Waived`, counted where a waived ticket is made, `limit.go:289`),
+(`Limiter.Waived`, counted where a waived ticket is made, `limit.go:387`),
 `golem.limit.held` (`Limiter.Held`, under the limiter's lock for a
 `len`) and `golem.limit.dropped`, and `golem.denylist.entries`. They carry
 no attributes of their own: the resource's site and pool name the
@@ -377,17 +503,18 @@ increment, a lease run out).
 
 ## 4. The binary's lifecycle (`cmd/golem-gateway`)
 
-`parse` (`main.go:71`) reads the flags and applies `releaseGate`
-(`main.go:457`). The gateway has two modes:
+`parse` (`main.go:83`) reads the flags, grouped as `options` holds them
+(general, Entra, pool mode, the site's Valkey, the floor before
+authentication), and applies `releaseGate` (`main.go:604`). The gateway has two modes:
 
 - **standalone** (`-standalone <dir>`, ADR 0023): only on a loopback
   address; the in-memory limiter; dev keys, with the local key
-  (`loadLocalKey`, `main.go:491`: a dev key in a 0600 file, kept across
+  (`loadLocalKey`, `main.go:638`: a dev key in a 0600 file, kept across
   restarts); the directory source, which must load once before the server
   starts; provider credentials from the environment;
 - **pool** (`-pool <name>`): `-bucket`, `-keys`, `-valkey` and `-site` are
   required, and until golem#7's deployment evidence is in, so is
-  `-accept-unreleased`. `poolSource` (`main.go:340`) opens the bucket
+  `-accept-unreleased`. `poolSource` (`main.go:467`) opens the bucket
   (`s3bucket.Open`; a directory for tests), loads the trusted publishing
   keys (`sign.LoadKeys`: a directory of PEM public keys, a KMS key's named
   by its `Key-ID` header), opens the Secrets mounted under `-secrets`
@@ -395,10 +522,10 @@ increment, a lease run out).
   name) and starts the bucket source: `Start` raises the floor from the
   local checkpoint (`-checkpoint`) and the pool's signed trusted
   checkpoint, refusing to start with neither, and applies the last-good
-  copy beside the checkpoint (`lastGoodPath`, `main.go:524`); then one
+  copy beside the checkpoint (`lastGoodPath`, `main.go:671`); then one
   `Poll`, whose failure is logged, not fatal. The limiter is over the
   site's Valkey (`limit.DialValkey`, `-valkey-replica-acks` for WAIT), its
-  client's options from `valkeyOption` (`main.go:245`): `-valkey-tls` for TLS
+  client's options from `valkeyOption` (`main.go:271`): `-valkey-tls` for TLS
   (ElastiCache's in-transit encryption), verified against the system's
   roots or `-valkey-ca`'s, each dial's certificate checked against that
   dial's host (no fixed `ServerName`, so a cluster's nodes are each
@@ -412,33 +539,38 @@ increment, a lease run out).
   `Valkey.Connect` retries the dial in the background, backing off to 30
   seconds; the limiter's `Run` then recovers it (accounting.md §3.4).
 
-`run` (`main.go:112`) builds the parts in dependency order, each a named
-step: telemetry (`setupTelemetry`, `main.go:422`, labelled with the site
+`run` (`main.go:135`) builds the parts in dependency order, each a named
+step: telemetry (`setupTelemetry`, `main.go:571`, labelled with the site
 and pool), the Entra verifier if a tenant is given (`newEntra`,
-`main.go:377`: its key set, from `-entra-jwks` or Entra's public cloud,
+`main.go:504`: its key set, from `-entra-jwks` or Entra's public cloud,
 fetched once; a failure is logged, not fatal, and the verifier's `Run`
-retries, golem keys served meanwhile), the limiter over its store (`newLimiter`, `main.go:216`),
+retries, golem keys served meanwhile), the limiter over its store (`newLimiter`, `main.go:242`),
 the holder that hands each snapshot's known spend to the limiter and then
-sweeps the calls in flight both dialects' handlers share (`newHolder`,
-`proxy.InFlight`), the denylist if one is named (`newDenyFile`, its each
+sweeps the calls in flight every dialect's handlers share (`newHolder`,
+`main.go:346`, `proxy.InFlight`), the denylist if one is named (`newDenyFile`, its each
 list sweeping them too; loaded before
-the source, `main.go:155`, so neither a first request nor the last-good
+the source, `main.go:179`, so neither a first request nor the last-good
 publication is ever compiled without it), the snapshot source
-(`startSource`, `main.go:288`: standalone's directory with the dev key, or
-`poolSource`), and the routes (`newMux`, `main.go:309`) on the server
-(`newServer`, `main.go:396`). Every background loop (the source, the
-denylist, the limiter, Valkey's connection retries, Entra's refresh) runs under `bg` in one
-`WaitGroup`. Once the source has started, the state gauges are
+(`startSource`, `main.go:393`: standalone's directory with the dev key, or
+`poolSource`), the deployments' health and its checks (`newHealth`,
+`main.go:304`, above), and the routes (`newMux`, `main.go:415`: the three
+dialects' APIs, the models list, Anthropic's token count, the refusal of
+stored responses' paths, the probes; the handlers share one `guard.Guard`
+from `newGuard`) on the server (`newServer`, `main.go:543`), served by
+`serve` (`main.go:523`) over a `guard.Listener`. Every background loop
+(the source, the denylist, the limiter, Valkey's connection retries,
+Entra's refresh, the health checks) runs under `bg` in one `WaitGroup`. Once the source has started, the state gauges are
 registered over the holder, the bucket source, the limiter and the
-denylist (`telemetry.ObserveState`, `main.go:175`; with any telemetry but
-`off`, and exported only over OTLP). `announce` (`main.go:326`) says what
+denylist (`telemetry.ObserveState`, `main.go:199`; with any telemetry but
+`off`, and exported only over OTLP). `announce` (`main.go:453`) says what
 is served.
 
-Standalone's API handlers are wrapped as `track(localOnly(...))`; pool
-mode's as `track(...)`. `localOnly` (`guard.go:24`) keeps the developer's
-browser out: a loopback `Host` only (DNS rebinding), no cross-origin
-request by the browser's own headers, and a JSON body only (no
-preflight-free page can send one). `track` (`lifecycle.go:42`) counts
+Standalone's API handlers are wrapped as `track(localOnly(...))`, and the
+models list (a GET, no body) as `track(loopbackOnly(...))`; pool mode's as
+`track(...)` (`newMux`'s `handle`). `localOnly` (`guard.go:25`) keeps the
+developer's browser out: no cross-origin request by the browser's own
+headers, a loopback `Host` only (`loopbackOnly`, `guard.go:44`: DNS
+rebinding), and a JSON body only (no preflight-free page can send one). `track` (`lifecycle.go:42`) counts
 calls in flight under a mutex (`begin`, `end`): not a `WaitGroup`, because
 after `srv.Close` a handler whose connection was already accepted can
 still start while the wait runs. Once `wait` (`lifecycle.go:75`) has begun
@@ -459,13 +591,13 @@ serves the call as a waiver.
 
 ### Worked example: shutdown with a stream in flight
 
-SIGTERM ends `sig` (`main.go:138`). The shutdown goroutine
-(`main.go:189`) runs `lifecycle.shutdown` (`lifecycle.go:104`):
+SIGTERM ends `sig` (`main.go:161`). The shutdown goroutine
+(`main.go:215`) runs `lifecycle.shutdown` (`lifecycle.go:104`):
 
 1. `draining` is set, so `/readyz` answers 503, and the gateway sleeps
    `-unready` for the endpoints to stop sending.
-2. `srv.Shutdown` closes the listeners (`ListenAndServe` returns at
-   `main.go:196`) and waits up to `-drain` for calls to finish.
+2. `srv.Shutdown` closes the listeners (`serve` returns at
+   `main.go:222`) and waits up to `-drain` for calls to finish.
 3. At the deadline `srv.Close` (`lifecycle.go:113`) cuts the remaining
    connections; the stream's context ends and the proxy accounts it as a
    cancellation, under `context.WithoutCancel`, its row and counter add
@@ -474,11 +606,11 @@ SIGTERM ends `sig` (`main.go:138`). The shutdown goroutine
    counted call's end, up to `cut` (10 seconds); a call that starts now is
    refused (`gateway.not_ready`, in its dialect).
 
-Only then (`<-drained`, `main.go:201`) does `run` stop the background loops
-(`stopBg`, `wg.Wait`, `main.go:202`; they ran through the drain because
+Only then (`<-drained`, `main.go:227`) does `run` stop the background loops
+(`stopBg`, `wg.Wait`, `main.go:228`; they ran through the drain because
 the limiter's renewals keep calls' slots), let the limiter finish
-(`main.go:205`), close the Valkey client (`closeStore`, deferred) and shut
-telemetry down last (`shutdownTelemetry`, deferred at `main.go:132`),
+(`main.go:231`), close the Valkey client (`closeStore`, deferred) and shut
+telemetry down last (`shutdownTelemetry`, deferred at `main.go:155`),
 delivering the rows the cut calls wrote. `TestShutdownAccounts` checks
 this end to end: the cut stream leaves one row with outcome `cancelled`,
 its cost in the counter. `TestTrackAfterWait` checks the count: a call
@@ -489,7 +621,7 @@ that started before it.
 
 | Invariant | Enforced | Tested |
 |---|---|---|
-| A snapshot below the floor, or not newer than the one held, is never applied | `Holder.Apply` (`holder.go:119`, `:122`); `Bucket.openPointer` (`bucket.go:315`) | `TestHolder`, `TestRaiseFloor`, `TestBucketSource`, `TestPublicationModel` |
+| A snapshot below the floor, or not newer than the one held, is never applied | `Holder.Apply` (`holder.go:126`, `:129`); `Bucket.openPointer` (`bucket.go:315`) | `TestHolder`, `TestRaiseFloor`, `TestBucketSource`, `TestPublicationModel` |
 | A restart with an empty disk takes the trusted checkpoint as its floor; with no floor at all it does not start | `Bucket.Start`, `trustedCheckpoint` | `TestBucketSource` (restarts), `TestPublicationModel` (`restartEmpty`) |
 | Only a correctly signed pointer of this pool, naming an object with its hash and sequence, is applied | `Bucket.openPointer`, `openSnapshot` | `TestBucketSource` |
 | A pointer issued more than the skew in the gateway's future, or a snapshot whose lease runs past the longest lease plus the skew, is refused, from the bucket or from disk | `Bucket.openPointer`, `checkLease` | `TestClockBounds`; `TestPoolModeLeaseBound` (`-max-lease`) |
@@ -511,6 +643,9 @@ that started before it.
 | Entra tokens are refused once the key set is too old; a key fetched by a refresh is accepted | `entra.Verifier.Verify`, `Refresh` | `TestStaleKeys`, `TestRefresh` |
 | A gateway starts while Entra is unreachable: golem keys served, Entra tokens refused as `gateway.not_ready` until a retried fetch succeeds | `newEntra`, `Verify` (`errNoKeys`), `Run`'s backoff, `Keys.token` | `TestPoolModeEntraDown`, `TestStartWithoutKeys` (lib/entra), `TestEntraKeysNotYetFetched` |
 | A refresh asked for within a minute of the last is deferred to the minute's end, not dropped | `Verifier.Run` | `TestRefreshDeferred` (lib/entra, `testing/synctest`) |
+| A source past its failed authentications has every request refused, before its credential is checked or its body read; each refused credential is counted | `Guard.Admit`, `Guard.Failed`, `proxy.Handler.authenticate` | `TestFailuresRefuseTheSource`, `TestInvalidKeyFlood` (gateway/proxy) |
+| A source's requests before authentication are bounded; the sources kept are bounded, a spray of new ones limited as one; a nil guard admits all | `Guard.Admit`, `Guard.source` | `TestRequestRate`, `TestSources`, `TestNilGuard` |
+| Connections are bounded in all and per remote address; closing the listener ends an `Accept` waiting for a slot | `guard.Listener` | `TestListener`, `TestListenerMax` |
 | A caller the denylist names is refused whatever the snapshot says; a bad edit keeps the list in force | `Authenticate`, `Denylist.denies`, `DenyFile.Load` | `TestDenylist` |
 | A grant is honoured by a later snapshot by the rules a new request is refused by (revoked, removed, its principal gone from its scope or from golem, denied); expiry, the key's or the lease's, ends none, nor a scope losing a model (by decision: they stop new requests only) | `Keys.AuthenticateGrant`, `Keys.Honours` | `TestHonours` |
 | A snapshot revoking a key, or a denylist entry, ends that caller's calls in flight within seconds (both dialects: a stream's error event, a waiting call's error, a begun whole response cut); other calls run on; the lease's expiry ends none | `InFlight.Sweep`, `add`, `newHolder`, `newDenyFile` | `TestTerminateStream`, `TestTerminateWhole`, `TestLeaseExpiryEndsNoCall`, `TestTerminateRace` (gateway/proxy), `TestWiringEndsWithdrawnCalls` |
@@ -520,12 +655,17 @@ that started before it.
 | OTLP uses TLS unless the collector is a literal loopback address, whatever the environment says | `otlp.PlaintextOK`, `otlp.New` | `TestPlaintextOK`, `TestOTLPIgnoresInsecureEnv` (lib/otlp) |
 | A stream cut at shutdown still leaves its row and counter add | `lifecycle.shutdown`, the order in `run` | `TestShutdownAccounts` |
 | No call starts uncounted once the shutdown's wait has begun; one refused then gets its dialect's `gateway.not_ready` with Retry-After | `lifecycle.begin`, `wait`, `track` | `TestTrackAfterWait` (both dialects) |
-| Standalone answers only loopback, same-origin JSON requests | `localOnly` | `TestLocalOnly` |
+| Standalone answers only loopback, same-origin JSON requests | `localOnly`, `loopbackOnly` | `TestLocalOnly` (the models list's `loopbackOnly` alone is not tested directly) |
 | Pool mode needs its inputs, and `-accept-unreleased` until golem#7 | `releaseGate` | `TestReleaseGate` |
 | A pool's published snapshot is served, its credential from a Secret, its spend in Valkey | `poolSource`, `run` | `TestPoolMode` |
 | Valkey is reached over TLS with AUTH when configured; the password never comes from a flag | `valkeyOption` | `TestValkeyOption`, `TestPoolModeValkeyTLS` (a TLS-only server with an ACL user) |
 | A gateway starts, is ready and serves while its Valkey is unreachable | `newLimiter` (`limit.DialValkey`, `MarkDown`), `/readyz` | `TestPoolModeValkeyDown`, `TestStartWithValkeyDown` (gateway/limit) |
 | A source reports a failure once, not every second | `repeat` | `TestRepeat` |
+| A deployment's attempts stay within its ceiling, and one principal's within its per-principal ceiling | `Health.Acquire` | `TestCeiling`, `TestPerPrincipalCeiling` |
+| Failures in a row or a failed probe eject a deployment; an ejected one takes one probe at a time; a commit readmits it, and a probe sent before the readmission is no probe | `Health.Acquire`, `Lease.Fail`, `Lease.Commit`, `Lease.Release` | `TestEjection`, `TestProbeAbandoned`, `TestReadmissionEndsProbes` |
+| A box whose health check fails is ejected before a call finds it, and one that passes is readmitted once its ejection is over | `route.Checker`, `Health.Checked` | `TestCheckerEjectsAndReadmits` |
+| A route's retries are a share of its calls | `Health.Called`, `Health.Retry` | `TestRetryBudget`, `TestRetryBudgetBoundsTheStorm` |
+| A bedrock deployment gets a Messages body rewritten for Bedrock, signed with the attribution header under the signature; its exceptions come back in Anthropic's shape and its stream as Messages SSE | `bedrock.Transport` (`rewrite`, `sign`, `metadata`, `anthropicError`, `reframer`) | `TestRewrite`, `TestRequest`, `TestMetadata`, `TestNoCredentials`, `TestReframe`, `TestErrorResponse`, `TestCountTokens`; `TestBedrockEndToEnd` (gateway/proxy) |
 
 ## Known gaps
 
@@ -551,6 +691,10 @@ that started before it.
   per site, not promised. A sweep ends only what the keys can see: a
   route or model taken from a scope does not end calls already on it, nor
   does a key's or a token's expiry.
+- The floor before authentication is each gateway's own, in memory: a
+  source's budgets are per gateway, not the pool's, and behind a sidecar
+  without `-source-header` every caller shares the pod's. Health, ejection
+  and the health checks are per gateway too (model/attempts.md §9).
 - The m1 acceptance record's "Not yet shown" lists the rest: client
   certificates for OTLP, OpenAI's restricted mode, provider-account
   spending limits (ADR 0044).
