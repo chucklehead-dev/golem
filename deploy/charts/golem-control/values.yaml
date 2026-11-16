@@ -47,6 +47,16 @@ clickhouse:
   url: ""          # empty: snapshots carry no known spend
   user: golem_control
   passwordSecret: {name: golem-clickhouse, key: password}
+  # The ledger's DDL (deploy/clickhouse/spend.sql), applied by a Job before
+  # each install and upgrade, as an admin user (not golem-control's).
+  ddl:
+    enabled: false
+    image: clickhouse/clickhouse-server:24.8
+    host: ""        # the native protocol's host
+    port: 9440      # TLS
+    secure: true
+    user: golem_admin
+    passwordSecret: {name: golem-clickhouse-admin, key: password}
 spendAllowance: 5m
 counterRetention: 6h
 periodZone: UTC

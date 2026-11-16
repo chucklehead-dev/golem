@@ -419,9 +419,11 @@ Status:
   drain plus the readiness window, an optional AuthorizationPolicy).
   Checked by `helm lint` and `helm template` (Helm 3.16; a missing
   required value fails naming it) and every flag they pass against the
-  binaries'; not yet against a cluster's schemas, nor deployed. Open: the CRD
-  definitions, the ClickHouse DDL Job, dashboards, egress ServiceEntries,
-  the image builds, and the deploy to EKS through Argo.
+  binaries', kubeconform, and the images run in Docker (a publication
+  verified and applied, ready, an unauthenticated call refused). Also:
+  the CRDs generated from the types, the ClickHouse DDL Job, the
+  Dockerfile, a sample Argo Application and ApplicationSet. Open:
+  dashboards, egress ServiceEntries, and the deploy to EKS through Argo.
 
 - **Install**: Helm charts for the gateway and golem-control through Argo
   CD, on EKS. The chart sets drain to the 10 minutes operations.md assumes

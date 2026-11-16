@@ -1,0 +1,60 @@
+{{- if .Values.clickhouse.ddl.enabled }}
+{{- if not .Values.clickhouse.ddl.host }}{{ fail "values.clickhouse.ddl.host is required with the DDL Job" }}{{ end }}
+# The ledger's tables and views (files/spend.sql, a copy of
+# deploy/clickhouse/spend.sql), applied before golem-control's pods: every
+# statement is IF NOT EXISTS, so a rerun changes nothing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-clickhouse-ddl
+  labels: {{- include "golem-control.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
+data:
+  spend.sql: |
+{{ .Files.Get "files/spend.sql" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: golem-clickhouse-ddl
+  labels: {{- include "golem-control.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: ddl
+          image: {{ .Values.clickhouse.ddl.image }}
+          command: [clickhouse-client]
+          args:
+            - --host={{ .Values.clickhouse.ddl.host }}
+            - --port={{ .Values.clickhouse.ddl.port }}
+            - --user={{ .Values.clickhouse.ddl.user }}
+            {{- if .Values.clickhouse.ddl.secure }}
+            - --secure
+            {{- end }}
+            - --multiquery
+            - --queries-file=/ddl/spend.sql
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.clickhouse.ddl.passwordSecret.name }}, key: {{ .Values.clickhouse.ddl.passwordSecret.key }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: ddl, mountPath: /ddl, readOnly: true}
+      volumes:
+        - name: ddl
+          configMap: {name: golem-clickhouse-ddl}
+{{- end }}

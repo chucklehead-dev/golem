@@ -19,9 +19,29 @@ first, then a gateway pool per site.
   default, as operations.md assumes) plus the readiness window.
 
 Each ServiceAccount takes its AWS role by annotation (IRSA or Pod
-Identity). Not here yet: the config CRDs' definitions, Argo Rollouts
-(canaries are by hand in M1), the ClickHouse DDL Job, dashboards, and
+Identity).
+
+- The config CRDs are in golem-control's `crds/` (Helm installs them
+  first), generated from `lib/api/v1alpha1` by internal/crdgen, whose test
+  fails when they are not current (`GOLEM_UPDATE_CRDS=1 go test
+  ./internal/crdgen/`).
+- golem-control's `clickhouse.ddl` runs the ledger's DDL as a pre-install
+  and pre-upgrade Job (its copy, `files/spend.sql`, is checked against
+  deploy/clickhouse/spend.sql).
+- The images: the repository's Dockerfile, `--build-arg
+  BINARY=golem-gateway` or `golem-control` (static, distroless, non-root).
+- deploy/argocd/golem.yaml: a sample Application for golem-control and an
+  ApplicationSet of gateway pools by site.
+
+Not here yet: Argo Rollouts (canaries are by hand in M1), dashboards,
 egress ServiceEntries.
+
+Checked: `helm lint`, `helm template`, kubeconform (every resource but
+the CRDs and the Istio policy, which have no schema offline), every flag
+against the binaries, and the images run in Docker: golem-control
+published to a directory bucket and the gateway verified and applied it,
+served ready, and refused an unauthenticated call. Not on a cluster: kind
+cannot run in this sandbox.
 
 Required values fail the render with their name. Large numbers in values
 are quoted: Helm reads YAML numbers as floats and would render 33554432 as
