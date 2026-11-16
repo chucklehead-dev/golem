@@ -1,14 +1,16 @@
-// Package snapshot holds the gateway's current configuration: a compiled
-// lib/snapshot behind an atomic pointer, taken once per request and used to
-// its end (gateway.md). It enforces the rules the publication model
-// checks (model/publication.md, and its connect test here): a snapshot is
-// applied only if it is at least the floor and newer than the one applied,
-// and an expired authorization lease serves nothing new.
+// Package snapshot holds the gateway's current configuration, a compiled
+// lib/snapshot behind an atomic pointer. A request takes it once and uses
+// it to its end. The package enforces the rules model/publication.md
+// checks, and a connect test here checks them against the model. A
+// snapshot is applied only if it is at least the floor and newer than the
+// one applied. An expired authorization lease serves nothing new.
 //
-// The floor is inclusive: it is the lowest publication the gateway may
-// accept, such as the publisher's trusted checkpoint after a restart with an
-// empty disk. That checkpoint is the current publication, which the
+// The floor is inclusive. It is the lowest publication the gateway may
+// accept, such as the publisher's trusted checkpoint after a restart with
+// an empty disk. That checkpoint is the current publication, which the
 // restarted gateway must be able to apply.
+//
+// Package variables marked read-only are never written after init.
 package snapshot
 
 import (
@@ -40,12 +42,12 @@ type Compiled struct {
 	Snapshot *snapshot.Snapshot
 	Hash     string
 	Routes   *route.Table
-	// Auth authenticates against the snapshot's entitlements; nil (tests)
-	// lets everyone call everything.
+	// Auth authenticates against the snapshot's entitlements. Nil, as in
+	// tests, lets everyone call everything.
 	Auth   *auth.Keys
 	Prices map[string]snapshot.Price // by the provider's model name
-	// Accounts are the backends' provider accounts, by backend name: the
-	// ledger's provider_account (the backend's name where none is set).
+	// Accounts are the backends' provider accounts by backend name, the
+	// ledger's provider_account. A backend without one uses its name.
 	Accounts map[string]string
 }
 
@@ -58,36 +60,37 @@ var (
 // Holder is the gateway's current snapshot.
 type Holder struct {
 	cur atomic.Pointer[Compiled]
-	// Now is the clock (tests set it).
+	// Now is the clock. Tests set it.
 	Now func() time.Time
-	// Env is the key prefix this gateway accepts: Live, or Dev standalone.
+	// Env is the key environment this gateway accepts, Live, or Dev for
+	// standalone.
 	Env key.Env
-	// Entra verifies Entra tokens; nil: the gateway takes golem keys only.
+	// Entra verifies Entra tokens. Nil means the gateway takes golem keys
+	// only.
 	Entra *entra.Verifier
 	// LocalKey is the standalone gateway's generated key, the one credential
 	// its implicit principal takes.
 	LocalKey string
-	// OnApply, if set, is called with each snapshot applied (the limiter
-	// takes its known spend).
+	// OnApply, if set, is called with each snapshot applied. The limiter
+	// takes its known spend this way.
 	OnApply func(*Compiled)
 	// Deny, if set, is the site's emergency denylist, applied over every
 	// snapshot's entitlements (control-plane.md).
 	Deny *auth.DenyFile
-	// AWS signs bedrock deployments' requests (the gateway's role: the AWS
-	// SDK's provider chain, IRSA or Pod Identity); nil: a bedrock
-	// deployment's calls fail with what to configure.
+	// AWS signs bedrock deployments' requests with the gateway's role,
+	// through the AWS SDK's provider chain. Without it, a bedrock
+	// deployment's calls fail saying what to configure.
 	AWS aws.CredentialsProvider
 
-	// applying serializes Apply, its OnApply included, so the callbacks
-	// see the snapshots in the order they were applied; mu guards the
-	// floor and the transports only, and is not held across OnApply (the
-	// limiter's update and the sweep of every call in flight), so Floor
-	// and RaiseFloor do not wait on it.
+	// applying serializes Apply, its OnApply included, so the callbacks see
+	// snapshots in the order they were applied.
 	applying sync.Mutex
-	mu       sync.Mutex
-	floor    uint64
-	// transports by deployment identity, kept across snapshots so
-	// connections and their state survive a swap (gateway.md).
+	// mu guards the floor and the transports only. It is not held across
+	// OnApply, so Floor and RaiseFloor do not wait on a sweep.
+	mu    sync.Mutex
+	floor uint64
+	// transports are kept by deployment identity across snapshots, so
+	// connections and their state survive a swap.
 	transports map[transportKey]*http.Transport
 }
 
@@ -103,29 +106,31 @@ func (h *Holder) Current() (*Compiled, error) {
 	return c, nil
 }
 
-// Applied is the snapshot applied, whether or not its lease holds; nil
-// before the first. For metrics (its age, the lease remaining).
+// Applied is the snapshot applied, whether or not its lease holds, or nil
+// before the first. Metrics read its age and the lease remaining.
 func (h *Holder) Applied() *Compiled { return h.cur.Load() }
 
-// Floor is the lowest publication the gateway may apply: the last one it
-// applied, or a trusted checkpoint.
+// Floor is the lowest publication the gateway may apply. It is the last
+// one applied, or a trusted checkpoint.
 func (h *Holder) Floor() uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.floor
 }
 
-// RaiseFloor sets the floor from a trusted checkpoint before any snapshot is
-// applied (a restart's persisted checkpoint, the publisher's record).
+// RaiseFloor raises the floor to a trusted checkpoint before any snapshot
+// is applied. The checkpoint is a restart's persisted one or the
+// publisher's record.
 func (h *Holder) RaiseFloor(seq uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.floor = max(h.floor, seq)
 }
 
-// Apply compiles s and swaps it in. A snapshot below the floor, one not
-// newer than the snapshot applied, one whose lease has already expired, or
-// one that does not compile is refused and the previous snapshot kept.
+// Apply compiles a snapshot and swaps it in. It refuses a snapshot below
+// the floor, one not newer than the snapshot applied, one whose lease has
+// expired, and one that does not compile. A refusal keeps the previous
+// snapshot.
 func (h *Holder) Apply(s *snapshot.Snapshot, hash string, secrets Secrets) error {
 	h.applying.Lock()
 	defer h.applying.Unlock()
@@ -314,22 +319,23 @@ func Static(c *Compiled) *Holder {
 	return h
 }
 
-// upstreamTransport is a deployment's connection pool, every setting chosen
-// rather than inherited from http.DefaultTransport:
-//   - no proxy: egress goes through the mesh (ADR 0004), and a stray
-//     HTTPS_PROXY in a pod must not redirect calls carrying provider keys;
-//   - idle connections bounded per host only: DefaultTransport's
-//     MaxIdleConns of 100 is a total over all hosts, so above 100
-//     concurrent streams connections were closed and re-handshaken;
-//   - HTTP/2 pings on a connection silent for 30 seconds, so a dead one is
-//     found under a long stream rather than at the next request;
-//   - no response-header timeout here: a non-streamed answer's headers come
-//     when the model has finished, which for a long answer is minutes; that
-//     bound is the route's (ModelRoute spec.timeouts: headers, maxDuration);
-//   - every dial's resolved address checked (checkDestination), so a name
+// upstreamTransport is a deployment's connection pool. Every setting is
+// chosen rather than inherited from http.DefaultTransport:
+//   - No proxy. Egress goes through the mesh, and a stray HTTPS_PROXY in a
+//     pod must not redirect calls carrying provider keys.
+//   - Idle connections are bounded per host only. DefaultTransport's limit
+//     of 100 is a total over all hosts, which closed connections above 100
+//     concurrent streams.
+//   - HTTP/2 pings a connection silent for 30 seconds, so a dead one is
+//     found under a long stream rather than at the next request.
+//   - No response-header timeout here. A whole answer's headers come when
+//     the model has finished, minutes for a long answer. The route's
+//     timeouts bound that wait.
+//   - Every dial's resolved address is checked (checkDestination). A name
 //     that re-resolves somewhere forbidden is refused at its next
-//     connection. A connection already open stays on the address it was
-//     checked at. resolver is nil but in tests (the system's).
+//     connection, and an open connection stays on the address checked.
+//
+// The resolver is nil, meaning the system's, except in tests. ADR 0004.
 func upstreamTransport(allowPrivate bool, resolver *net.Resolver) *http.Transport {
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Resolver: resolver,
 		ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
