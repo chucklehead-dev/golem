@@ -398,7 +398,7 @@ func TestKnownSpend(t *testing.T) {
 func TestWithKnownSpend(t *testing.T) {
 	since := time.Date(2026, 11, 14, 9, 55, 0, 0, time.UTC)
 	e := snapshot.Entitlements{Scopes: []snapshot.Scope{{ID: "team-a"}, {ID: "team-b"}, {ID: "team-c"}}}
-	withKnownSpend(&e, spend.Known{Period: "2026-11", Since: since, Totals: spend.Totals{
+	withKnownSpend(&e, spend.Result{Period: "2026-11", Since: since, Totals: spend.Totals{
 		Scopes: map[string]int64{"team-a": 10, "team-b": 1}}})
 	a := e.Scopes[0]
 	if a.Period != "2026-11" || !a.Since.Equal(since) || a.KnownSpend != 10 {

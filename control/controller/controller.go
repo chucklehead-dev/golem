@@ -662,7 +662,7 @@ func (c *Controller) entitlements(doc *state.Document) func(aliases []string) sn
 }
 
 // withKnownSpend gives e's scopes the period's known spend.
-func withKnownSpend(e *snapshot.Entitlements, k spend.Known) {
+func withKnownSpend(e *snapshot.Entitlements, k spend.Result) {
 	for i := range e.Scopes {
 		sc := &e.Scopes[i]
 		sc.Period, sc.Since, sc.KnownSpend = k.Period, k.Since, k.Scopes[sc.ID]

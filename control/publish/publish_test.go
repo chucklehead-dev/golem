@@ -27,7 +27,7 @@ func setup(t *testing.T) (*Publisher, sign.Ed25519Keys, *bucket.Dir) {
 }
 
 // leads gives holder the fence at epoch, as a claim would.
-func leads(t *testing.T, st *state.Store, holder string, epoch uint64) Lease {
+func leads(t *testing.T, st *state.Store, holder string, epoch uint64) state.Fence {
 	t.Helper()
 	if _, err := st.Update(t.Context(), func(d *state.Document) error {
 		d.Fence = &state.Fence{Holder: holder, Epoch: epoch}
@@ -35,7 +35,7 @@ func leads(t *testing.T, st *state.Store, holder string, epoch uint64) Lease {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return Lease{Holder: holder, Epoch: epoch}
+	return state.Fence{Holder: holder, Epoch: epoch}
 }
 
 func build(seq uint64) (*snapshot.Snapshot, error) {
@@ -80,12 +80,12 @@ func TestFenced(t *testing.T) {
 	}
 	before, _, _ := d.Get(ctx, snapshot.PointerKey("internal"), "")
 	for name, c := range map[string]struct {
-		lease  Lease
+		lease  state.Fence
 		source uint64
 	}{
-		"an old epoch":          {Lease{Holder: "r1", Epoch: 1}, 9},
-		"another's lease":       {Lease{Holder: "r2", Epoch: 2}, 9},
-		"a lease not yet taken": {Lease{Holder: "r1", Epoch: 3}, 9},
+		"an old epoch":          {state.Fence{Holder: "r1", Epoch: 1}, 9},
+		"another's lease":       {state.Fence{Holder: "r2", Epoch: 2}, 9},
+		"a lease not yet taken": {state.Fence{Holder: "r1", Epoch: 3}, 9},
 		"old state":             {l, 4},
 	} {
 		if _, err := p.Publish(ctx, c.lease, c.source, build); !errors.Is(err, ErrFenced) {
@@ -198,7 +198,7 @@ func TestPausedAfterRecord(t *testing.T) {
 	d.Put(ctx, snapshot.PointerKey("internal"), forged, "")
 	r2 := *p
 	r2.State = &state.Store{Bucket: d}
-	if ptr, err := r2.Publish(ctx, Lease{Holder: "r2", Epoch: 2}, 1, build); err != nil || ptr.PublishSeq != 4 {
+	if ptr, err := r2.Publish(ctx, state.Fence{Holder: "r2", Epoch: 2}, 1, build); err != nil || ptr.PublishSeq != 4 {
 		t.Fatalf("after a forged pointer: %+v %v", ptr, err)
 	}
 }
@@ -219,13 +219,12 @@ func (b *pauseAfterRecord) Put(ctx context.Context, key string, body []byte, ifM
 	return b.Bucket.Put(ctx, key, body, ifMatch)
 }
 
-// TestGuard: model/leadership.md's counterexamples, each refused. A
-// rolled-back record, alone or met by an older checkpoint copied back,
-// stops the pool's publication until the document is adopted, then
-// numbers above what gateways trust (the signed pointer); a race for the
-// record is not mistaken for one; a forged or deleted checkpoint stops
-// publication; the first publication's crash window (a record with no
-// checkpoint yet) is not mistaken for tampering.
+// TestGuard checks the counterexamples of the retired leadership model,
+// each refused. A rolled-back record stops the pool's publication until the
+// document is adopted, then numbers above the signed pointer. A race for
+// the record is not mistaken for one. A forged or deleted checkpoint stops
+// publication. A record with no checkpoint yet, the first publication's
+// crash window, is not mistaken for tampering.
 func TestGuard(t *testing.T) {
 	ctx := t.Context()
 	// fresh is another replica, started after the bucket changed under

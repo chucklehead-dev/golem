@@ -1,8 +1,10 @@
-// Package spend is golem-control's known-spend job (ADR 0048,
-// control-plane.md §6): each scope's spend this budget period, from the
-// ledger in ClickHouse, of the calls that ended before a boundary B, a
-// minute an ingestion allowance before now. Snapshots carry it with B
-// (ADR 0031): a gateway's known spend is the snapshot's alone.
+// Package spend is golem-control's known-spend job. It sums each scope's
+// spend this budget period from the ledger in ClickHouse, counting the calls
+// that ended before a boundary.
+//
+// The boundary is a whole minute, an ingestion allowance before now.
+// Snapshots carry the sums with their boundary, and a gateway's known spend
+// is the snapshot's alone (ADR 0031).
 package spend
 
 import (
@@ -20,18 +22,20 @@ import (
 	"sync"
 	"time"
 
-	budget "github.com/chucklehead-dev/golem/lib/period"
+	"github.com/chucklehead-dev/golem/lib/period"
 )
 
-// Known is the ledger's spend for one period of the calls that ended
-// before Since, by scope.
-type Known struct {
-	Period string    // "2026-11"
-	Since  time.Time // B: a whole minute
+// Result is one read of the ledger: each scope's spend in one period, of the
+// calls that ended before Since.
+type Result struct {
+	Period string // as period.Of names it, "2026-11"
+	// Since is the boundary: only calls that ended before it are counted.
+	// Always a whole minute.
+	Since time.Time
 	Totals
 }
 
-// Totals is spend in micro-units, by scope ID (org-model.md §4.2).
+// Totals is spend in micro-units, by scope ID.
 type Totals struct {
 	Scopes map[string]int64
 }
@@ -42,14 +46,14 @@ func noSpend() Totals { return Totals{Scopes: map[string]int64{}} }
 // Ledger reads the deduplicated ledger.
 type Ledger interface {
 	// Spend sums each scope's cost in period over the calls that ended
-	// before before.
-	Spend(ctx context.Context, period string, before time.Time) (Totals, error)
+	// before boundary.
+	Spend(ctx context.Context, period string, boundary time.Time) (Totals, error)
 }
 
 // Ingestion is a Ledger that also says how far each site's rows have
-// arrived: the boundary assumes every call that ended before it is in the
-// ledger, which holds only while a site's rows arrive within the
-// allowance. A Ledger without it reports no lag (Job.Lags is empty).
+// arrived. The boundary assumes every call that ended before it is in the
+// ledger. That holds only while each site's rows arrive within the
+// allowance. A Ledger without Ingestion reports no lag.
 type Ingestion interface {
 	// Latest is, by site, the latest ended_at of any row ingested from it.
 	Latest(ctx context.Context) (map[string]time.Time, error)
@@ -60,42 +64,42 @@ type SiteLag struct {
 	// Latest is the latest ended_at ingested from the site; zero with
 	// NoRows.
 	Latest time.Time
-	// NoRows: the site was in an earlier read and is in the ledger no
-	// more (the table rebuilt or truncated, or another ClickHouse).
+	// NoRows reports that the site was in an earlier read and is in the
+	// ledger no more. The table was rebuilt or truncated, or this is
+	// another ClickHouse.
 	NoRows bool
 	// Lag is now − Latest; zero with NoRows.
 	Lag time.Duration
-	// Behind: Lag exceeds the allowance, or NoRows. The boundary then lies
-	// past the site's latest row, so any of its calls that ended between
-	// the two and have not arrived are in neither the snapshot's spend
-	// nor the gateways' minutes (ADR 0048): known spend undercounts them
-	// until a later boundary passes their rows. A site that served nothing
-	// lately is behind too: the ledger cannot tell idle from late.
+	// Behind reports that Lag exceeds the allowance, or NoRows. Known
+	// spend then misses the site's calls that ended before the boundary
+	// and have not arrived. A site that served nothing lately is behind
+	// too, because the ledger cannot tell idle from late.
 	Behind bool
 }
 
-// Age is how far the result's boundary is behind now: an allowance and a
-// minute at most when the ledger answers, more while it does not (a
-// result is kept through failures). For a metric.
-func (k Known) Age(now time.Time) time.Duration { return now.Sub(k.Since) }
+// Age is how far the result's boundary is behind now. It is at most an
+// allowance and a minute while the ledger answers, and grows while it does
+// not. For a metric.
+func (r Result) Age(now time.Time) time.Duration { return now.Sub(r.Since) }
 
-// Job keeps Known current.
+// Job keeps a Result current.
 type Job struct {
 	Ledger Ledger
-	// Allowance is how long after a call's end its row is surely in
-	// ClickHouse (default five minutes): B is that far behind now.
+	// Allowance is how long after a call ends its row is surely in
+	// ClickHouse. The boundary is this far behind now. Default five minutes.
 	Allowance time.Duration
-	// Location is the budget periods' time zone: the gateways' -period-zone.
+	// Location is the budget periods' time zone, the gateways' -period-zone.
 	Location *time.Location
 	Now      func() time.Time // the clock (tests set it)
 
-	// A result is kept through failures and stays published: a gateway's
-	// known spend is then older, never wrong. One whose boundary is more
-	// than StaleAfter old (MaxAge) is reported stale, for an alert.
-	StaleAfter time.Duration // default 90 minutes
+	// StaleAfter is how old a result's boundary may be before the result
+	// is reported stale, for an alert. A result is kept through failures
+	// and stays published, because older spend is never wrong spend.
+	// Default 90 minutes.
+	StaleAfter time.Duration
 
 	mu     sync.Mutex
-	last   *Known
+	last   *Result
 	latest map[string]time.Time // by site, as last read; zero: no rows any more
 }
 
@@ -108,9 +112,9 @@ const (
 // MaxAge is how old a result's boundary may be before it is stale.
 func (j *Job) MaxAge() time.Duration { return cmp.Or(j.StaleAfter, DefaultStaleAfter) }
 
-// Validate reports a configuration under which every result is stale: a
-// fresh one is an allowance and a minute old. For golem-control to check
-// at start.
+// Validate reports a configuration under which every result is stale. A
+// fresh result is already an allowance and a minute old. golem-control
+// checks it at start.
 func (j *Job) Validate() error {
 	allowance := cmp.Or(j.Allowance, DefaultAllowance)
 	if maxAge := j.MaxAge(); maxAge <= allowance+time.Minute {
@@ -119,19 +123,16 @@ func (j *Job) Validate() error {
 	return nil
 }
 
-// Step reads the ledger's spend at a new boundary, and, from an Ingestion
-// ledger, each site's latest row (Lags). On a failure the last result is
-// kept for its own period (a new period's spend is not the old one's), and
-// the error returned, saying whether it is stale; Current says what to
-// publish. The boundary is never moved for a lagging site: Lags reports
-// it, for an alert.
+// Step reads the ledger's spend at a new boundary and, from an Ingestion,
+// each site's latest row. On a failure the last result is kept if it is of
+// the current period, and the error says whether it is stale. A lagging
+// site never moves the boundary; Lags reports it, for an alert.
 func (j *Job) Step(ctx context.Context) error {
 	return errors.Join(j.stepSpend(ctx), j.stepLatest(ctx))
 }
 
 // stepLatest reads each site's latest ingested row. On a failure the last
-// read is kept, so the lags grow with the clock: the job cannot see the
-// sites' rows arrive, and the alert stays on.
+// read is kept, so the lags grow with the clock and the alert stays on.
 func (j *Job) stepLatest(ctx context.Context) error {
 	in, ok := j.Ledger.(Ingestion)
 	if !ok {
@@ -154,9 +155,9 @@ func (j *Job) stepLatest(ctx context.Context) error {
 	return nil
 }
 
-// Lags is each site's ingestion lag, as of now and the last read, by
-// site: empty before the first read, or for a Ledger that is not an
-// Ingestion. For a metric, and an alert on Behind.
+// Lags is each site's ingestion lag, as of now and the last read. It is
+// empty before the first read, and for a Ledger that is not an Ingestion.
+// For a metric, and an alert on Behind.
 func (j *Job) Lags() map[string]SiteLag {
 	now := j.now()
 	allowance := cmp.Or(j.Allowance, DefaultAllowance)
@@ -178,23 +179,23 @@ func (j *Job) stepSpend(ctx context.Context) error {
 	now := j.now()
 	loc := cmp.Or(j.Location, time.UTC)
 	since := now.Add(-cmp.Or(j.Allowance, DefaultAllowance)).Truncate(time.Minute)
-	period := budget.Of(now, loc)
-	// A boundary still in the previous period counts nothing of this one:
-	// this period starts from nothing until B passes its start.
-	if budget.Of(since, loc) != period {
-		j.set(&Known{Period: period, Since: since, Totals: noSpend()})
+	cur := period.Of(now, loc)
+	// A boundary still in the previous period counts nothing of this one.
+	// This period's spend is zero until the boundary passes its start.
+	if period.Of(since, loc) != cur {
+		j.set(&Result{Period: cur, Since: since, Totals: noSpend()})
 		return nil
 	}
-	s, err := j.Ledger.Spend(ctx, period, since)
+	s, err := j.Ledger.Spend(ctx, cur, since)
 	if err != nil {
-		j.forgetOtherThan(period)
-		if k, ok := j.Current(); ok && k.Age(now) > j.MaxAge() {
+		j.forgetOtherThan(cur)
+		if r, ok := j.Current(); ok && r.Age(now) > j.MaxAge() {
 			return fmt.Errorf("known spend for %s: %w (the last result is kept, but stale: its boundary %s is older than %v, so gateways miss every call since it; alert)",
-				period, err, k.Since.UTC().Format(time.RFC3339), j.MaxAge())
+				cur, err, r.Since.UTC().Format(time.RFC3339), j.MaxAge())
 		}
-		return fmt.Errorf("known spend for %s: %w (the last result is kept)", period, err)
+		return fmt.Errorf("known spend for %s: %w (the last result is kept)", cur, err)
 	}
-	j.set(&Known{Period: period, Since: since, Totals: s})
+	j.set(&Result{Period: cur, Since: since, Totals: s})
 	return nil
 }
 
@@ -205,54 +206,52 @@ func (j *Job) now() time.Time {
 	return time.Now()
 }
 
-func (j *Job) set(k *Known) {
+func (j *Job) set(r *Result) {
 	j.mu.Lock()
-	j.last = k
+	j.last = r
 	j.mu.Unlock()
 }
 
-// forgetOtherThan drops the last result unless it is of period: an older
-// result stays exact for its own period (its boundary is earlier, and the
-// gateways add the minutes from it), but not for another.
-func (j *Job) forgetOtherThan(period string) {
+// forgetOtherThan drops the last result unless it is of period p. An older
+// result only undercounts its own period, but says nothing of another.
+func (j *Job) forgetOtherThan(p string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.last != nil && j.last.Period != period {
+	if j.last != nil && j.last.Period != p {
 		j.last = nil
 	}
 }
 
-// Current is the latest result, or false if there is none yet: a snapshot
-// then carries no known spend, and gateways count none. A stale result is still current (Stale).
-func (j *Job) Current() (Known, bool) {
+// Current is the latest result, or false if there is none yet. Without one
+// a snapshot carries no known spend. A stale result is still current.
+func (j *Job) Current() (Result, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.last == nil {
-		return Known{}, false
+		return Result{}, false
 	}
 	return *j.last, true
 }
 
-// Age is the current result's age (Known.Age), or false if there is none:
-// for a metric.
+// Age is the current result's age, or false if there is none. For a metric.
 func (j *Job) Age() (time.Duration, bool) {
-	k, ok := j.Current()
+	r, ok := j.Current()
 	if !ok {
 		return 0, false
 	}
-	return k.Age(j.now()), true
+	return r.Age(j.now()), true
 }
 
 // Stale reports whether the current result's boundary is older than
-// MaxAge: the gateways' known spend then misses every call since the
+// MaxAge. The gateways' known spend then misses every call since the
 // boundary. For an alert.
 func (j *Job) Stale() bool {
 	age, ok := j.Age()
 	return ok && age > j.MaxAge()
 }
 
-// ClickHouse is the ledger over ClickHouse's HTTP interface: one query,
-// its values bound as parameters (never in the query's text).
+// ClickHouse is the ledger over ClickHouse's HTTP interface. Values are
+// bound as query parameters, never written into the query's text.
 type ClickHouse struct {
 	URL            string // e.g. https://clickhouse.golem.svc:8443
 	User, Password string
@@ -260,36 +259,36 @@ type ClickHouse struct {
 	Client         *http.Client
 }
 
-// spendQuery sums the period's events that ended before the boundary, one
-// row per event_id (deploy/clickhouse/spend.sql: golem.spend_by_event,
-// deduplicated by its engine; FINAL makes that exact at read time, within
-// the one partition the period names), by scope.
+// spendQuery sums, by scope, the period's events that ended before the
+// boundary. golem.spend_by_event (deploy/clickhouse/spend.sql) keeps one
+// row per event_id once merged. FINAL makes that exact at read time,
+// within the one partition the period names.
 const spendQuery = `SELECT scope_id, toString(sum(cost_micros)) AS spend
 FROM {db}.spend_by_event FINAL
 WHERE period = {period:Date} AND ended_at < {before:DateTime64(3, 'UTC')}
 GROUP BY scope_id
 FORMAT JSONEachRow`
 
-// Spend runs the query.
-func (c ClickHouse) Spend(ctx context.Context, period string, before time.Time) (Totals, error) {
+// Spend runs spendQuery for the period named p.
+func (c ClickHouse) Spend(ctx context.Context, p string, boundary time.Time) (Totals, error) {
 	q := url.Values{
-		"param_period": {budget.FirstDay(period)},
-		"param_before": {before.UTC().Format("2006-01-02 15:04:05.000")},
+		"param_period": {period.FirstDay(p)},
+		"param_before": {boundary.UTC().Format("2006-01-02 15:04:05.000")},
 	}
 	var out Totals
 	err := c.query(ctx, spendQuery, q, func(r io.Reader) (err error) { out, err = readSpend(r); return err })
 	return out, err
 }
 
-// latestQuery is each site's latest ingested ended_at
-// (deploy/clickhouse/spend.sql: golem.ingest_by_site, one row per site
-// once merged; max over the unmerged parts makes it exact at read time).
+// latestQuery is each site's latest ingested ended_at.
+// golem.ingest_by_site (deploy/clickhouse/spend.sql) keeps one row per
+// site once merged. max over the unmerged parts makes it exact at read time.
 const latestQuery = `SELECT site, toString(max(latest)) AS latest
 FROM {db}.ingest_by_site
 GROUP BY site
 FORMAT JSONEachRow`
 
-// Latest runs latestQuery: the Ingestion half.
+// Latest runs latestQuery, for Ingestion.
 func (c ClickHouse) Latest(ctx context.Context) (map[string]time.Time, error) {
 	var out map[string]time.Time
 	err := c.query(ctx, latestQuery, url.Values{}, func(r io.Reader) (err error) { out, err = readLatest(r); return err })
@@ -361,8 +360,8 @@ func readSpend(r io.Reader) (Totals, error) {
 	return out, nil
 }
 
-// eachRow decodes r's JSONEachRow rows, blank lines skipped, and gives
-// each to use; an error, the decoding's or use's, names its row.
+// eachRow decodes r's JSONEachRow rows, skipping blank lines, and gives
+// each to use. An error names its row.
 func eachRow[Row any](r io.Reader, use func(Row) error) error {
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {

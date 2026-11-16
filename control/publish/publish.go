@@ -1,15 +1,13 @@
-// Package publish is golem-control's publisher (control-plane.md §4,
-// model/publication.md): it writes a pool's snapshot to the bucket, wins
-// the pool's publication record in the state document (control/state) by
-// a fenced update, writes the pool's trusted checkpoint, then the signed
-// pointer to the snapshot.
+// Package publish is golem-control's publisher. For each pool it writes
+// the snapshot to the bucket, wins the pool's publication record in the
+// state document by a fenced update, then writes the pool's trusted
+// checkpoint and the signed pointer to the snapshot.
 //
-// The record, not the pointer, is the authority on what was last
-// published: anyone who can write the pool's objects but not sign can copy
-// an old signed pointer back (the model's replayPointer), so numbering
-// from the pointer would let a replay set the sequence back. A publisher
-// is fenced as the model's FENCE is: it publishes only with a leadership
-// epoch and a state version at least the record's.
+// The record, not the pointer, says what was last published. Anyone who
+// can write the bucket but not sign can copy an old signed pointer back, so
+// numbering from the pointer would let a replay set the sequence back.
+// model/publication.md checks this, and the fence, as replayPointer and
+// FENCE.
 package publish
 
 import (
@@ -28,27 +26,24 @@ import (
 
 // Errors a publish reports.
 var (
-	// ErrFenced: this publisher does not hold the fence at its epoch, or the
-	// record was written under a later epoch or from a newer state, or a
-	// later publication's checkpoint or pointer is in place.
+	// ErrFenced means this publisher does not hold the fence at its epoch.
+	// Or the record was written under a later epoch or from a newer state,
+	// or a later publication's checkpoint or pointer is in place.
 	ErrFenced = errors.New("publish: fenced by a newer publication")
-	// ErrTampered: the pool's trusted checkpoint does not verify, or is
-	// missing though a publication was made: someone other than
+	// ErrTampered means the pool's trusted checkpoint does not verify, or
+	// is missing though a publication was made. Someone other than
 	// golem-control wrote the bucket. Nothing is published until a person
-	// looks (model/leadership.md's VERIFY): numbering past it could lower
-	// gateways' floors, or let a forgery set the sequence.
+	// looks, because numbering past it could lower gateways' floors.
 	ErrTampered = errors.New("publish: the pool's trusted checkpoint has been tampered with")
-	// ErrConflict: another publisher updated the record first; re-read and
-	// retry.
+	// ErrConflict means another publisher updated the record first. Read
+	// it again and retry.
 	ErrConflict = errors.New("publish: the publication record changed concurrently")
-	// ErrRegressed: the pool's publication record, read afresh, is below
-	// what the bucket proves was published (its verified checkpoint or
-	// pointer). A record is written before its checkpoint and pointer, and a
-	// restore keeps the current records, so the state document went back
-	// (an older version put back, or a deleted one bootstrapped): its
-	// revocations since may have revived. The pool is not published until a
-	// person restores the newest document, or adopts this one
-	// (golem-control bootstrap -adopt).
+	// ErrRegressed means the pool's record, read afresh, is below what the
+	// bucket proves was published. Records are written first and restores
+	// keep them, so the state document went back. Revocations made since
+	// may have revived. The pool is not published until a person restores
+	// the newest document, or adopts this one with golem-control bootstrap
+	// -adopt.
 	ErrRegressed = errors.New("publish: the state document went back: the pool's publication record is below what the bucket proves was published")
 )
 
@@ -80,31 +75,27 @@ func (p *Publisher) Record(ctx context.Context) (state.Record, error) {
 	return p.State.Current().Publications[p.Pool], nil
 }
 
-// Lease is the leadership a publication is made under: the fence its
-// replica claimed (state.Fence, state.Store.Claim).
+// Lease is the old name of state.Fence.
+//
+// Deprecated: use state.Fence. TODO: remove once gateway/snapshot's tests
+// use state.Fence; they are another branch's to change.
 type Lease = state.Fence
 
-// Publish builds the next publication with build, given its sequence
-// number, and publishes it under lease from the state version source: it
-// is PublishAll for one pool.
+// Publish is PublishAll for one pool. build makes the publication given
+// its sequence number. It is published under fence, from the state
+// version source.
 //
 // The number is one above the highest of the record, the verified
-// checkpoint and the signed pointer (model/leadership.md's GUARD and
-// VERIFY), and a checkpoint that does not verify, or is missing after a
-// publication, stops it with ErrTampered. The snapshot is written first
-// (content-addressed), then the record by the state's fenced
-// compare-and-swap, which refuses it unless the document's fence is still
-// lease, then the checkpoint, then the pointer. A publisher that dies
-// after the record leaves the checkpoint and pointer behind it, and the
-// next publication (the controller's renewal, within a minute) moves them
-// on; until then a gateway restarted with an empty disk takes the older
-// checkpoint as its floor.
+// checkpoint and the signed pointer. A checkpoint that does not verify, or
+// is missing after a publication, stops it with ErrTampered.
 //
-// The record's write checks the fence's holder and epoch: while the fence
-// names this replica no other has claimed a later epoch, so none can have
-// published (ADR 0053: golem-control's one replica claims it at start).
-func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, build func(seq uint64) (*snapshot.Snapshot, error)) (snapshot.Pointer, error) {
-	ptrs, errs := PublishAll(ctx, p.State, lease, source, []*Publisher{p}, func(_ *Publisher, seq uint64) (*snapshot.Snapshot, error) {
+// The writes go in this order: the snapshot (content-addressed), the
+// record by a fenced compare-and-swap, the checkpoint, then the pointer. A
+// publisher that dies after the record leaves the checkpoint and pointer
+// behind, and the next renewal moves them on. Until then a gateway
+// restarted with an empty disk takes the older checkpoint as its floor.
+func (p *Publisher) Publish(ctx context.Context, fence state.Fence, source uint64, build func(seq uint64) (*snapshot.Snapshot, error)) (snapshot.Pointer, error) {
+	ptrs, errs := PublishAll(ctx, p.State, fence, source, []*Publisher{p}, func(_ *Publisher, seq uint64) (*snapshot.Snapshot, error) {
 		return build(seq)
 	})
 	if err := errs[p.Pool]; err != nil {
@@ -113,13 +104,15 @@ func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, bui
 	return ptrs[p.Pool], nil
 }
 
-// PublishAll publishes every pool's publication with one state write: each
-// pool's snapshot is numbered and written, then all their records are won
-// in a single fenced update (one document version a cycle, whatever the
-// number of pools, ADR 0049), then each pool's checkpoint and pointer. A
-// pool that fails before the record (tampering, a build error) is left out
-// and the others go on; its error is in errs. The publishers share st.
-func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64, pubs []*Publisher,
+// PublishAll publishes every pool with one state write. Each pool's
+// snapshot is numbered and written, then all their records are won in one
+// fenced update, then each pool's checkpoint and pointer. So a cycle costs
+// one document version, whatever the number of pools (ADR 0053).
+//
+// A pool that fails before the record, by tampering or a build error, is
+// left out and the others go on. Its error is in errs. The publishers
+// share st.
+func PublishAll(ctx context.Context, st *state.Store, fence state.Fence, source uint64, pubs []*Publisher,
 	build func(p *Publisher, seq uint64) (*snapshot.Snapshot, error)) (ptrs map[string]snapshot.Pointer, errs map[string]error) {
 	ptrs, errs = map[string]snapshot.Pointer{}, map[string]error{}
 	fail := func(err error) (map[string]snapshot.Pointer, map[string]error) {
@@ -135,12 +128,12 @@ func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64
 	}
 	// Checked here as well as by the fenced update below, so a deposed
 	// publisher writes no snapshot either.
-	if err := holds(st.Current().Fence, lease); err != nil {
+	if err := holds(st.Current().Fence, fence); err != nil {
 		return fail(err)
 	}
 	var ready []prepared
 	for _, p := range pubs {
-		pr, err := p.prepare(ctx, st, st.Current().Publications[p.Pool], lease, source, build)
+		pr, err := p.prepare(ctx, st, st.Current().Publications[p.Pool], fence, source, build)
 		if err != nil {
 			errs[p.Pool] = err
 			continue
@@ -150,7 +143,7 @@ func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64
 	if len(ready) == 0 {
 		return ptrs, errs
 	}
-	if _, err := st.FencedUpdate(ctx, lease, func(d *state.Document) error {
+	if _, err := st.FencedUpdate(ctx, fence, func(d *state.Document) error {
 		for _, pr := range ready {
 			if d.Publications[pr.p.Pool] != pr.rec {
 				return ErrConflict // another publisher won since this one read the record
@@ -160,7 +153,7 @@ func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64
 			d.Publications = map[string]state.Record{}
 		}
 		for _, pr := range ready {
-			d.Publications[pr.p.Pool] = state.Record{Epoch: lease.Epoch, Seq: pr.seq, Source: source}
+			d.Publications[pr.p.Pool] = state.Record{Epoch: fence.Epoch, Seq: pr.seq, Source: source}
 		}
 		return nil
 	}); err != nil {
@@ -170,7 +163,7 @@ func PublishAll(ctx context.Context, st *state.Store, lease Lease, source uint64
 		return fail(err)
 	}
 	for _, pr := range ready {
-		ptr, err := pr.p.finish(ctx, pr, lease, source)
+		ptr, err := pr.p.finish(ctx, pr, fence, source)
 		if err != nil {
 			errs[pr.p.Pool] = err
 			continue
@@ -190,17 +183,17 @@ type prepared struct {
 }
 
 // prepare numbers the pool's next publication and writes its snapshot.
-func (p *Publisher) prepare(ctx context.Context, st *state.Store, rec state.Record, lease Lease, source uint64,
+func (p *Publisher) prepare(ctx context.Context, st *state.Store, rec state.Record, fence state.Fence, source uint64,
 	build func(*Publisher, uint64) (*snapshot.Snapshot, error)) (prepared, error) {
-	if lease.Epoch < rec.Epoch || source < rec.Source {
-		return prepared{}, fmt.Errorf("%w: the record is at epoch %d, state %d; this publisher has epoch %d, state %d", ErrFenced, rec.Epoch, rec.Source, lease.Epoch, source)
+	if fence.Epoch < rec.Epoch || source < rec.Source {
+		return prepared{}, fmt.Errorf("%w: the record is at epoch %d, state %d; this publisher has epoch %d, state %d", ErrFenced, rec.Epoch, rec.Source, fence.Epoch, source)
 	}
 	floor, err := p.floor(ctx, rec)
 	if err != nil {
 		return prepared{}, err
 	}
 	if floor > rec.Seq {
-		return prepared{}, p.below(ctx, st, lease, floor)
+		return prepared{}, p.below(ctx, st, fence, floor)
 	}
 	seq := rec.Seq + 1
 	s, err := build(p, seq)
@@ -222,18 +215,16 @@ func (p *Publisher) prepare(ctx context.Context, st *state.Store, rec state.Reco
 }
 
 // below is the error for a record read below floor, what the bucket proves
-// was published. The record is written before the checkpoint and pointer,
-// so either another publisher has won it since it was read (ErrConflict,
-// or ErrFenced if it led at a later epoch: the document read afresh shows
-// it), or the document went back (ErrRegressed). Numbering past it, as the
-// guard of model/leadership.md does, would keep the floor, but publish the
-// older document's entitlements: revocations made since revived.
-func (p *Publisher) below(ctx context.Context, st *state.Store, lease Lease, floor uint64) error {
+// was published. The record is written before the checkpoint and pointer.
+// So either another publisher won it since it was read, or the document
+// went back (ErrRegressed). Numbering past the floor would publish the
+// older document's entitlements, reviving revocations made since.
+func (p *Publisher) below(ctx context.Context, st *state.Store, fence state.Fence, floor uint64) error {
 	if err := st.Refresh(ctx); err != nil {
 		return err
 	}
 	d := st.Current()
-	if err := holds(d.Fence, lease); err != nil {
+	if err := holds(d.Fence, fence); err != nil {
 		return err
 	}
 	rec := d.Publications[p.Pool]
@@ -246,17 +237,17 @@ func (p *Publisher) below(ctx context.Context, st *state.Store, lease Lease, flo
 		ErrRegressed, p.Pool, d.StateVersion, rec.Seq, floor, state.DocumentKey)
 }
 
-// Floor is the highest publication the bucket proves was made to the pool:
-// its verified checkpoint's and signed pointer's sequence, as the
-// publisher numbers above (golem-control bootstrap writes records at it).
-// A checkpoint that does not verify, or one missing beside a signed
-// pointer, is ErrTampered.
+// Floor is the highest publication the bucket proves was made to the pool,
+// from its verified checkpoint and signed pointer. The publisher numbers
+// above it, and golem-control bootstrap writes records at it. A checkpoint
+// that does not verify, or is missing beside a signed pointer, is
+// ErrTampered.
 func (p *Publisher) Floor(ctx context.Context) (uint64, error) {
 	return p.floor(ctx, state.Record{})
 }
 
 // finish writes a pool's checkpoint, then its pointer, once its record is won.
-func (p *Publisher) finish(ctx context.Context, pr prepared, lease Lease, source uint64) (snapshot.Pointer, error) {
+func (p *Publisher) finish(ctx context.Context, pr prepared, fence state.Fence, source uint64) (snapshot.Pointer, error) {
 	cp, err := snapshot.SignCheckpoint(ctx, snapshot.Checkpoint{Pool: p.Pool, PublishSeq: pr.seq}, p.Signer)
 	if err != nil {
 		return snapshot.Pointer{}, err
@@ -265,7 +256,7 @@ func (p *Publisher) finish(ctx context.Context, pr prepared, lease Lease, source
 		return snapshot.Pointer{}, err
 	}
 	now := p.now()
-	ptr := snapshot.Pointer{Pool: p.Pool, PublishSeq: pr.seq, Epoch: lease.Epoch, Source: source, IssuedAt: now,
+	ptr := snapshot.Pointer{Pool: p.Pool, PublishSeq: pr.seq, Epoch: fence.Epoch, Source: source, IssuedAt: now,
 		Expires: now.Add(cmp.Or(p.PointerTTL, 10*time.Minute)), Hash: pr.hash}
 	signed, err := snapshot.SignPointer(ctx, ptr, p.Signer)
 	if err != nil {
@@ -314,14 +305,14 @@ func (p *Publisher) Published(ctx context.Context) (*snapshot.Snapshot, error) {
 	return s, nil
 }
 
-// holds refuses a publication unless the document's fence, l, is want.
-func holds(l *state.Fence, want Lease) error {
-	if l == nil || *l != want {
-		have := "no lease"
-		if l != nil {
-			have = fmt.Sprintf("%s holds the lease at epoch %d", l.Holder, l.Epoch)
+// holds refuses a publication unless the document's fence, have, is want.
+func holds(have *state.Fence, want state.Fence) error {
+	if have == nil || *have != want {
+		who := "no one holds the fence"
+		if have != nil {
+			who = fmt.Sprintf("%s holds the fence at epoch %d", have.Holder, have.Epoch)
 		}
-		return fmt.Errorf("%w: %s; this publisher is %s at epoch %d", ErrFenced, have, want.Holder, want.Epoch)
+		return fmt.Errorf("%w: %s; this publisher is %s at epoch %d", ErrFenced, who, want.Holder, want.Epoch)
 	}
 	return nil
 }
@@ -371,12 +362,11 @@ func (p *Publisher) floor(ctx context.Context, rec state.Record) (uint64, error)
 	return max(cp.PublishSeq, ptrSeq), nil
 }
 
-// advance writes body, publication seq's object at key, unless a later
-// publication's is there: conditionally on the object it read, so a later
-// one written meanwhile (a successor's, while this publisher was paused)
-// is not overwritten. A stored checkpoint that does not verify is
-// ErrTampered; a stored pointer that does not verify is replaced (it is
-// junk to gateways too).
+// advance writes body, publication seq's object, at key unless a later
+// publication's is there. The put is conditional on the object read, so a
+// later one written meanwhile is not overwritten. A stored checkpoint that
+// does not verify is ErrTampered. A stored pointer that does not verify is
+// replaced, as gateways ignore it too.
 func (p *Publisher) advance(ctx context.Context, key string, seq uint64, body []byte) error {
 	isCheckpoint := key == snapshot.CheckpointKey(p.Pool)
 	for range 5 {
