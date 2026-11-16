@@ -212,7 +212,9 @@ func (d *attemptsDriver) Attempt(c string) (string, error) {
 }
 
 // Failed answers call c's attempt as outcome says: unreached, refused (a
-// 503, or a 200 whose first event is an error, alternately) or uncertain.
+// 503, or a 200 whose first event is an error, alternately) or uncertain
+// (a reset before the headers, or a 200 reset before its first event,
+// alternately).
 func (d *attemptsDriver) Failed(c, outcome string) error {
 	m := d.calls[c]
 	answer := map[string]func() (*http.Response, error){
@@ -223,7 +225,12 @@ func (d *attemptsDriver) Failed(c, outcome string) error {
 			}
 			return statusOf(503, ""), nil
 		},
-		"uncertain": func() (*http.Response, error) { return nil, errors.New("read: connection reset by peer") },
+		"uncertain": func() (*http.Response, error) {
+			if m.attempts%2 == 0 { // the headers, then a reset before the first event
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(failing{})}, nil
+			}
+			return nil, errors.New("read: connection reset by peer")
+		},
 	}[outcome]
 	m.pending.reply <- answer
 	m.pending = nil

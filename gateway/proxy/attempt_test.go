@@ -333,3 +333,66 @@ func TestOwnShareIsTheCallersLimit(t *testing.T) {
 		t.Fatalf("%d %s: a deployment at its ceiling: want upstream.unavailable", w.Code, w.Body)
 	}
 }
+
+// TestNoRetryPastTheCallsEnd: an attempt refused as the route's maximum
+// duration cancels the upstream context is not retried: the retry would
+// take the next deployment's lease and a retry from the route's budget
+// for a request that could only fail at once, and be charged and failed
+// as uncertain. The caller has the refusal; the next deployment is left
+// untouched.
+func TestNoRetryPastTheCallsEnd(t *testing.T) {
+	d1 := roundTrip(func(r *http.Request) (*http.Response, error) {
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		<-r.Context().Done() // refused just as the call's time ran out
+		return statusOf(529, ""), nil
+	})
+	var n2 atomic.Int32
+	d2 := roundTrip(func(r *http.Request) (*http.Response, error) { // as a transport does, sent a done context
+		n2.Add(1)
+		r.Body.Close()
+		if err := r.Context().Err(); err != nil {
+			return nil, err
+		}
+		return streamOf(anthropicStream(1)), nil
+	})
+	h, rows := poolHandler(t, 2, d1, d2)
+	h.Health = &route.Health{EjectAfter: 1}
+	c, _ := h.Snapshots.Current()
+	rt := c.Routes.Lookup([]byte("claude"))
+	rt.MaxDuration = 20 * time.Millisecond
+	w := serveOne(h)
+	all := rowsOf(t, rows)
+	if dh := h.Health.Deployment(rt.Pool[1]); n2.Load() != 0 || dh.Ejected || dh.InFlight != 0 || len(all) != 1 {
+		t.Fatalf("d2 attempts %d, health %+v, %d rows: want no retry past the call's end", n2.Load(), dh, len(all))
+	}
+	if w.Code != 529 || all[0]["cost_micros"].(float64) != 0 {
+		t.Fatalf("status %d, row %v: want the provider's refusal, uncharged", w.Code, all[0])
+	}
+}
+
+// TestUnsentAttempt: an attempt whose upstream context ended before it was
+// sent (here the route's maximum duration, passed before the round trip
+// began) never reached the provider: it is free and its deployment's
+// lease released, not failed. Sent, the transport fails at once with the
+// context's error, which reads as a request that may have gone out: the
+// attempt would be charged its worst case and its deployment failed.
+func TestUnsentAttempt(t *testing.T) {
+	d1 := &counting{fn: func(int32) (*http.Response, error) { return nil, context.Canceled }}
+	h, rows := poolHandler(t, 1, d1)
+	h.Health = &route.Health{EjectAfter: 1}
+	h.beforeSend = func(ctx context.Context) { <-ctx.Done() }
+	c, _ := h.Snapshots.Current()
+	rt := c.Routes.Lookup([]byte("claude"))
+	rt.MaxDuration = 20 * time.Millisecond
+	w := serveOne(h)
+	all := rowsOf(t, rows)
+	switch dh := h.Health.Deployment(rt.Pool[0]); {
+	case d1.n.Load() != 0 || dh.Ejected || dh.InFlight != 0:
+		t.Fatalf("attempts %d, health %+v: want nothing sent, the lease released", d1.n.Load(), dh)
+	case len(all) != 1 || all[0]["cost_micros"].(float64) != 0 || all[0]["outcome"] != "failed":
+		t.Fatalf("rows %v: want one, failed (not uncertain) and free", all)
+	case w.Code != 503 || !strings.Contains(w.Body.String(), "maximum duration"):
+		t.Fatalf("status %d %s: want upstream.unavailable naming the route's maximum duration", w.Code, w.Body)
+	}
+}

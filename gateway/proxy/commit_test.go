@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/limit"
+	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/key"
 )
@@ -122,4 +125,65 @@ func TestIsErrorEvent(t *testing.T) {
 			t.Errorf("%v %q %q: %v", tc.d, tc.event, tc.data, got)
 		}
 	}
+}
+
+// TestNoFirstEvent: a stream whose provider sent its headers and then
+// failed (a reset, an end, the idle alarm) before its first event is not
+// committed. The request went out, so the attempt is uncertain
+// (model/attempts.md): the call ends without a retry, though the pool has
+// another deployment, is charged its worst case, and its deployment's
+// lease fails (with EjectAfter 1 it is ejected), never commits.
+func TestNoFirstEvent(t *testing.T) {
+	for name, body := range map[string]func(*http.Request) io.Reader{
+		"reset before any event": func(*http.Request) io.Reader { return failing{} },
+		"part of an event, then reset": func(*http.Request) io.Reader {
+			return io.MultiReader(strings.NewReader("event: message_start\ndata: {\"type\""), failing{})
+		},
+		"ended before any event":       func(*http.Request) io.Reader { return strings.NewReader(": ping\n\n") },
+		"silent past the idle timeout": func(r *http.Request) io.Reader { return silent{r} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var n1 atomic.Int32
+			p1 := roundTrip(func(r *http.Request) (*http.Response, error) {
+				io.Copy(io.Discard, r.Body)
+				r.Body.Close()
+				n1.Add(1)
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(body(r))}, nil
+			})
+			d2 := &counting{fn: func(int32) (*http.Response, error) { return streamOf(anthropicStream(1)), nil }}
+			h, rows := poolHandler(t, 2, p1, d2)
+			h.Health = &route.Health{EjectAfter: 1}
+			c, _ := h.Snapshots.Current()
+			rt := c.Routes.Lookup([]byte("claude"))
+			rt.Idle = 50 * time.Millisecond
+			var w *httptest.ResponseRecorder
+			func() {
+				defer func() { recover() }() // a committed stream's abort, without the fix
+				w = serveOne(h)
+			}()
+			if w == nil {
+				t.Fatal("the stream was committed, then aborted: it never began")
+			}
+			all := rowsOf(t, rows)
+			switch {
+			case w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "upstream.unavailable"):
+				t.Fatalf("status %d %s: want 503 upstream.unavailable, the stream never began", w.Code, w.Body)
+			case n1.Load() != 1 || d2.n.Load() != 0:
+				t.Fatalf("attempts %d and %d: an uncertain attempt ends the call", n1.Load(), d2.n.Load())
+			case len(all) != 1 || all[0]["outcome"] != "uncertain" || all[0]["cost_micros"].(float64) == 0:
+				t.Fatalf("rows %v: want one, uncertain and charged its worst case", all)
+			}
+			if dh := h.Health.Deployment(rt.Pool[0]); !dh.Ejected || dh.InFlight != 0 {
+				t.Fatalf("deployment %+v: want its lease failed (ejected), not committed", dh)
+			}
+		})
+	}
+}
+
+// silent is a stream body that sends nothing until its request ends.
+type silent struct{ r *http.Request }
+
+func (s silent) Read([]byte) (int, error) {
+	<-s.r.Context().Done()
+	return 0, s.r.Context().Err()
 }
