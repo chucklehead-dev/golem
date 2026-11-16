@@ -62,9 +62,10 @@ func serve(t *testing.T) (*httptest.Server, *state.Store) {
 
 func code(err error) connect.Code { return connect.CodeOf(err) }
 
-// TestAPI: the org and key services over Connect, as golemctl would call
-// them: authenticated, authorized by the service, errors as Connect codes.
-func TestAPI(t *testing.T) {
+// TestServicesOverConnect calls the org and key services over Connect, as
+// golemctl does. Calls are authenticated, authorized by the service, and
+// fail with Connect codes.
+func TestServicesOverConnect(t *testing.T) {
 	srv, st := serve(t)
 	ctx := t.Context()
 	org := func(who string) orgv1connect.OrgServiceClient {
@@ -153,10 +154,11 @@ type readFlag struct {
 
 func (r *readFlag) Read(p []byte) (int, error) { r.read = true; return r.Reader.Read(p) }
 
-// TestLimits: an unauthenticated call is refused before its body is read;
-// an authenticated one over the size limit is refused; an internal error
-// is answered without its text, which is logged.
-func TestLimits(t *testing.T) {
+// TestRefusesBeforeReadingAndHidesErrors checks that an unauthenticated
+// call is refused before its body is read, and an authenticated one over
+// the size limit is refused. An internal error is answered without its
+// text, which is logged.
+func TestRefusesBeforeReadingAndHidesErrors(t *testing.T) {
 	_, st := serve(t)
 	var logged strings.Builder
 	s := &Server{Service: &service.Service{State: st}, Auth: headerAuth{}, MaxRequest: 1024,

@@ -42,7 +42,7 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
 | Upstream connections to metadata, link-local, unspecified or multicast addresses are refused always; to loopback or private ones unless granted | `gateway/snapshot` `TestCheckDestination` (IPv4-mapped and CGNAT included), `TestDialRefused` (on a real dial); `TestDialReresolved` (a name re-resolved to metadata, then link-local, between connections: refused at the next dial) | yes (the dial check removed: it connects) | 79e0d0a; re-resolution this commit |
 | OTLP export uses TLS unless the collector is a literal loopback address (a name, localhost included, gets TLS) | `gateway/telemetry` `TestPlaintextOK` (the decision; no live collector) | — | 79e0d0a; names 2c0d42e |
 | A snapshot the reader cannot interpret is refused, never read with weaker policy: unknown members (`strict` included), duplicate names, names in another case | `lib/snapshot` `TestDecodeFailsClosed` | yes | this commit |
-| Production publication stays gated: standalone on loopback only; pool mode only with `-accept-unreleased` until golem#7's evidence is in | `cmd/golem-gateway` `TestReleaseGate` | — | this change |
+| Production publication stays gated: standalone on loopback only; pool mode only with `-accept-unreleased` until golem#7's evidence is in | `cmd/golem-gateway` `TestValidate` | — | this change |
 
 ## Not yet shown
 
@@ -60,7 +60,7 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
 
 Deployment evidence that tests cannot give (provider spending limits,
 OTLP TLS against the real collector, the mTLS owner of each hop) is tracked in golem#7, a prerequisite
-for lifting `releaseGate`.
+for lifting `validate`.
 
 ## Validation of this record
 

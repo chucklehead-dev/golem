@@ -10,10 +10,10 @@ import (
 	"github.com/chucklehead-dev/golem/lib/bucket/buckettest"
 )
 
-// TestTimeout: a bucket that accepts a call and never answers ends a
-// refresh and an update at the store's Timeout, though the caller's
-// context has no deadline.
-func TestTimeout(t *testing.T) {
+// TestHungBucketTimesOut checks that a bucket that accepts a call and never
+// answers ends a refresh and an update at the store's Timeout, though the
+// caller's context has no deadline.
+func TestHungBucketTimesOut(t *testing.T) {
 	hang := &buckettest.Hang{}
 	s := &Store{Bucket: hang, Timeout: 50 * time.Millisecond}
 	for name, call := range map[string]func() error{

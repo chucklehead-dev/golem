@@ -33,9 +33,10 @@ func put(pool string, seq uint64) func(*Document) error {
 	}
 }
 
-// TestUpdate: each write increments state_version from the document
-// written, and a second store over the bucket reads it.
-func TestUpdate(t *testing.T) {
+// TestUpdateIncrementsVersion checks that each write increments
+// state_version from the document written, and a second store over the
+// bucket reads it.
+func TestUpdateIncrementsVersion(t *testing.T) {
 	ctx := t.Context()
 	b := open(t)
 	s := &Store{Bucket: b}
@@ -57,9 +58,9 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
-// TestInvariants: a record removed or going back is refused, and nothing
-// is written.
-func TestInvariants(t *testing.T) {
+// TestRecordsNeverGoBack checks that a publication record removed or going
+// back is refused, and nothing is written.
+func TestRecordsNeverGoBack(t *testing.T) {
 	ctx := t.Context()
 	s := &Store{Bucket: open(t)}
 	if _, err := s.Update(ctx, put("internal", 5)); err != nil {

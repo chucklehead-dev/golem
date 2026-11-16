@@ -91,10 +91,11 @@ func setup(t *testing.T, d *dir) *Sync {
 
 func alive(d *state.Document, h string) bool { return d.Keys[h].RevokedAt.IsZero() }
 
-// TestSync: members of bound groups become members of their scopes, are
-// created if new, keep memberships granted in golem, and lose synced ones
-// (and the keys in them) when they leave; a disabled account loses all.
-func TestSync(t *testing.T) {
+// TestSyncFollowsBoundGroups checks that members of bound groups become
+// members of their scopes, created if new, keeping memberships granted in
+// golem. Those who leave lose their synced memberships and the keys in
+// them. A disabled account loses all.
+func TestSyncFollowsBoundGroups(t *testing.T) {
 	d := &dir{groups: map[string][]User{
 		"g-a":      {{ID: "oid-a", UPN: "Alice@Example.com", Enabled: true}, {ID: "oid-c", UPN: "carol@example.com", Enabled: true}},
 		"g-b":      {{ID: "oid-a", UPN: "Alice@Example.com", Enabled: true}},

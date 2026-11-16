@@ -47,7 +47,7 @@ recorded in [acceptance/m1-exit.md](acceptance/m1-exit.md).
    the switch with its time recorded.
 
 Production also needs the release gate lifted: pool mode refuses to run
-without `-accept-unreleased` until golem#7's evidence is in (`releaseGate`,
+without `-accept-unreleased` until golem#7's evidence is in (`validate`,
 cmd/golem-gateway; m1-security-gates.md). Step 5 schedules it; the
 gateway chart's `acceptUnreleased` runs the observe phase meanwhile, by
 recorded decision.
@@ -70,10 +70,10 @@ Steps 1–4 and the built parts of step 5. The code's map:
 | Org | scopes, members (synced from bound Entra groups), managers, services, keys with model constraints; a manager cannot adopt another team's service | `control/state`, `control/service` (`TestServiceAdoption`), `control/entrasync` tests; ADR 0047 |
 | Admission | scope budgets on the snapshot's known spend, in-flight slots per principal (per scope) and per scope, request rate limits, cut-stream estimates, Valkey outages as waivers, TLS and AUTH to Valkey | model/exposure.md and `TestExposureModel`, `TestExposureModelValkey`; `TestStoresAgree`, `TestPrincipalPerScope`, `TestCallerLeavesDuringAdmission`; ADR 0031 |
 | Budget modes | ScopePolicy: observe, warn, enforce; a live scope's policy cannot be deleted | `TestBudgetModes`, `TestBudgetWarning`, `TestRemovedPolicyRefused`; ADR 0050 |
-| Control plane | one replica claiming the fence; signed publication with checkpoints; config from git-sync's checkout, each snapshot naming its commit, no lease past `-max-config-age`; last-good config; restore; bootstrap; bounded audit outbox; the API served while Entra is down | model/publication.md and `TestPublicationModel`; `TestGuard`, `TestCheckout`, `TestRestartOverBrokenConfig`, `TestRestoreNeverWidens`, `TestOutboxBound`, `TestAPIStartsWithoutEntra`; ADR 0053, 0054 |
+| Control plane | one replica claiming the fence; signed publication with checkpoints; config from git-sync's checkout, each snapshot naming its commit, no lease past `-max-config-age`; last-good config; restore; bootstrap; bounded audit outbox; the API served while Entra is down | model/publication.md and `TestPublicationModel`; `TestRegressedOrTamperedRefused`, `TestCheckout`, `TestRestartOverBrokenConfig`, `TestRestoreNeverWidens`, `TestOutboxBound`, `TestAPIStartsWithoutEntra`; ADR 0053, 0054 |
 | Ledger | rows through the pod's collector sidecar (deploy/otel/collector.yaml, a persistent queue) into spend.sql's tables, deduplicated by event; attempt IDs as UUIDs; price versions, provider accounts, one-hour cache writes; known spend from `golem.spend_dedup` | `TestLedgerReachesClickHouse` (test/ledger), `TestRowMatchesLedgerDDL`, `TestClickHouseLedger`, `TestLedgerQueue*`; ADR 0043 |
 | Charts | golem-control (one replica, `Recreate`, git-sync) and a gateway pool (three replicas, PDB, collector sidecar, `acceptUnreleased`, reading bounds); lease and period zone set together; Argo sync waves gateways first, then golem-control | `helm lint`, `helm template`, kubeconform, the flags checked against the binaries, the images run in Docker; deploy/charts/README.md |
-| Release | the release gate | `TestReleaseGate` |
+| Release | the release gate | `TestValidate` |
 | Models | publication, exposure and attempts, each with sampled checks, scenarios and broken designs, and a connect test | `make -C model check`; CI |
 
 ## Left, in order
@@ -116,7 +116,7 @@ install. Two weeks begin here.
 
 Done when:
 - the charts deploy to the EKS cluster through Argo, recorded;
-- `TestReleaseGate`'s gate is lifted by a commit citing golem#7's closed
+- `TestValidate`'s gate is lifted by a commit citing golem#7's closed
   evidence;
 - each ADR 0041 M1 gate has its test (ablated) in m1-security-gates.md;
 - m1-bedrock.md and m1-vllm.md record their runs;

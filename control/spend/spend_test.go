@@ -52,10 +52,10 @@ func (f *fakeLedger) Spend(_ context.Context, period string, before time.Time) (
 	return Totals{Scopes: f.spend}, f.fail
 }
 
-// TestJob: the boundary is a whole minute an allowance back; a failure
-// keeps the last result for its own period only; before the boundary
-// passes a period's start, the period's spend is nothing.
-func TestJob(t *testing.T) {
+// TestJobBoundaryAndPeriods checks that the boundary is a whole minute an
+// allowance back, and a failure keeps the last result for its own period
+// only. Before the boundary passes a period's start, its spend is zero.
+func TestJobBoundaryAndPeriods(t *testing.T) {
 	now := time.Date(2026, 11, 14, 10, 0, 30, 0, time.UTC)
 	l := &fakeLedger{spend: map[string]int64{"team-a": 7}}
 	j := &Job{Ledger: l, Now: func() time.Time { return now }}

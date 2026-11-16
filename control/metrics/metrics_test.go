@@ -145,9 +145,9 @@ func value(t *testing.T, got map[string][]point, name string, attrs ...attribute
 
 var pool = attribute.String("pool", "internal")
 
-// TestMetrics: a leader's publication, then a tampered checkpoint, as the
-// collector sees them.
-func TestMetrics(t *testing.T) {
+// TestPublicationMetrics checks a leader's publication, then a tampered
+// checkpoint, as the collector sees them.
+func TestPublicationMetrics(t *testing.T) {
 	r := newRig(t)
 	got := r.collect()
 	if v := value(t, got, Leader); v != 0 {
@@ -277,9 +277,9 @@ func TestMetrics(t *testing.T) {
 	})
 }
 
-// TestOutbox: the outbox's length is the document's, read without a copy,
-// and its bound the store's.
-func TestOutbox(t *testing.T) {
+// TestOutboxMetrics checks that the outbox's length is the document's, read
+// without a copy, and its bound the store's.
+func TestOutboxMetrics(t *testing.T) {
 	r := newRig(t)
 	if _, err := r.c.State.Update(t.Context(), func(d *state.Document) error {
 		d.Audit = append(d.Audit, state.AuditEvent{At: r.clock, Actor: "root", Action: "key.revoke"}, state.AuditEvent{At: r.clock, Actor: "root", Action: "membership.remove"})

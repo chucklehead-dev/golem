@@ -31,7 +31,7 @@ links `lib/` and the generated clients only, a dialect imports only
 
 | Package | What it does | Start reading at |
 |---|---|---|
-| `cmd/golem-gateway` | flags, wiring, signals; standalone or pool mode; the release gate; the lifecycle's drain | `run`, `newMux`, `newHolder`, `newLimiter`, `releaseGate`, `lifecycle.shutdown` |
+| `cmd/golem-gateway` | flags, wiring, signals; standalone or pool mode; flag validation; the lifecycle's drain | `run`, `newMux`, `newHolder`, `newLimiter`, `validate`, `lifecycle.shutdown` |
 | `gateway/proxy` | the request path: the only package that knows the order of the steps | `Handler.ServeHTTP`, `Handler.prepare`, `callState.respond`, `Handler.relay` |
 | `gateway/guard` | the floor before authentication: a source's requests and failed authentications, connections | `Guard.Admit`, `Guard.Failing`, `Guard.Failed`, `Listener.Accept` |
 | `gateway/auth` | a credential to a `Principal` from the snapshot alone: golem keys by hash, Entra tokens by cached keys; the emergency denylist | `Keys.AuthenticateGrant`, `Keys.Honours`, `DenyFile.Load` |
@@ -260,7 +260,7 @@ the same process; its writes are ordinary compare-and-swap updates.
 | A row has `golem.spend`'s columns and types; attempt IDs are UUIDs | `Ledger.row`, `AttemptUUID` | `TestRowMatchesLedgerDDL`, `TestRowListAndMapTypes`, `TestAttemptIDs`, `TestLedgerReachesClickHouse` |
 | OTLP is TLS unless to a literal loopback address | `otlp.PlaintextOK` | `TestPlaintextOK`, `TestOTLPIgnoresInsecureEnv` |
 | A stream cut at shutdown still leaves its row; no call starts uncounted after the wait | `lifecycle.shutdown`, `lifecycle.begin` | `TestShutdownAccounts`, `TestTrackAfterWait` |
-| Pool mode needs `-accept-unreleased` until golem#7 | `releaseGate` | `TestReleaseGate` |
+| Pool mode needs `-accept-unreleased` until golem#7 | `validate` | `TestValidate` |
 | Bedrock: the body rewritten and signed with the attribution; a credentials refusal's text not forwarded; a request never sent is unreached | `bedrock.Transport` | `TestRewrite`, `TestRequest`, `TestMetadata`, `TestCredentialsRefused`, `TestNotSent`, `TestBedrockEndToEnd` |
 
 ### The control plane (`control/`)
@@ -268,8 +268,8 @@ the same process; its writes are ordinary compare-and-swap updates.
 | Invariant | Enforced by | Tested by |
 |---|---|---|
 | The fence's epoch never goes back; a leader-only write lands only under its fence | `checkFence`, `Store.FencedUpdate` | `TestFenceInvariant`, `TestClaim`, `TestFenced`, `TestSyncFenced`, `TestDeposedTrim`, `TestRunExitsWhenDeposed` |
-| No pool's publication record is removed or goes back | `checkPublications` | `TestInvariants` |
-| No pool is published from a record below its checkpoint or pointer; a bad checkpoint stops it | `Publisher.prepare`, `below` | `TestGuard` |
+| No pool's publication record is removed or goes back | `checkPublications` | `TestRecordsNeverGoBack` |
+| No pool is published from a record below its checkpoint or pointer; a bad checkpoint stops it | `Publisher.prepare`, `below` | `TestRegressedOrTamperedRefused` |
 | A write whose reply was lost is applied once | `Store.Update`, `Document.wrote` | `TestLostReplyOvertaken`, `TestConcurrentStores` |
 | A document that went back is refused; a missing one is not started over unless bootstrapped | `regressed`, `missing`, `Store.Bootstrap` | `TestRegressed`, `TestMissingDocument`, `TestBootstrapCommand` |
 | Entitlements: owners exist and are members; scopes exist; one principal per Entra ID; no `entra:` IDs; revocations append-only | `checkPrincipals`, `checkKeys`, `checkRevocations`, `checkRoles` | `TestEntitlementInvariants`, `TestRolesAndAudit` |
@@ -280,21 +280,21 @@ the same process; its writes are ordinary compare-and-swap updates.
 | A stale checkout renews no lease; a change is still published within the lease granted | `staleErr`, `Controller.due` | `TestCheckout`, `TestCheckoutAgeUnknown`, `TestConfigAgeMetric` |
 | A scope with no ScopePolicy can call nothing; deleting a live scope's policy is refused | `join`, `DefaultScope`, `policiesRemoved` | `TestJoin`, `TestUnmatchedScopes`, `TestRemovedPolicyRefused` |
 | A failing pool backs off while others publish | `Controller.due`, `backoff` | `TestFailingPoolBacksOff` |
-| Known spend: a whole-minute boundary an allowance back; a failure keeps the last result, reported stale | `Job.Step`, `Job.Stale`, `Job.Lags` | `TestJob`, `TestJobReportsStaleResult`, `TestJobReportsIngestionLag`, `TestKnownSpend` |
+| Known spend: a whole-minute boundary an allowance back; a failure keeps the last result, reported stale | `Job.Step`, `Job.Stale`, `Job.Lags` | `TestJobBoundaryAndPeriods`, `TestJobReportsStaleResult`, `TestJobReportsIngestionLag`, `TestKnownSpend` |
 | The group sync's removals of active users are guarded; offboarding is never held back | `Sync.Step`, `reconcile` | `TestSyncSafety`, `TestSyncOffboarding` |
 
 ### The control API (`control/service`, `control/api`, `cmd/golemctl`)
 
 | Invariant | Enforced by | Tested by |
 |---|---|---|
-| Every call is authenticated before its body is read; a message is at most 1 MiB | `Server.Handler` | `TestLimits`, `TestAPI` |
+| Every call is authenticated before its body is read; a message is at most 1 MiB | `Server.Handler` | `TestRefusesBeforeReadingAndHidesErrors`, `TestServicesOverConnect` |
 | Only control API tokens are taken; a gateway token is not; Entra unreachable at start is `Unavailable` | `EntraAuth`, `entra.Verifier` | `TestEntraAuth`, `TestAPIStartsWithoutEntra` |
 | Each method's callers are exactly org-model.md §2's; outsiders get `not found` | `manages`, `sees`, `visibleScope`, `mayMint`, `keyToChange` | `TestAuthorization`, `TestRevokeKey`, `TestReads` |
 | A manager cannot adopt another team's service and mint as it | `principalToAdd`, `mayMint` | `TestServiceAdoption` |
 | A manager cannot create a user or bind an Entra ID | `principalToAdd` | `TestIdentityBinding` |
 | A key narrows its scope's models (from the config); expires within 90 days | `Service.MintKey`, `narrows`, `keyExpiry` | `TestKeyRules`, `TestKeyModelsFromConfig`, `TestScopeModels` |
 | A change and its audit event are one write; a dry run writes nothing | `Service.apply` | `TestKeyRules`, `TestValidateOnly` |
-| Internal errors' text never reaches the caller | `Server.connectError` | `TestLimits` |
+| Internal errors' text never reaches the caller | `Server.connectError` | `TestRefusesBeforeReadingAndHidesErrors` |
 
 ### Config and snapshots (`lib/`)
 

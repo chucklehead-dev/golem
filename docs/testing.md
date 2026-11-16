@@ -60,7 +60,7 @@ standing after a readmission (`TestReadmissionEndsProbes`). Retired models
 (accounting, freshness, leadership) and the exhaustive design matrices
 are described in model/README.md; their ground is covered by exposure.md,
 by ADR 0054's freshness (tested by `TestCheckout`), and by
-control/publish's `TestGuard`.
+control/publish's `TestRegressedOrTamperedRefused`.
 
 ## 4. Still owed
 

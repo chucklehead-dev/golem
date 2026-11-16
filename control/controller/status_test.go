@@ -12,10 +12,10 @@ import (
 	"github.com/chucklehead-dev/golem/lib/bucket"
 )
 
-// TestStatus: what the leader's jobs report for their metrics: the last
-// audit step and group sync that succeeded, and the sync's removal guard
-// tripping.
-func TestStatus(t *testing.T) {
+// TestJobStatusForMetrics checks what the leader's jobs report for their
+// metrics: the last audit step and group sync that succeeded, and the
+// sync's removal guard tripping.
+func TestJobStatusForMetrics(t *testing.T) {
 	w := newWorld(t)
 	r1 := w.replicas["r1"]
 	w.lead("r1")

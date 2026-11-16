@@ -88,4 +88,4 @@ write-ups in m1-drills.md.
 ## 7. Release gate
 
 - golem#7's evidence closed (link):
-- The commit lifting `releaseGate`:
+- The commit lifting `validate`:

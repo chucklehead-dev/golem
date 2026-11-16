@@ -219,13 +219,13 @@ func (b *pauseAfterRecord) Put(ctx context.Context, key string, body []byte, ifM
 	return b.Bucket.Put(ctx, key, body, ifMatch)
 }
 
-// TestGuard checks the counterexamples of the retired leadership model,
-// each refused. A rolled-back record stops the pool's publication until the
+// TestRegressedOrTamperedRefused checks the counterexamples of the retired
+// leadership model, each refused. A rolled-back record stops the pool's publication until the
 // document is adopted, then numbers above the signed pointer. A race for
 // the record is not mistaken for one. A forged or deleted checkpoint stops
 // publication. A record with no checkpoint yet, the first publication's
 // crash window, is not mistaken for tampering.
-func TestGuard(t *testing.T) {
+func TestRegressedOrTamperedRefused(t *testing.T) {
 	ctx := t.Context()
 	// fresh is another replica, started after the bucket changed under
 	// it: its store has no memory of newer versions.
