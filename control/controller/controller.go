@@ -55,6 +55,10 @@ type Controller struct {
 	// hours for internal pools); Renew how often they are republished to
 	// extend it (default a minute).
 	Lease, Renew time.Duration
+	// PeriodZone is the budget periods' time zone (an IANA name), stated
+	// in every snapshot so a gateway of another zone refuses it
+	// (snapshot.PeriodZone); "": none stated.
+	PeriodZone string
 	// Retry is how soon a pool whose publication failed is tried again
 	// (default two seconds), doubling at each further failure up to Renew,
 	// jittered; a change to publish (the config, the entitlements, the
@@ -544,7 +548,7 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 	validUntil := map[string]time.Time{}                    // each pool's lease, as built
 	ptrs, perrs := publish.PublishAll(ctx, c.State, fence, doc.StateVersion, pubs,
 		func(p *publish.Publisher, seq uint64) (*snapshot.Snapshot, error) {
-			o := compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(),
+			o := compile.Options{PublishSeq: seq, Now: c.now().UTC(), Lease: c.lease(), PeriodZone: c.PeriodZone,
 				Entitlements: c.entitlements(doc), Unmatched: func(q compile.Problem) { unmatched[q.String()] = q }}
 			var s *snapshot.Snapshot
 			var err error

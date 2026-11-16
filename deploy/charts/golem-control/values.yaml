@@ -14,6 +14,11 @@ signingKey: ""     # required: kms:<a KMS key ARN, ECC_NIST_P256>
 trustedKeys:       # retiring publishing keys' public halves, while rotating
   configMap: ""
 pools: [internal]
+# MUST MATCH every gateway pool's chart: lease is at most the gateways'
+# maxLease (-max-lease), or they refuse every snapshot and serve until the
+# lease they hold runs out (raise maxLease in every pool first, then this);
+# periodZone (below) is the gateways' periodZone, stated in each snapshot,
+# which a gateway of another zone refuses.
 lease: 4h
 
 # The config: the GitOps repository's directory of golem CRD YAML, kept
@@ -59,7 +64,7 @@ clickhouse:
     passwordSecret: {name: golem-clickhouse-admin, key: password}
 spendAllowance: 5m
 counterRetention: 6h
-periodZone: UTC
+periodZone: UTC   # MUST MATCH every gateway pool's periodZone (lease, above)
 
 # The audit archive: an Object Lock bucket in a separate account.
 auditArchive: ""

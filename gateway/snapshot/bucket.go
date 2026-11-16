@@ -64,7 +64,13 @@ type Bucket struct {
 	// lease the gateway cannot trust is no lease at all (it fails closed:
 	// the gateway keeps what it holds, until that expires).
 	MaxLease time.Duration
-	Log      *slog.Logger
+	// PeriodZone is this gateway's budget periods' time zone (its
+	// -period-zone, an IANA name). A snapshot stating another
+	// (snapshot.PeriodZone, golem-control's -period-zone) is refused,
+	// naming both: known spend's month and this gateway's would disagree
+	// near midnight at a month's end. "": not checked.
+	PeriodZone string
+	Log        *slog.Logger
 
 	tag   string    // the entity tag of the last pointer judged (Poll)
 	retry time.Time // when to read a pointer whose publication failed to apply again
@@ -351,7 +357,21 @@ func (b *Bucket) openSnapshot(ptr snapshot.Pointer, body []byte) (*snapshot.Snap
 	if s.PublishSeq != ptr.PublishSeq {
 		return nil, fmt.Errorf("snapshot %s is publication %d, its pointer says %d: refused", ptr.Hash, s.PublishSeq, ptr.PublishSeq)
 	}
-	return s, b.checkLease(s)
+	if err := b.checkLease(s); err != nil {
+		return s, err
+	}
+	return s, b.checkZone(s)
+}
+
+// checkZone refuses a snapshot whose budget periods are in another time
+// zone than this gateway's; one that states none (an older publisher) is
+// not checked.
+func (b *Bucket) checkZone(s *snapshot.Snapshot) error {
+	if b.PeriodZone == "" || s.PeriodZone == "" || s.PeriodZone == b.PeriodZone {
+		return nil
+	}
+	return fmt.Errorf("snapshot %d's budget periods are in %s (golem-control's -period-zone), this gateway's -period-zone is %s: refused; give golem-control and every gateway the same zone (both charts' periodZone)",
+		s.PublishSeq, s.PeriodZone, b.PeriodZone)
 }
 
 // verify is openPointer and openSnapshot together.

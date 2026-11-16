@@ -94,7 +94,7 @@ func parse(args []string) (options, error) {
 	fs.DurationVar(&o.unready, "unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
 	fs.StringVar(&o.telem, "telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless a literal loopback address: 127.0.0.1:4318, [::1]:4318)")
 	fs.StringVar(&o.localKeyFile, "local-key", "", "standalone: the file holding the local key (generated on first use); default <user config dir>/golem/standalone-key")
-	fs.StringVar(&o.zoneName, "period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there")
+	fs.StringVar(&o.zoneName, "period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there; in pool mode golem-control's -period-zone, a snapshot stating another refused")
 	fs.StringVar(&o.denylist, "denylist", "", "the site's emergency denylist file (a mounted ConfigMap), re-read as it changes; empty: none")
 
 	fs.StringVar(&o.tenant, "entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
@@ -474,7 +474,7 @@ func poolSource(ctx context.Context, o options, holder *snapshot.Holder) (*snaps
 		}
 	}
 	src := &snapshot.Bucket{Bucket: b, Keys: keys, Pool: o.pool, Holder: holder, Secrets: snapshot.FileSecrets{Root: root},
-		Checkpoint: o.checkpoint, LastGood: lastGoodPath(o.checkpoint), GatewayID: id, MaxSkew: o.maxSkew, MaxLease: o.maxLease, Log: slog.Default()}
+		Checkpoint: o.checkpoint, LastGood: lastGoodPath(o.checkpoint), GatewayID: id, MaxSkew: o.maxSkew, MaxLease: o.maxLease, PeriodZone: o.zoneName, Log: slog.Default()}
 	if err := src.Start(ctx); err != nil {
 		return nil, fmt.Errorf("pool %s: %w", o.pool, err)
 	}

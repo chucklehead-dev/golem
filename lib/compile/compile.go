@@ -33,6 +33,9 @@ type Options struct {
 	PublishSeq uint64        // the publication's sequence number
 	Now        time.Time     // the snapshot's IssuedAt, and its lease's start
 	Lease      time.Duration // zero: no lease (standalone only)
+	// PeriodZone is the budget periods' time zone the snapshot states
+	// (golem-control's -period-zone); "": none stated.
+	PeriodZone string
 	// Entitlements gives a published snapshot's entitlements (the state
 	// document's, control/state), told the route aliases that exist: its
 	// scopes are IDs (and known spend), which the compile joins with the
@@ -149,7 +152,7 @@ func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
 // publication is s as o's publication: its schema, sequence, time and
 // lease (none if o has none), and its config's digest.
 func (o Options) publication(s snapshot.Snapshot) *snapshot.Snapshot {
-	s.Schema, s.PublishSeq, s.IssuedAt = snapshot.Schema, o.PublishSeq, o.Now.UTC()
+	s.Schema, s.PublishSeq, s.IssuedAt, s.PeriodZone = snapshot.Schema, o.PublishSeq, o.Now.UTC(), o.PeriodZone
 	if o.Lease > 0 {
 		s.ValidUntil = o.Now.Add(o.Lease).UTC()
 	}

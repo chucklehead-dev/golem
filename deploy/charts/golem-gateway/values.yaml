@@ -36,6 +36,19 @@ valkey:
   user: golem-gateway
   passwordSecret: {name: golem-valkey, key: password}
 
+# MUST MATCH golem-control's chart (its lease and periodZone): set twice,
+# once per chart, and nothing but the gateway checks them.
+# - maxLease (-max-lease) is the longest authorization lease the gateway
+#   trusts: golem-control's lease must not be longer, or every gateway
+#   refuses every snapshot ("longer than the longest lease") and serves
+#   until the lease it holds runs out. Raise this first, roll the pools,
+#   then raise golem-control's lease.
+# - periodZone (-period-zone) is the budget periods' time zone: each
+#   snapshot states golem-control's, and a gateway of another refuses it,
+#   naming both.
+maxLease: 4h
+periodZone: UTC
+
 # Entra (users' and services' tokens); empty tenant: golem keys only.
 entra:
   tenant: ""

@@ -37,6 +37,13 @@ type Snapshot struct {
 	// ValidUntil is the authorization lease: no new request is served
 	// after it. Zero only in standalone mode, which has no publisher.
 	ValidUntil time.Time `json:"validUntil,omitzero"`
+	// PeriodZone is the time zone (an IANA name) the publisher's budget
+	// periods are calendar months in (golem-control's -period-zone): known
+	// spend's Period is a month there. A gateway whose own -period-zone
+	// differs refuses the snapshot, naming both, since its admission and
+	// ledger rows would put a call near midnight in another month. Empty:
+	// not stated (standalone, an older publisher), not checked.
+	PeriodZone string    `json:"periodZone,omitempty"`
 	Source     Source    `json:"source"`
 	Backends   []Backend `json:"backends"`
 	Routes     []Route   `json:"routes"`

@@ -239,7 +239,7 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.trustedKeys, "trusted-keys", "", "a directory of retiring publishing keys' public halves (*.pub, as a gateway's -keys): checkpoints and pointers they signed are trusted while the signer is rotated, and re-signed with -signing-key at the next publication; empty: the signing key's own only")
 	flag.StringVar(&o.pools, "pools", "internal", "the gateway pools to publish to, comma-separated")
 	flag.StringVar(&o.id, "id", "", "this replica's name (default: the host name)")
-	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
+	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge); at most every gateway's -max-lease, or they refuse every snapshot")
 	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
 	flag.StringVar(&o.probes, "probes", "", "serve GET /livez and /readyz here, for Kubernetes' probes (ready once the state is loaded); empty: none")
 	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut")
@@ -255,7 +255,7 @@ func parseFlags() (options, error) {
 	flag.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
 	flag.DurationVar(&o.counterRetention, "counter-retention", 6*time.Hour, "how long the gateways' site counters keep a minute (their stores' Retain): a known-spend result older than this less the lease is reported stale")
 	flag.DurationVar(&o.allowance, "spend-allowance", 5*time.Minute, "how long after a call's end its ledger row is surely in ClickHouse: known spend's boundary is this far back")
-	flag.StringVar(&o.periodZone, "period-zone", "UTC", "the budget periods' time zone (an IANA name): the gateways' -period-zone")
+	flag.StringVar(&o.periodZone, "period-zone", "UTC", "the budget periods' time zone (an IANA name), stated in every snapshot: every gateway's -period-zone must be the same, or it refuses the snapshots")
 	flag.Parse()
 	if o.config == "" || o.bucket == "" || o.signingKey == "" {
 		return o, errors.New("-config, -bucket and -signing-key are required")
@@ -392,7 +392,13 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 		}
 		trusted = k
 	}
-	c = &controller.Controller{Dir: o.config, Lease: o.authLease,
+	// Checked whether or not known spend uses it: every snapshot states it,
+	// and gateways of another zone refuse the snapshot.
+	zone, err := time.LoadLocation(o.periodZone)
+	if err != nil {
+		return nil, closeAudit, fmt.Errorf("-period-zone: %w", err)
+	}
+	c = &controller.Controller{Dir: o.config, Lease: o.authLease, PeriodZone: o.periodZone,
 		State: st, ID: replica, Publishers: map[string]*publish.Publisher{}}
 	for _, p := range list(o.pools) {
 		c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Keys: trusted, Pool: p}
@@ -407,10 +413,6 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped; past 80% of -audit-outbox-max changes that grant access are refused, and at it every audited change", "audit-outbox-max", st.OutboxMax())
 	}
 	if o.clickhouse != "" {
-		zone, err := time.LoadLocation(o.periodZone)
-		if err != nil {
-			return nil, closeAudit, fmt.Errorf("-period-zone: %w", err)
-		}
 		c.Spend = &spend.Job{Ledger: spend.ClickHouse{URL: o.clickhouse, User: o.clickhouseUser, Password: os.Getenv("CLICKHOUSE_PASSWORD")},
 			Allowance: o.allowance, Location: zone, Lease: o.authLease, Retention: o.counterRetention}
 		if err := c.Spend.Validate(); err != nil {

@@ -92,6 +92,9 @@ spec:
             - -denylist=/etc/golem/denylist/{{ .Values.denylist.key }}
             - -unready={{ .Values.unready }}
             - -drain={{ .Values.drain }}
+            # Both as golem-control's chart's lease and periodZone (values.yaml).
+            - -max-lease={{ .Values.maxLease }}
+            - -period-zone={{ .Values.periodZone }}
             - -max-body={{ .Values.maxBody }}
             - -max-reading={{ .Values.maxReading }}
             - -max-reading-per-principal={{ .Values.maxReadingPerPrincipal }}

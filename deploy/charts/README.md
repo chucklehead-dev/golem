@@ -27,6 +27,12 @@ first, then a gateway pool per site.
   pods exit naming the missing evidence. The grace period is the drain (10 minutes by
   default, as operations.md assumes) plus the readiness window.
 
+Two settings are set in both charts and must agree: golem-control's
+`lease` must not exceed the gateways' `maxLease` (a longer lease makes
+every gateway refuse every snapshot: raise `maxLease` in every pool first),
+and `periodZone` must be the same (each snapshot states golem-control's,
+and a gateway of another zone refuses it, naming both).
+
 Each ServiceAccount takes its AWS role by annotation (IRSA or Pod
 Identity).
 
