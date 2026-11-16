@@ -117,10 +117,16 @@ func (b *bounds) bound(ctx context.Context, started time.Time, rt *route.Route) 
 	if rt.MaxDuration > 0 {
 		b.call.arm(b.cancel, time.Until(started.Add(rt.MaxDuration)), nil)
 	}
-	if rt.Headers > 0 && (rt.MaxDuration == 0 || rt.Headers < rt.MaxDuration) { // else the call's alarm is the bound
+	b.armHeaders(rt)
+	return ctx
+}
+
+// armHeaders arms the headers' alarm, unless the call's alarm is the
+// tighter bound.
+func (b *bounds) armHeaders(rt *route.Route) {
+	if rt.Headers > 0 && (rt.MaxDuration == 0 || rt.Headers < rt.MaxDuration) {
 		b.headers.arm(b.cancel, rt.Headers, nil)
 	}
-	return ctx
 }
 
 // nextAttempt readies the bounds for another attempt of the call: the
@@ -129,9 +135,7 @@ func (b *bounds) bound(ctx context.Context, started time.Time, rt *route.Route) 
 func (b *bounds) nextAttempt(rt *route.Route) {
 	stopAlarm(&b.idle)
 	stopAlarm(&b.headers)
-	if rt.Headers > 0 && (rt.MaxDuration == 0 || rt.Headers < rt.MaxDuration) {
-		b.headers.arm(b.cancel, rt.Headers, nil)
-	}
+	b.armHeaders(rt)
 }
 
 // gotHeaders ends the wait for headers and arms the idle alarm.

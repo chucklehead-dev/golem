@@ -56,7 +56,7 @@ func TestFeatureModes(t *testing.T) {
 			ex := getExchange()
 			req, _ := ex.scan(AnthropicMessages, []byte(tc.body))
 			got := 200
-			if no := h.features(r.Header, p, rt, req); no != nil {
+			if no := h.features(r.Header, p, rt, req, requestBetas(AnthropicMessages, r.Header)); no != nil {
 				got = no.code.Status
 				if no.code.Name != "authz.feature_forbidden" {
 					t.Fatalf("code %s", no.code.Name)

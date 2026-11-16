@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"cmp"
-	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -25,14 +24,15 @@ func (h *Handler) health() *route.Health {
 }
 
 // pick is the pool's next deployment for an attempt, in pool order: one
-// the call has not tried, and whose health takes the attempt. A call is
-// never retried on a deployment it tried (ADR 0051): the client's SDK
-// already retries the same endpoint with backoff, so the gateway's retry
-// is a failover or nothing, and a pool of one makes one attempt. It marks
-// the one it takes in tried. With none, it returns the earliest time one
-// may take an attempt again (zero: unknown). A deployment its health takes
-// must also have quota for the attempt (quota; nil: none checked): one at
-// its quota is passed over, as one at its ceiling is, and left untried.
+// the call has not tried, that accepts the request's betas, and whose
+// health takes the attempt. A call is never retried on a deployment it
+// tried (ADR 0051): the client's SDK already retries the same endpoint
+// with backoff, so the gateway's retry is a failover or nothing, and a pool
+// of one makes one attempt. It marks the one it takes in tried. With none,
+// it returns the earliest time one may take an attempt again (zero:
+// unknown). A deployment its health takes must also have quota for the
+// attempt (quota; nil: none checked): one at its quota is passed over, as
+// one at its ceiling is, and left untried.
 func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string, quota func(*route.Target) (bool, time.Time)) (*route.Target, *route.Lease, time.Time) {
 	var earliest time.Time
 	later := func(at time.Time) {
@@ -49,19 +49,30 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, bet
 			later(at)
 			continue
 		}
-		if quota == nil {
-			tried[i] = true
-			return t, l, time.Time{}
-		}
-		if ok, at := quota(t); !ok {
-			l.Release() // not attempted: the deployment as it was
-			later(at)
-			continue
+		if quota != nil {
+			if ok, at := quota(t); !ok {
+				l.Release() // not attempted: the deployment as it was
+				later(at)
+				continue
+			}
 		}
 		tried[i] = true
 		return t, l, time.Time{}
 	}
 	return nil, nil, earliest
+}
+
+// noDeployment is the refusal of a call no deployment of its route takes
+// now, with the earliest time one may (retryAt): every one at its share
+// of the provider's quota, if a share turned one away, else resting or at
+// its ceiling.
+func noDeployment(quotaFull bool, retryAt time.Time) *refusal {
+	if quotaFull {
+		return &refusal{code: contract.LimitProviderQuota, retryAfter: time.Until(retryAt),
+			msg: "every deployment of this route is at its share of the provider's quota for this minute; retry after the Retry-After"}
+	}
+	return &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
+		msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"}
 }
 
 // requestBetas are an Anthropic request's anthropic-beta values, each
@@ -107,17 +118,59 @@ func incapable(rt *route.Route, betas []string) *refusal {
 
 // takeQuota takes an attempt's request from t's quota share, if it has
 // one (PRD §9.2), reporting when the share has room again if not; it
-// records in full that a deployment was passed over at its quota.
-func takeQuota(ctx context.Context, m admission.Meters, t *route.Target, full *bool) (bool, time.Time) {
+// records in quotaFull that a deployment was passed over at its quota.
+func (c *callState) takeQuota(t *route.Target) (bool, time.Time) {
+	m := c.h.Meters
 	if m == nil || t.QuotaRPM == 0 {
 		return true, time.Time{}
 	}
-	ok, _, wait := m.Take(ctx, []admission.Meter{{Key: admission.QuotaMeter(t.Key()), PerMinute: t.QuotaRPM}})
+	ok, _, wait := m.Take(c.bg, []admission.Meter{{Key: admission.QuotaMeter(t.Key()), PerMinute: t.QuotaRPM}})
 	if !ok {
-		*full = true
+		c.quotaFull = true
 		return false, time.Now().Add(wait)
 	}
 	return true, time.Time{}
+}
+
+// next picks the call's next deployment (pick), taking its quota.
+func (c *callState) next() (*route.Target, *route.Lease, time.Time) {
+	return pick(c.hl, c.rt, c.tried, c.principal.ID, c.betas, c.takeQuota)
+}
+
+// retry, given an attempt's failure before it committed, takes the pool's
+// next deployment if the call may retry: it was kept, has attempts left,
+// its caller is there, nothing withdrew it, and the pool's budget has a
+// retry. It records the failed attempt's row (charged nothing: the
+// provider saw nothing, or refused before any output) and reports whether
+// the call goes on.
+func (c *callState) retry(status int, after time.Duration) bool {
+	c.lease.Fail(after)
+	c.h.paused(c.r)
+	if !c.kept || c.attempt >= c.rt.MaxAttempts || c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil {
+		return false
+	}
+	next, nl, _ := c.next()
+	if next == nil {
+		return false
+	}
+	if !c.hl.Retry(c.rt.Alias) {
+		nl.Release()
+		return false
+	}
+	code := contract.UpstreamUnavailable
+	c.row.Ended, c.row.Status = time.Now(), cmp.Or(status, code.Status)
+	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = coded(outcomeFailed, code)
+	c.h.Telemetry.Retried(c.ctx, c.row)
+	c.row.ProviderRequestID, c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = "", "", "", ""
+	c.target, c.lease = next, nl
+	return true
+}
+
+// paused runs beforePick, if set (tests).
+func (h *Handler) paused(r *http.Request) {
+	if h.beforePick != nil {
+		h.beforePick(r)
+	}
 }
 
 // retryable reports a provider's status for a request it refused before

@@ -13,10 +13,9 @@ import (
 // it sends anthropic-version, as the Anthropic SDKs and agents do;
 // OpenAI's otherwise, Chat's and Responses' routes), the routes its
 // endpoints serve: another dialect's would be refused there
-// (route.wrong_frontend). A
-// model the caller may not use is not listed, and asked for by ID is
-// unknown: listing it would tell a caller what other scopes have. Nothing
-// is admitted or charged.
+// (route.wrong_frontend). A model the caller may not use is not listed,
+// and asked for by ID is unknown: listing it would tell a caller what
+// other scopes have. Nothing is admitted or charged.
 func (h *Handler) ServeModels(w http.ResponseWriter, r *http.Request) {
 	d := OpenAIChat
 	if r.Header.Get("Anthropic-Version") != "" {

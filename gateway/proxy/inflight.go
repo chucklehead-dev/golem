@@ -57,6 +57,15 @@ type inFlightCall struct {
 	ended      bool // a sweep ended it (counted once)
 }
 
+// end cancels the call's upstream request with the refusal its keys now
+// give it.
+func (c *inFlightCall) end(no *auth.Refusal) *errTerminated {
+	t := &errTerminated{no.Code, no.Msg}
+	c.cancel(t)
+	c.ended = true
+	return t
+}
+
 // errTerminated is the cause of an upstream request a sweep cancelled: the
 // refusal a new request of the same caller would get.
 type errTerminated struct {
@@ -111,10 +120,7 @@ func (f *InFlight) add(c *inFlightCall, g *auth.Grant, cancel context.CancelCaus
 	}
 	if k := f.keys(); k != nil {
 		if no := k.Honours(&c.grant); no != nil {
-			t := &errTerminated{no.Code, no.Msg}
-			cancel(t)
-			c.ended = true
-			return t
+			return c.end(no)
 		}
 	}
 	return nil
@@ -173,8 +179,7 @@ func (f *InFlight) Sweep() (ended int) {
 				if cur := f.keys(); cur != nil && cur != k && cur.Honours(&c.grant) == nil {
 					continue
 				}
-				c.cancel(&errTerminated{no.Code, no.Msg})
-				c.ended = true
+				c.end(no)
 				ended++
 			}
 		}
