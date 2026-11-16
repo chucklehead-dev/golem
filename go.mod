@@ -12,7 +12,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/aws/smithy-go v1.28.9
 	github.com/chucklehead-dev/gotogether v0.0.0-20261115194443-19f4f5794336
-	github.com/chucklehead-dev/gotogether/qhegel v0.0.0-20261115194443-19f4f5794336
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/valkey-io/valkey-go v1.0.79
 	go.opentelemetry.io/otel v1.47.0
@@ -27,7 +26,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/net v0.59.0
 	google.golang.org/protobuf v1.36.12
-	hegel.dev/go/hegel v0.9.30
 	sigs.k8s.io/yaml v1.4.0
 )
 
@@ -46,7 +44,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/ebitengine/purego v0.12.0-alpha.1.0.20261015130536-d456b1bb95e8 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect

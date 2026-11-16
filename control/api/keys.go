@@ -15,7 +15,7 @@ type keys struct{ *Server }
 
 func (k keys) MintKey(ctx context.Context, r *connect.Request[keysv1.MintKeyRequest]) (*connect.Response[keysv1.MintKeyResponse], error) {
 	m := r.Msg
-	req := service.KeyRequest{Owner: m.Owner, Scope: m.Scope, Models: m.Models, CapMicros: m.CapMicros}
+	req := service.KeyRequest{Owner: m.Owner, Scope: m.Scope, Models: m.Models}
 	if m.Expires != nil {
 		req.Expires = m.Expires.AsTime()
 	}
@@ -42,15 +42,9 @@ func (k keys) ListKeys(ctx context.Context, r *connect.Request[keysv1.ListKeysRe
 	return reply(k.Server, res, err)
 }
 
-func (k keys) SetKeyCap(ctx context.Context, r *connect.Request[keysv1.SetKeyCapRequest]) (*connect.Response[keysv1.SetKeyCapResponse], error) {
-	m := r.Msg
-	err := k.Service.SetKeyCap(ctx, caller(ctx), options(m.ValidateOnly), m.Hash, m.CapMicros)
-	return reply(k.Server, &keysv1.SetKeyCapResponse{}, err)
-}
-
 // keyFromState is a key's record as the API shows it: never the key.
 func keyFromState(v service.KeyView) *keysv1.Key {
-	pk := &keysv1.Key{Hash: v.Hash, Display: v.Display, Owner: v.Owner, Scope: v.Scope, Models: v.Models, CapMicros: v.CapMicros}
+	pk := &keysv1.Key{Hash: v.Hash, Display: v.Display, Owner: v.Owner, Scope: v.Scope, Models: v.Models}
 	if !v.ExpiresAt.IsZero() {
 		pk.Expires = timestamppb.New(v.ExpiresAt)
 	}

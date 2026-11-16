@@ -1,12 +1,12 @@
-# golem-control: one installation (docs/operations.md §1). Two replicas,
-# one leading (its lease is in the state bucket, ADR 0049).
+# golem-control: one installation (docs/operations.md §1), one replica
+# (ADR 0053): it claims the state document's fence as it starts. The
+# Deployment is replaced with Recreate; a lingering predecessor is refused
+# at its next fenced write and exits.
 
 image:
   repository: ghcr.io/chucklehead-dev/golem-control
   tag: ""          # default: the chart's appVersion
   pullPolicy: IfNotPresent
-
-replicas: 2
 
 # The state bucket, the publishing key (KMS), and the pools published to.
 bucket: ""         # required: s3://<bucket>/<prefix>
@@ -18,7 +18,7 @@ lease: 4h
 
 # The config: the GitOps repository's directory of golem CRD YAML, kept
 # checked out by git-sync beside golem-control (each push is a new
-# directory, compiled and published by the leader within a step).
+# directory, compiled and published within a step).
 config:
   repo: ""         # required: e.g. git@github.com:corp/golem-config.git
   ref: main

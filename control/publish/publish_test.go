@@ -26,7 +26,7 @@ func setup(t *testing.T) (*Publisher, sign.Ed25519Keys, *bucket.Dir) {
 	return &Publisher{State: &state.Store{Bucket: d}, Bucket: d, Signer: sign.Ed25519{ID: "k", Key: priv}, Pool: "internal"}, sign.Ed25519Keys{"k": pub}, d
 }
 
-// leads gives holder the lease at epoch, as control/lead would.
+// leads gives holder the fence at epoch, as a claim would.
 func leads(t *testing.T, st *state.Store, holder string, epoch uint64) Lease {
 	t.Helper()
 	if _, err := st.Update(t.Context(), func(d *state.Document) error {
@@ -68,7 +68,7 @@ func TestPublish(t *testing.T) {
 	}
 }
 
-// TestFenced: a publisher that does not hold the lease at its epoch, or
+// TestFenced: a publisher that does not hold the fence at its epoch, or
 // has older state than the record's, publishes nothing, and the record and
 // pointer stay (the model's FENCE).
 func TestFenced(t *testing.T) {
@@ -170,7 +170,7 @@ func TestPausedAfterRecord(t *testing.T) {
 	l := leads(t, p.State, "r1", 1)
 	paused := *p
 	paused.Bucket = &pauseAfterRecord{Bucket: d, at: snapshot.CheckpointKey("internal"), pause: func() {
-		// r2 takes the lease and publishes twice while r1 is paused.
+		// r2 claims the fence and publishes twice while r1 is paused.
 		r2 := *p
 		r2.State = &state.Store{Bucket: d}
 		l2 := leads(t, r2.State, "r2", 2)

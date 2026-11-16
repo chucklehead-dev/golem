@@ -1,6 +1,5 @@
 // Package spend is golem-control's known-spend job (ADR 0048,
-// control-plane.md §6): each scope's, member's and key's spend this budget
-// period, from the
+// control-plane.md §6): each scope's spend this budget period, from the
 // ledger in ClickHouse, of the calls that ended before a boundary B, a
 // minute an ingestion allowance before now. Snapshots carry it with B, and
 // a gateway adds its site counter's minutes from B on, so each call is
@@ -26,33 +25,24 @@ import (
 )
 
 // Known is the ledger's spend for one period of the calls that ended
-// before Since, by account.
+// before Since, by scope.
 type Known struct {
 	Period string    // "2026-11"
 	Since  time.Time // B: a whole minute
 	Totals
 }
 
-// Member is a principal in a scope: a member's account.
-type Member struct{ Scope, Principal string }
-
-// Totals is spend by account (org-model.md §4.2), in micro-units: by
-// scope ID, by member in a scope, and by key (its display ID, the
-// ledger's key_id).
+// Totals is spend in micro-units, by scope ID (org-model.md §4.2).
 type Totals struct {
-	Scopes  map[string]int64
-	Members map[Member]int64
-	Keys    map[string]int64
+	Scopes map[string]int64
 }
 
-// noSpend is Totals with every account at nothing.
-func noSpend() Totals {
-	return Totals{Scopes: map[string]int64{}, Members: map[Member]int64{}, Keys: map[string]int64{}}
-}
+// noSpend is Totals with every scope at nothing.
+func noSpend() Totals { return Totals{Scopes: map[string]int64{}} }
 
 // Ledger reads the deduplicated ledger.
 type Ledger interface {
-	// Spend sums each account's cost in period over the calls that ended
+	// Spend sums each scope's cost in period over the calls that ended
 	// before before.
 	Spend(ctx context.Context, period string, before time.Time) (Totals, error)
 }
@@ -301,12 +291,11 @@ type ClickHouse struct {
 // spendQuery sums the period's events that ended before the boundary, one
 // row per event_id (deploy/clickhouse/spend.sql: golem.spend_by_event,
 // deduplicated by its engine; FINAL makes that exact at read time, within
-// the one partition the period names), by scope, principal and key:
-// readSpend sums those into each account.
-const spendQuery = `SELECT scope_id, principal_id, key_id, toString(sum(cost_micros)) AS spend
+// the one partition the period names), by scope.
+const spendQuery = `SELECT scope_id, toString(sum(cost_micros)) AS spend
 FROM {db}.spend_by_event FINAL
 WHERE period = {period:Date} AND ended_at < {before:DateTime64(3, 'UTC')}
-GROUP BY scope_id, principal_id, key_id
+GROUP BY scope_id
 FORMAT JSONEachRow`
 
 // Spend runs the query.
@@ -380,27 +369,18 @@ func readLatest(r io.Reader) (map[string]time.Time, error) {
 	return out, nil
 }
 
-// readSpend reads the query's rows, each a scope's, a principal's and a
-// key's spend, into each account's sum.
+// readSpend reads the query's rows, each a scope's spend.
 func readSpend(r io.Reader) (Totals, error) {
 	out := noSpend()
 	err := eachRow(r, func(row struct {
-		Scope     string `json:"scope_id"`
-		Principal string `json:"principal_id"`
-		Key       string `json:"key_id"`
-		Spend     string `json:"spend"` // a string: Int64 sums are quoted in JSON by default
+		Scope string `json:"scope_id"`
+		Spend string `json:"spend"` // a string: Int64 sums are quoted in JSON by default
 	}) error {
 		n, err := strconv.ParseInt(row.Spend, 10, 64)
 		if err != nil {
 			return err
 		}
 		out.Scopes[row.Scope] += n
-		if row.Principal != "" {
-			out.Members[Member{row.Scope, row.Principal}] += n
-		}
-		if row.Key != "" {
-			out.Keys[row.Key] += n
-		}
 		return nil
 	})
 	if err != nil {

@@ -35,11 +35,6 @@ type Principal struct {
 	Scopes  []string `json:"scopes"`            // memberships granted in golem
 	Synced  []string `json:"synced,omitempty"`  // memberships from bound groups
 	Default string   `json:"default,omitempty"` // the scope without a golem-scope header
-	// Caps are the principal's caps in its scopes for each period, by
-	// scope, set by the scopes' managers (org-model.md §4.1): a member
-	// without one draws up to its scope's default (its ScopePolicy's).
-	// Replaced whole, never edited in place: a Document's clone shares it.
-	Caps map[string]int64 `json:"caps,omitempty"`
 }
 
 // Members is every scope p is a member of, sorted, once each.
@@ -75,8 +70,6 @@ type Key struct {
 	Models    []string  `json:"models,omitempty"` // narrows the scope's
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 	RevokedAt time.Time `json:"revokedAt,omitzero"`
-	// CapMicros is the key's spend cap for each period; 0: none.
-	CapMicros int64 `json:"capMicros,omitempty"`
 }
 
 // Revocation is a key revoked: kept for ever, so no restore of older
@@ -152,11 +145,6 @@ func checkPrincipals(d *Document) error {
 		if p.Default != "" && !p.MemberOf(p.Default) {
 			return broken("principal %s's default scope %s is not one of its scopes", id, p.Default)
 		}
-		for s, c := range p.Caps {
-			if _, ok := d.Scopes[s]; !ok || c <= 0 || c > snapshot.MaxMicros {
-				return broken("principal %s's cap in %s is %d: a cap is in a scope that exists, above 0 and at most 2^50", id, s, c)
-			}
-		}
 		if p.Entra != "" {
 			if other, dup := entra[p.Entra]; dup {
 				return broken("principals %s and %s share Entra ID %s", other, id, p.Entra)
@@ -179,11 +167,9 @@ func checkKeys(d *Document) error {
 			return broken("key %s's owner %s does not exist", k.Display, k.Owner)
 		case k.RevokedAt.IsZero() && !owner.MemberOf(k.Scope):
 			return broken("key %s's owner %s is not a member of its scope %s", k.Display, k.Owner, k.Scope)
-		case k.CapMicros < 0 || k.CapMicros > snapshot.MaxMicros:
-			return broken("key %s's cap is %d: 0 (none) to 2^50", k.Display, k.CapMicros)
 		case k.Display != "" && displays[k.Display]:
-			// The display ID is the ledger's key_id, and a key's spend
-			// account: two keys sharing one would share their spend.
+			// The display ID is the ledger's key_id: two keys sharing one
+			// could not be told apart in it.
 			return broken("two keys share the display ID %s", k.Display)
 		}
 		displays[k.Display] = true
@@ -267,14 +253,8 @@ func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 		slices.Sort(in)
 		return in
 	}
-	members := map[string][]snapshot.MemberAccount{} // by scope: members with a cap of their own
 	for _, id := range slices.Sorted(maps.Keys(d.Principals)) {
 		p := d.Principals[id]
-		for _, s := range slices.Sorted(maps.Keys(p.Caps)) {
-			if p.MemberOf(s) {
-				members[s] = append(members[s], snapshot.MemberAccount{Principal: id, CapMicros: p.Caps[s]})
-			}
-		}
 		scopes := p.Members()
 		e.KeyOwners = append(e.KeyOwners, snapshot.Owner{ID: id, Kind: p.Kind, Scopes: scopes})
 		if p.Entra == "" {
@@ -288,7 +268,7 @@ func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(d.Scopes)) {
-		e.Scopes = append(e.Scopes, snapshot.Scope{ID: id, Members: members[id]})
+		e.Scopes = append(e.Scopes, snapshot.Scope{ID: id})
 	}
 	byEntra := func(a, b snapshot.Member) int { return cmp.Compare(a.Entra, b.Entra) }
 	slices.SortFunc(e.Users, byEntra)
@@ -297,7 +277,7 @@ func (d *Document) Entitlements(aliases []string) snapshot.Entitlements {
 		k := d.Keys[h]
 		e.Keys = append(e.Keys, snapshot.Key{Hash: h, Display: k.Display, Principal: k.Owner,
 			PrincipalKind: d.Principals[k.Owner].Kind, Scope: k.Scope, Models: known(k.Models),
-			ExpiresAt: k.ExpiresAt, Revoked: !k.RevokedAt.IsZero(), CapMicros: k.CapMicros})
+			ExpiresAt: k.ExpiresAt, Revoked: !k.RevokedAt.IsZero()})
 	}
 	return e
 }

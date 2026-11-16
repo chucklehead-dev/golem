@@ -40,7 +40,6 @@ import (
 	"github.com/chucklehead-dev/golem/control/audit"
 	"github.com/chucklehead-dev/golem/control/controller"
 	"github.com/chucklehead-dev/golem/control/entrasync"
-	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/metrics"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/service"
@@ -89,11 +88,11 @@ func dispatch(args []string) error {
 }
 
 // installed is what shows golem-control has run on a bucket publishing
-// pools (a comma-separated list): the lease object, and each pool's
-// checkpoint and pointer. The bucket interface cannot list, so these are
-// looked for by name (state.Store.Installed).
+// pools (a comma-separated list): each pool's checkpoint and pointer. The
+// bucket interface cannot list, so these are looked for by name
+// (state.Store.Installed).
 func installed(pools string) []string {
-	keys := []string{lead.LeaseKey}
+	var keys []string
 	for _, p := range list(pools) {
 		keys = append(keys, snapshot.CheckpointKey(p), snapshot.PointerKey(p))
 	}
@@ -243,7 +242,7 @@ func parseFlags() (options, error) {
 	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge)")
 	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
 	flag.StringVar(&o.probes, "probes", "", "serve GET /livez and /readyz here, for Kubernetes' probes (ready once the state is loaded); empty: none")
-	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut and the lease is given up")
+	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut")
 	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
 	flag.IntVar(&o.outboxMax, "audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, in events: past 80% of it changes that grant access are refused, and at it every change that adds an audit event, until the archive drains it")
 	flag.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for golem-control's metrics and, with -audit-archive, the audit's log records (TLS unless a literal loopback address)")
@@ -270,9 +269,10 @@ func parseFlags() (options, error) {
 // run is golem-control: set up, then run until SIGTERM or a component
 // fails. Shutdown is in order: the publishing loop stops (no publication
 // left half-done) while the API drains (its calls in flight finish, up to
-// -drain), then the lease is given up so another replica publishes at
-// once rather than after the lease lapses, and the audit's log records
-// are flushed, then the metrics' last collection is exported.
+// -drain), then the audit's log records are flushed, then the metrics'
+// last collection is exported. golem-control runs as one replica (ADR
+// 0053): it claims the state document's fence as it starts, and exits if
+// a successor claims over it.
 // Errors are returned, never an exit from a goroutine, so every deferred
 // step runs.
 func run() error {
@@ -304,6 +304,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The one leadership step (ADR 0053): this replica claims the fence at
+	// one above the document's epoch, so a predecessor still running is
+	// refused at its next fenced write.
+	if err := c.Claim(ctx); err != nil {
+		closeAudit()
+		return err
+	}
 	closeMetrics, err := openMetrics(ctx, o.telemetry, replica, c)
 	if err != nil {
 		closeAudit()
@@ -319,8 +326,8 @@ func run() error {
 	fail := func(err error) { failOnce.Do(func() { failed = err }); cancel() }
 	wg.Go(func() { st.Run(ctx) })
 	if o.probes != "" {
-		// The state is loaded and the replica runs: alive and ready. A
-		// replica not leading is ready too: it serves the API and stands by.
+		// The state is loaded, the fence claimed and the replica runs:
+		// alive and ready.
 		mux := http.NewServeMux()
 		ok := func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) }
 		mux.HandleFunc("GET /livez", ok)
@@ -343,7 +350,7 @@ func run() error {
 		}
 		// Drained when the context ends; serveAPI returns only once the
 		// calls in flight have finished (or -drain passed), so the wait
-		// below, and the lease's release after it, follow the drain.
+		// below follows the drain.
 		wg.Go(func() {
 			if err := serveAPI(ctx, srv, srv.ListenAndServe, o.drain); err != nil {
 				fail(fmt.Errorf("the control API: %w", err)) // read after wg.Wait
@@ -351,13 +358,12 @@ func run() error {
 		})
 		slog.Info("golem-control: the control API is listening", "addr", o.listen)
 	}
-	c.Run(ctx) // until SIGTERM, or another component cancels
-	wg.Wait()  // the state's loop, and the API drained
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer rcancel()
-	if err := c.Elector.Release(rctx); err != nil {
-		slog.Warn("golem-control: the lease was not given up; another replica takes it when it lapses", "err", err)
+	// Until SIGTERM, another component cancels, or a successor claims the
+	// fence over this replica (controller.ErrDeposed): it then exits.
+	if err := c.Run(ctx); err != nil {
+		fail(err)
 	}
+	wg.Wait() // the state's loop, and the API drained
 	if failed != nil {
 		return failed
 	}
@@ -365,7 +371,7 @@ func run() error {
 	return nil
 }
 
-// newController wires the publishing loop: an elector and a publisher per
+// newController wires the publishing loop: a publisher per
 // pool over st, and the jobs the flags ask for (audit shipping, known
 // spend, the group sync). closeAudit flushes the audit's log records; it
 // is a no-op without them, and has run already when err is set.
@@ -387,7 +393,7 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 		trusted = k
 	}
 	c = &controller.Controller{Dir: o.config, Lease: o.authLease,
-		Elector: &lead.Elector{State: st, ID: replica}, Publishers: map[string]*publish.Publisher{}}
+		State: st, ID: replica, Publishers: map[string]*publish.Publisher{}}
 	for _, p := range list(o.pools) {
 		c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Keys: trusted, Pool: p}
 	}
@@ -451,7 +457,7 @@ func apiServer(ctx context.Context, listen, tenant, audience string, svc *servic
 // ctx ends, then shuts srv down and returns only once that has: the calls
 // in flight have finished, or drain has passed and they are cut (logged,
 // with what to do). Serve returns ErrServerClosed as soon as Shutdown
-// starts, so waiting on serve alone would release the lease while calls
+// starts, so waiting on serve alone would exit the process while calls
 // were in flight: a MintKey whose write landed, cut before the key reached
 // its caller. It returns serve's error if serving fails before ctx ends.
 func serveAPI(ctx context.Context, srv *http.Server, serve func() error, drain time.Duration) error {

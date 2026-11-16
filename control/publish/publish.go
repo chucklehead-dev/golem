@@ -28,7 +28,7 @@ import (
 
 // Errors a publish reports.
 var (
-	// ErrFenced: this publisher does not hold the lease at its epoch, or the
+	// ErrFenced: this publisher does not hold the fence at its epoch, or the
 	// record was written under a later epoch or from a newer state, or a
 	// later publication's checkpoint or pointer is in place.
 	ErrFenced = errors.New("publish: fenced by a newer publication")
@@ -81,7 +81,7 @@ func (p *Publisher) Record(ctx context.Context) (state.Record, error) {
 }
 
 // Lease is the leadership a publication is made under: the fence its
-// elector claimed (state.Fence, lead.Elector.Fence).
+// replica claimed (state.Fence, state.Store.Claim).
 type Lease = state.Fence
 
 // Publish builds the next publication with build, given its sequence
@@ -100,10 +100,9 @@ type Lease = state.Fence
 // on; until then a gateway restarted with an empty disk takes the older
 // checkpoint as its floor.
 //
-// The record's write checks the fence's holder and epoch, not the lease's
-// expiry: while the fence names this replica no other has claimed a later
-// epoch, so none can have published, and a replica stops believing it
-// leads before its lease lapses by its own clock (lead.Elector.Epoch).
+// The record's write checks the fence's holder and epoch: while the fence
+// names this replica no other has claimed a later epoch, so none can have
+// published (ADR 0053: golem-control's one replica claims it at start).
 func (p *Publisher) Publish(ctx context.Context, lease Lease, source uint64, build func(seq uint64) (*snapshot.Snapshot, error)) (snapshot.Pointer, error) {
 	ptrs, errs := PublishAll(ctx, p.State, lease, source, []*Publisher{p}, func(_ *Publisher, seq uint64) (*snapshot.Snapshot, error) {
 		return build(seq)

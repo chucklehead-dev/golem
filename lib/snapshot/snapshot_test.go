@@ -7,12 +7,12 @@ import (
 	"time"
 )
 
-// checked is a snapshot whose one scope has the declared-worst-case check.
+// checked is a snapshot whose one scope allows provider-side storage.
 func checked(t *testing.T) string {
 	t.Helper()
 	s := &Snapshot{Schema: Schema, PublishSeq: 7, IssuedAt: time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC),
 		Entitlements: Entitlements{Scopes: []Scope{{ID: "team-a", Models: []string{"claude"}, BudgetMicros: 1000,
-			DeclaredWorstCaseCheck: true, PrincipalInFlight: 2, ScopeInFlight: 8}}}}
+			StorageAllowed: true, PrincipalInFlight: 2, ScopeInFlight: 8}}}}
 	b, err := s.Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -25,8 +25,8 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.Entitlements.Scopes[0].DeclaredWorstCaseCheck {
-		t.Fatal("the check did not survive encoding")
+	if !s.Entitlements.Scopes[0].StorageAllowed {
+		t.Fatal("the policy did not survive encoding")
 	}
 }
 
@@ -34,11 +34,11 @@ func TestRoundTrip(t *testing.T) {
 // interpret is refused, never read with the check off.
 func TestDecodeFailsClosed(t *testing.T) {
 	cur := checked(t)
-	on := `"declaredWorstCaseCheck":true`
+	on := `"storageAllowed":true`
 	for _, tc := range []struct{ name, body, want string }{
-		{"a member it does not know", strings.Replace(cur, on, `"strict":true`, 1), `"strict"`},
-		{"the name in another case", strings.Replace(cur, on, `"DeclaredWorstCaseCheck":true`, 1), "DeclaredWorstCaseCheck"},
-		{"the name twice, the last off", strings.Replace(cur, on, on+`,"declaredWorstCaseCheck":false`, 1), "duplicate"},
+		{"a member it does not know", strings.Replace(cur, on, `"storage":true`, 1), `"storage"`},
+		{"the name in another case", strings.Replace(cur, on, `"StorageAllowed":true`, 1), "StorageAllowed"},
+		{"the name twice, the last off", strings.Replace(cur, on, on+`,"storageAllowed":false`, 1), "duplicate"},
 		{"another schema", strings.Replace(cur, `"schema":1`, `"schema":9`, 1), "snapshot schema 9"},
 		{"another schema with members of its own", strings.Replace(cur, `"schema":1`, `"schema":9,"newPolicy":true`, 1), "upgrade the gateway"},
 	} {

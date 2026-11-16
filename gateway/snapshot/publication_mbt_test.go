@@ -13,7 +13,6 @@ import (
 	"github.com/chucklehead-dev/gotogether/connect"
 	"github.com/chucklehead-dev/gotogether/itf"
 
-	"github.com/chucklehead-dev/golem/control/lead"
 	"github.com/chucklehead-dev/golem/control/publish"
 	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/bucket"
@@ -30,11 +29,12 @@ import (
 // snapshots live in a real bucket, poll is each gateway's Bucket source,
 // and replayPointer is an attacker copying an old signed pointer back. A
 // restart with an empty disk takes its floor from the trusted checkpoint
-// (the design's TRUSTED_FLOOR). Leadership is real too: each replica is a
-// control/lead Elector with its own view of the state and its own clock
-// (a paused replica's stands still), takeLease is a replica taking the
-// lapsed lease, noticeLoss its next try, and publish uses the epoch its
-// elector believes. The authoritative state (revocations, restores,
+// (the design's TRUSTED_FLOOR). Leadership is real too: each replica has
+// its own view of the state and claims the document's fence as
+// golem-control does when it starts (state.Store.Claim, ADR 0053):
+// takeLease is a replica claiming it, noticeLoss a replica reading that
+// another has (state.Store.Leads), and publish uses the epoch the replica
+// believes. The authoritative state (revocations, restores,
 // replicas' reads) remains the environment: it reaches the publisher as
 // the state version the model's publish used.
 
@@ -49,12 +49,23 @@ var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func at(tick int) time.Time { return epoch.Add(time.Duration(tick) * time.Minute) }
 
-// ctlReplica is a golem-control replica: its elector, its publisher and
-// its clock.
+// ctlReplica is a golem-control replica: its view of the state, the fence
+// it claimed and still believes it holds (zero: none), and its publisher.
 type ctlReplica struct {
-	el    *lead.Elector
+	id    string
+	st    *state.Store
+	fence state.Fence
 	pub   *publish.Publisher
-	clock time.Time
+}
+
+// claim claims the fence, as golem-control does when it starts.
+func (c *ctlReplica) claim() (uint64, error) {
+	f, err := c.st.Claim(context.Background(), c.id)
+	if err != nil {
+		return 0, err
+	}
+	c.fence = f
+	return f.Epoch, nil
 }
 
 type pubDriver struct {
@@ -142,17 +153,16 @@ func (d *pubDriver) Step(s *connect.Step) error {
 			}
 			d.replicas = map[string]*ctlReplica{}
 			for r := range believes {
-				c := &ctlReplica{clock: at(0)}
 				st := &state.Store{Bucket: d.bucket}
-				c.el = &lead.Elector{State: st, ID: r, Duration: 30 * time.Second, Now: func() time.Time { return c.clock }}
+				c := &ctlReplica{id: r, st: st}
 				c.pub = &publish.Publisher{State: st, Bucket: d.bucket, Signer: sign.Ed25519{ID: "k", Key: sk}, Pool: "pool",
 					Now: func() time.Time { return at(d.clock) }}
 				d.replicas[r] = c
 			}
 			d.pub = d.replicas["r1"].pub
-			// The first leader, r1, holds the lease at epoch 1 (the model's init).
-			if e, err := d.replicas["r1"].el.Try(context.Background()); err != nil || e != 1 {
-				return fmt.Errorf("r1's first lease: epoch %d, %v", e, err)
+			// The first leader, r1, holds the fence at epoch 1 (the model's init).
+			if e, err := d.replicas["r1"].claim(); err != nil || e != 1 {
+				return fmt.Errorf("r1's first claim: epoch %d, %v", e, err)
 			}
 			d.signed = map[int][]byte{}
 			if err := d.seed(genesis); err != nil {
@@ -187,11 +197,11 @@ func (d *pubDriver) Step(s *connect.Step) error {
 				return err
 			}
 			r := d.replicas[connect.MustPick[string](s, "replica")]
-			believed := r.el.Epoch()
+			believed := r.fence.Epoch
 			if int(believed) != p.Epoch {
-				return fmt.Errorf("the model publishes at epoch %d; the replica's elector believes %d", p.Epoch, believed)
+				return fmt.Errorf("the model publishes at epoch %d; the replica believes %d", p.Epoch, believed)
 			}
-			ptr, err := r.pub.Publish(context.Background(), publish.Lease{Holder: r.el.ID, Epoch: believed}, uint64(p.Source), func(seq uint64) (*snapshot.Snapshot, error) {
+			ptr, err := r.pub.Publish(context.Background(), r.fence, uint64(p.Source), func(seq uint64) (*snapshot.Snapshot, error) {
 				return publication(pub{Seq: int(seq), ValidUntil: p.ValidUntil}), nil
 			})
 			if err != nil {
@@ -237,32 +247,29 @@ func (d *pubDriver) Step(s *connect.Step) error {
 		},
 		// The environment: golem-control and the attacker.
 		"takeLease": func(s *connect.Step) error {
-			// The replica sees the lease, then its own clock moves past the
-			// lease's duration with the lease unchanged (its holder paused):
-			// it judges it lapsed, takes it at the next epoch and claims the
-			// fence. The time guard holds because the driver arranges it.
+			// The replica starts (its predecessor paused, not gone) and claims
+			// the fence at the next epoch.
 			r := d.replicas[connect.MustPick[string](s, "replica")]
-			if err := r.el.State.Load(context.Background()); err != nil {
-				return err
-			}
-			if _, err := r.el.Try(context.Background()); err != nil {
-				return err
-			}
-			r.clock = r.clock.Add(r.el.Duration + time.Second)
 			var want int
 			if err := connectDecode(s, &want, "leaseEpoch"); err != nil {
 				return err
 			}
-			if e, err := r.el.Try(context.Background()); err != nil || int(e) != want {
-				return fmt.Errorf("the model's lease is epoch %d; the elector took %d (%v)", want, e, err)
+			if e, err := r.claim(); err != nil || int(e) != want {
+				return fmt.Errorf("the model's fence is epoch %d; the replica claimed %d (%v)", want, e, err)
 			}
 			return nil
 		},
 		"noticeLoss": func(s *connect.Step) error {
+			// The replica reads the document and finds another's fence: it
+			// leads no more (golem-control's controller.ErrDeposed).
 			r := d.replicas[connect.MustPick[string](s, "replica")]
-			if e, err := r.el.Try(context.Background()); err != nil || e != 0 {
-				return fmt.Errorf("a replica that lost the lease tried and kept epoch %d (%v)", e, err)
+			if err := r.st.Refresh(context.Background()); err != nil {
+				return err
 			}
+			if r.st.Leads(r.fence) {
+				return fmt.Errorf("a replica claimed over still holds the fence %+v", r.fence)
+			}
+			r.fence = state.Fence{}
 			return nil
 		},
 		"revoke": connect.Skip, "restore": connect.Skip,
@@ -313,7 +320,7 @@ func (d *pubDriver) State() (any, error) {
 	}
 	st.Believes = map[string]int{}
 	for r, c := range d.replicas {
-		st.Believes[r] = int(c.el.Epoch())
+		st.Believes[r] = int(c.fence.Epoch)
 	}
 	raw, _, err := d.bucket.Get(ctx, snapshot.PointerKey("pool"), "")
 	if err != nil {
