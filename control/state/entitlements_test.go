@@ -29,6 +29,8 @@ func seeded(t *testing.T) *Store {
 
 // TestEntitlementInvariants: each change below is refused, and the state
 // is left as it was.
+//
+//quint:checks revocationsSurviveRestore
 func TestEntitlementInvariants(t *testing.T) {
 	s := seeded(t)
 	ctx := t.Context()

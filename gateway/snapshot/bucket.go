@@ -97,6 +97,8 @@ type Bucket struct {
 // current one. A pool never published, with no pointer either, has floor
 // zero; a pool with a pointer and no checkpoint has lost its floor, and is
 // not taken as never published.
+//
+//quint:enforces noRollbackBelowCheckpoint
 func (b *Bucket) Start(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, b.timeout())
 	defer cancel()
@@ -221,6 +223,8 @@ func (b *Bucket) localCheckpoint() (uint64, bool, error) {
 
 // trustedCheckpoint is the sequence of the pool's signed checkpoint in the
 // bucket; zero for a pool never published.
+//
+//quint:enforces noRollbackBelowCheckpoint
 func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
 	key := snapshot.CheckpointKey(b.Pool)
 	raw, _, err := b.Bucket.Get(ctx, key, "")

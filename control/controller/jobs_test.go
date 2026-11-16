@@ -30,6 +30,8 @@ func (l *silentLedger) Spend(ctx context.Context, _ string, _ time.Time) (spend.
 // TestRevocationNotBehindSpend: while known spend's ledger hangs, a
 // revocation is still published within seconds: publication does not wait
 // on the spend job (nor on the audit or the sync).
+//
+//quint:checks revocationBounded
 func TestRevocationNotBehindSpend(t *testing.T) {
 	w := newWorld(t)
 	r1 := w.replicas["r1"]

@@ -47,6 +47,8 @@ func stores(tb testing.TB, addr string) map[string]connect.Driver {
 
 // TestStoresAgree: the model's traces on both stores at once; each must be
 // the model's after every step, and they must see the same known spend.
+//
+//quint:checks limitsHonoured, withinBound
 func TestStoresAgree(t *testing.T) {
 	if _, err := exec.LookPath("quint"); err != nil {
 		t.Skip("quint not installed")

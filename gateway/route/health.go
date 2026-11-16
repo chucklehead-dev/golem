@@ -131,11 +131,13 @@ func (h *Health) AcquireWhy(t *Target, principal string) (*Hold, time.Time, Refu
 		switch now := h.now(); {
 		case now.Before(d.until):
 			return nil, d.until, Ejected
+		//quint:enforces probeOnly
 		case d.probing:
 			return nil, now.Add(cmp.Or(h.Ejection, 10*time.Second)), Ejected
 		}
 		probe = true
 	}
+	//quint:enforces quotaHonoured
 	if t.MaxInFlight > 0 && d.inflight >= t.MaxInFlight {
 		return nil, time.Time{}, AtCeiling
 	}
@@ -273,6 +275,8 @@ func (h *Health) Called(alias string) {
 
 // Retry takes one retry from a route's budget, reporting false if it has
 // none left.
+//
+//quint:enforces retriesCapped
 func (h *Health) Retry(alias string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -22,6 +22,8 @@ import (
 // over to, it is not retried: ADR 0051); otherwise the call is charged an
 // estimate, its slot held for the provider's tail, and it is never
 // retried (model/attempts.md: an uncertain attempt ends the call).
+//
+//quint:checks covered, workWithinLimit
 func TestUncertainUpstream(t *testing.T) {
 	alice := key.New(key.Dev)
 	cfg := `apiVersion: golem.dev/v1alpha1

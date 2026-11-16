@@ -30,6 +30,7 @@ func snap(seq uint64, until time.Time) *snapshot.Snapshot {
 		Routes: []snapshot.Route{{Alias: "claude", Dialect: "anthropic.messages", Pool: []snapshot.Target{{Backend: "a", Deployment: "d", Weight: 1}}}}}
 }
 
+//quint:checks revocationBounded, noExpiredServe, noRollback, noRollbackBelowCheckpoint
 func TestHolder(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	h := &Holder{Now: func() time.Time { return now }}
@@ -78,6 +79,8 @@ func TestHolder(t *testing.T) {
 // TestRaiseFloor: after a restart whose floor comes from a trusted
 // checkpoint, a replayed older snapshot is refused even though the gateway
 // holds nothing yet.
+//
+//quint:checks noRollbackBelowCheckpoint
 func TestRaiseFloor(t *testing.T) {
 	h := &Holder{}
 	h.RaiseFloor(10)

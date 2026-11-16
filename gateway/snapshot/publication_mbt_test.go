@@ -351,6 +351,7 @@ func (d *pubDriver) State() (any, error) {
 	return st, nil
 }
 
+//quint:checks revocationBounded, noExpiredServe, noRollback, noRollbackBelowCheckpoint, publicationsOrdered
 func TestPublicationModel(t *testing.T) {
 	if os.Getenv("QUINT_BIN") == "" {
 		if _, err := lookQuint(); err != nil {

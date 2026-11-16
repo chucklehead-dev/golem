@@ -347,6 +347,7 @@ func (t *tick) now() time.Time {
 	return t.at
 }
 
+//quint:checks oneCommit, withinBound, workWithinLimit, quotaHonoured, attemptsBounded, retriesCapped, probeOnly
 func TestAttemptsModel(t *testing.T) {
 	if os.Getenv("QUINT_BIN") == "" {
 		if _, err := exec.LookPath("quint"); err != nil {

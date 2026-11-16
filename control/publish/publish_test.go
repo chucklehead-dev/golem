@@ -71,6 +71,8 @@ func TestPublish(t *testing.T) {
 // TestFenced: a publisher that does not hold the fence at its epoch, or
 // has older state than the record's, publishes nothing, and the record and
 // pointer stay (the model's FENCE).
+//
+//quint:checks publicationsOrdered, noRollback
 func TestFenced(t *testing.T) {
 	p, _, d := setup(t)
 	ctx := t.Context()
@@ -143,6 +145,8 @@ func TestConcurrentPublishers(t *testing.T) {
 // TestLeaseLostBeforeRecord: a leader that read the record, then lost the
 // lease before winning it, is refused by the record's own write, though no
 // successor has published yet.
+//
+//quint:checks publicationsOrdered
 func TestLeaseLostBeforeRecord(t *testing.T) {
 	p, _, _ := setup(t)
 	ctx := t.Context()

@@ -293,6 +293,8 @@ func (c *callState) unkeep() {
 // committed is false when the call has already ended, refused or
 // unanswered. The caller's body is released as soon as no retry can need
 // it.
+//
+//quint:enforces oneCommit, withinBound
 func (c *callState) attempts(ex *exchange, snap *snapshot.Compiled, in **[]byte, body []byte) (resp *http.Response, upBody io.Reader, streamed, committed bool) {
 	h, r, req, rt, lim := c.h, c.r, c.req, c.rt, &ex.lim
 	for c.attempt = 1; ; c.attempt++ {
@@ -573,6 +575,8 @@ var errUnsent = errors.New("the call ended before the attempt was sent")
 // provider. Only a few failures certainly did not. They are a name that did
 // not resolve, a connection never made, a failed TLS handshake, and an
 // envelope's request that never left the gateway (envelope.ErrNotSent).
+//
+//quint:enforces workWithinLimit
 func reachedProvider(err error) bool {
 	if errors.Is(err, envelope.ErrNotSent) || errors.Is(err, errUnsent) {
 		return false

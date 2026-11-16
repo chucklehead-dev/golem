@@ -15,6 +15,8 @@ import (
 // or TLS handshake that failed, and an envelope's request that never left
 // the gateway (envelope.ErrNotSent, however wrapped); anything else, a
 // reset or a timeout after the request went out, may have reached it.
+//
+//quint:checks workWithinLimit
 func TestReachedProvider(t *testing.T) {
 	for _, c := range []struct {
 		name    string

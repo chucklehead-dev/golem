@@ -18,6 +18,8 @@ func scopeCall(id, principal string) Call {
 // TestKnownSpendIsTheSnapshots: known spend is the snapshot's (ADR 0031),
 // checked below the budget whatever the call then costs (the accepted risk); a
 // call's cost is its ledger row's, not counted here.
+//
+//quint:checks withinBound
 func TestKnownSpendIsTheSnapshots(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
@@ -46,6 +48,8 @@ func TestKnownSpendIsTheSnapshots(t *testing.T) {
 
 // TestInFlightLimits: the principal's and the scope's in-flight limits refuse,
 // and a cancelled call keeps its slot until its upstream ends.
+//
+//quint:checks limitsHonoured
 func TestInFlightLimits(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
@@ -73,6 +77,8 @@ func TestInFlightLimits(t *testing.T) {
 // TestOutage: during an outage each gateway admits against its own counts
 // and the snapshot's known spend, as waivers; on recovery each re-acquires
 // its running calls' slots.
+//
+//quint:checks limitsHonoured
 func TestOutage(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()

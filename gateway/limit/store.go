@@ -50,6 +50,8 @@ const (
 // outage's local check and a ticket's over-budget mark all use it. Known
 // spend must be below the budget, whatever the call then costs. A budget
 // of 0 is none. ADR 0031.
+//
+//quint:enforces withinBound
 func overBudget(spend, budget int64) bool { return budget != 0 && spend >= budget }
 
 // atLimit reports whether n calls in flight fill an in-flight limit. A
@@ -92,6 +94,7 @@ func NewMem() *Mem {
 	return &Mem{slots: map[string]Slot{}, buckets: map[string]*rateBucket{}, Now: time.Now}
 }
 
+//quint:enforces limitsHonoured
 func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

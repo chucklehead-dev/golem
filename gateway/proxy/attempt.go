@@ -154,6 +154,7 @@ func (c *callState) retry(result string, status int, after time.Duration) bool {
 	gone := c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil
 	c.endHold(after, gone)
 	c.h.runBeforePick(c.r)
+	//quint:enforces attemptsBounded
 	if !c.kept || c.attempt >= c.rt.MaxAttempts || c.r.Context().Err() != nil || c.upCtx.Err() != nil {
 		return false
 	}

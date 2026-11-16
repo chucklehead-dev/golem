@@ -196,6 +196,8 @@ func checkRoles(d *Document) error {
 
 // checkRevocations: the revocations only grow, old ones unchanged, and a
 // key in them stays revoked: a revocation is never undone.
+//
+//quint:enforces revocationsSurviveRestore
 func checkRevocations(old, next *Document) error {
 	if len(next.Revocations) < len(old.Revocations) || !slices.Equal(next.Revocations[:len(old.Revocations)], old.Revocations) {
 		return broken("revocations are append-only")

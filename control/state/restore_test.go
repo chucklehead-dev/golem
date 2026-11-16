@@ -13,6 +13,8 @@ import (
 // TestRestore: a backup taken, then rights changed both ways; the restore
 // rolls back what widened and keeps what narrowed, the fence, the records
 // and every revocation the current document's, and says what it withheld.
+//
+//quint:checks revocationsSurviveRestore
 func TestRestore(t *testing.T) {
 	s := seeded(t)
 	ctx := t.Context()
@@ -102,6 +104,8 @@ func contains(lines []string, sub string) bool {
 // model it lacks, no later expiry; and its fence and records are the
 // current ones. (A scope's policy is config, not state: a restore cannot
 // touch it.)
+//
+//quint:checks revocationsSurviveRestore
 func TestRestoreNeverWidens(t *testing.T) {
 	for seed := range uint64(2000) {
 		r := rand.New(rand.NewPCG(seed, 1))

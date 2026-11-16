@@ -62,7 +62,7 @@ type Limiter struct {
 	openLogged atomic.Int64               // when a rate limit last failed open, logged, in Unix ns
 
 	mu          sync.Mutex
-	spend       map[string]ScopeSpend        // known spend by scope, from the snapshot
+	spend       map[string]ScopeSpend   // known spend by scope, from the snapshot
 	running     map[string]*Ticket      // this gateway's calls the provider may still be working on
 	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer fires
 	byPrincipal map[principalIn]int     // running calls counted, so an outage's local check is O(1)
@@ -201,6 +201,8 @@ func (l *Limiter) knownSpendLocked(scope, period string) int64 {
 //
 // Only an enforced budget refuses. Under warn or observe the store checks
 // the slots alone, and the ticket says whether the call is over budget.
+//
+//quint:enforces withinBound
 func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	period := l.period(cmp.Or(c.Started, l.now()))
 	spend := l.knownSpend(c.Scope, period)
@@ -392,6 +394,8 @@ func (t *Ticket) Complete(ctx context.Context, _ int64) {
 // The provider may still be working and billing. Freeing the slot would let
 // cancel-and-resend escape the in-flight limit. The ledger row records the
 // cost seen. ADR 0041.
+//
+//quint:enforces limitsHonoured
 func (t *Ticket) Cancel(_ context.Context, _ int64) { t.cancel() }
 
 // cancel is Cancel, and reports whether it ended the ticket.
@@ -520,6 +524,8 @@ type pinger interface{ Ping(context.Context) error }
 //
 // A store call that fails during Recover keeps the limiter down. No lock
 // is held across a store call.
+//
+//quint:enforces limitsHonoured
 func (l *Limiter) Recover(ctx context.Context) error {
 	l.mu.Lock()
 	gen := l.downGen

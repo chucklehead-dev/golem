@@ -1,0 +1,8 @@
+# This file exists only to name the publication model's invariants (the
+# conjuncts of its safe val) for `gotogether invariants` (model/invariants.sh):
+# no test validates runs with it. The connect test's binding is
+# gateway/snapshot/publication.binding.yaml.
+format: gotogether.binding/2
+spec: publication.qnt
+module: publication
+invariants: [revocationBounded, noExpiredServe, noRollback, noRollbackBelowCheckpoint, publicationsOrdered, revocationsSurviveRestore]

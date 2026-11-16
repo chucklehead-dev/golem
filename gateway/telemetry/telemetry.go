@@ -167,6 +167,8 @@ type Funding struct {
 // AttemptID is the attempt's ID, which is its ledger event's ID. The first
 // attempt's is the request ID, and a later one's is AttemptUUID of the
 // request ID and its number. Both are UUIDs, as golem.spend's columns are.
+//
+//quint:enforces ledgerMatches
 func (c *Call) AttemptID() string {
 	if c.Attempt <= 1 {
 		return c.RequestID

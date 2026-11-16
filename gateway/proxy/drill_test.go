@@ -34,6 +34,8 @@ import (
 //
 // The real drill (a Bedrock region, a local box) runs on the install
 // (m1-plan.md); this one runs in CI.
+//
+//quint:checks ledgerMatches
 func TestFailoverDrill(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a two-second load")

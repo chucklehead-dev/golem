@@ -36,6 +36,8 @@ func (a *settlement) complete(cost int64) {
 // cancel ends the ticket charging seen, and holds the slot for the
 // provider's tail from now. The hold ends no later than the call's
 // deadline.
+//
+//quint:enforces workWithinLimit
 func (a *settlement) cancel(seen int64) {
 	if a.ticket != nil {
 		until := time.Now().Add(a.tail)
@@ -53,6 +55,8 @@ func (a *settlement) cancel(seen int64) {
 // is charged an estimate, which reconciliation corrects. If a sweep ended
 // the call, it is charged as if its caller left, and its row says
 // terminated.
+//
+//quint:enforces covered
 func chargeUnanswered(call *telemetry.Call, err error, callerLeft bool, ended *errTerminated, requestBytes int64, req scanned, pr libsnapshot.Price) int64 {
 	call.Outcome, call.ErrorOrigin, call.ErrorCode = coded(outcomeFailed, contract.UpstreamUnavailable)
 	if ended != nil && !callerLeft {

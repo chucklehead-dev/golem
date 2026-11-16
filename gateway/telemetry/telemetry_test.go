@@ -199,6 +199,8 @@ func TestRowPeriodIsTheCounters(t *testing.T) {
 // the RFC 9562 name-based UUID (version 5) of its number under the request
 // ID, the value Python's uuid.uuid5(request_id, "2") gives, so it fits
 // golem.spend's UUID columns and can be derived again from the request.
+//
+//quint:checks ledgerMatches
 func TestAttemptIDs(t *testing.T) {
 	const req = "019a8f2e-7c1d-7b3a-9e4f-0123456789ab"
 	c := Call{RequestID: req}

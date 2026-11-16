@@ -371,6 +371,8 @@ func (c *Controller) notice() bool {
 // publish, and its last failure is in every step's error until it
 // publishes. A replica that finds itself deposed publishes nothing and
 // returns ErrDeposed.
+//
+//quint:enforces revocationBounded
 func (c *Controller) Step(ctx context.Context) (bool, error) {
 	fence, leads := c.Fence()
 	if !leads {

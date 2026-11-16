@@ -19,6 +19,8 @@ func (*untilTicket) OverBudget() (bool, int64)                        { return f
 // provider's tail, but never past the call's own deadline (the provider
 // cannot still be working on it after that); with no deadline, the whole
 // tail.
+//
+//quint:checks workWithinLimit
 func TestTailClampedToDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

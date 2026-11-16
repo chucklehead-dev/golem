@@ -13,6 +13,8 @@ import (
 // enforce refuses; warn and observe admit, the ticket over budget with the
 // known spend checked. A call within the budget is never over, and the
 // in-flight limits refuse in every mode.
+//
+//quint:checks withinBound
 func TestBudgetModes(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
