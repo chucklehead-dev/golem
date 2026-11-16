@@ -17,7 +17,7 @@ import (
 // flight drain, then those still running are cut and their accounting
 // (under context.WithoutCancel) is waited for. Only then may the limiter's
 // and the telemetry's last work run: a call ended by the process exiting
-// would have no ledger row and no counter add.
+// would have no ledger row.
 type lifecycle struct {
 	srv      *http.Server
 	draining atomic.Bool

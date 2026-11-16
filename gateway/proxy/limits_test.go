@@ -58,9 +58,9 @@ func (t *account) Cancel(_ context.Context, seen int64, until time.Time) {
 	t.end("cancel", seen)
 	t.until = until
 }
-func (t *account) Period() string             { return "2026-11" }
-func (t *account) Waived() bool               { return false }
-func (t *account) OverBudget() admission.Over { return admission.Over{} }
+func (t *account) Period() string            { return "2026-11" }
+func (t *account) Waived() bool              { return false }
+func (t *account) OverBudget() (bool, int64) { return false, 0 }
 
 // TestAdmitterContract: the request path depends only on admission. A
 // refusal is rendered by its code (with its Retry-After), a caller gone

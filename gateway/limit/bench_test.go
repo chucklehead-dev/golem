@@ -5,36 +5,20 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // BenchmarkAdmitComplete is one call's admission and completion, from
 // parallel goroutines, over the in-memory store and over Valkey (whose
-// client pipelines concurrent calls on one connection), with a counter
-// holding every minute of its retention. Admission reads the minutes from
-// the snapshot's boundary on (ADR 0048): "current" is a gateway on a
-// current snapshot (its boundary three minutes back), "unbounded" one with
-// no boundary at all (the first snapshot), which reads the whole retention.
+// client pipelines concurrent calls on one connection): the slots taken
+// with the snapshot's known spend checked, then freed.
 func BenchmarkAdmitComplete(b *testing.B) {
-	for _, name := range []string{"mem", "valkey-current", "valkey-unbounded"} {
+	for _, name := range []string{"mem", "valkey"} {
 		b.Run(name, func(b *testing.B) {
-			now := time.Now()
 			var st Store = NewMem()
 			if name != "mem" {
 				st = newValkey(b, valkeyAddr(b))
 			}
 			l := New(st)
-			period := l.period(now)
-			var incs []Increment
-			for m := range 360 {
-				incs = append(incs, Increment{Accounts: []string{"s"}, Period: period, Cost: 1, At: now.Add(-time.Duration(m) * time.Minute)})
-			}
-			if err := st.AddAll(context.Background(), incs); err != nil {
-				b.Fatal(err)
-			}
-			if name != "valkey-unbounded" {
-				l.ApplySnapshot(context.Background(), "s", Known{Period: period, Since: now.Add(-3 * time.Minute)})
-			}
 			var n atomic.Int64
 			ctx := context.Background()
 			b.ReportAllocs()

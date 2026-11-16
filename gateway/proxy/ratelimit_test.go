@@ -2,59 +2,15 @@ package proxy
 
 import (
 	"bytes"
-	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 
-	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/lib/key"
 )
-
-// quotaRoute is a route over two deployments of one stub each, with quotas.
-func quotaRoute(a, b *stub, qa, qb int64) *gsnap.Holder {
-	u, _ := url.Parse("https://provider.example/v1/messages")
-	return gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(&route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(), MaxAttempts: 2,
-		Pool: []*route.Target{
-			{Backend: "anthropic", Deployment: "a", Model: "claude-sonnet", URL: u, Transport: a, QuotaRPM: qa},
-			{Backend: "anthropic", Deployment: "b", Model: "claude-sonnet", URL: u, Transport: b, QuotaRPM: qb},
-		}})})
-}
-
-func quotaCall(h *Handler) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(smallRequest))
-	r.Header.Set("Anthropic-Version", "2023-06-01")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	return w
-}
-
-// TestQuotaFailover: a deployment at its share of the provider's requests
-// a minute is passed over for the pool's next, and a call finding every
-// deployment at its share is refused limit.provider_quota with a
-// Retry-After, no provider called.
-func TestQuotaFailover(t *testing.T) {
-	a, b := &stub{events: anthropicStream(1)}, &stub{events: anthropicStream(1)}
-	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, b, 1, 1), Meters: limit.New(limit.NewMem())}
-	if w := quotaCall(h); w.Code != 200 || a.got == nil || b.got != nil {
-		t.Fatalf("the first call: %d, a %v b %v; want a's", w.Code, a.got != nil, b.got != nil)
-	}
-	a.got = nil
-	if w := quotaCall(h); w.Code != 200 || a.got != nil || b.got == nil {
-		t.Fatalf("the second: %d, a %v b %v; want b's, a at its quota", w.Code, a.got != nil, b.got != nil)
-	}
-	b.got = nil
-	w := quotaCall(h)
-	if w.Code != http.StatusTooManyRequests || !strings.Contains(w.Body.String(), "limit.provider_quota") || w.Header().Get("Retry-After") == "" {
-		t.Fatalf("the third: %d %s (Retry-After %q); want 429 limit.provider_quota", w.Code, w.Body, w.Header().Get("Retry-After"))
-	}
-	if a.got != nil || b.got != nil {
-		t.Fatal("a provider called past its quota")
-	}
-}
 
 // TestRateLimits: a scope's rate limits, each member's and the whole
 // scope's, refuse a call past either with limit.rate and a Retry-After,

@@ -31,9 +31,6 @@ type Target struct {
 	// (lib/api's HealthCheck).
 	HealthPath     string
 	HealthInterval time.Duration
-	// QuotaRPM is the site's share of the provider's quota, requests a
-	// minute (lib/api's); 0: none.
-	QuotaRPM int64
 	// Betas are the anthropic-beta values the deployment accepts; nil: any.
 	Betas map[string]bool
 	// Envelope is how its requests reach the provider: "" or "bedrock"

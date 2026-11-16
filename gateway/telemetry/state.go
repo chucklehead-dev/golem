@@ -21,8 +21,6 @@ const (
 	MetricServingLastGood = "golem.snapshot.last_good"
 	MetricLimiterDown     = "golem.limit.down"
 	MetricWaivers         = "golem.limit.waivers"
-	MetricHeld            = "golem.limit.held"
-	MetricHeldDropped     = "golem.limit.dropped"
 	MetricDenylistEntries = "golem.denylist.entries"
 )
 
@@ -33,7 +31,7 @@ type State struct {
 	// Source, if set, is the pool's bucket source (nil standalone): its
 	// pointer's overdue flag and whether the last-good copy is served.
 	Source *snapshot.Bucket
-	// Limiter, if set, reports its outage, waivers and held increments.
+	// Limiter, if set, reports its outage and waivers.
 	Limiter *limit.Limiter
 	// Deny, if set, is the site's denylist file.
 	Deny *auth.DenyFile
@@ -46,8 +44,7 @@ type State struct {
 // applied snapshot's age (now − IssuedAt) and lease remaining
 // (ValidUntil − now) in seconds, its publication sequence, the pool's
 // pointer overdue and the last-good copy served (0/1), the limiter down
-// (0/1), its waivers, held and dropped increments, and the denylist's
-// entries. None is attributed beyond the resource's site and pool.
+// (0/1), its waivers, and the denylist's entries. None is attributed beyond the resource's site and pool.
 func ObserveState(mp metric.MeterProvider, s State) error {
 	m := mp.Meter("golem/gateway") // the request path's meter (New)
 	now := s.Now
@@ -80,14 +77,12 @@ func ObserveState(mp metric.MeterProvider, s State) error {
 		lastGood = ig(MetricServingLastGood, "1", "1 while the snapshot served is the last-good copy from disk, not one read from the bucket")
 		insts = append(insts, overdue, lastGood)
 	}
-	var down, held metric.Int64ObservableGauge
-	var waivers, dropped metric.Int64ObservableCounter
+	var down metric.Int64ObservableGauge
+	var waivers metric.Int64ObservableCounter
 	if s.Limiter != nil {
 		down = ig(MetricLimiterDown, "1", "1 while the limiter believes the site store unreachable: admissions are local, as waivers")
 		waivers = ic(MetricWaivers, "{count}", "Calls admitted as waivers of the budget's bound (an outage, or the grace after it)")
-		held = ig(MetricHeld, "{count}", "Spend increments held for replay while the site store is unreachable")
-		dropped = ic(MetricHeldDropped, "{count}", "Held increments dropped (past the cap, or abandoned at shutdown): the counter lacks them")
-		insts = append(insts, down, waivers, held, dropped)
+		insts = append(insts, down, waivers)
 	}
 	var deny metric.Int64ObservableGauge
 	if s.Deny != nil {
@@ -113,8 +108,6 @@ func ObserveState(mp metric.MeterProvider, s State) error {
 		if l := s.Limiter; l != nil {
 			o.ObserveInt64(down, b2i(l.Down()))
 			o.ObserveInt64(waivers, l.Waived.Load())
-			o.ObserveInt64(held, int64(l.Held()))
-			o.ObserveInt64(dropped, l.Dropped.Load())
 		}
 		if s.Deny != nil {
 			o.ObserveInt64(deny, int64(s.Deny.Current().Len()))

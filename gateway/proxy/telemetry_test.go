@@ -20,7 +20,7 @@ import (
 func TestLedgerRows(t *testing.T) {
 	alice := key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)}
-	h, lim := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
 metadata: {name: team-a}
 spec: {models: [claude], budgetMicros: 100000000}
@@ -60,16 +60,12 @@ spec:
 			t.Errorf("row %d: %v", i, r)
 		}
 	}
-	// The counter holds what the rows charge, once each.
-	if k := lim.Known(t.Context(), "team-a"); k != 2*6204000 {
-		t.Fatalf("known spend %d, want the two rows' 12408000", k)
-	}
 }
 
 // TestPeriodIsTheStart: the request path gives the limiter the call's
-// start, so the counter it is added to and its ledger row name the same
-// month however late the admission (here a limiter whose clock is a month
-// ahead of the request's arrival).
+// start, so its ledger row names the start's month however late the
+// admission (here a limiter whose clock is a month ahead of the request's
+// arrival).
 func TestPeriodIsTheStart(t *testing.T) {
 	alice := key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)}
@@ -94,12 +90,6 @@ spec:
 	got := splitRows(t, &rows)
 	if want := time.Now().UTC().Format("2006-01") + "-01"; len(got) != 1 || got[0]["period"] != want {
 		t.Fatalf("rows %v: period %s", got, want)
-	}
-	// The counter of the start's month has the call: known spend this
-	// month (the limiter's clock back) is its cost.
-	lim.Now = time.Now
-	if k := lim.Known(t.Context(), "team-a"); k == 0 || float64(k) != got[0]["cost_micros"] {
-		t.Fatalf("known spend this month %d, the row's cost %v: the call is in its start's counter", k, got[0]["cost_micros"])
 	}
 }
 

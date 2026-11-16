@@ -33,19 +33,15 @@ type Principal struct {
 	Limits  Limits
 }
 
-// Limits are the scope's, for the limiter, with the principal's cap in it
-// and its key's.
+// Limits are the scope's, for the limiter.
 type Limits struct {
-	BudgetMicros    int64
-	MemberCapMicros int64 // the member's own, or the scope's default; 0: none
-	KeyCapMicros    int64 // 0: none
+	BudgetMicros int64
 	// MemberRPM and ScopeRPM are the scope's rate limits, requests a
 	// minute: each member's, and the whole scope's (PRD §5.5); 0: none.
-	MemberRPM, ScopeRPM    int64
-	BudgetMode             admission.BudgetMode // the snapshot's; an unknown one is enforce
-	DeclaredWorstCaseCheck bool
-	PrincipalInFlight      int
-	ScopeInFlight          int
+	MemberRPM, ScopeRPM int64
+	BudgetMode          admission.BudgetMode // the snapshot's; an unknown one is enforce
+	PrincipalInFlight   int
+	ScopeInFlight       int
 	// The scope's request policy (contracts.md §8).
 	StorageAllowed  bool
 	MaxOutputTokens int64  // max_tokens times n; 0: none
@@ -91,17 +87,6 @@ const implicitInFlight = 16
 type rights struct {
 	models map[string]bool
 	limits Limits
-	caps   map[string]int64 // members' own caps, by principal
-}
-
-// limitsOf is the scope's limits for principal: its own cap, else the
-// scope's default.
-func (r *rights) limitsOf(principal string) Limits {
-	l := r.limits
-	if c := r.caps[principal]; c > 0 {
-		l.MemberCapMicros = c
-	}
-	return l
 }
 
 // Compile indexes a snapshot's entitlements for an installation: env is the
@@ -137,20 +122,11 @@ func compileScopes(ss []snapshot.Scope) map[string]*rights {
 	scopes := make(map[string]*rights, len(ss))
 	for _, s := range ss {
 		r := &rights{models: make(map[string]bool, len(s.Models)), limits: Limits{BudgetMicros: s.BudgetMicros,
-			MemberCapMicros: s.DefaultMemberCapMicros, MemberRPM: s.MemberRPM, ScopeRPM: s.ScopeRPM,
-			BudgetMode: admission.ModeOf(s.BudgetMode), DeclaredWorstCaseCheck: s.DeclaredWorstCaseCheck,
+			MemberRPM: s.MemberRPM, ScopeRPM: s.ScopeRPM, BudgetMode: admission.ModeOf(s.BudgetMode),
 			PrincipalInFlight: s.PrincipalInFlight, ScopeInFlight: s.ScopeInFlight, StorageAllowed: s.StorageAllowed,
 			MaxOutputTokens: s.MaxOutputTokens, MaxInputBytes: s.MaxInputBytes, Features: s.Features}}
 		for _, a := range s.Models {
 			r.models[a] = true
-		}
-		for _, m := range s.Members {
-			if m.CapMicros > 0 {
-				if r.caps == nil {
-					r.caps = map[string]int64{}
-				}
-				r.caps[m.Principal] = m.CapMicros
-			}
 		}
 		scopes[s.ID] = r
 	}
@@ -172,7 +148,7 @@ func (k *Keys) addMembers(kind string, ms []snapshot.Member, scopes map[string]*
 		byScope := map[string]*Principal{}
 		for _, id := range m.Scopes {
 			if r := scopes[id]; r != nil {
-				byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: r.models, entraID: m.Entra, Limits: r.limitsOf(m.ID)}
+				byScope[id] = &Principal{ID: m.ID, Kind: kind, Scope: id, models: r.models, entraID: m.Entra, Limits: r.limits}
 			}
 		}
 		if p := byScope[m.Default]; p != nil {
@@ -202,8 +178,7 @@ func keyEntry(sk snapshot.Key, scopes map[string]*rights, owners map[string]owne
 		en.refused = &Refusal{contract.AuthzScopeNotMember, "this key's principal is no longer a member of scope " + sk.Scope + ": its managers can add it back, or mint a key for a scope it is in"}
 		return en
 	}
-	en.p.Limits, en.p.models = r.limitsOf(sk.Principal), r.models
-	en.p.Limits.KeyCapMicros = sk.CapMicros
+	en.p.Limits, en.p.models = r.limits, r.models
 	if len(sk.Models) > 0 { // the key narrows its scope's models
 		en.p.models = make(map[string]bool, len(sk.Models))
 		for _, m := range sk.Models {

@@ -50,7 +50,6 @@ spec:
             {{- with .Values.valkey.user }}
             - -valkey-user={{ . }}
             {{- end }}
-            - -valkey-replica-acks={{ .Values.valkey.replicaAcks }}
             {{- with .Values.entra.tenant }}
             - -entra-tenant={{ . }}
             - -entra-audience={{ $.Values.entra.audience }}

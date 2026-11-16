@@ -3,19 +3,22 @@ package proxy
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/chucklehead-dev/golem/gateway/admission"
+	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
 	"github.com/chucklehead-dev/golem/lib/contract"
 	"github.com/chucklehead-dev/golem/lib/key"
+	"github.com/chucklehead-dev/golem/lib/period"
 )
 
 // TestBudgetModes: a scope's budget in each mode (PRD §9.1, ADR 0050),
 // spent past by calls of 6,204,000 micro-units against a budget of
-// 10,000,000: the third is over it. observe admits it and marks its
+// 10,000,000, each counted by a snapshot before the next (ADR 0052): the
+// third is over it. observe admits it and marks its
 // ledger row, adding nothing to the response; warn admits it, marks it and
 // says so in golem-warning; enforce refuses it as budget.pool_exhausted,
 // as the default did before modes. A call within the budget is never
@@ -39,7 +42,7 @@ func TestBudgetModes(t *testing.T) {
 				spec = "{models: [claude], budgetMicros: 10000000, budgetMode: " + tc.mode + "}"
 			}
 			s := &stub{events: anthropicStream(1)}
-			h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+			h, lim := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
 metadata: {name: team-a}
 spec: `+spec+`
@@ -61,6 +64,7 @@ spec:
 			// Within the budget (0, then 6,204,000 spent), then over it
 			// (12,408,000 of 10,000,000: 124%).
 			for i := range 3 {
+				lim.ApplySnapshot(t.Context(), "team-a", limit.Known{Period: period.Of(time.Now(), time.UTC), Spend: int64(i) * 6_204_000})
 				s.events = anthropicStream(1)
 				w := send(h, alice, stream)
 				want, warning := 200, ""
@@ -91,53 +95,6 @@ spec:
 	}
 }
 
-// TestCapModes: a member's cap (the scope's default) and a key's, each
-// spent past as TestBudgetModes' budget is, follow the scope's mode:
-// enforce refuses with the level's code, warn admits and names it.
-func TestCapModes(t *testing.T) {
-	for _, tc := range []struct {
-		name, policy, keyCap string
-		code                 int
-		refusal, warning     string
-	}{
-		{"member, enforced", "defaultMemberCapMicros: 10000000, budgetMode: enforce", "", 402, "budget.member_cap", ""},
-		{"member, warned", "defaultMemberCapMicros: 10000000, budgetMode: warn", "", 200, "", "budget.member_cap 124%"},
-		{"key, enforced", "budgetMode: enforce, defaultMemberCapMicros: 100000000", ", capMicros: 10000000", 402, "budget.key_cap", ""},
-		{"key before member", "budgetMode: enforce, defaultMemberCapMicros: 10000000", ", capMicros: 10000000", 402, "budget.key_cap", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			alice := key.New(key.Dev)
-			s := &stub{events: anthropicStream(1)}
-			h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
-kind: ScopePolicy
-metadata: {name: team-a}
-spec: {models: [claude], `+tc.policy+`}
----
-apiVersion: golem.dev/v1alpha1
-kind: LocalIdentity
-metadata: {name: local}
-spec:
-  keys: [{key: `+alice+`, principal: alice, scope: team-a`+tc.keyCap+`}]
-`, s)
-			stream := `{"model":"claude","max_tokens":10,"stream":true,"messages":[]}`
-			for i := range 3 {
-				s.events = anthropicStream(1)
-				w := send(h, alice, stream)
-				want, warning := 200, ""
-				if i == 2 {
-					want, warning = tc.code, tc.warning
-				}
-				if w.Code != want || w.Header().Get(contract.HeaderWarning) != warning {
-					t.Fatalf("call %d: %d, golem-warning %q; want %d, %q: %s", i, w.Code, w.Header().Get(contract.HeaderWarning), want, warning, w.Body)
-				}
-				if want == 402 && errorCode(t, w) != tc.refusal {
-					t.Fatalf("call %d refused %s, want %s", i, w.Body, tc.refusal)
-				}
-			}
-		})
-	}
-}
-
 // TestBudgetWarning: warn mode's header is the refusal's code and the share
 // of the budget spent, rounded down, without overflow.
 func TestBudgetWarning(t *testing.T) {
@@ -146,11 +103,11 @@ func TestBudgetWarning(t *testing.T) {
 		want          string
 	}{
 		{10, 10, "budget.pool_exhausted 100%"},
-		{9, 10, "budget.pool_exhausted 90%"}, // over by its declared worst case
+		{9, 10, "budget.pool_exhausted 90%"},
 		{12_408_000, 10_000_000, "budget.pool_exhausted 124%"},
 		{1 << 62, 1 << 50, "budget.pool_exhausted 409600%"},
 	} {
-		if got := budgetWarning(admission.Over{Level: admission.ScopeLevel, Known: tc.known, Limit: tc.budget}); got != tc.want {
+		if got := budgetWarning(tc.known, tc.budget); got != tc.want {
 			t.Errorf("budgetWarning(%d, %d) = %q, want %q", tc.known, tc.budget, got, tc.want)
 		}
 	}

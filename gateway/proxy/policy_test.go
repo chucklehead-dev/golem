@@ -15,12 +15,12 @@ import (
 // TestPolicy: each row of contracts.md §8 the gateway enforces, through a
 // real LocalIdentity's scopes.
 func TestPolicy(t *testing.T) {
-	checked, open, capped := key.New(key.Dev), key.New(key.Dev), key.New(key.Dev)
+	plain, open, capped := key.New(key.Dev), key.New(key.Dev), key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)}
 	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
-metadata: {name: checked}
-spec: {models: [claude], declaredWorstCaseCheck: true, budgetMicros: 1000000000000}
+metadata: {name: plain}
+spec: {models: [claude], budgetMicros: 1000000000000}
 ---
 apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
@@ -37,7 +37,7 @@ kind: LocalIdentity
 metadata: {name: local}
 spec:
   keys:
-  - {key: `+checked+`, principal: alice, scope: checked}
+  - {key: `+plain+`, principal: alice, scope: plain}
   - {key: `+open+`, principal: bob, scope: open}
   - {key: `+capped+`, principal: carol, scope: capped}
 `, s)
@@ -47,11 +47,8 @@ spec:
 		want            int
 		code            string
 	}{
-		{"checked: a server tool", checked, `{"model":"claude","max_tokens":10,` + webSearch + `"messages":[]}`, 403, "authz.feature_forbidden"},
-		{"checked: an MCP server", checked, `{"model":"claude","max_tokens":10,"mcp_servers":[{"type":"url","url":"https://x"}],"messages":[]}`, 403, "authz.feature_forbidden"},
-		{"checked: client tools", checked, `{"model":"claude","max_tokens":10,"tools":[{"name":"f","input_schema":{}}],"messages":[]}`, 200, ""},
-		{"unchecked: a server tool", open, `{"model":"claude","max_tokens":10,` + webSearch + `"messages":[]}`, 200, ""},
-		{"storage forbidden: a container", checked, `{"model":"claude","max_tokens":10,"container":"c1","messages":[]}`, 403, "authz.provider_storage_forbidden"},
+		{"a server tool", open, `{"model":"claude","max_tokens":10,` + webSearch + `"messages":[]}`, 200, ""},
+		{"storage forbidden: a container", plain, `{"model":"claude","max_tokens":10,"container":"c1","messages":[]}`, 403, "authz.provider_storage_forbidden"},
 		{"storage allowed: a container", open, `{"model":"claude","max_tokens":10,"container":"c1","messages":[]}`, 200, ""},
 		{"ceiling: within", capped, `{"model":"claude","max_tokens":1000,"messages":[]}`, 200, ""},
 		{"ceiling: max_tokens over", capped, `{"model":"claude","max_tokens":1001,"messages":[]}`, 400, "request.over_ceiling"},
@@ -111,7 +108,6 @@ func TestStoreNotBoolean(t *testing.T) {
 func TestPolicyUnits(t *testing.T) {
 	h := &Handler{Dialect: OpenAIChat}
 	capped := &auth.Principal{Limits: auth.Limits{MaxOutputTokens: 1000}}
-	checkedP := &auth.Principal{Limits: auth.Limits{DeclaredWorstCaseCheck: true}}
 	for _, tc := range []struct {
 		name string
 		p    *auth.Principal
@@ -121,7 +117,6 @@ func TestPolicyUnits(t *testing.T) {
 		{"no max_tokens under a ceiling", capped, scanned{n: 1}, "request.over_ceiling"},
 		{"n completions count", capped, scanned{n: 3, maxTokens: 400, hasMax: true}, "request.over_ceiling"},
 		{"n within", capped, scanned{n: 2, maxTokens: 500, hasMax: true}, ""},
-		{"OpenAI web search, checked", checkedP, scanned{n: 1, serverTools: true}, "authz.feature_forbidden"},
 	} {
 		got := ""
 		if no := h.policy(getExchange(), tc.p, tc.req, 10); no != nil {

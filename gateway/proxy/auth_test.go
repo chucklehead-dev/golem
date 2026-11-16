@@ -16,6 +16,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/lib/key"
+	"github.com/chucklehead-dev/golem/lib/period"
 )
 
 // standaloneHandler compiles a real LocalIdentity config (through the same
@@ -85,7 +86,7 @@ func send(h http.Handler, apiKey, body string) *httptest.ResponseRecorder {
 func TestAuthAndLimits(t *testing.T) {
 	alice, bob := key.New(key.Dev), key.New(key.Dev)
 	s := &stub{events: anthropicStream(1)} // 2048 input tokens, 4 output
-	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+	h, lim := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
 metadata: {name: team-a}
 spec: {models: [claude, haiku], budgetMicros: 100000000, budgetMode: enforce, inFlight: {principal: 1}}
@@ -113,14 +114,16 @@ spec:
 	if w := send(h, alice, stream); w.Code != 200 {
 		t.Fatalf("alice: %d %s", w.Code, w.Body)
 	}
-	// Each call is 2,048 input tokens at 3,000,000,000 micro-units per
-	// million (an exaggerated price) plus 4 output tokens: 6,204,000
-	// micro-units. The budget of 100,000,000 admits calls while known spend
-	// is below it: the 17th still is (at 99,264,000 spent), the 18th not.
-	for range 16 {
-		s.events = anthropicStream(1)
-		send(h, alice, stream)
+	// Known spend is the snapshot's (ADR 0052): the budget of 100,000,000
+	// admits calls while it is below, and refuses them once a snapshot
+	// says it is reached.
+	now := period.Of(time.Now(), time.UTC)
+	lim.ApplySnapshot(t.Context(), "team-a", limit.Known{Period: now, Spend: 99_999_999})
+	s.events = anthropicStream(1)
+	if w := send(h, alice, stream); w.Code != 200 {
+		t.Fatalf("below the budget: %d %s", w.Code, w.Body)
 	}
+	lim.ApplySnapshot(t.Context(), "team-a", limit.Known{Period: now, Spend: 100_000_000})
 	if w := send(h, alice, stream); w.Code != 402 || errorCode(t, w) != "budget.pool_exhausted" {
 		t.Fatalf("after spending the budget: %d %s", w.Code, w.Body)
 	}
@@ -142,7 +145,7 @@ func TestConcurrencyAndCancel(t *testing.T) {
 		}()
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: pr}, nil
 	})
-	h, lim := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
+	h, _ := standaloneHandler(t, `apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
 metadata: {name: team-a}
 spec: {models: [claude, haiku], inFlight: {principal: 1}}
@@ -172,25 +175,23 @@ spec:
 	if w := send(h, alice, body); w.Code != 429 || errorCode(t, w) != "limit.concurrency" || w.Header().Get("Retry-After") == "" {
 		t.Fatalf("a second call in flight: %d %s", w.Code, w.Body)
 	}
-	// The caller goes away: the call is cancelled, charged what was seen,
-	// and its slot freed once the upstream connection has closed.
+	// The caller goes away: the call is cancelled, and its slot freed once
+	// the upstream connection has closed.
 	cancel()
-	for range 200 {
-		if lim.Known(t.Context(), "team-a") > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond) // for the handler to see the cancellation over a real connection
-	}
-	if got := lim.Known(t.Context(), "team-a"); got == 0 {
-		t.Fatal("the cancelled call's usage so far was not charged")
-	}
 	close(release)
 	// Its slot is held for the provider's tail (golem#4), then freed.
 	if w := send(h, alice, body); w.Code != 429 {
 		t.Fatalf("during the provider's tail the slot is held: %d %s", w.Code, w.Body)
 	}
-	time.Sleep(h.ProviderTail + 50*time.Millisecond) // the tail's timer: real time
-	if w := send(h, alice, body); w.Code == 429 {
+	time.Sleep(h.ProviderTail) // the tail's timer: real time
+	var w *httptest.ResponseRecorder
+	for range 100 { // and the handler's seeing the cancellation over a real connection
+		if w = send(h, alice, body); w.Code != 429 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if w.Code == 429 {
 		t.Fatalf("after the provider's tail the slot is free: %d %s", w.Code, w.Body)
 	}
 }

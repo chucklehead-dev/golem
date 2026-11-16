@@ -18,8 +18,8 @@ const SchemaVersion = 2
 // Ledger writes the access-log records that are golem.spend's rows, one per
 // upstream attempt, as OTel log records whose attributes are the table's
 // columns; the collector writes them to ClickHouse. A row is written when
-// its call ends, whatever the site counter's state, so an outage of the
-// counter keeps no billing rows in memory (ADR 0043).
+// its call ends, whatever the site store's state, so an outage keeps no
+// billing rows in memory (ADR 0043).
 type Ledger struct {
 	logger     otellog.Logger
 	site, pool string

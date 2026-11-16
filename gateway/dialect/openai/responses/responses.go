@@ -31,7 +31,7 @@ var known = map[string]bool{ // read-only
 }
 
 // serverTools are the tool types the provider runs itself: egress, units
-// billed beyond tokens, no declared worst case (ADR 0044).
+// billed beyond tokens (ADR 0044).
 var serverTools = map[string]bool{ // read-only
 	"web_search": true, "web_search_preview": true, "file_search": true, "code_interpreter": true,
 	"mcp": true, "image_generation": true, "computer_use_preview": true, "local_shell": true,

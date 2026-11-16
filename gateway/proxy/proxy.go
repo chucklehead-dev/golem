@@ -43,7 +43,7 @@ type Snapshots interface {
 }
 
 // Result is what a finished call reports: the input to pricing, the
-// counters and the access log (gateway.md §3 step 9).
+// ticket and the access log (gateway.md §3 step 9).
 type Result struct {
 	RequestID uuid.UUID
 	Principal *auth.Principal
@@ -63,7 +63,7 @@ type Result struct {
 type Handler struct {
 	Dialect   Dialect   // the API served: its body, headers and error shapes
 	Snapshots Snapshots // the configuration, taken once per request
-	// Limiter admits calls against budgets, caps and in-flight limits
+	// Limiter admits calls against budgets and in-flight limits
 	// (golem's: limit.Limiter.Admitter); nil admits everything uncounted.
 	Limiter admission.Admitter
 	MaxBody int64 // request body cap in bytes (default 32 MiB)
@@ -91,8 +91,7 @@ type Handler struct {
 	// Health is the deployments' health and the routes' retry budgets the
 	// gateway's handlers share (route.Health); nil: the handler's own.
 	Health *route.Health
-	// Meters counts each call's requests against its rate limits, and each
-	// attempt's against its deployment's share of its provider's quota
+	// Meters counts each call's requests against its rate limits
 	// (gateway/limit's Limiter); nil: none.
 	Meters admission.Meters
 	// Guard is the floor before authentication the gateway's handlers
@@ -180,15 +179,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, no)
 		return
 	}
-	// The call takes a request from its rate limits once (PRD §5.5), and
-	// each attempt one from its deployment's quota share (§9.2, takeQuota).
+	// The call takes a request from its rate limits once (PRD §5.5).
 	if no := h.takeRate(c.bg, c.principal); no != nil {
 		h.fail(ctx, w, no)
 		return
 	}
 	var retryAt time.Time
 	if c.target, c.lease, retryAt = c.next(); c.target == nil {
-		h.fail(ctx, w, noDeployment(c.quotaFull, retryAt))
+		h.fail(ctx, w, noDeployment(retryAt))
 		return
 	}
 	defer func() { c.lease.Release() }() // the last attempt's: when the call is over
@@ -202,8 +200,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: "the request's token count is too large to price safely: lower max_tokens or n"})
 		return
 	}
-	ticket, no := h.admit(ctx, c.principal, req, admission.Call{ID: reqIDs, Alias: rt.Alias, Deployment: c.target.Key(),
-		Model: c.target.Model, Worst: worst, Started: started, Deadline: deadline})
+	ticket, no := h.admit(ctx, c.principal, admission.Call{ID: reqIDs, Alias: rt.Alias, Deployment: c.target.Key(),
+		Model: c.target.Model, Started: started, Deadline: deadline})
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
@@ -235,7 +233,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Scope: pr.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Started: started,
 		Currency: p.snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived()}
 	if ticket != nil {
-		c.row.Period = ticket.Period() // the counter's: one period per call
+		c.row.Period = ticket.Period() // admission's: one period per call
 		c.row.OverBudget = h.overBudget(w, pr, ticket)
 	}
 
@@ -374,15 +372,14 @@ type callState struct {
 
 	// The attempts: the deployments tried and the one being attempted,
 	// with its lease from the deployment's health and its price.
-	hl        *route.Health
-	tried     []bool
-	betas     []string
-	quotaFull bool // a deployment was passed over at its quota
-	target    *route.Target
-	lease     *route.Lease
-	price     libsnapshot.Price
-	attempt   int
-	kept      bool // the caller's body is kept for a retry
+	hl      *route.Health
+	tried   []bool
+	betas   []string
+	target  *route.Target
+	lease   *route.Lease
+	price   libsnapshot.Price
+	attempt int
+	kept    bool // the caller's body is kept for a retry
 
 	row   telemetry.Call  // the attempt's ledger row
 	acct  settlement      // the call's ticket
@@ -493,11 +490,6 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 
 	c.row.Ended, c.row.Status, c.row.Usage, c.row.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
 	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = outcome(res, cut, ended)
-	// The row's end is stamped before the ticket adds the cost to the
-	// counter's minute, so the minute is never before the row's end: a
-	// call that ended after a snapshot's boundary is in the counter's
-	// minutes from it (ADR 0048). One that ends at a minute's last
-	// millisecond may land in both, which errs high.
 	h.Telemetry.Ended(c.ctx, c.row)
 	switch {
 	case c.acct.ticket == nil: // nothing counted
@@ -730,8 +722,7 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 // policy applies the scope's request policy (contracts.md §8): its
 // ceilings on output asked for and on input size (ADR 0038), provider-side
 // storage (ADR 0027: turned off where it can be, refused where it cannot),
-// and server-side tools, refused under the declared-worst-case check, since a
-// request that asks for them declares no worst case (ADR 0044).
+// and the state M1 never keeps at the provider.
 func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
 	lim := p.Limits
 	if c := lim.MaxInputBytes; c > 0 && requestBytes > c {
@@ -763,28 +754,20 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 			ex.forbidStorage(h.Dialect)
 		}
 	}
-	if lim.DeclaredWorstCaseCheck && req.serverTools {
-		return &refusal{code: contract.AuthzFeatureForbidden, msg: "this scope checks each call's declared worst case, and server-side tools (web search or fetch, code execution, MCP servers) declare none: use client-side tools, or a scope without declaredWorstCaseCheck"}
-	}
 	return nil
 }
 
-// admit checks the call against its scope's budget, its key's and
-// member's caps and its in-flight limits (ADR 0031), and takes its slots.
-// c names the call and its route; the principal's scope supplies its
-// limits. A nil ticket with no refusal: no limiter.
-func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c admission.Call) (admission.Ticket, *refusal) {
+// admit checks the call against its scope's budget and its in-flight
+// limits (ADR 0031), and takes its slots. c names the call and its route;
+// the principal's scope supplies its limits. A nil ticket with no
+// refusal: no limiter.
+func (h *Handler) admit(ctx context.Context, p *auth.Principal, c admission.Call) (admission.Ticket, *refusal) {
 	if h.Limiter == nil {
 		return nil, nil
 	}
 	lim := p.Limits
-	if lim.DeclaredWorstCaseCheck && !req.hasMax {
-		return nil, &refusal{code: contract.RequestInvalid, msg: "this scope checks each call's declared worst case: set max_tokens, so it can be checked against the budget"}
-	}
-	c.Principal, c.Scope, c.Key = p.ID, p.Scope, p.Key
+	c.Principal, c.Scope = p.ID, p.Scope
 	c.Budget, c.BudgetMode, c.PrincipalLimit, c.ScopeLimit = lim.BudgetMicros, lim.BudgetMode, lim.PrincipalInFlight, lim.ScopeInFlight
-	c.MemberCap, c.KeyCap = lim.MemberCapMicros, lim.KeyCapMicros
-	c.DeclaredWorstCaseCheck = lim.DeclaredWorstCaseCheck
 	t, err := h.Limiter.Admit(ctx, c)
 	if no, ok := errors.AsType[*admission.Refusal](err); ok {
 		return nil, &refusal{code: no.Code, msg: no.Msg, retryAfter: no.RetryAfter}
@@ -798,33 +781,32 @@ func (h *Handler) admit(ctx context.Context, p *auth.Principal, req scanned, c a
 	return t, nil
 }
 
-// overBudget reports whether an admitted call is over one of its
-// accounts' limits (its scope observes or warns rather than enforcing):
-// its key's cap, its member's, or the scope's budget, for its ledger row;
+// overBudget reports whether an admitted call is over its scope's budget
+// (its scope observes or warns rather than enforcing), for its ledger row;
 // in warn mode the response says so in golem-warning, with the refusal's
-// code and the share of the limit known spend has reached (contracts.md
+// code and the share of the budget known spend has reached (contracts.md
 // §1). It is set before the provider's headers are copied, which never
 // include golem's.
 func (h *Handler) overBudget(w http.ResponseWriter, p *auth.Principal, t admission.Ticket) bool {
-	o := t.OverBudget()
-	if o.Level != admission.NoLevel && p.Limits.BudgetMode == admission.Warn {
-		w.Header()[contract.HeaderWarning] = []string{budgetWarning(o)}
+	over, known := t.OverBudget()
+	if over && p.Limits.BudgetMode == admission.Warn {
+		w.Header()[contract.HeaderWarning] = []string{budgetWarning(known, p.Limits.BudgetMicros)}
 	}
-	return o.Level != admission.NoLevel
+	return over
 }
 
 // budgetWarning is warn mode's golem-warning: the refusal's code, and the
-// share of the limit known spend has reached, rounded down.
-func budgetWarning(o admission.Over) string {
+// share of the budget known spend has reached, rounded down.
+func budgetWarning(known, limit int64) string {
 	var pct int64
-	switch known, limit := o.Known, o.Limit; {
+	switch {
 	case limit <= 0:
 	case known > math.MaxInt64/100: // past any limit: not worth exactness
 		pct = known / limit * 100
 	default:
 		pct = known * 100 / limit
 	}
-	return o.Level.Code().Name + " " + strconv.FormatInt(pct, 10) + "%"
+	return contract.BudgetPoolExhausted.Name + " " + strconv.FormatInt(pct, 10) + "%"
 }
 
 // takeRate takes the call's request from its scope's rate limits (PRD

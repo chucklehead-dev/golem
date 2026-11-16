@@ -94,17 +94,6 @@ spec:
                       type: string
                     name:
                       type: string
-                    quota:
-                      description: 'Quota is this site''s share of the provider account''s
-                        quota for the deployment (PRD §9.2, ADR 0012: each site''s
-                        share set here, split statically), shared by the site''s gateways
-                        in Valkey: an attempt past it goes to the pool''s next deployment,
-                        and a call that finds every one at its quota is refused limit.provider_quota
-                        with a Retry-After.'
-                      properties:
-                        requestsPerMinute:
-                          type: integer
-                      type: object
                     region:
                       description: Region is a bedrock deployment's region, if not
                         its backend's (a failover to another region is another deployment).

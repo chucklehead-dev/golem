@@ -131,7 +131,7 @@ spec: {alias: claude, pool: [{backend: anthropic, deployment: sonnet}]}
 	os.WriteFile(filepath.Join(cfg, "team-a.yaml"), []byte(`apiVersion: golem.dev/v1alpha1
 kind: ScopePolicy
 metadata: {name: team-a}
-spec: {models: [claude]}
+spec: {models: [claude], rateLimits: {scope: {requestsPerMinute: 1000}}}
 `), 0o600)
 	fsRoot, _ := os.OpenRoot(cfg)
 	objs, err := v1.DecodeFS(fsRoot.FS())
@@ -216,13 +216,14 @@ func TestPoolMode(t *testing.T) {
 	if code, body := f.call(t, base); code != 200 || !strings.Contains(body, `"text":"hi"`) {
 		t.Fatalf("the call: %d %s", code, body)
 	}
-	// The call's spend is in the site's Valkey, not a memory store.
+	// The call took its rate limit's request in the site's Valkey, not a
+	// memory store.
 	c, err := valkeygo.NewClient(valkeygo.ClientOption{InitAddress: []string{vk}, DisableCache: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	keys, err := c.Do(ctx, c.B().Keys().Pattern("{golem:test}*").Build()).AsStrSlice()
+	keys, err := c.Do(ctx, c.B().Keys().Pattern("{golem:test}:rate:*").Build()).AsStrSlice()
 	if err != nil || len(keys) == 0 {
 		t.Fatalf("Valkey holds %v (%v): the limiter is not the site's", keys, err)
 	}
