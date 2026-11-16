@@ -181,12 +181,23 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	if !l.Down() {
 		a := Admission{Slot: slotOf(c), Known: known, Budget: refusing(c),
 			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit}
-		sctx, cancel := l.storeContext(ctx)
+		// The store call runs to its own bound, not the caller's: a call
+		// cut by the caller leaving may have taken the slot at the store
+		// without this gateway tracking it, a phantom for the slot's TTL.
+		// Run whole, the answer is known, and an admission the caller no
+		// longer waits for is ended at once.
+		bg := context.WithoutCancel(ctx)
+		sctx, cancel := l.storeContext(bg)
 		o, err := l.store.Admit(sctx, a)
 		cancel()
 		switch {
 		case err == nil:
-			return l.admitted(c, period, known, o)
+			t, err := l.admitted(c, period, known, o)
+			if t != nil && ctx.Err() != nil {
+				t.Complete(bg, 0) // frees the slot: the call never ran
+				return nil, ctx.Err()
+			}
+			return t, err
 		case ctx.Err() != nil:
 			return nil, ctx.Err() // the caller went away: no outage
 		}
