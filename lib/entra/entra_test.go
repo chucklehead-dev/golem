@@ -101,6 +101,34 @@ func TestStartWithoutKeys(t *testing.T) {
 	})
 }
 
+// TestEmptyKeySetKeepsCache: a key set answered with no usable signing
+// key (an empty one, or one of keys Verify cannot use) or that does not
+// parse is a failed refresh: the cached keys stay, and tokens they sign
+// still verify. Before any good set, such an answer leaves the verifier
+// not ready.
+func TestEmptyKeySetKeepsCache(t *testing.T) {
+	ks, pk := newKeySet(t)
+	good := ks.set
+	e := &Verifier{Tenant: "tid", Audiences: []string{"api://golem"}, Client: &http.Client{Transport: ks}}
+	ks.set = []byte(`{"keys":[]}`)
+	if err := e.Refresh(t.Context()); err == nil || e.Ready() {
+		t.Fatalf("an empty first set: %v, ready %v; want a failed refresh", err, e.Ready())
+	}
+	ks.set = good
+	if err := e.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{`{"keys":[]}`, `{}`, `{"keys":[{"kty":"oct","k":"c2VjcmV0","kid":"k1"}]}`, `not json`} {
+		ks.set = []byte(bad)
+		if err := e.Refresh(t.Context()); err == nil {
+			t.Errorf("%s: refreshed", bad)
+		}
+		if id, err := e.Verify(token(t, pk, "k1")); err != nil || id.ID != "alice" {
+			t.Errorf("after %s: %+v, %v; the cached keys must stay", bad, id, err)
+		}
+	}
+}
+
 // TestRefreshDeferred: a refresh asked for within a minute of the last one
 // is made when the minute is up, not dropped until the hourly refresh.
 func TestRefreshDeferred(t *testing.T) {
