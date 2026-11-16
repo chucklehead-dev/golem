@@ -89,3 +89,44 @@ func TestCutStreamsErrorEventBounded(t *testing.T) {
 		t.Fatal("the cut stream's error event blocked past the stall: its write had no deadline")
 	}
 }
+
+// countingDeadlines is a caller that counts the write deadlines set on it.
+type countingDeadlines struct {
+	*httptest.ResponseRecorder
+	n int
+}
+
+func (c *countingDeadlines) SetWriteDeadline(time.Time) error { c.n++; return nil }
+
+// TestWriteWatch: the stall is watched once a call, not set and cleared
+// around each write (under HTTP/2 each is a message to the connection's
+// goroutine, and a timer allocated): a stream's writes that do not stall
+// set no deadline at all. A write that stalls is cut between one and one
+// and a half stalls after it began.
+func TestWriteWatch(t *testing.T) {
+	ex := getExchange()
+	c := &countingDeadlines{ResponseRecorder: httptest.NewRecorder()}
+	ex.startWrites(c, time.Hour)
+	for range 100 {
+		if !ex.send([]byte("data: {}\n\n"), true) {
+			t.Fatal("a write to a reading caller failed")
+		}
+	}
+	ex.release()
+	if c.n != 0 {
+		t.Fatalf("%d write deadlines set for 100 writes that did not stall: want none", c.n)
+	}
+
+	const stall = 200 * time.Millisecond
+	ex = getExchange()
+	defer ex.release()
+	w := newStallingWriter([]byte("stall"))
+	ex.startWrites(w, stall)
+	guard := time.AfterFunc(5*time.Second, func() { close(w.free) }) // uncut, the write would block for ever
+	defer guard.Stop()
+	start := time.Now()
+	ok := ex.send([]byte("stall"), true)
+	if took := time.Since(start); ok || took < stall || took > stall*3/2+100*time.Millisecond {
+		t.Fatalf("a stalled write returned ok %v after %v: want it cut within 1 to 1.5 stalls (%v)", ok, took, stall)
+	}
+}

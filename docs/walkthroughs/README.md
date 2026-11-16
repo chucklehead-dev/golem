@@ -218,7 +218,7 @@ the same process; its writes are ordinary compare-and-swap updates.
 | A revoked or denied caller's calls in flight end within seconds; lease expiry ends none | `InFlight.Sweep`, `Keys.Honours`, `terminatedBy` | `TestTerminateStream`, `TestTerminateWhole`, `TestLeaseExpiryEndsNoCall`, `TestTerminateRace`, `TestSweepSparesANewerGrant`, `TestWiringEndsWithdrawnCalls` |
 | Only allowlisted headers cross; golem's and `OpenAI-Organization` never reach the provider | `Dialect.forwardRequest`, `copyHeaders` | `TestHeaders`, `TestOpenAIHeaders` |
 | The injected usage chunk never reaches the caller | `startStream`, `sse.Filter` | `TestInjectedUsageWithheld` |
-| A slow client or a silent provider is bounded; a fired alarm cancels no later call | `exchange.send`'s write deadline, `bounds`, `alarm.disarm` | `TestStalledClient`, `TestSilentProviderKeepsClient`, `TestCutStreamsErrorEventBounded`, `TestRouteBounds`, `TestBoundsReuse`, `TestBoundsRace` |
+| A slow client or a silent provider is bounded (a stalled write cut within 1 to 1.5 stalls); a fired alarm cancels no later call | `exchange.send`, `writeWatch`, `bounds`, `alarm.disarm` | `TestStalledClient`, `TestSilentProviderKeepsClient`, `TestCutStreamsErrorEventBounded`, `TestWriteWatch`, `TestRouteBounds`, `TestBoundsReuse`, `TestBoundsRace` |
 | Policy: ceilings, storage, feature modes | `Handler.policy`, `Handler.features` | `TestPolicy`, `TestStoreOff`, `TestPolicyUnits`, `TestFeatureModes` |
 | `count_tokens` is held to a call's checks, short of admission | `ServeCountTokens` | `TestCountTokens`, `TestCountTokensChecks`, `TestCountTokensWiring` |
 | A model list holds only the scope's aliases | `ServeModels` | `TestModels` |
