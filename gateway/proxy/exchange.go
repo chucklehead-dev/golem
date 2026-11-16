@@ -34,6 +34,10 @@ type exchange struct {
 	overflow   bool       // the response outgrew kept: its usage is not read from a part
 	callerGone bool       // a write to the caller failed
 	received   int64      // the response's bytes so far (MaxResponse; an estimate's bound)
+	// streamErr: the stream carried its dialect's error event (an
+	// Anthropic or Bedrock event: error, an OpenAI chunk with "error"),
+	// after its output began: the provider failed it, however it ended.
+	streamErr bool
 
 	// The usage readers' methods, bound once: a method value allocates
 	// each time it is taken, and the readers stay at these addresses.
@@ -62,7 +66,24 @@ type exchange struct {
 // readers' methods once, at the addresses they keep.
 var exchanges = sync.Pool{New: func() any {
 	ex := &exchange{buf: make([]byte, copyBuffer)}
-	ex.msgWant, ex.msgOn, ex.chatOn, ex.respOn = ex.msgUsage.Want, ex.msgUsage.OnEvent, ex.chatUsage.OnEvent, ex.respUsage.OnEvent
+	// Each also notes the dialect's error event (streamErr); Anthropic's
+	// usage reader wants none, so its error events are not passed to it.
+	ex.msgWant = func(event []byte) bool { return string(event) == "error" || ex.msgUsage.Want(event) }
+	ex.msgOn = func(event, data []byte) {
+		if isErrorEvent(AnthropicMessages, event, data) {
+			ex.streamErr = true
+			return
+		}
+		ex.msgUsage.OnEvent(event, data)
+	}
+	ex.chatOn = func(event, data []byte) {
+		ex.streamErr = ex.streamErr || isErrorEvent(OpenAIChat, event, data)
+		ex.chatUsage.OnEvent(event, data)
+	}
+	ex.respOn = func(event, data []byte) {
+		ex.streamErr = ex.streamErr || isErrorEvent(OpenAIResponses, event, data)
+		ex.respUsage.OnEvent(event, data)
+	}
 	ex.filter.Drop = dropUsageOnly
 	ex.first.parser.OnEvent = ex.first.onEvent
 	ex.lim = newBounds()
@@ -74,7 +95,7 @@ var exchanges = sync.Pool{New: func() any {
 // startWrites, bound).
 func getExchange() *exchange {
 	ex := exchanges.Get().(*exchange)
-	ex.callerGone, ex.received = false, 0
+	ex.callerGone, ex.received, ex.streamErr = false, 0, false
 	return ex
 }
 

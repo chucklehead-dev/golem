@@ -492,7 +492,7 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 	res.Cost = price.Cost(res.Usage, c.price)
 
 	c.row.Ended, c.row.Status, c.row.Usage, c.row.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
-	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = outcome(res, cut, ended)
+	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = outcome(res, cut || streamed && ex.streamErr, ended)
 	h.Telemetry.Ended(c.ctx, c.row)
 	switch {
 	case c.acct.ticket == nil: // nothing counted
@@ -888,14 +888,16 @@ func coded(outcome string, c contract.Code) (string, string, string) {
 }
 
 // outcome is a finished call's ledger outcome, and the failure's origin and
-// code (contracts.md §3).
+// code (contracts.md §3). cut is a response that ended early, or a stream
+// that carried its provider's error event after its output began: either
+// is a failure, however much was delivered (and charged) before it.
 func outcome(res Result, cut bool, ended *errTerminated) (outcome, origin, code string) {
 	switch {
 	case res.CallerGone:
 		return outcomeCancelled, string(contract.OriginClient), ""
 	case res.Terminated:
 		return coded(outcomeTerminated, ended.code)
-	case cut:
+	case cut: // or a stream whose provider sent its error event
 		return coded(outcomeFailed, contract.UpstreamStreamFailed)
 	case res.Status >= 400:
 		return outcomeFailed, string(contract.OriginProvider), ""
