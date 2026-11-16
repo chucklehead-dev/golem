@@ -66,15 +66,12 @@ LIMIT 1 BY event_id;
 -- spend job reads it every minute; golem.spend_dedup would sort the whole
 -- wide table each time.
 --
--- Its principal and key are the accounts below the scope's (members' and
--- keys' caps, org-model.md §4.2); an event's are fixed with it.
---
 -- Exact: a duplicate of an event (a retried batch, at-least-once delivery)
 -- has the same scope, event_id and period, so the same sorting key in the
 -- same partition, and ReplacingMergeTree keeps one. Merges do that
 -- eventually; FINAL does it at read time, within the one partition the
 -- query names, so a read never counts a duplicate whether or not it has
--- been merged yet. The cost is a read of seven narrow columns of one month.
+-- been merged yet. The cost is a read of five narrow columns of one month.
 -- Measured on ClickHouse 24.8 (one node, Docker), 5 million rows over 200
 -- scopes with 1% delivered twice and unmerged: this table's query 170 ms
 -- and 86 MiB, golem.spend_dedup's 1.96 s and 769 MiB, identical results.
@@ -82,13 +79,11 @@ LIMIT 1 BY event_id;
 -- step is a per-minute rollup of the minutes old enough to be merged, with
 -- FINAL only over the recent ones.
 CREATE TABLE IF NOT EXISTS golem.spend_by_event (
-    period       Date,
-    scope_id     String,
-    principal_id String,
-    key_id       String,
-    event_id     UUID,
-    ended_at     DateTime64(3, 'UTC'),
-    cost_micros  Int64
+    period      Date,
+    scope_id    String,
+    event_id    UUID,
+    ended_at    DateTime64(3, 'UTC'),
+    cost_micros Int64
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY period
@@ -96,9 +91,9 @@ ORDER BY (scope_id, event_id);
 
 -- Rows inserted before this view existed are not in the table: on a ledger
 -- that already has rows, backfill once with
---   INSERT INTO golem.spend_by_event SELECT period, scope_id, principal_id, key_id, event_id, ended_at, cost_micros FROM golem.spend;
+--   INSERT INTO golem.spend_by_event SELECT period, scope_id, event_id, ended_at, cost_micros FROM golem.spend;
 CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_by_event_mv TO golem.spend_by_event AS
-SELECT period, scope_id, principal_id, key_id, event_id, ended_at, cost_micros FROM golem.spend;
+SELECT period, scope_id, event_id, ended_at, cost_micros FROM golem.spend;
 
 -- Ingestion lag's input (ADR 0048): each site's latest ended_at, filled
 -- from golem.spend by the materialized view below as rows arrive. Known

@@ -62,11 +62,5 @@ func (o org) ListScopes(ctx context.Context, _ *connect.Request[orgv1.ListScopes
 
 func (o org) GetScope(ctx context.Context, r *connect.Request[orgv1.GetScopeRequest]) (*connect.Response[orgv1.GetScopeResponse], error) {
 	v, err := o.Service.GetScope(ctx, caller(ctx), r.Msg.Id)
-	return reply(o.Server, &orgv1.GetScopeResponse{Id: v.ID, Members: v.Members, Managers: v.Managers, Groups: v.Groups, Caps: v.Caps}, err)
-}
-
-func (o org) SetMemberCap(ctx context.Context, r *connect.Request[orgv1.SetMemberCapRequest]) (*connect.Response[orgv1.SetMemberCapResponse], error) {
-	m := r.Msg
-	err := o.Service.SetMemberCap(ctx, caller(ctx), options(m.ValidateOnly), m.Scope, m.Principal, m.CapMicros)
-	return reply(o.Server, &orgv1.SetMemberCapResponse{}, err)
+	return reply(o.Server, &orgv1.GetScopeResponse{Id: v.ID, Members: v.Members, Managers: v.Managers, Groups: v.Groups}, err)
 }

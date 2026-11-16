@@ -34,9 +34,7 @@ type MintKeyRequest struct {
 	Expires *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires,proto3" json:"expires,omitempty"`
 	// Checks the change, its authorization and the store's invariants, and
 	// writes nothing (golemctl --dry-run).
-	ValidateOnly bool `protobuf:"varint,5,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
-	// The key's spend cap for each period, in micro-units; 0: none.
-	CapMicros     int64 `protobuf:"varint,6,opt,name=cap_micros,json=capMicros,proto3" json:"cap_micros,omitempty"`
+	ValidateOnly  bool `protobuf:"varint,5,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -104,13 +102,6 @@ func (x *MintKeyRequest) GetValidateOnly() bool {
 		return x.ValidateOnly
 	}
 	return false
-}
-
-func (x *MintKeyRequest) GetCapMicros() int64 {
-	if x != nil {
-		return x.CapMicros
-	}
-	return 0
 }
 
 type MintKeyResponse struct {
@@ -316,14 +307,12 @@ type Key struct {
 	// The key's hex SHA-256, which names it.
 	Hash string `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
 	// The shown prefix.
-	Display string                 `protobuf:"bytes,2,opt,name=display,proto3" json:"display,omitempty"`
-	Owner   string                 `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
-	Scope   string                 `protobuf:"bytes,4,opt,name=scope,proto3" json:"scope,omitempty"`
-	Models  []string               `protobuf:"bytes,5,rep,name=models,proto3" json:"models,omitempty"`
-	Expires *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=expires,proto3" json:"expires,omitempty"`
-	Revoked *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=revoked,proto3" json:"revoked,omitempty"`
-	// Its spend cap for each period, in micro-units; 0: none.
-	CapMicros     int64 `protobuf:"varint,8,opt,name=cap_micros,json=capMicros,proto3" json:"cap_micros,omitempty"`
+	Display       string                 `protobuf:"bytes,2,opt,name=display,proto3" json:"display,omitempty"`
+	Owner         string                 `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
+	Scope         string                 `protobuf:"bytes,4,opt,name=scope,proto3" json:"scope,omitempty"`
+	Models        []string               `protobuf:"bytes,5,rep,name=models,proto3" json:"models,omitempty"`
+	Expires       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=expires,proto3" json:"expires,omitempty"`
+	Revoked       *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=revoked,proto3" json:"revoked,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -407,112 +396,6 @@ func (x *Key) GetRevoked() *timestamppb.Timestamp {
 	return nil
 }
 
-func (x *Key) GetCapMicros() int64 {
-	if x != nil {
-		return x.CapMicros
-	}
-	return 0
-}
-
-type SetKeyCapRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	Hash  string                 `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
-	// Micro-units of the currency for each period; 0 removes the cap.
-	CapMicros int64 `protobuf:"varint,2,opt,name=cap_micros,json=capMicros,proto3" json:"cap_micros,omitempty"`
-	// Checks the change, its authorization and the store's invariants, and
-	// writes nothing (golemctl --dry-run).
-	ValidateOnly  bool `protobuf:"varint,3,opt,name=validate_only,json=validateOnly,proto3" json:"validate_only,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetKeyCapRequest) Reset() {
-	*x = SetKeyCapRequest{}
-	mi := &file_golem_keys_v1_keys_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetKeyCapRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetKeyCapRequest) ProtoMessage() {}
-
-func (x *SetKeyCapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_keys_v1_keys_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetKeyCapRequest.ProtoReflect.Descriptor instead.
-func (*SetKeyCapRequest) Descriptor() ([]byte, []int) {
-	return file_golem_keys_v1_keys_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *SetKeyCapRequest) GetHash() string {
-	if x != nil {
-		return x.Hash
-	}
-	return ""
-}
-
-func (x *SetKeyCapRequest) GetCapMicros() int64 {
-	if x != nil {
-		return x.CapMicros
-	}
-	return 0
-}
-
-func (x *SetKeyCapRequest) GetValidateOnly() bool {
-	if x != nil {
-		return x.ValidateOnly
-	}
-	return false
-}
-
-type SetKeyCapResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetKeyCapResponse) Reset() {
-	*x = SetKeyCapResponse{}
-	mi := &file_golem_keys_v1_keys_proto_msgTypes[7]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetKeyCapResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetKeyCapResponse) ProtoMessage() {}
-
-func (x *SetKeyCapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_keys_v1_keys_proto_msgTypes[7]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetKeyCapResponse.ProtoReflect.Descriptor instead.
-func (*SetKeyCapResponse) Descriptor() ([]byte, []int) {
-	return file_golem_keys_v1_keys_proto_rawDescGZIP(), []int{7}
-}
-
 type ListKeysResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Keys          []*Key                 `protobuf:"bytes,1,rep,name=keys,proto3" json:"keys,omitempty"`
@@ -522,7 +405,7 @@ type ListKeysResponse struct {
 
 func (x *ListKeysResponse) Reset() {
 	*x = ListKeysResponse{}
-	mi := &file_golem_keys_v1_keys_proto_msgTypes[8]
+	mi := &file_golem_keys_v1_keys_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -534,7 +417,7 @@ func (x *ListKeysResponse) String() string {
 func (*ListKeysResponse) ProtoMessage() {}
 
 func (x *ListKeysResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_golem_keys_v1_keys_proto_msgTypes[8]
+	mi := &file_golem_keys_v1_keys_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -547,7 +430,7 @@ func (x *ListKeysResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListKeysResponse.ProtoReflect.Descriptor instead.
 func (*ListKeysResponse) Descriptor() ([]byte, []int) {
-	return file_golem_keys_v1_keys_proto_rawDescGZIP(), []int{8}
+	return file_golem_keys_v1_keys_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ListKeysResponse) GetKeys() []*Key {
@@ -561,15 +444,14 @@ var File_golem_keys_v1_keys_proto protoreflect.FileDescriptor
 
 const file_golem_keys_v1_keys_proto_rawDesc = "" +
 	"\n" +
-	"\x18golem/keys/v1/keys.proto\x12\rgolem.keys.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xce\x01\n" +
+	"\x18golem/keys/v1/keys.proto\x12\rgolem.keys.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc1\x01\n" +
 	"\x0eMintKeyRequest\x12\x14\n" +
 	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x14\n" +
 	"\x05scope\x18\x02 \x01(\tR\x05scope\x12\x16\n" +
 	"\x06models\x18\x03 \x03(\tR\x06models\x124\n" +
 	"\aexpires\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\aexpires\x12#\n" +
-	"\rvalidate_only\x18\x05 \x01(\bR\fvalidateOnly\x12\x1d\n" +
-	"\n" +
-	"cap_micros\x18\x06 \x01(\x03R\tcapMicros\"Q\n" +
+	"\rvalidate_only\x18\x05 \x01(\bR\fvalidateOnlyJ\x04\b\x06\x10\aR\n" +
+	"cap_micros\"Q\n" +
 	"\x0fMintKeyResponse\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
 	"\x04hash\x18\x02 \x01(\tR\x04hash\x12\x18\n" +
@@ -579,7 +461,7 @@ const file_golem_keys_v1_keys_proto_rawDesc = "" +
 	"\rvalidate_only\x18\x02 \x01(\bR\fvalidateOnly\"\x13\n" +
 	"\x11RevokeKeyResponse\"'\n" +
 	"\x0fListKeysRequest\x12\x14\n" +
-	"\x05scope\x18\x01 \x01(\tR\x05scope\"\x82\x02\n" +
+	"\x05scope\x18\x01 \x01(\tR\x05scope\"\xf5\x01\n" +
 	"\x03Key\x12\x12\n" +
 	"\x04hash\x18\x01 \x01(\tR\x04hash\x12\x18\n" +
 	"\adisplay\x18\x02 \x01(\tR\adisplay\x12\x14\n" +
@@ -587,23 +469,15 @@ const file_golem_keys_v1_keys_proto_rawDesc = "" +
 	"\x05scope\x18\x04 \x01(\tR\x05scope\x12\x16\n" +
 	"\x06models\x18\x05 \x03(\tR\x06models\x124\n" +
 	"\aexpires\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\aexpires\x124\n" +
-	"\arevoked\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\arevoked\x12\x1d\n" +
-	"\n" +
-	"cap_micros\x18\b \x01(\x03R\tcapMicros\"j\n" +
-	"\x10SetKeyCapRequest\x12\x12\n" +
-	"\x04hash\x18\x01 \x01(\tR\x04hash\x12\x1d\n" +
-	"\n" +
-	"cap_micros\x18\x02 \x01(\x03R\tcapMicros\x12#\n" +
-	"\rvalidate_only\x18\x03 \x01(\bR\fvalidateOnly\"\x13\n" +
-	"\x11SetKeyCapResponse\":\n" +
+	"\arevoked\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\arevokedJ\x04\b\b\x10\tR\n" +
+	"cap_micros\":\n" +
 	"\x10ListKeysResponse\x12&\n" +
-	"\x04keys\x18\x01 \x03(\v2\x12.golem.keys.v1.KeyR\x04keys2\xc3\x02\n" +
+	"\x04keys\x18\x01 \x03(\v2\x12.golem.keys.v1.KeyR\x04keys2\xf3\x01\n" +
 	"\n" +
 	"KeyService\x12H\n" +
 	"\aMintKey\x12\x1d.golem.keys.v1.MintKeyRequest\x1a\x1e.golem.keys.v1.MintKeyResponse\x12N\n" +
 	"\tRevokeKey\x12\x1f.golem.keys.v1.RevokeKeyRequest\x1a .golem.keys.v1.RevokeKeyResponse\x12K\n" +
-	"\bListKeys\x12\x1e.golem.keys.v1.ListKeysRequest\x1a\x1f.golem.keys.v1.ListKeysResponse\x12N\n" +
-	"\tSetKeyCap\x12\x1f.golem.keys.v1.SetKeyCapRequest\x1a .golem.keys.v1.SetKeyCapResponseB;Z9github.com/chucklehead-dev/golem/gen/golem/keys/v1;keysv1b\x06proto3"
+	"\bListKeys\x12\x1e.golem.keys.v1.ListKeysRequest\x1a\x1f.golem.keys.v1.ListKeysResponseB;Z9github.com/chucklehead-dev/golem/gen/golem/keys/v1;keysv1b\x06proto3"
 
 var (
 	file_golem_keys_v1_keys_proto_rawDescOnce sync.Once
@@ -617,7 +491,7 @@ func file_golem_keys_v1_keys_proto_rawDescGZIP() []byte {
 	return file_golem_keys_v1_keys_proto_rawDescData
 }
 
-var file_golem_keys_v1_keys_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_golem_keys_v1_keys_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_golem_keys_v1_keys_proto_goTypes = []any{
 	(*MintKeyRequest)(nil),        // 0: golem.keys.v1.MintKeyRequest
 	(*MintKeyResponse)(nil),       // 1: golem.keys.v1.MintKeyResponse
@@ -625,26 +499,22 @@ var file_golem_keys_v1_keys_proto_goTypes = []any{
 	(*RevokeKeyResponse)(nil),     // 3: golem.keys.v1.RevokeKeyResponse
 	(*ListKeysRequest)(nil),       // 4: golem.keys.v1.ListKeysRequest
 	(*Key)(nil),                   // 5: golem.keys.v1.Key
-	(*SetKeyCapRequest)(nil),      // 6: golem.keys.v1.SetKeyCapRequest
-	(*SetKeyCapResponse)(nil),     // 7: golem.keys.v1.SetKeyCapResponse
-	(*ListKeysResponse)(nil),      // 8: golem.keys.v1.ListKeysResponse
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(*ListKeysResponse)(nil),      // 6: golem.keys.v1.ListKeysResponse
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
 }
 var file_golem_keys_v1_keys_proto_depIdxs = []int32{
-	9, // 0: golem.keys.v1.MintKeyRequest.expires:type_name -> google.protobuf.Timestamp
-	9, // 1: golem.keys.v1.Key.expires:type_name -> google.protobuf.Timestamp
-	9, // 2: golem.keys.v1.Key.revoked:type_name -> google.protobuf.Timestamp
+	7, // 0: golem.keys.v1.MintKeyRequest.expires:type_name -> google.protobuf.Timestamp
+	7, // 1: golem.keys.v1.Key.expires:type_name -> google.protobuf.Timestamp
+	7, // 2: golem.keys.v1.Key.revoked:type_name -> google.protobuf.Timestamp
 	5, // 3: golem.keys.v1.ListKeysResponse.keys:type_name -> golem.keys.v1.Key
 	0, // 4: golem.keys.v1.KeyService.MintKey:input_type -> golem.keys.v1.MintKeyRequest
 	2, // 5: golem.keys.v1.KeyService.RevokeKey:input_type -> golem.keys.v1.RevokeKeyRequest
 	4, // 6: golem.keys.v1.KeyService.ListKeys:input_type -> golem.keys.v1.ListKeysRequest
-	6, // 7: golem.keys.v1.KeyService.SetKeyCap:input_type -> golem.keys.v1.SetKeyCapRequest
-	1, // 8: golem.keys.v1.KeyService.MintKey:output_type -> golem.keys.v1.MintKeyResponse
-	3, // 9: golem.keys.v1.KeyService.RevokeKey:output_type -> golem.keys.v1.RevokeKeyResponse
-	8, // 10: golem.keys.v1.KeyService.ListKeys:output_type -> golem.keys.v1.ListKeysResponse
-	7, // 11: golem.keys.v1.KeyService.SetKeyCap:output_type -> golem.keys.v1.SetKeyCapResponse
-	8, // [8:12] is the sub-list for method output_type
-	4, // [4:8] is the sub-list for method input_type
+	1, // 7: golem.keys.v1.KeyService.MintKey:output_type -> golem.keys.v1.MintKeyResponse
+	3, // 8: golem.keys.v1.KeyService.RevokeKey:output_type -> golem.keys.v1.RevokeKeyResponse
+	6, // 9: golem.keys.v1.KeyService.ListKeys:output_type -> golem.keys.v1.ListKeysResponse
+	7, // [7:10] is the sub-list for method output_type
+	4, // [4:7] is the sub-list for method input_type
 	4, // [4:4] is the sub-list for extension type_name
 	4, // [4:4] is the sub-list for extension extendee
 	0, // [0:4] is the sub-list for field type_name
@@ -661,7 +531,7 @@ func file_golem_keys_v1_keys_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_golem_keys_v1_keys_proto_rawDesc), len(file_golem_keys_v1_keys_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -180,19 +180,6 @@ func (r *restorer) principal(id string, b, c Principal) Principal {
 			break
 		}
 	}
-	// Each cap the narrower of the two (a cap removed since the backup is
-	// put back): a restore never widens.
-	for _, s := range p.Members() {
-		if v := lowerCap(b.Caps[s], c.Caps[s]); v > 0 {
-			if p.Caps == nil {
-				p.Caps = map[string]int64{}
-			}
-			p.Caps[s] = v
-			if v != c.Caps[s] {
-				r.remove("principal %s's cap in %s (back to the backup's)", id, s)
-			}
-		}
-	}
 	return p
 }
 
@@ -215,10 +202,6 @@ func (r *restorer) key(h string, b, c Key) {
 	case c.ExpiresAt.IsZero() || b.ExpiresAt.Before(c.ExpiresAt):
 		k.ExpiresAt = b.ExpiresAt
 		r.remove("key %s's later expiry (back to the backup's %s)", c.Display, b.ExpiresAt.Format(time.RFC3339))
-	}
-	if v := lowerCap(b.CapMicros, c.CapMicros); v != c.CapMicros {
-		k.CapMicros = v
-		r.remove("key %s's raised or removed cap (back to the backup's)", c.Display)
 	}
 	r.next.Keys[h] = k
 	if k.RevokedAt.IsZero() && len(k.Models) == 0 && (len(b.Models) > 0 || len(c.Models) > 0) {

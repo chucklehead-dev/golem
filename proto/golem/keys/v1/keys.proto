@@ -18,9 +18,6 @@ service KeyService {
   // The keys the caller may see: its own, those of the scopes it manages,
   // every key for admins. Never the key itself.
   rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
-  // Sets a key's spend cap for each period (0 removes it): its owner, its
-  // scope's managers, or admins.
-  rpc SetKeyCap(SetKeyCapRequest) returns (SetKeyCapResponse);
 }
 
 message MintKeyRequest {
@@ -33,8 +30,8 @@ message MintKeyRequest {
   // Checks the change, its authorization and the store's invariants, and
   // writes nothing (golemctl --dry-run).
   bool validate_only = 5;
-  // The key's spend cap for each period, in micro-units; 0: none.
-  int64 cap_micros = 6;
+  reserved 6;
+  reserved "cap_micros";
 }
 
 message MintKeyResponse {
@@ -70,20 +67,9 @@ message Key {
   repeated string models = 5;
   google.protobuf.Timestamp expires = 6;
   google.protobuf.Timestamp revoked = 7;
-  // Its spend cap for each period, in micro-units; 0: none.
-  int64 cap_micros = 8;
+  reserved 8;
+  reserved "cap_micros";
 }
-
-message SetKeyCapRequest {
-  string hash = 1;
-  // Micro-units of the currency for each period; 0 removes the cap.
-  int64 cap_micros = 2;
-  // Checks the change, its authorization and the store's invariants, and
-  // writes nothing (golemctl --dry-run).
-  bool validate_only = 3;
-}
-
-message SetKeyCapResponse {}
 
 message ListKeysResponse {
   repeated Key keys = 1;

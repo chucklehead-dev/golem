@@ -50,12 +50,7 @@ const usage = `usage:
   golemctl groups bind <scope> <entra-group-id> [--dry-run]
   golemctl groups unbind <scope> <entra-group-id> [--dry-run]
   golemctl managers add <scope> <principal> [--dry-run]
-  golemctl members cap <scope> <principal> <amount> [--dry-run]
-      Sets a member's spend cap in the scope for each period, in the currency (0 removes it:
-      the ScopePolicy's defaultMemberCapMicros applies).
-  golemctl keys create --scope <scope> [--owner <principal>] [--models a,b] [--expires 30d] [--cap <amount>] [--dry-run]
-  golemctl keys cap <hash> <amount> [--dry-run]
-      Sets a key's spend cap for each period, in the currency (0 removes it).
+  golemctl keys create --scope <scope> [--owner <principal>] [--models a,b] [--expires 30d] [--dry-run]
   golemctl keys revoke <hash> [--dry-run]`
 
 func main() { os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }

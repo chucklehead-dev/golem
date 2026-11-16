@@ -395,37 +395,3 @@ func isAuditEvent(e ast.Expr) bool {
 	}
 	return false
 }
-
-// TestCapWidens: a cap raised or removed widens access, one lowered or set
-// where there was none does not, for a member and for a key; so a lowered
-// cap lands past the outbox's reserve and a raised one is held back.
-func TestCapWidens(t *testing.T) {
-	doc := func(member, key int64) *Document {
-		d := &Document{Scopes: map[string]Scope{"a": {}},
-			Principals: map[string]Principal{"alice": {Kind: "user", Scopes: []string{"a"}}},
-			Keys:       map[string]Key{"h": {Display: "glm_h", Owner: "alice", Scope: "a", CapMicros: key}}}
-		if member > 0 {
-			p := d.Principals["alice"]
-			p.Caps = map[string]int64{"a": member}
-			d.Principals["alice"] = p
-		}
-		return d
-	}
-	for _, tc := range []struct {
-		name     string
-		from, to [2]int64 // member, key
-		widens   bool
-	}{
-		{"member lowered", [2]int64{10, 0}, [2]int64{5, 0}, false},
-		{"member set", [2]int64{0, 0}, [2]int64{5, 0}, false},
-		{"member raised", [2]int64{5, 0}, [2]int64{10, 0}, true},
-		{"member removed", [2]int64{5, 0}, [2]int64{0, 0}, true},
-		{"key lowered", [2]int64{0, 10}, [2]int64{0, 5}, false},
-		{"key raised", [2]int64{0, 5}, [2]int64{0, 10}, true},
-		{"key removed", [2]int64{0, 5}, [2]int64{0, 0}, true},
-	} {
-		if got := widens(doc(tc.from[0], tc.from[1]), doc(tc.to[0], tc.to[1])) != ""; got != tc.widens {
-			t.Errorf("%s: widens %v, want %v", tc.name, got, tc.widens)
-		}
-	}
-}

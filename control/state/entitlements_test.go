@@ -51,19 +51,6 @@ func TestEntitlementInvariants(t *testing.T) {
 		"a synced membership of no scope": func(d *Document) {
 			d.Principals["syn"] = Principal{Kind: "user", Entra: "oid-9", Synced: []string{"z"}}
 		},
-		"a cap in a scope that does not exist": func(d *Document) {
-			p := d.Principals["alice"]
-			p.Caps = map[string]int64{"gone": 5}
-			d.Principals["alice"] = p
-		},
-		"a cap of zero": func(d *Document) {
-			p := d.Principals["alice"]
-			p.Caps = map[string]int64{"a": 0}
-			d.Principals["alice"] = p
-		},
-		"a negative key cap": func(d *Document) {
-			d.Keys["h2"] = Key{Display: "glm_live_2", Owner: "bot", Scope: "a", CapMicros: -1}
-		},
 		"two keys with one display ID": func(d *Document) {
 			d.Keys["h3"] = Key{Display: "glm_live_2", Owner: "bot", Scope: "a"}
 		},
@@ -100,34 +87,6 @@ func TestEntitlementsView(t *testing.T) {
 	}
 	if len(e.Keys) != 2 || e.Keys[0].Revoked || !e.Keys[1].Revoked || e.Keys[0].PrincipalKind != "user" {
 		t.Fatalf("keys %+v", e.Keys)
-	}
-}
-
-// TestEntitlementsCaps: a member's own cap is published in its scope, only
-// while it is a member there, and a key's cap with the key.
-func TestEntitlementsCaps(t *testing.T) {
-	s := seeded(t)
-	if _, err := s.Update(t.Context(), func(d *Document) error {
-		p := d.Principals["alice"]
-		p.Caps = map[string]int64{"a": 5, "b": 7}
-		d.Principals["alice"] = p
-		b := d.Principals["bot"]
-		b.Caps = map[string]int64{"b": 9} // not a member of b: unpublished
-		d.Principals["bot"] = b
-		k := d.Keys["h2"]
-		k.CapMicros = 3
-		d.Keys["h2"] = k
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	e := s.Current().Entitlements(nil)
-	if want := []snapshot.Scope{{ID: "a", Members: []snapshot.MemberAccount{{Principal: "alice", CapMicros: 5}}},
-		{ID: "b", Members: []snapshot.MemberAccount{{Principal: "alice", CapMicros: 7}}}}; !reflect.DeepEqual(e.Scopes, want) {
-		t.Fatalf("scopes %+v, want %+v", e.Scopes, want)
-	}
-	if e.Keys[0].CapMicros != 0 || e.Keys[1].CapMicros != 3 {
-		t.Fatalf("keys %+v: want h2's cap of 3", e.Keys)
 	}
 }
 
