@@ -54,6 +54,8 @@ type exchange struct {
 	first firstEvent // a stream's bytes until its first event: the commit point
 
 	call inFlightCall // the call's entry in Handler.InFlight, while admitted
+
+	tried []bool // the deployments the call has attempted (pick)
 }
 
 // exchanges pools the per-request working memory; New binds the usage

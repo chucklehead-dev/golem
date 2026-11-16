@@ -62,18 +62,16 @@ var (
 var approvedVersions = map[string]bool{"2023-06-01": true, "2026-10-21": true} // read-only
 
 // restrictedHeaders checks, in restricted mode, the feature headers the
-// dialect forwards: an Anthropic call's betas must be approved on the
-// route and its API version approved here. Another API forwards no
-// anthropic-* header (forwardRequest), so it checks none.
-func (d Dialect) restrictedHeaders(hdr http.Header, rt *route.Route) *refusal {
+// dialect forwards: an Anthropic call's betas (requestBetas) must be
+// approved on the route and its API version approved here. Another API
+// forwards no anthropic-* header (forwardRequest), so it checks none.
+func (d Dialect) restrictedHeaders(hdr http.Header, rt *route.Route, betas []string) *refusal {
 	if d != AnthropicMessages {
 		return nil
 	}
-	for _, v := range hdr.Values("Anthropic-Beta") {
-		for b := range strings.SplitSeq(v, ",") {
-			if b = strings.TrimSpace(b); b != "" && !rt.Betas[b] {
-				return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
-			}
+	for _, b := range betas {
+		if !rt.Betas[b] {
+			return &refusal{code: contract.AuthzFeatureForbidden, msg: "anthropic-beta " + b + " is not approved on this route (restricted mode); its managers can approve it"}
 		}
 	}
 	// Every value, as every value is forwarded: an approved first value
@@ -153,27 +151,24 @@ func (ex *exchange) rewrite(d Dialect, dst, body []byte, model string) []byte {
 // provider for usage the caller did not, and the usage-only chunk must be
 // withheld (some SDKs fail on a chunk with no choices).
 func (ex *exchange) startStream(d Dialect) (filter bool) {
-	if d == AnthropicMessages {
+	switch d {
+	case AnthropicMessages:
 		ex.msgUsage = messages.StreamUsage{}
 		ex.parser.Want, ex.parser.OnEvent = ex.msgWant, ex.msgOn
-		ex.parser.Reset()
-		return false
-	}
-	if d == OpenAIResponses { // its terminal event carries usage: nothing to ask for
+	case OpenAIResponses: // its terminal event carries usage: nothing to ask for
 		ex.respUsage = responses.StreamUsage{}
 		ex.parser.Want, ex.parser.OnEvent = nil, ex.respOn
-		ex.parser.Reset()
-		return false
-	}
-	ex.chatUsage = chat.StreamUsage{}
-	if !ex.chat.InjectedUsage() {
+	default:
+		ex.chatUsage = chat.StreamUsage{}
+		if ex.chat.InjectedUsage() {
+			ex.filter.Want, ex.filter.OnEvent = nil, ex.chatOn
+			ex.filter.Reset()
+			return true
+		}
 		ex.parser.Want, ex.parser.OnEvent = nil, ex.chatOn
-		ex.parser.Reset()
-		return false
 	}
-	ex.filter.Want, ex.filter.OnEvent = nil, ex.chatOn
-	ex.filter.Reset()
-	return true
+	ex.parser.Reset()
+	return false
 }
 
 // readWhole reads a non-streamed response's usage from its kept bytes; a

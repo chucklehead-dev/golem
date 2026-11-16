@@ -46,7 +46,7 @@ type firstEvent struct {
 // body to relay, its held bytes first.
 func (f *firstEvent) await(d Dialect, body io.Reader, buf []byte) (failed bool) {
 	f.d, f.done, f.failed, f.err, f.body, f.off = d, false, false, nil, body, 0
-	f.held = keep(f.held)
+	f.held = reusable(f.held)
 	f.parser.Reset()
 	for !f.done && len(f.held) < maxFirst {
 		n, err := body.Read(buf)
@@ -81,8 +81,8 @@ func (f *firstEvent) Read(p []byte) (int, error) {
 	return f.body.Read(p)
 }
 
-// keep is a held buffer to reuse, if it is small.
-func keep(b []byte) []byte {
+// reusable is a held buffer emptied for reuse, or nil if it grew large.
+func reusable(b []byte) []byte {
 	if cap(b) > 16<<10 {
 		return nil
 	}

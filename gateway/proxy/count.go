@@ -24,53 +24,30 @@ const maxCountResponse = 64 << 10
 // deployment that takes it, at the deployment's count endpoint (a bedrock
 // deployment's envelope sends it to Bedrock's CountTokens). It is free:
 // nothing is admitted, charged or written to the ledger, and it takes no
-// slot; the provider bills no count. (A rate limit for it is step 4's.)
+// slot and no rate limit; the provider bills no count.
 func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 	_, reqIDs := newRequestID()
 	w.Header()[contract.HeaderRequestID] = []string{reqIDs}
 	ctx := r.Context()
-	if err := contract.CheckSingleHeaders(r.Header); err != nil {
-		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: err.Error()})
-		return
-	}
-	var grant auth.Grant
-	snap, principal, no := h.authenticate(r, &grant)
-	if no != nil {
-		h.fail(ctx, w, no)
-		return
-	}
 	ex := getExchange()
 	defer ex.release()
 	in := getBody()
 	defer putBody(in)
-	body, no := h.readBody(w, r, in)
+	var grant auth.Grant
+	p, no := h.prepare(w, r, ex, in, &grant)
 	if no != nil {
 		h.fail(ctx, w, no)
 		return
 	}
-	req, err := ex.scan(h.Dialect, body)
-	if err != nil {
-		h.fail(ctx, w, &refusal{code: contract.RequestInvalid, msg: err.Error()})
-		return
-	}
-	rt, no := h.route(snap, principal, req.alias)
-	if no != nil {
-		h.fail(ctx, w, no)
-		return
-	}
-	if no := h.features(r.Header, principal, rt, req); no != nil {
-		h.fail(ctx, w, no)
-		return
-	}
-	target, lease, retryAt := pick(h.health(), rt, make([]bool, len(rt.Pool)), principal.ID, requestBetas(h.Dialect, r.Header), nil)
+	rt := p.rt
+	target, lease, retryAt := pick(h.health(), rt, make([]bool, len(rt.Pool)), p.principal.ID, p.betas, nil)
 	if target == nil {
-		h.fail(ctx, w, &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
-			msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"})
+		h.fail(ctx, w, noDeployment(false, retryAt))
 		return
 	}
 	defer lease.Release() // a count says nothing of the deployment's health
 	out := getBody()
-	*out = ex.rewrite(h.Dialect, (*out)[:0], body, target.Model)
+	*out = ex.rewrite(h.Dialect, (*out)[:0], p.body, target.Model)
 	upCtx, cancel := context.WithTimeout(ctx, cmp.Or(rt.Headers, time.Minute))
 	defer cancel()
 	up, ub := upstreamRequest(upCtx, r, target, out, h.Dialect.forwardRequest())
