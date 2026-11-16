@@ -205,6 +205,47 @@ func TestKeyRules(t *testing.T) {
 	}
 }
 
+// TestServiceAdoption: a manager cannot take another team's service into
+// its scope and mint keys acting as it. Adding an existing service needs
+// an admin or a manager of a scope it is a member of; a manager mints a
+// service's keys only if it manages every scope the service is a member
+// of. A user, whose keys are its own, any manager may add.
+func TestServiceAdoption(t *testing.T) {
+	ctx := t.Context()
+	s := setup(t)
+	if err := s.AddMember(ctx, mgrB, Options{}, "team-b", Member{ID: "ci"}); !errors.Is(err, ErrPermission) {
+		t.Fatalf("bob adopting team-a's service ci: %v, want permission denied", err)
+	}
+	if _, err := s.MintKey(ctx, mgrB, Options{}, KeyRequest{Owner: "ci", Scope: "team-b"}); err == nil {
+		t.Fatal("bob minted a key acting as team-a's service")
+	}
+	if err := s.AddMember(ctx, mgrB, Options{}, "team-b", Member{ID: "alice"}); err != nil {
+		t.Fatalf("a manager adding an existing user: %v", err)
+	}
+	// Shared by an admin (or a manager of both), the service's keys are
+	// no longer one team's managers' alone to mint.
+	if err := s.AddMember(ctx, admin, Options{}, "team-b", Member{ID: "ci"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		who   Caller
+		scope string
+	}{{mgrB, "team-b"}, {mgrA, "team-a"}} {
+		if _, err := s.MintKey(ctx, c.who, Options{}, KeyRequest{Owner: "ci", Scope: c.scope}); !errors.Is(err, ErrPermission) {
+			t.Errorf("%s minting the shared service's key in %s: %v, want permission denied", c.who.Principal, c.scope, err)
+		}
+	}
+	if err := s.BindManager(ctx, admin, Options{}, "team-b", "mona"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MintKey(ctx, mgrA, Options{}, KeyRequest{Owner: "ci", Scope: "team-b"}); err != nil {
+		t.Fatalf("a manager of every scope of the service: %v", err)
+	}
+	if err := s.AddMember(ctx, mgrA, Options{}, "team-b", Member{ID: "ci"}); err != nil {
+		t.Fatalf("a manager of the service's scope adding it again: %v", err)
+	}
+}
+
 // TestRemoveMember: a member removed loses its keys in the scope (revoked,
 // kept as records) and its role there.
 func TestRemoveMember(t *testing.T) {
