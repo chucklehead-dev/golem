@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/chucklehead-dev/golem/lib/bucket"
@@ -78,4 +79,28 @@ func swapRace(t *testing.T, ctx context.Context, b bucket.Bucket) {
 	if won != 1 {
 		t.Fatalf("%d swaps won from one tag, want 1", won)
 	}
+}
+
+// Hang is a bucket that never answers: every call waits until its context
+// ends, then returns the context's error. For tests that a caller bounds
+// its bucket calls (a poll, a state write, a publication).
+type Hang struct {
+	// Calls counts the calls begun.
+	Calls atomic.Int64
+}
+
+var _ bucket.Bucket = (*Hang)(nil)
+
+// Get waits for ctx to end.
+func (h *Hang) Get(ctx context.Context, _, _ string) ([]byte, string, error) {
+	h.Calls.Add(1)
+	<-ctx.Done()
+	return nil, "", ctx.Err()
+}
+
+// Put waits for ctx to end.
+func (h *Hang) Put(ctx context.Context, _ string, _ []byte, _ string) (string, error) {
+	h.Calls.Add(1)
+	<-ctx.Done()
+	return "", ctx.Err()
 }

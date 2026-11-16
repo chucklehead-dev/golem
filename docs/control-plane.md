@@ -107,6 +107,13 @@ and apply a newer publication at least their floor, so a revocation
 reaches every connected gateway in about two seconds. Each snapshot names
 its commit (`Source.ConfigRevision`), logged at each publication.
 
+Every external call has a deadline, so a bucket, ClickHouse or Graph that
+accepts a request and never answers fails that step rather than holding
+the loop: the S3 client waits at most 15 s for a response's headers, each
+state read or write 15 s, a step's publication a minute, known spend 30 s,
+an audit batch a minute and a group sync two minutes. A gateway bounds
+each poll of its pointer, and its start, at 30 s.
+
 Signing: `-signing-key kms:<arn>` (ECDSA P-256 in KMS, `lib/sign/kmssign`)
 or `file:` (Ed25519, development). `golem-control pubkey` prints the public
 half for the gateways' `-keys`; `-trusted-keys` keeps a retiring key

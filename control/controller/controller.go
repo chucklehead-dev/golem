@@ -319,6 +319,23 @@ func (c *Controller) log() *slog.Logger {
 	return slog.Default()
 }
 
+// The deadlines of the loop's external calls: a bucket, ClickHouse or
+// Graph that accepts a request and never answers must not hold the loop.
+// The state's own reads and writes are bounded by its Timeout.
+const (
+	publishTimeout = time.Minute      // every due pool's publication: the records' write, each pool's objects, the signer
+	spendTimeout   = 30 * time.Second // known spend's ClickHouse queries
+	auditTimeout   = time.Minute      // one batch of the outbox archived, emitted and trimmed
+	syncTimeout    = 2 * time.Minute  // the group sync's Graph reads and its write
+)
+
+// bounded runs f under a deadline of d.
+func bounded(ctx context.Context, d time.Duration, f func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return f(ctx)
+}
+
 // ErrDeposed: another replica has claimed the fence since this one did. It
 // leads no more, for good, and Run returns.
 var ErrDeposed = errors.New("controller: another golem-control replica has claimed the fence since this one did: this one leads no more, and stops")
@@ -395,7 +412,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 		// No config has compiled since this replica started: renew what is
 		// published (it compiled when it was), so a restart over a broken
 		// edit cannot let every gateway's authorization lapse either.
-		if err := c.loadPublished(ctx); err != nil {
+		if err := bounded(ctx, publishTimeout, c.loadPublished); err != nil {
 			c.setConfigBroken(true)
 			c.count(ReasonConfigRenewing)
 			return false, fmt.Errorf("no config has compiled yet, and nothing published can be renewed: fix the config directory: %w", errors.Join(cfgErr, err))
@@ -426,9 +443,11 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	}
 	var spendErr error
 	if c.Spend != nil {
-		spendErr = c.Spend.Step(ctx) // on failure, the last result for this period
+		spendErr = bounded(ctx, spendTimeout, c.Spend.Step) // on failure, the last result for this period
 	}
-	perrs := c.publish(ctx, fence, doc, due, stale != nil) // counts each pool's failure
+	pctx, cancel := context.WithTimeout(ctx, publishTimeout)
+	perrs := c.publish(pctx, fence, doc, due, stale != nil) // counts each pool's failure
+	cancel()
 	c.degraded(cfgErr, due...)
 	var errs []error
 	published := false
@@ -813,7 +832,10 @@ func (c *Controller) tick(ctx context.Context) (err error) {
 		}
 	}()
 	if fence, leads := c.Fence(); c.Audit != nil && leads {
-		if _, aerr := c.Audit.Step(ctx, fence); aerr != nil {
+		actx, cancel := context.WithTimeout(ctx, auditTimeout)
+		_, aerr := c.Audit.Step(actx, fence)
+		cancel()
+		if aerr != nil {
 			err = errors.Join(err, fmt.Errorf("audit: %w", aerr))
 		} else {
 			c.mu.Lock()
@@ -835,7 +857,9 @@ func (c *Controller) syncStep(ctx context.Context) error {
 		return nil
 	}
 	c.syncTried = c.now()
-	res, err := c.Sync.Step(ctx, fence)
+	sctx, cancel := context.WithTimeout(ctx, syncTimeout)
+	res, err := c.Sync.Step(sctx, fence)
+	cancel()
 	c.mu.Lock()
 	switch {
 	case err == nil:

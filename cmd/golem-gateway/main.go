@@ -191,7 +191,8 @@ func run(ctx context.Context, args []string) int {
 		holder.Deny = deny
 		wg.Go(func() { deny.Run(bg) })
 	}
-	src, keyPath, err := startSource(bg, o, holder)
+	// Under the signal's context: a SIGTERM ends a start hung on the bucket.
+	src, keyPath, err := startSource(sig, o, holder)
 	if err != nil {
 		return failed("%v", err)
 	}

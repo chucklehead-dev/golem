@@ -49,6 +49,10 @@ type Bucket struct {
 	// pool's credentials can overwrite it).
 	GatewayID string
 	Interval  time.Duration // default one second
+	// Timeout bounds each poll, and Start, with every bucket call they
+	// make (default 30 seconds): a bucket that accepts a request and never
+	// answers must not stall polling for good, while the lease runs out.
+	Timeout time.Duration
 	// ApplyRetry is how often a verified publication that failed to apply
 	// is tried again while it is current (default 30 seconds).
 	ApplyRetry time.Duration
@@ -97,6 +101,8 @@ type Bucket struct {
 // zero; a pool with a pointer and no checkpoint has lost its floor, and is
 // not taken as never published.
 func (b *Bucket) Start(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout())
+	defer cancel()
 	local, haveLocal, err := b.localCheckpoint()
 	if err != nil {
 		return err
@@ -175,6 +181,9 @@ func (b *Bucket) retryLastGood() {
 	b.tryLastGood(b.pending)
 }
 
+// timeout is Timeout or its default.
+func (b *Bucket) timeout() time.Duration { return cmp.Or(b.Timeout, 30*time.Second) }
+
 // applyRetry is ApplyRetry or its default.
 func (b *Bucket) applyRetry() time.Duration { return cmp.Or(b.ApplyRetry, 30*time.Second) }
 
@@ -246,6 +255,8 @@ func (b *Bucket) trustedCheckpoint(ctx context.Context) (uint64, error) {
 // Poll reads the pointer and applies a newer publication. An unchanged
 // pointer costs one conditional get.
 func (b *Bucket) Poll(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout())
+	defer cancel()
 	b.retryLastGood() // first: the bucket may be unreachable
 	if !b.retry.IsZero() && !b.Holder.now().Before(b.retry) {
 		b.tag, b.retry = "", time.Time{} // read it again, though unchanged
