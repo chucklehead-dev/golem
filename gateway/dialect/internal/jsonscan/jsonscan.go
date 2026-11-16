@@ -45,6 +45,9 @@ type Decoder struct {
 	// 16 MiB per P.
 	buf  bytes.Buffer
 	name []byte
+	// stack is Objects' frames, kept with their buffers from one walk to
+	// the next.
+	stack []frame
 }
 
 // ReadValue returns the next value's raw JSON and its span in the body.
@@ -60,6 +63,9 @@ func (d *Decoder) ReadValue() (jsontext.Value, Span, error) {
 // SkipValue consumes the next value; it is still checked (syntax and
 // duplicate names at every depth), only not returned.
 func (d *Decoder) SkipValue() error { return d.dec.SkipValue() }
+
+// maxKept is the most a pooled frame's buffers keep between walks.
+const maxKept = 4 << 10
 
 var pool = sync.Pool{New: func() any {
 	d := &Decoder{name: make([]byte, 0, 64)}
@@ -77,6 +83,15 @@ func decoder(data []byte) *Decoder {
 
 // release returns d to the pool, keeping no view of the data it read.
 func (d *Decoder) release() {
+	// A frame's buffers hold member names, never a view of the data; one
+	// grown past a request's usual size is dropped rather than pinned in
+	// the pool.
+	frames := d.stack[:cap(d.stack)]
+	for i := range frames {
+		if f := &frames[i]; cap(f.in)+cap(f.typ)+cap(f.info.names) > maxKept {
+			*f = frame{}
+		}
+	}
 	d.buf = bytes.Buffer{}
 	d.dec.Reset(&d.buf)
 	pool.Put(d)

@@ -59,6 +59,28 @@ type frame struct {
 	typ   []byte // info.Type's storage
 }
 
+// push opens a frame for an object or array, in naming the member that
+// holds it (nil for none). A frame within the stack's capacity is reused
+// with its buffers emptied, not zeroed: a walk of an agent's history
+// pushes thousands, and a zeroed frame dropped the storage its In, Type
+// and names had grown, so each push allocated it again.
+func (d *Decoder) push(array bool, in []byte) {
+	n := len(d.stack)
+	if n < cap(d.stack) {
+		d.stack = d.stack[:n+1]
+	} else {
+		d.stack = append(d.stack, frame{})
+	}
+	f := &d.stack[n]
+	f.array = array
+	f.in = append(f.in[:0], in...)
+	f.typ = f.typ[:0]
+	f.info = ObjectInfo{Depth: n, names: f.info.names[:0]}
+	if in != nil {
+		f.info.In = f.in
+	}
+}
+
 // Objects calls visit for every object within v, one JSON value, at any
 // depth, once each object's members have all been read (so an inner
 // object is visited before the one holding it). Member names are compared
@@ -69,16 +91,7 @@ type frame struct {
 func Objects(v []byte, skip func(name []byte) bool, visit func(o *ObjectInfo) error) error {
 	d := decoder(v)
 	defer d.release()
-	var stack []frame
-	push := func(array bool, in []byte) {
-		stack = append(stack, frame{array: array})
-		f := &stack[len(stack)-1]
-		if in != nil {
-			f.in = append(f.in, in...)
-			f.info.In = f.in
-		}
-		f.info.Depth = len(stack) - 1
-	}
+	d.stack = d.stack[:0]
 	// begin reads the next value: a container opened and pushed, a scalar
 	// read and returned.
 	begin := func(in []byte) (jsontext.Value, error) {
@@ -88,7 +101,7 @@ func Objects(v []byte, skip func(name []byte) bool, visit func(o *ObjectInfo) er
 			if err != nil {
 				return nil, err
 			}
-			push(tok.Kind() == '[', in)
+			d.push(tok.Kind() == '[', in)
 			return nil, nil
 		}
 		return d.dec.ReadValue()
@@ -96,20 +109,21 @@ func Objects(v []byte, skip func(name []byte) bool, visit func(o *ObjectInfo) er
 	if _, err := begin(nil); err != nil {
 		return err
 	}
-	for len(stack) > 0 {
-		f := &stack[len(stack)-1]
+	for len(d.stack) > 0 {
+		f := &d.stack[len(d.stack)-1]
 		switch d.dec.PeekKind() {
 		case '}', ']':
 			if _, err := d.dec.ReadToken(); err != nil {
 				return err
 			}
-			done := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if !done.array {
-				if err := visit(&done.info); err != nil {
+			// Visited in place before it is popped: a copy made to
+			// outlive the pop escaped to the heap, one per object.
+			if !f.array {
+				if err := visit(&f.info); err != nil {
 					return err
 				}
 			}
+			d.stack = d.stack[:len(d.stack)-1]
 			continue
 		}
 		if f.array {
