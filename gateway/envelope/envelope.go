@@ -5,7 +5,31 @@
 // metadata). It is a leaf: the proxy sets it, envelopes read it.
 package envelope
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNotSent is what an envelope's error wraps when the request never left
+// the gateway (its body could not be read or rewritten, or it could not be
+// signed): the provider cannot have seen it, so the request path charges
+// nothing for it and may fail over (gateway/proxy's reachedProvider).
+var ErrNotSent = errors.New("envelope: the request was not sent")
+
+// NotSent is err marked as a request that never left the gateway: its
+// message is err's, and errors.Is finds both err and ErrNotSent. NotSent
+// of nil is nil.
+func NotSent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return notSent{err}
+}
+
+type notSent struct{ err error }
+
+func (e notSent) Error() string   { return e.err.Error() }
+func (e notSent) Unwrap() []error { return []error{e.err, ErrNotSent} }
 
 // Attribution names an attempt as golem's ledger does: its IDs, and who
 // made it. Nothing in it is a secret (the key is its display ID).

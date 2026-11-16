@@ -96,12 +96,12 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
-		return nil, err
+		return nil, envelope.NotSent(err)
 	}
 	count := strings.HasSuffix(r.URL.Path, "/count_tokens")
 	body, stream, err := rewrite(body, betas(r.Header))
 	if err != nil {
-		return nil, fmt.Errorf("bedrock: the request body: %w", err)
+		return nil, envelope.NotSent(fmt.Errorf("bedrock: the request body: %w", err))
 	}
 	action := "invoke"
 	switch {
@@ -139,8 +139,10 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if a := envelope.AttributionOf(r.Context()); a != nil {
 		up.Header.Set(MetadataHeader, metadata(a))
 	}
+	// Nothing has left the gateway until Base's round trip: a failure to
+	// sign (credentials that cannot be retrieved) is free and fails over.
 	if err := t.sign(r.Context(), up, body); err != nil {
-		return nil, err
+		return nil, envelope.NotSent(err)
 	}
 	resp, err := t.Base.RoundTrip(up)
 	if err != nil {
