@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"log/slog"
 	"net"
 	"net/http/httptest"
 	"testing"
@@ -8,27 +9,31 @@ import (
 )
 
 // TestFailuresRefuseTheSource: a source past its failed authentications
-// has every request refused, with when to retry, while another source is
-// admitted; it is admitted again once its bucket refills.
+// is Failing, with when to retry (the request path refuses its failures
+// then), while another source is not; it is not once its bucket refills.
+// Admit, the request rate, is not its failures'.
 func TestFailuresRefuseTheSource(t *testing.T) {
 	now := time.Unix(1000, 0)
 	g := &Guard{FailRate: 1, FailBurst: 3, Now: func() time.Time { return now }}
 	for range 3 {
-		if no := g.Admit("a"); no != nil {
-			t.Fatalf("refused within the burst: %s", no.Msg)
+		if no := g.Failing("a"); no != nil {
+			t.Fatalf("failing within the burst: %s", no.Msg)
 		}
 		g.Failed("a")
 	}
-	no := g.Admit("a")
+	no := g.Failing("a")
 	if no == nil || no.RetryAfter != time.Second {
-		t.Fatalf("past its failures: %+v, want refused for a second", no)
+		t.Fatalf("past its failures: %+v, want failing for a second", no)
 	}
-	if g.Admit("b") != nil {
-		t.Fatal("another source refused")
+	if g.Admit("a") != nil {
+		t.Fatal("Admit refused for failures: a valid key from the source must still be looked up")
+	}
+	if g.Failing("b") != nil {
+		t.Fatal("another source failing")
 	}
 	now = now.Add(time.Second)
-	if g.Admit("a") != nil {
-		t.Fatal("still refused after a refill")
+	if g.Failing("a") != nil {
+		t.Fatal("still failing after a refill")
 	}
 }
 
@@ -53,7 +58,8 @@ func TestRequestRate(t *testing.T) {
 
 // TestSources: the header's last value is the source, else the connection's
 // host; past MaxSources, sources whose buckets refilled are forgotten, and
-// while none can be, new sources share the overflow's.
+// while none can be, new sources are not limited (one bucket they shared
+// could be drained by one for all).
 func TestSources(t *testing.T) {
 	g := &Guard{SourceHeader: "X-Forwarded-For", FailRate: 1}
 	r := httptest.NewRequest("GET", "/", nil)
@@ -67,18 +73,22 @@ func TestSources(t *testing.T) {
 	}
 
 	now := time.Unix(1000, 0)
-	g = &Guard{FailRate: 1, FailBurst: 1, MaxSources: 2, Now: func() time.Time { return now }}
+	g = &Guard{FailRate: 1, FailBurst: 1, MaxSources: 2, Now: func() time.Time { return now }, Log: slog.New(slog.DiscardHandler)}
 	g.Failed("a")
 	g.Failed("b")
-	g.Failed("c") // the overflow's
-	if g.Admit("d") == nil {
-		t.Fatal("a new source past MaxSources does not share the overflow")
+	g.Failed("c") // no room: not counted
+	if g.Failing("c") != nil || g.Failing("d") != nil {
+		t.Fatal("a new source past MaxSources is limited: it must be left alone, not share a drainable bucket")
+	}
+	if g.Failing("a") == nil {
+		t.Fatal("a kept source's failures forgotten")
 	}
 	if len(g.sources) != 2 {
 		t.Fatalf("%d sources kept", len(g.sources))
 	}
 	now = now.Add(2 * time.Second)
-	if g.Admit("e") != nil {
+	g.Failed("e")
+	if g.Failing("e") == nil {
 		t.Fatal("refilled sources not forgotten for a new one")
 	}
 	if len(g.sources) != 1 {

@@ -2,19 +2,23 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
+	"github.com/chucklehead-dev/golem/lib/contract"
 	libsnapshot "github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
@@ -205,5 +209,127 @@ func TestKeptBound(t *testing.T) {
 	}
 	if h.kept.Load() != 0 {
 		t.Fatalf("%d bytes still counted as kept", h.kept.Load())
+	}
+}
+
+// TestCallerGoneIsNoFailure: a call its caller cancelled, or a sweep
+// withdrew, ends its attempt without a failure of its deployment's: a few
+// Esc presses (or one revocation) must not eject a healthy deployment.
+// Each case ends one attempt so with EjectAfter 1, which a failure would
+// eject.
+func TestCallerGoneIsNoFailure(t *testing.T) {
+	// waitThen is a provider that answers, once its caller has left, as
+	// then says.
+	waitThen := func(arrived chan<- struct{}, then func(*http.Request) (*http.Response, error)) http.RoundTripper {
+		return roundTrip(func(r *http.Request) (*http.Response, error) {
+			io.Copy(io.Discard, r.Body)
+			r.Body.Close()
+			arrived <- struct{}{}
+			<-r.Context().Done()
+			return then(r)
+		})
+	}
+	cancelled := func(t *testing.T, h *Handler, arrived <-chan struct{}) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() { <-arrived; cancel() }()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, "POST", "/v1/messages", bytes.NewReader(smallRequest)))
+	}
+	t.Run("unanswered", func(t *testing.T) {
+		arrived := make(chan struct{}, 1)
+		h, _ := poolHandler(t, 1, waitThen(arrived, func(r *http.Request) (*http.Response, error) { return nil, r.Context().Err() }))
+		h.Health = &route.Health{EjectAfter: 1}
+		cancelled(t, h, arrived)
+		c, _ := h.Snapshots.Current()
+		if dh := h.Health.Deployment(c.Routes.Lookup([]byte("claude")).Pool[0]); dh.Ejected || dh.InFlight != 0 {
+			t.Fatalf("deployment %+v after its caller left: want it neither ejected nor held", dh)
+		}
+	})
+	t.Run("refused as the caller left", func(t *testing.T) {
+		arrived := make(chan struct{}, 1)
+		d2 := &counting{fn: func(int32) (*http.Response, error) { return streamOf(anthropicStream(1)), nil }}
+		h, _ := poolHandler(t, 2, waitThen(arrived, func(*http.Request) (*http.Response, error) { return statusOf(529, ""), nil }), d2)
+		h.Health = &route.Health{EjectAfter: 1}
+		cancelled(t, h, arrived)
+		c, _ := h.Snapshots.Current()
+		if dh := h.Health.Deployment(c.Routes.Lookup([]byte("claude")).Pool[0]); dh.Ejected || dh.InFlight != 0 || d2.n.Load() != 0 {
+			t.Fatalf("deployment %+v, d2 attempts %d after the caller left: want it neither ejected nor held, and no retry", dh, d2.n.Load())
+		}
+	})
+	t.Run("withdrawn", func(t *testing.T) {
+		g := newTGW(t, AnthropicMessages, true)
+		hl := &route.Health{EjectAfter: 1}
+		g.srv.Config.Handler.(*Handler).Health = hl
+		target := g.src.Holder.Applied().Routes.Lookup([]byte("claude")).Pool[0]
+		alice := g.call(g.keyA, false).Body.(*lateBody)
+		g.apply(true)
+		resp, err := alice.done()
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if dh := hl.Deployment(target); dh.Ejected || resp.StatusCode != 401 {
+			t.Fatalf("status %d, deployment %+v after a sweep withdrew its call: want 401 and it not ejected", resp.StatusCode, dh)
+		}
+	})
+}
+
+// TestRefusedCallsEarnNoRetries: the route's retry budget is credited by
+// admitted calls only: a flood of refused ones (here by admission) must
+// not refill the retries a failing pool draws on.
+func TestRefusedCallsEarnNoRetries(t *testing.T) {
+	ok := &counting{fn: func(int32) (*http.Response, error) { return streamOf(anthropicStream(1)), nil }}
+	h, _ := poolHandler(t, 2, ok, ok)
+	h.Health = &route.Health{RetryBurst: 2, RetryRatio: 1}
+	for h.Health.Retry("claude") { // drained
+	}
+	h.Limiter = &admitter{t: t, refuse: &admission.Refusal{Code: contract.LimitConcurrency, Msg: "busy"}}
+	for range 4 {
+		if w := serveOne(h); w.Code != 429 {
+			t.Fatalf("status %d: want the admitter's refusal", w.Code)
+		}
+	}
+	if n := h.Health.Retries("claude"); n != 0 {
+		t.Fatalf("%v retries after four refused calls: want none credited", n)
+	}
+	h.Limiter = nil
+	serveOne(h)
+	if n := h.Health.Retries("claude"); n != 1 {
+		t.Fatalf("%v retries after one admitted call: want its credit, 1", n)
+	}
+}
+
+// TestOwnShareIsTheCallersLimit: a principal at its own per-principal
+// ceiling on every deployment of the route is refused limit.concurrency,
+// its own calls being what it waits on, not upstream.unavailable; a pool
+// passed over for other reasons too (one ejected) is still unavailable.
+func TestOwnShareIsTheCallersLimit(t *testing.T) {
+	release := make(chan struct{})
+	held := func(int32) (*http.Response, error) { <-release; return streamOf(anthropicStream(1)), nil }
+	d1, d2 := &counting{fn: held}, &counting{fn: held}
+	h, _ := poolHandler(t, 2, d1, d2)
+	c, _ := h.Snapshots.Current()
+	pool := c.Routes.Lookup([]byte("claude")).Pool
+	for _, d := range pool {
+		d.MaxPerPrincipal = 1
+	}
+	var done sync.WaitGroup
+	for range 2 { // the caller's two calls, one on each deployment
+		done.Go(func() { serveOne(h) })
+	}
+	defer done.Wait()
+	defer close(release)
+	for d1.n.Load()+d2.n.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	w := serveOne(h)
+	if w.Code != 429 || !strings.Contains(w.Body.String(), "limit.concurrency") || !strings.Contains(w.Body.String(), "for you") {
+		t.Fatalf("%d %s: want limit.concurrency, the caller's own share", w.Code, w.Body)
+	}
+	l, _ := h.health().Acquire(pool[0], "someone else") // d1 at its ceiling for others too
+	pool[0].MaxInFlight = 2
+	defer l.Release()
+	if w := serveOne(h); w.Code != 503 || !strings.Contains(w.Body.String(), "upstream.unavailable") {
+		t.Fatalf("%d %s: a deployment at its ceiling: want upstream.unavailable", w.Code, w.Body)
 	}
 }

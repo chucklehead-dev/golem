@@ -22,6 +22,15 @@ func (h *Handler) health() *route.Health {
 	return h.ownHealth
 }
 
+// reading is the handler's Reading, or its own if none was given.
+func (h *Handler) reading() *Reading {
+	if h.Reading != nil {
+		return h.Reading
+	}
+	h.readingOnce.Do(func() { h.ownReading = &Reading{} })
+	return h.ownReading
+}
+
 // pick is the pool's next deployment for an attempt, in pool order: one
 // the call has not tried, that accepts the request's betas, and whose
 // health takes the attempt. A call is never retried on a deployment it
@@ -29,33 +38,42 @@ func (h *Handler) health() *route.Health {
 // with backoff, so the gateway's retry is a failover or nothing, and a pool
 // of one makes one attempt. It marks the one it takes in tried. With none,
 // it returns the earliest time one may take an attempt again (zero:
-// unknown).
-func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string) (*route.Target, *route.Lease, time.Time) {
+// unknown), and whether every one it passed over was for the principal's
+// own share of it (route.AtPrincipalCeiling): its own calls, not the
+// deployments, are what it waits on.
+func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string) (*route.Target, *route.Lease, time.Time, bool) {
 	var earliest time.Time
 	later := func(at time.Time) {
 		if !at.IsZero() && (earliest.IsZero() || at.Before(earliest)) {
 			earliest = at
 		}
 	}
+	own, passed := true, false
 	for i, t := range rt.Pool {
 		if tried[i] || !t.Accepts(betas) {
 			continue // a deployment the request's betas would be refused by is no failover (ADR 0028)
 		}
-		l, at := hl.Acquire(t, principal)
+		l, at, why := hl.AcquireWhy(t, principal)
 		if l == nil {
 			later(at)
+			passed, own = true, own && why == route.AtPrincipalCeiling
 			continue
 		}
 		tried[i] = true
-		return t, l, time.Time{}
+		return t, l, time.Time{}, false
 	}
-	return nil, nil, earliest
+	return nil, nil, earliest, passed && own
 }
 
 // noDeployment is the refusal of a call no deployment of its route takes
 // now, with the earliest time one may (retryAt): every one resting or at
-// its ceiling.
-func noDeployment(retryAt time.Time) *refusal {
+// its ceiling; or, if every one is at the principal's own share of it
+// (own), the principal's limit.
+func noDeployment(retryAt time.Time, own bool) *refusal {
+	if own {
+		return &refusal{code: contract.LimitConcurrency,
+			msg: "too many calls in flight for you on this route's deployments; retry when one of yours finishes"}
+	}
 	return &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
 		msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"}
 }
@@ -102,7 +120,7 @@ func incapable(rt *route.Route, betas []string) *refusal {
 }
 
 // next picks the call's next deployment (pick).
-func (c *callState) next() (*route.Target, *route.Lease, time.Time) {
+func (c *callState) next() (*route.Target, *route.Lease, time.Time, bool) {
 	return pick(c.hl, c.rt, c.tried, c.principal.ID, c.betas)
 }
 
@@ -113,12 +131,13 @@ func (c *callState) next() (*route.Target, *route.Lease, time.Time) {
 // provider saw nothing, or refused before any output) and reports whether
 // the call goes on.
 func (c *callState) retry(status int, after time.Duration) bool {
-	c.lease.Fail(after)
+	gone := c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil
+	c.endLease(after, gone)
 	c.h.paused(c.r)
 	if !c.kept || c.attempt >= c.rt.MaxAttempts || c.r.Context().Err() != nil || terminatedBy(c.upCtx) != nil {
 		return false
 	}
-	next, nl, _ := c.next()
+	next, nl, _, _ := c.next()
 	if next == nil {
 		return false
 	}
@@ -133,6 +152,19 @@ func (c *callState) retry(status int, after time.Duration) bool {
 	c.row.ProviderRequestID, c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = "", "", "", ""
 	c.target, c.lease = next, nl
 	return true
+}
+
+// endLease ends a failed attempt's lease: a failure of its deployment's
+// (after, the provider's Retry-After), unless the call itself was ended,
+// its caller gone or a sweep withdrawing it (gone). Then the attempt's end
+// says nothing of the deployment: it is released, so callers cancelling
+// cannot eject a healthy deployment.
+func (c *callState) endLease(after time.Duration, gone bool) {
+	if gone {
+		c.lease.Release()
+		return
+	}
+	c.lease.Fail(after)
 }
 
 // paused runs beforePick, if set (tests).

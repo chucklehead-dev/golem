@@ -86,7 +86,8 @@ func TestHeaders(t *testing.T) {
 
 // TestOpenAIHeaders: an anthropic-* header on an OpenAI call is neither
 // checked against the route's approvals (restricted mode would refuse an
-// unapproved beta) nor passed to the provider; OpenAI's own is passed.
+// unapproved beta) nor passed to the provider; nor is OpenAI-Organization,
+// which would choose the organisation golem's credential bills.
 func TestOpenAIHeaders(t *testing.T) {
 	var got http.Header
 	h := handler(OpenAIChat, roundTrip(func(r *http.Request) (*http.Response, error) {
@@ -103,8 +104,8 @@ func TestOpenAIHeaders(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status %d %s: an Anthropic header refused an OpenAI call", w.Code, w.Body)
 	}
-	if got.Get("Anthropic-Beta") != "" || got.Get("Anthropic-Version") != "" || got.Get("Openai-Organization") != "org-1" {
-		t.Fatalf("upstream headers %v; want OpenAI's own only", got)
+	if got.Get("Anthropic-Beta") != "" || got.Get("Anthropic-Version") != "" || got.Get("Openai-Organization") != "" {
+		t.Fatalf("upstream headers %v; want no caller header (the Backend's credential decides the organisation)", got)
 	}
 }
 

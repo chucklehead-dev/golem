@@ -155,8 +155,8 @@ func TestPerPrincipalCeiling(t *testing.T) {
 	d := &Target{Backend: "b", Deployment: "box", MaxInFlight: 4, MaxPerPrincipal: 2}
 	a1, _ := h.Acquire(d, "alice")
 	a2, _ := h.Acquire(d, "alice")
-	if x, _ := h.Acquire(d, "alice"); x != nil {
-		t.Fatal("alice past her ceiling")
+	if x, _, why := h.AcquireWhy(d, "alice"); x != nil || why != AtPrincipalCeiling {
+		t.Fatalf("alice past her ceiling (refused %v): want AtPrincipalCeiling", why)
 	}
 	if b, _ := h.Acquire(d, "bob"); b == nil {
 		t.Fatal("bob kept out by alice's calls")
@@ -169,5 +169,24 @@ func TestPerPrincipalCeiling(t *testing.T) {
 	a2.Fail(0)
 	if h.Deployment(d).InFlight != 2 {
 		t.Fatalf("in flight %d: bob's and alice's third", h.Deployment(d).InFlight)
+	}
+}
+
+// TestAcquireWhy: a refusal says why: the deployment's ejection, its
+// ceiling, or the principal's own share (TestPerPrincipalCeiling).
+func TestAcquireWhy(t *testing.T) {
+	now := time.Unix(1000, 0)
+	h := &Health{EjectAfter: 1, Now: func() time.Time { return now }}
+	d := &Target{Backend: "b", Deployment: "box", MaxInFlight: 1}
+	l, _, why := h.AcquireWhy(d, "alice")
+	if l == nil || why != NotRefused {
+		t.Fatalf("refused %v on an idle deployment", why)
+	}
+	if _, _, why := h.AcquireWhy(d, "bob"); why != AtCeiling {
+		t.Fatalf("refused %v at the deployment's ceiling: want AtCeiling", why)
+	}
+	l.Fail(0)
+	if _, _, why := h.AcquireWhy(d, "bob"); why != Ejected {
+		t.Fatalf("refused %v while ejected: want Ejected", why)
 	}
 }

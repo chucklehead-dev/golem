@@ -39,7 +39,9 @@ func (d Dialect) Name() string {
 
 // forwardRequest are the caller's headers its provider may see: an API's
 // own, never another's (an anthropic-beta on an OpenAI call is the
-// caller's mistake, not a feature to approve or pass on).
+// caller's mistake, not a feature to approve or pass on). An OpenAI call
+// forwards none: OpenAI-Organization would bill golem's credential to an
+// organisation the caller chose, and the Backend's credential decides it.
 func (d Dialect) forwardRequest() []string {
 	if d == AnthropicMessages {
 		return anthropicForward
@@ -49,7 +51,7 @@ func (d Dialect) forwardRequest() []string {
 
 var (
 	anthropicForward = []string{"Anthropic-Version", "Anthropic-Beta"} // read-only
-	openAIForward    = []string{"Openai-Organization"}                 // read-only
+	openAIForward    []string                                          // read-only: none (see forwardRequest)
 )
 
 // approvedVersions are the anthropic-version values restricted mode

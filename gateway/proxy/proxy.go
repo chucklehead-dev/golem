@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,15 +102,22 @@ type Handler struct {
 	// until their calls commit (default 256 MiB); a call past it makes one
 	// attempt.
 	MaxKept int64
+	// Reading bounds the request bodies being read at once, before
+	// admission: the gateway's bytes and each principal's bodies (Reading);
+	// the gateway's handlers share one. nil: the handler's own, with the
+	// defaults.
+	Reading *Reading
 	// record, if set, is told each call's result (tests).
 	record func(*http.Request, Result)
 	// beforePick, if set, runs before each attempt's deployment is picked,
 	// the first included (tests: the attempt model's traces drive when).
 	beforePick func(*http.Request)
 
-	healthOnce sync.Once
-	ownHealth  *route.Health
-	kept       atomic.Int64 // bytes of bodies kept for retries
+	healthOnce  sync.Once
+	ownHealth   *route.Health
+	readingOnce sync.Once
+	ownReading  *Reading
+	kept        atomic.Int64 // bytes of bodies kept for retries
 }
 
 // Response headers returned to the caller (contracts.md §5: golem's own
@@ -171,7 +179,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ex.tried = append(ex.tried[:0], make([]bool, len(rt.Pool))...) // pooled: held in c, a slice would escape
 	c := &callState{h: h, w: w, r: r, ctx: ctx, bg: context.WithoutCancel(ctx), principal: p.principal, req: req, rt: rt,
 		reqID: reqID, reqIDs: reqIDs, requestBytes: int64(len(body)), hl: h.health(), tried: ex.tried, betas: p.betas}
-	c.hl.Called(rt.Alias)
 	h.paused(r)
 	// Only deployments that accept the request's betas are its pool here
 	// (ADR 0028): none, and it is refused before anything is counted.
@@ -185,8 +192,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var retryAt time.Time
-	if c.target, c.lease, retryAt = c.next(); c.target == nil {
-		h.fail(ctx, w, noDeployment(retryAt))
+	var own bool
+	if c.target, c.lease, retryAt, own = c.next(); c.target == nil {
+		h.fail(ctx, w, noDeployment(retryAt, own))
 		return
 	}
 	defer func() { c.lease.Release() }() // the last attempt's: when the call is over
@@ -206,6 +214,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, no)
 		return
 	}
+	// Only an admitted call earns its route retries: refused ones would
+	// refill the budget a failing pool's retries draw on.
+	c.hl.Called(rt.Alias)
 	// The accounting runs to its end whatever the caller does.
 	c.acct = settlement{ticket: ticket, ctx: c.bg, deadline: deadline, tail: cmp.Or(h.ProviderTail, 2*time.Minute)}
 	// Every admitted call's ticket ends exactly once. Should anything below
@@ -342,7 +353,20 @@ func (h *Handler) prepare(w http.ResponseWriter, r *http.Request, ex *exchange, 
 	if p.snap, p.principal, no = h.authenticate(r, g); no != nil {
 		return p, no
 	}
-	if p.body, no = h.readBody(w, r, in); no != nil {
+	// Before the body is read: a claimed length past the scope's ceiling is
+	// refused unread, and the bodies being read at once are bounded, the
+	// gateway's bytes and the principal's bodies (Reading).
+	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero is the default, not "no body"
+	if c := p.principal.Limits.MaxInputBytes; c > 0 && r.ContentLength > c {
+		return p, inputCeiling(p.principal, r.ContentLength)
+	}
+	br, no := h.reading().start(p.principal.ID)
+	if no != nil {
+		return p, no
+	}
+	p.body, no = h.readBody(w, r, in, maxBody, br)
+	br.end()
+	if no != nil {
 		return p, no
 	}
 	var err error
@@ -415,10 +439,10 @@ func (c *callState) endWithdrawn(t *errTerminated) {
 // upstream.unavailable, naming the route's timeout if one cut it, or with
 // the refusal of the sweep that withdrew it.
 func (c *callState) endUnanswered(err error) {
-	c.lease.Fail(0)
 	callerLeft := c.r.Context().Err() != nil
 	code, msg := contract.UpstreamUnavailable, unavailableMessage(context.Cause(c.upCtx)) // the cause as the call failed
 	ended := terminatedBy(c.upCtx)
+	c.endLease(0, callerLeft || ended != nil)
 	if ended != nil && !callerLeft { // the headers not yet sent: the dialect's error
 		code, msg = ended.code, ended.message()
 	}
@@ -489,7 +513,7 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 	res.Cost = price.Cost(res.Usage, c.price)
 
 	c.row.Ended, c.row.Status, c.row.Usage, c.row.Cost = time.Now(), resp.StatusCode, res.Usage, res.Cost
-	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = outcome(res, cut, ended)
+	c.row.Outcome, c.row.ErrorOrigin, c.row.ErrorCode = outcome(res, cut || streamed && ex.streamErr, ended)
 	h.Telemetry.Ended(c.ctx, c.row)
 	switch {
 	case c.acct.ticket == nil: // nothing counted
@@ -636,10 +660,18 @@ func reachedProvider(err error) bool {
 // authenticate takes the request's snapshot and finds its principal.
 func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compiled, *auth.Principal, *refusal) {
 	// The floor before anything is checked (gateway/guard): a source's
-	// requests, and its failed authentications, bounded.
+	// requests, and its failed authentications, bounded. A source past its
+	// failures (a flood of bad credentials, perhaps behind the same sidecar
+	// as valid callers) still has a golem key looked up, cheaply, and is
+	// refused only if that fails too; an Entra token from it is refused
+	// before its signature is checked.
 	src := h.Guard.Source(r)
 	if no := h.Guard.Admit(src); no != nil {
 		return nil, nil, &refusal{code: contract.LimitSource, msg: no.Msg, retryAfter: no.RetryAfter}
+	}
+	failing := h.Guard.Failing(src)
+	if failing != nil && !sendsGolemKey(r.Header) {
+		return nil, nil, &refusal{code: contract.LimitSource, msg: failing.Msg, retryAfter: failing.RetryAfter}
 	}
 	snap, err := h.Snapshots.Current()
 	switch {
@@ -652,10 +684,57 @@ func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compil
 	}
 	p, no := snap.Auth.AuthenticateGrant(r.Header, g)
 	if no != nil {
+		if !credentialsFault(no) {
+			return nil, nil, &refusal{code: no.Code, msg: no.Msg}
+		}
 		h.Guard.Failed(src)
+		if failing != nil {
+			return nil, nil, &refusal{code: contract.LimitSource, msg: failing.Msg, retryAfter: failing.RetryAfter}
+		}
 		return nil, nil, &refusal{code: no.Code, msg: no.Msg}
 	}
 	return snap, p, nil
+}
+
+// credentialsFault reports whether an authentication's refusal was the
+// credential's fault, and so counts against its source's failures
+// (gateway/guard): a key unknown, revoked, expired or of another
+// installation, a token invalid or expired, none sent. Not the gateway's
+// state (gateway.not_ready: Entra's keys not yet fetched), nor a token
+// refused for golem's copy of Entra's keys (too old, or without the key
+// that signed it: Entra rotated): those are golem's or Entra's, and would
+// lock out every caller of a shared address at once. Nor a valid
+// credential refused by policy (authz.*, the denylist).
+func credentialsFault(no *auth.Refusal) bool {
+	switch no.Code {
+	case contract.AuthKeyUnknown, contract.AuthKeyRevoked, contract.AuthKeyExpired, contract.AuthKeyWrongInstallation,
+		contract.AuthTokenExpired, contract.AuthMissing:
+		return true
+	case contract.AuthTokenInvalid:
+		// lib/entra says these only in its message (its Error has no
+		// field for them): TestEntraKeyTroubleIsNoFailure pins them.
+		return !strings.Contains(no.Msg, entraKeysTooOld) && !strings.Contains(no.Msg, entraUnknownKey)
+	}
+	return false
+}
+
+// lib/entra's refusals of a token for golem's copy of the signing keys.
+const (
+	entraKeysTooOld = "signing keys is too old to trust"
+	entraUnknownKey = "signed by an unknown key"
+)
+
+// sendsGolemKey reports whether the request's credential (x-api-key, or
+// Authorization: Bearer) is a golem key, not an Entra token: a key is a
+// hash lookup, a token a signature check.
+func sendsGolemKey(h http.Header) bool {
+	cred := h.Get("X-Api-Key")
+	if cred == "" {
+		if v := h.Get("Authorization"); len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
+			cred = v[7:]
+		}
+	}
+	return strings.HasPrefix(strings.TrimSpace(cred), "glm_")
 }
 
 // preallocMax is the most readBody allocates on a body's claimed length
@@ -663,9 +742,8 @@ func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compil
 const preallocMax = 1 << 20
 
 // readBody reads the request body into the pooled buffer in, at most
-// MaxBody bytes.
-func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) ([]byte, *refusal) {
-	maxBody := cmp.Or(h.MaxBody, 32<<20) // zero is the default, not "no body"
+// maxBody bytes, counting them in br (the bound on bodies being read).
+func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte, maxBody int64, br *bodyRead) ([]byte, *refusal) {
 	// One allocation, not a doubling series, for a body up to preallocMax:
 	// past it the claimed length is not trusted (a client could claim 32
 	// MiB, send two bytes, and hold the buffer until BodyTimeout), and
@@ -678,9 +756,11 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, in *[]byte) (
 	rc := http.NewResponseController(w)
 	rc.SetReadDeadline(time.Now().Add(cmp.Or(h.BodyTimeout, 30*time.Second))) // a test's recorder has none
 	var err error
-	*in, err = readAll((*in)[:0], http.MaxBytesReader(w, r.Body, maxBody))
+	*in, err = readAll((*in)[:0], br.reader(http.MaxBytesReader(w, r.Body, maxBody)))
 	rc.SetReadDeadline(time.Time{})
 	switch _, tooBig := errors.AsType[*http.MaxBytesError](err); {
+	case errors.Is(err, errReadingFull):
+		return nil, readingFull
 	case tooBig:
 		return nil, &refusal{code: contract.RequestTooLarge, msg: "the request body is larger than this gateway accepts"}
 	case err != nil:
@@ -730,8 +810,8 @@ func (h *Handler) features(hdr http.Header, p *auth.Principal, rt *route.Route, 
 // and the state M1 never keeps at the provider.
 func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBytes int64) *refusal {
 	lim := p.Limits
-	if c := lim.MaxInputBytes; c > 0 && requestBytes > c {
-		return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}
+	if no := inputCeiling(p, requestBytes); no != nil {
+		return no
 	}
 	if c := lim.MaxOutputTokens; c > 0 {
 		switch {
@@ -758,6 +838,15 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 		if req.store {
 			ex.forbidStorage(h.Dialect)
 		}
+	}
+	return nil
+}
+
+// inputCeiling is the scope's ceiling on a request's size (ADR 0038), a
+// token count's too.
+func inputCeiling(p *auth.Principal, requestBytes int64) *refusal {
+	if c := p.Limits.MaxInputBytes; c > 0 && requestBytes > c {
+		return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("the request is %d bytes; this scope accepts at most %d: shorten the context, or ask its managers", requestBytes, c)}
 	}
 	return nil
 }
@@ -881,14 +970,16 @@ func coded(outcome string, c contract.Code) (string, string, string) {
 }
 
 // outcome is a finished call's ledger outcome, and the failure's origin and
-// code (contracts.md §3).
+// code (contracts.md §3). cut is a response that ended early, or a stream
+// that carried its provider's error event after its output began: either
+// is a failure, however much was delivered (and charged) before it.
 func outcome(res Result, cut bool, ended *errTerminated) (outcome, origin, code string) {
 	switch {
 	case res.CallerGone:
 		return outcomeCancelled, string(contract.OriginClient), ""
 	case res.Terminated:
 		return coded(outcomeTerminated, ended.code)
-	case cut:
+	case cut: // or a stream whose provider sent its error event
 		return coded(outcomeFailed, contract.UpstreamStreamFailed)
 	case res.Status >= 400:
 		return outcomeFailed, string(contract.OriginProvider), ""

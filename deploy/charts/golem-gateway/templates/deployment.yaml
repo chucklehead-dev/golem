@@ -59,7 +59,13 @@ spec:
             - -unready={{ .Values.unready }}
             - -drain={{ .Values.drain }}
             - -max-body={{ .Values.maxBody }}
-            - -auth-failures={{ .Values.guard.authFailures }}
+            - -max-reading={{ .Values.maxReading }}
+            - -max-reading-per-principal={{ .Values.maxReadingPerPrincipal }}
+            {{- $authFailures := .Values.guard.authFailures }}
+            {{- if eq (toString $authFailures) "" }}
+            {{- $authFailures = ternary 20 0 (ne (toString .Values.guard.sourceHeader) "") }}
+            {{- end }}
+            - -auth-failures={{ $authFailures }}
             - -max-conns={{ .Values.guard.maxConns }}
             {{- with .Values.guard.sourceHeader }}
             - -source-header={{ . }}

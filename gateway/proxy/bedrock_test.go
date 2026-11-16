@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -34,12 +33,15 @@ import (
 type bedrockStub struct {
 	creds    aws.Credentials
 	throttle string // a region whose first call is throttled
-	mu       sync.Mutex
-	regions  []string // each request's signed region, in order
-	paths    []string
-	bad      []string            // what failed the signature check
-	rows     lockedBuffer        // the gateway's ledger rows
-	metas    []map[string]string // each request's Bedrock request metadata
+	// failAfter, if set, ends each stream with an exception after that
+	// many of its events.
+	failAfter int
+	mu        sync.Mutex
+	regions   []string // each request's signed region, in order
+	paths     []string
+	bad       []string            // what failed the signature check
+	rows      lockedBuffer        // the gateway's ledger rows
+	metas     []map[string]string // each request's Bedrock request metadata
 }
 
 func (s *bedrockStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -100,12 +102,12 @@ func (s *bedrockStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		enc.Encode(w, m)
 		return
 	}
-	for _, ev := range bedrockEvents {
-		var m eventstream.Message
-		m.Headers.Set(":message-type", eventstream.StringValue("event"))
-		m.Headers.Set(":event-type", eventstream.StringValue("chunk"))
-		m.Payload = []byte(`{"bytes":"` + base64.StdEncoding.EncodeToString([]byte(ev)) + `"}`)
-		enc.Encode(w, m)
+	for i, ev := range bedrockEvents {
+		if s.failAfter > 0 && i == s.failAfter {
+			enc.Encode(w, bedrockException("internalServerException", "The system encountered an unexpected error during processing."))
+			return
+		}
+		enc.Encode(w, bedrockChunk(ev))
 		w.(http.Flusher).Flush()
 	}
 }

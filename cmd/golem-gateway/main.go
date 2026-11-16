@@ -62,7 +62,10 @@ import (
 type options struct {
 	standalone, listen, telem, localKeyFile, zoneName, denylist string
 	maxBody                                                     int64
-	drainFor, unready                                           time.Duration
+	// request bodies being read at once, before admission (proxy.Reading)
+	maxReading         int64
+	maxReadingPerPrinc int
+	drainFor, unready  time.Duration
 	// Entra tokens
 	tenant, audience, jwks string
 	// pool mode
@@ -85,6 +88,8 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.standalone, "standalone", "", "run from the CRD YAML in this directory, on this machine only (ADR 0023)")
 	fs.StringVar(&o.listen, "listen", "127.0.0.1:8080", "address to serve on")
 	fs.Int64Var(&o.maxBody, "max-body", 32<<20, "largest request body accepted, in bytes")
+	fs.Int64Var(&o.maxReading, "max-reading", 512<<20, "request-body bytes this gateway reads at once, before admission; past it requests are refused limit.concurrency (retry in a second); 0: no bound")
+	fs.IntVar(&o.maxReadingPerPrinc, "max-reading-per-principal", 8, "request bodies one principal may have being read at once; past it its requests are refused limit.concurrency; 0: no bound")
 	fs.DurationVar(&o.drainFor, "drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
 	fs.DurationVar(&o.unready, "unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
 	fs.StringVar(&o.telem, "telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless a literal loopback address: 127.0.0.1:4318, [::1]:4318)")
@@ -115,7 +120,7 @@ func parse(args []string) (options, error) {
 	fs.StringVar(&o.sourceHeader, "source-header", "", "the header the proxy in front sets to the caller's address (its last value is taken, e.g. X-Forwarded-For); empty: the connection's address, which behind a sidecar is the sidecar's, so the per-source limits are the pod's")
 	fs.Float64Var(&o.sourceRate, "source-rate", 0, "requests a second each source may make before authentication; 0: no limit (authenticated callers' limits are the policy's)")
 	fs.Float64Var(&o.sourceBurst, "source-burst", 0, "the requests a quiet source may make at once (default -source-rate)")
-	fs.Float64Var(&o.authFailRate, "auth-failures", 20, "failed authentications a second each source may make; past them (and the burst) its requests are refused until it slows; 0: no limit")
+	fs.Float64Var(&o.authFailRate, "auth-failures", 20, "failed authentications a second each source may make; past them (and the burst) its Entra tokens, and its requests that fail authentication, are refused until it slows (a valid golem key is still served); only the credential's faults count, not golem's or Entra's; 0: no limit")
 	fs.Float64Var(&o.authFailBurst, "auth-failure-burst", 200, "the failed authentications a source may make at once")
 	fs.IntVar(&o.maxConns, "max-conns", 8192, "connections open at once; past it new ones wait in the listen backlog; 0: no limit")
 	fs.IntVar(&o.maxConnsPerSource, "max-conns-per-source", 0, "connections open at once from one remote address (for a gateway reached directly, not behind a sidecar); 0: no limit")
@@ -398,6 +403,7 @@ func startSource(ctx context.Context, o options, holder *snapshot.Holder) (src i
 func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Limiter, tel *telemetry.Telemetry, calls *proxy.InFlight, health *route.Health) *http.ServeMux {
 	mux := http.NewServeMux()
 	guard := newGuard(o)
+	reading := newReading(o)
 	// handle registers h, refusing in d's dialect; standalone puts it behind
 	// local: localOnly, or loopbackOnly for a GET (no body).
 	handle := func(pattern string, d proxy.Dialect, h http.Handler, local func(proxy.Dialect, http.Handler) http.Handler) {
@@ -408,7 +414,7 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 	}
 	for pattern, d := range map[string]proxy.Dialect{"POST /v1/messages": proxy.AnthropicMessages, "POST /v1/chat/completions": proxy.OpenAIChat,
 		"POST /v1/responses": proxy.OpenAIResponses} {
-		handle(pattern, d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), Meters: limiter, MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health, Guard: guard}, localOnly)
+		handle(pattern, d, &proxy.Handler{Dialect: d, Snapshots: holder, Limiter: limiter.Admitter(), Meters: limiter, MaxBody: o.maxBody, Telemetry: tel, InFlight: calls, Health: health, Guard: guard, Reading: reading}, localOnly)
 	}
 	// The models list, either dialect's shape (ServeModels picks it): the
 	// Messages handler serves it, with the same snapshots and identity.
@@ -422,8 +428,9 @@ func newMux(o options, lc *lifecycle, holder *snapshot.Holder, limiter *limit.Li
 		proxy.Refuse(w, proxy.OpenAIResponses, contract.AuthzProviderStorageForbidden,
 			"golem serves stateless responses only: no response is stored to retrieve, delete or cancel")
 	})
-	// Anthropic's token count: free, no admission, no ledger row.
-	count := http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, MaxBody: o.maxBody, Guard: guard}).ServeCountTokens)
+	// Anthropic's token count: free, no admission, no ledger row; but the
+	// calls' health (ejections, ceilings) and rate limits.
+	count := http.HandlerFunc((&proxy.Handler{Dialect: proxy.AnthropicMessages, Snapshots: holder, Meters: limiter, MaxBody: o.maxBody, Health: health, Guard: guard, Reading: reading}).ServeCountTokens)
 	handle("POST /v1/messages/count_tokens", proxy.AnthropicMessages, count, localOnly)
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	// Ready once a snapshot is applied and its authorization holds.
@@ -519,6 +526,18 @@ func newGuard(o options) *guard.Guard {
 	}
 	return &guard.Guard{SourceHeader: o.sourceHeader, Rate: max(o.sourceRate, 0), Burst: o.sourceBurst,
 		FailRate: max(o.authFailRate, 0), FailBurst: o.authFailBurst}
+}
+
+// newReading is the bound on request bodies being read at once the
+// handlers share, from the flags (0: no bound, which Reading spells -1).
+func newReading(o options) *proxy.Reading {
+	off := func(n int64) int64 {
+		if n <= 0 {
+			return -1
+		}
+		return n
+	}
+	return &proxy.Reading{MaxBytes: off(o.maxReading), PerPrincipal: int(off(int64(o.maxReadingPerPrinc)))}
 }
 
 // newServer is the API's server, its limits set for long streams over
