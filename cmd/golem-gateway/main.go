@@ -591,7 +591,9 @@ func setupTelemetry(where, site, pool string) (_ *telemetry.Telemetry, meter met
 		return nil, nil, nil, fmt.Errorf("telemetry: %w", err)
 	}
 	return tel, p.Meter, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Four seconds for each provider (the ledger, spans, metrics): at
+		// most 12 s, inside the pod's grace after the drain and the cut.
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
 		if err := shutdown(ctx); err != nil {
 			slog.Warn("golem-gateway: telemetry not flushed", "err", err)

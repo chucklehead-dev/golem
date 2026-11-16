@@ -51,9 +51,20 @@ func SDK(spans sdktrace.SpanExporter, metrics sdkmetric.Reader, logs sdklog.Expo
 	ledger := NewLedgerQueue(logs, ledgerQueueSize, 512, time.Second)
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(ledger), sdklog.WithResource(res), sdklog.WithAllowKeyDuplication())
 	// The ledger first, the metrics last: the final drop and failure
-	// counts are exported after the rows they count.
+	// counts are exported after the rows they count. Each has a budget of
+	// its own, ctx's time left as the shutdown begins: the ledger's drain
+	// may use all of its own, and the final counts still export.
 	shutdown := func(ctx context.Context) error {
-		return errors.Join(lp.Shutdown(ctx), tp.Shutdown(ctx), mp.Shutdown(ctx))
+		budget := 5 * time.Second
+		if d, ok := ctx.Deadline(); ok {
+			budget = time.Until(d)
+		}
+		each := func(stop func(context.Context) error) error {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+			defer cancel()
+			return stop(ctx)
+		}
+		return errors.Join(each(lp.Shutdown), each(tp.Shutdown), each(mp.Shutdown))
 	}
 	return Providers{Tracer: tp, Meter: mp, Logger: lp, Ledger: ledger}, shutdown
 }
