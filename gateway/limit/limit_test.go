@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/admission"
@@ -366,41 +367,42 @@ func TestTicketEndsOnce(t *testing.T) {
 
 // TestAdmitter: the request path's view. A nil limiter is no admitter at
 // all; Cancel holds the slot until the time given, then frees it, and
-// Finish stops the tails still held (their slots expire by TTL).
+// Finish stops the tails still held (their slots expire by TTL). The
+// tail's timer runs on synctest's clock.
 func TestAdmitter(t *testing.T) {
 	var none *Limiter
 	if none.Admitter() != nil {
 		t.Fatal("a nil limiter's Admitter must be a nil interface (admit everything uncounted)")
 	}
-	ctx := t.Context()
-	l := New(NewMem())
-	a := l.Admitter()
-	tk, err := a.Admit(ctx, scopeCall("a", "p1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tk.Cancel(ctx, 1, time.Now().Add(50*time.Millisecond))
-	if _, err := a.Admit(ctx, scopeCall("b", "p1")); !errors.Is(err, ErrConcurrency) {
-		t.Fatalf("during the tail: %v, want the slot still held", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := a.Admit(ctx, scopeCall("b", "p1")); err == nil {
-			break
-		} else if time.Now().After(deadline) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		l := New(NewMem())
+		a := l.Admitter()
+		tk, err := a.Admit(ctx, scopeCall("a", "p1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tk.Cancel(ctx, 1, time.Now().Add(50*time.Millisecond))
+		time.Sleep(49 * time.Millisecond)
+		synctest.Wait()
+		if _, err := a.Admit(ctx, scopeCall("b", "p1")); !errors.Is(err, ErrConcurrency) {
+			t.Fatalf("during the tail: %v, want the slot still held", err)
+		}
+		time.Sleep(time.Millisecond)
+		synctest.Wait() // the tail's timer has fired and freed the slot
+		if _, err := a.Admit(ctx, scopeCall("b", "p1")); err != nil {
 			t.Fatalf("after the tail: %v", err)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	held, _ := a.Admit(ctx, scopeCall("c", "p2"))
-	held.Cancel(ctx, 1, time.Now().Add(time.Hour))
-	l.Finish(ctx)
-	l.mu.Lock()
-	n := len(l.tails)
-	l.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("%d tails still timed after Finish", n)
-	}
+		held, _ := a.Admit(ctx, scopeCall("c", "p2"))
+		held.Cancel(ctx, 1, time.Now().Add(time.Hour))
+		l.Finish(ctx)
+		l.mu.Lock()
+		n := len(l.tails)
+		l.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("%d tails still timed after Finish", n)
+		}
+	})
 }
 
 // TestMetersFailOpen: meters are taken and refused through the store; with

@@ -174,9 +174,10 @@ func TestAttemptBudgets(t *testing.T) {
 // TestCeilingFailsOver: a deployment at its ceiling takes no attempt, and
 // the call goes to the next (quotaHonoured).
 func TestCeilingFailsOver(t *testing.T) {
-	release := make(chan struct{})
+	arrived, release := make(chan struct{}), make(chan struct{})
 	d1 := &counting{fn: func(n int32) (*http.Response, error) {
 		if n == 1 {
+			close(arrived)
 			<-release // the first call holds d1's one place
 		}
 		return streamOf(anthropicStream(1)), nil
@@ -187,9 +188,7 @@ func TestCeilingFailsOver(t *testing.T) {
 	c.Routes.Lookup([]byte("claude")).Pool[0].MaxInFlight = 1
 	done := make(chan struct{})
 	go func() { serveOne(h); close(done) }()
-	for d1.n.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	<-arrived
 	if w := serveOne(h); w.Code != 200 || d2.n.Load() != 1 || d1.n.Load() != 1 {
 		t.Fatalf("status %d, attempts %d and %d: the second call must go to d2", w.Code, d1.n.Load(), d2.n.Load())
 	}
@@ -304,8 +303,15 @@ func TestRefusedCallsEarnNoRetries(t *testing.T) {
 // its own calls being what it waits on, not upstream.unavailable; a pool
 // passed over for other reasons too (one ejected) is still unavailable.
 func TestOwnShareIsTheCallersLimit(t *testing.T) {
-	release := make(chan struct{})
-	held := func(int32) (*http.Response, error) { <-release; return streamOf(anthropicStream(1)), nil }
+	arrived, release := make(chan struct{}, 2), make(chan struct{})
+	held := func(int32) (*http.Response, error) {
+		select {
+		case arrived <- struct{}{}:
+		default: // only the first two calls are waited for
+		}
+		<-release
+		return streamOf(anthropicStream(1)), nil
+	}
 	d1, d2 := &counting{fn: held}, &counting{fn: held}
 	h, _ := poolHandler(t, 2, d1, d2)
 	c, _ := h.Snapshots.Current()
@@ -319,9 +325,8 @@ func TestOwnShareIsTheCallersLimit(t *testing.T) {
 	}
 	defer done.Wait()
 	defer close(release)
-	for d1.n.Load()+d2.n.Load() < 2 {
-		time.Sleep(time.Millisecond)
-	}
+	<-arrived
+	<-arrived
 	w := serveOne(h)
 	if w.Code != 429 || !strings.Contains(w.Body.String(), "limit.concurrency") || !strings.Contains(w.Body.String(), "for you") {
 		t.Fatalf("%d %s: want limit.concurrency, the caller's own share", w.Code, w.Body)
