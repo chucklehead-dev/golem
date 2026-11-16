@@ -11,7 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/aws/smithy-go v1.28.9
-	github.com/chucklehead-dev/gotogether v0.0.0-20261115194443-19f4f5794336
+	github.com/chucklehead-dev/gotogether v0.0.0-20261116165437-c7b69f08e934
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/valkey-io/valkey-go v1.0.79
 	go.opentelemetry.io/otel v1.47.0
