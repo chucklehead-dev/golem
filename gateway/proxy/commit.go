@@ -60,6 +60,18 @@ func (f *firstEvent) await(d Dialect, body io.Reader, buf []byte) (failed bool) 
 	return f.failed
 }
 
+// unanswered is the read error (io.EOF for a stream that ended) that ended
+// the wait before any event was complete, or nil. Such an attempt is not
+// committed: its provider sent headers and then nothing the caller could
+// be told, though it had the request, so it is uncertain, not refused
+// (model/attempts.md).
+func (f *firstEvent) unanswered() error {
+	if f.done {
+		return nil
+	}
+	return f.err
+}
+
 func (f *firstEvent) onEvent(event, data []byte) {
 	if !f.done {
 		f.done = true

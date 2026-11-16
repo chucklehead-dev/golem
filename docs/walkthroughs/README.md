@@ -136,7 +136,8 @@ per dialect, sharing one `InFlight`, `route.Health`, `guard.Guard` and
    Bedrock's `envelope.ErrNotSent` included), or refused (`retryable`), is
    retried on an untried deployment (`callState.retry`) within the route's
    attempts and retry budget. A stream commits at its first event
-   (`firstEvent.await`); an error event first is a refusal. A caller gone or
+   (`firstEvent.await`); an error event first is a refusal, and a stream
+   that fails or ends before any event is uncertain. A caller gone or
    a sweep's withdrawal releases the attempt's lease, not fails it.
 10. **Respond** (`callState.respond`, `Handler.relay`): the bytes copied
     as they come, the same bytes through the dialect's usage reader; a
@@ -201,7 +202,7 @@ the same process; its writes are ordinary compare-and-swap updates.
 | A source's requests and the sources kept are bounded; a nil guard admits all | `Guard.Admit`, `Guard.source` | `TestRequestRate`, `TestSources`, `TestNilGuard` |
 | Connections are bounded in all and per address | `guard.Listener` | `TestListener`, `TestListenerMax` |
 | A body claiming more than the scope's ceiling is refused unread; bytes and bodies being read are bounded | `prepare`, `Reading.start`, `Reading.take` | `TestReadingClaimOverCeiling`, `TestReadingBounds`, `TestClaimedLengthNotTrusted`, `TestReadingFlags` |
-| A retry is a failover, before the commit, of an attempt never reached or refused, within the route's attempts and retry budget | `pick`, `callState.retry`, `retryable`, `reachedProvider`, `firstEvent` | `TestAttemptsModel`, `TestFailover`, `TestFinalAttempts`, `TestAttemptBudgets`, `TestFailedBeforeCommit`, `TestFailoverDrill`, `TestReachedProvider` |
+| A retry is a failover, before the commit, of an attempt never reached or refused, within the route's attempts and retry budget | `pick`, `callState.retry`, `retryable`, `reachedProvider`, `firstEvent` | `TestAttemptsModel`, `TestFailover`, `TestFinalAttempts`, `TestAttemptBudgets`, `TestFailedBeforeCommit`, `TestNoFirstEvent`, `TestFailoverDrill`, `TestReachedProvider` |
 | A cancelled call or a withdrawn one is no deployment failure | `callState.endUnanswered`, `callState.retry` (lease released) | `TestCallerGoneIsNoFailure` |
 | Only an admitted call earns its route retries | `Health.Called` after `admit` | `TestRefusedCallsEarnNoRetries` |
 | A principal at its own per-principal ceiling is told `limit.concurrency` | `Health.AcquireWhy`, `noDeployment` | `TestOwnShareIsTheCallersLimit`, `TestAcquireWhy` |

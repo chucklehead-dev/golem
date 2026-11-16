@@ -316,6 +316,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				c.endFailedFirst(providerRetryAfter(resp))
 				return
 			}
+			// The stream failed or ended before its first event (a reset, the
+			// idle alarm, the caller leaving): nothing to commit. The provider
+			// had the request, so it ends as an attempt with no answer does:
+			// uncertain, its lease failed, its slot held for the tail.
+			if err := ex.first.unanswered(); err != nil {
+				resp.Body.Close()
+				c.endUnanswered(err)
+				return
+			}
 			upBody = &ex.first
 		}
 		c.row.Committed = time.Now() // the first event in hand, or a whole response's headers
