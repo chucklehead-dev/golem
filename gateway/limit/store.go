@@ -32,7 +32,7 @@ var ErrUnavailable = errors.New("limit: the site store is unreachable")
 // scope's known spend against its budget, then the slots.
 type Admission struct {
 	Slot
-	Known          int64 // the snapshot's known spend for the call's period
+	KnownSpend     int64 // the snapshot's known spend for the call's period
 	Budget         int64 // the budget refused over; 0: none
 	PrincipalLimit int   // 0: none
 	ScopeLimit     int   // 0: none
@@ -51,7 +51,7 @@ const (
 // local check and a ticket's over-budget mark make it: known spend must be
 // below the budget, whatever the call then costs (ADR 0031). A budget of 0 is
 // none.
-func overBudget(known, budget int64) bool { return budget != 0 && known >= budget }
+func overBudget(spend, budget int64) bool { return budget != 0 && spend >= budget }
 
 // atLimit reports whether n calls in flight fill an in-flight limit (0:
 // none).
@@ -100,7 +100,7 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, error) {
 	if m.down {
 		return 0, ErrUnavailable
 	}
-	if overBudget(a.Known, a.Budget) {
+	if overBudget(a.KnownSpend, a.Budget) {
 		return OverBudget, nil
 	}
 	if !m.acquire(a.Slot, a.PrincipalLimit, a.ScopeLimit) {

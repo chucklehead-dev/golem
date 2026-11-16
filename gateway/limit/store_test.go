@@ -89,7 +89,7 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			{"none", 1 << 50, 0, Admitted},
 			{"negative", 0, -1, OverBudget},
 		} {
-			o, err := st.Admit(ctx, Admission{Slot: Slot{tc.name, tc.name, "s"}, Known: tc.known, Budget: tc.budget})
+			o, err := st.Admit(ctx, Admission{Slot: Slot{tc.name, tc.name, "s"}, KnownSpend: tc.known, Budget: tc.budget})
 			if err != nil || o != tc.want {
 				t.Errorf("%s: %v %v; want %v", tc.name, o, err, tc.want)
 			}

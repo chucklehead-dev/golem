@@ -227,7 +227,7 @@ func (v *Valkey) Admit(ctx context.Context, a Admission) (Outcome, error) {
 		return 0, err
 	}
 	o, err := admitScript.Exec(ctx, c, []string{v.principalKey(a.Scope, a.Principal), v.scopeKey(a.Scope)},
-		[]string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.ttlMs(), i64(a.Known), i64(a.Budget)}).AsInt64()
+		[]string{a.Call, strconv.Itoa(a.PrincipalLimit), strconv.Itoa(a.ScopeLimit), v.ttlMs(), i64(a.KnownSpend), i64(a.Budget)}).AsInt64()
 	if err != nil {
 		return 0, wrap(err)
 	}

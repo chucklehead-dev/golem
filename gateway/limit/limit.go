@@ -11,7 +11,7 @@ import (
 
 	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/lib/contract"
-	budget "github.com/chucklehead-dev/golem/lib/period"
+	"github.com/chucklehead-dev/golem/lib/period"
 )
 
 // Refusals (contracts.md), matched with errors.Is.
@@ -25,8 +25,8 @@ var (
 // Call is the call the limiter admits: admission's.
 type Call = admission.Call
 
-// Known is a snapshot's known spend for one scope (ADR 0031), for one
-// budget period: the ledger's spend, as golem-control last published it.
+// Known is one scope's ledger spend for one budget period, as the snapshot
+// carries it: the known spend golem-control last published. ADR 0031.
 type Known struct {
 	Period string
 	Spend  int64
@@ -61,7 +61,7 @@ type Limiter struct {
 	openLogged atomic.Int64               // when a rate limit last failed open, logged (Unix ns)
 
 	mu          sync.Mutex
-	known       map[string]Known        // by scope, from the snapshot
+	spend       map[string]Known        // known spend by scope, from the snapshot
 	running     map[string]*Ticket      // this gateway's calls the provider may still be working on
 	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer
 	byPrincipal map[principalIn]int     // running calls, counted: an outage's local check is O(1)
@@ -111,7 +111,7 @@ const maxEndedDown = 1 << 16
 
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
-	return &Limiter{store: store, known: map[string]Known{},
+	return &Limiter{store: store, spend: map[string]Known{},
 		running: map[string]*Ticket{}, tails: map[*Ticket]*time.Timer{}, byPrincipal: map[principalIn]int{}, byScope: map[string]int{},
 		Grace: 2 * renewInterval, StoreTimeout: 250 * time.Millisecond, Location: time.UTC,
 		downed: make(chan struct{}, 1), probeFirst: probeFirst}
@@ -121,14 +121,14 @@ func New(store Store) *Limiter {
 // later end is ignored); after Cancel, its slot is held until Ended, or
 // the time EndAt names.
 type Ticket struct {
-	l      *Limiter
-	call   Call
-	period string
-	waived bool
-	over   bool  // admitted over the budget, in a mode that admits one
-	known  int64 // the known spend admission read
-	ended  bool  // Complete or Cancel has run (under l.mu)
-	freed  bool  // its slot is freed (under l.mu)
+	l          *Limiter
+	call       Call
+	period     string
+	waived     bool
+	over       bool  // admitted over the budget, in a mode that admits one
+	knownSpend int64 // the known spend admission read
+	ended      bool  // Complete or Cancel has run (under l.mu)
+	freed      bool  // its slot is freed (under l.mu)
 }
 
 // claimEnd claims the ticket's one end: false if Complete or Cancel has
@@ -154,7 +154,7 @@ func (t *Ticket) Period() string { return t.period }
 // OverBudget reports whether the call was admitted over its scope's
 // budget, in a mode that admits one (warn, observe): what enforce would
 // have refused; and the known spend admission read.
-func (t *Ticket) OverBudget() (bool, int64) { return t.over, t.known }
+func (t *Ticket) OverBudget() (bool, int64) { return t.over, t.knownSpend }
 
 func (l *Limiter) now() time.Time {
 	if l.Now != nil {
@@ -170,22 +170,22 @@ func (l *Limiter) period(t time.Time) string {
 	if p := l.periods.Load(); p != nil && p.year == y && p.month == m {
 		return p.name
 	}
-	p := &periodName{y, m, budget.Of(t, l.Location)}
+	p := &periodName{y, m, period.Of(t, l.Location)}
 	l.periods.Store(p)
 	return p.name
 }
 
-// knownFor is the snapshot's known spend for a scope in a period: none if
+// knownSpend is the snapshot's known spend for a scope in a period: none if
 // the snapshot is of another period (a new month starts from nothing).
-func (l *Limiter) knownFor(scope, period string) int64 {
+func (l *Limiter) knownSpend(scope, period string) int64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.knownLocked(scope, period)
+	return l.knownSpendLocked(scope, period)
 }
 
-// knownLocked is knownFor with mu held.
-func (l *Limiter) knownLocked(scope, period string) int64 {
-	if k := l.known[scope]; k.Period == period {
+// knownSpendLocked is knownSpend with mu held.
+func (l *Limiter) knownSpendLocked(scope, period string) int64 {
+	if k := l.spend[scope]; k.Period == period {
 		return k.Spend
 	}
 	return 0
@@ -202,9 +202,9 @@ func (l *Limiter) knownLocked(scope, period string) int64 {
 // the call is over the budget.
 func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	period := l.period(cmp.Or(c.Started, l.now()))
-	known := l.knownFor(c.Scope, period)
+	spend := l.knownSpend(c.Scope, period)
 	if !l.Down() {
-		a := Admission{Slot: slotOf(c), Known: known, Budget: refusing(c),
+		a := Admission{Slot: slotOf(c), KnownSpend: spend, Budget: refusing(c),
 			PrincipalLimit: c.PrincipalLimit, ScopeLimit: c.ScopeLimit}
 		// The store call runs to its own bound, not the caller's: a call
 		// cut by the caller leaving may have taken the slot at the store
@@ -217,7 +217,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 		cancel()
 		switch {
 		case err == nil:
-			t, err := l.admitted(c, period, known, o)
+			t, err := l.admitted(c, period, spend, o)
 			if t != nil && ctx.Err() != nil {
 				t.Complete(bg, 0) // frees the slot: the call never ran
 				return nil, ctx.Err()
@@ -228,7 +228,7 @@ func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 		}
 		l.MarkDown(err) // and fall through to the local check
 	}
-	return l.admitLocally(c, period, known)
+	return l.admitLocally(c, period, spend)
 }
 
 // refusing is the budget a call is refused over: the scope's if it
@@ -242,7 +242,7 @@ func refusing(c Call) int64 {
 
 // admitted takes the store's answer to an admission: an admitted call is
 // tracked.
-func (l *Limiter) admitted(c Call, period string, known int64, o Outcome) (*Ticket, error) {
+func (l *Limiter) admitted(c Call, period string, spend int64, o Outcome) (*Ticket, error) {
 	switch o {
 	case OverBudget:
 		return nil, ErrBudget
@@ -252,22 +252,22 @@ func (l *Limiter) admitted(c Call, period string, known int64, o Outcome) (*Tick
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	// In grace, peers may still run calls whose slots Valkey lacks.
-	return l.track(c, period, l.now().Before(l.graceUntil), known), nil
+	return l.track(c, period, l.now().Before(l.graceUntil), spend), nil
 }
 
 // admitLocally is the outage's check: the snapshot's known spend and this
 // gateway's own running calls decide, and the call is a waiver. The check
 // and the tracking are one step under the lock.
-func (l *Limiter) admitLocally(c Call, period string, known int64) (*Ticket, error) {
+func (l *Limiter) admitLocally(c Call, period string, spend int64) (*Ticket, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if overBudget(known, refusing(c)) {
+	if overBudget(spend, refusing(c)) {
 		return nil, ErrBudget
 	}
 	if atLimit(l.byPrincipal[principalOf(c)], c.PrincipalLimit) || atLimit(l.byScope[c.Scope], c.ScopeLimit) {
 		return nil, ErrConcurrency
 	}
-	return l.track(c, period, true, known), nil
+	return l.track(c, period, true, spend), nil
 }
 
 // storeContext bounds a store call: Valkey answers a site's gateways in a
@@ -322,10 +322,10 @@ func (l *Limiter) keepEnded(slots ...Slot) {
 	l.endedDown = append(l.endedDown, slots[:max(n, 0)]...)
 }
 
-// track records a running call, admitted at known spend known; mu is
-// held.
-func (l *Limiter) track(c Call, period string, waived bool, known int64) *Ticket {
-	t := &Ticket{l: l, call: c, period: period, waived: waived, over: overBudget(known, c.Budget), known: known}
+// track records a running call and the known spend it was admitted at. The
+// caller holds mu.
+func (l *Limiter) track(c Call, period string, waived bool, spend int64) *Ticket {
+	t := &Ticket{l: l, call: c, period: period, waived: waived, over: overBudget(spend, c.Budget), knownSpend: spend}
 	if waived {
 		l.Waived.Add(1)
 	}
@@ -436,7 +436,7 @@ func (t *Ticket) Ended(ctx context.Context) {
 func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.known[scope] = k
+	l.spend[scope] = k
 }
 
 // Renew re-registers the slots of this gateway's running calls; the
@@ -570,9 +570,9 @@ func (l *Limiter) endGrace() {
 	l.graceUntil = time.Time{}
 }
 
-// Known is a scope's known spend for the current period: the snapshot's,
+// KnownSpend is a scope's known spend for the current period: the snapshot's,
 // as admission reads it.
-func (l *Limiter) Known(scope string) int64 { return l.knownFor(scope, l.period(l.now())) }
+func (l *Limiter) KnownSpend(scope string) int64 { return l.knownSpend(scope, l.period(l.now())) }
 
 // Down reports whether this gateway believes the store unreachable.
 func (l *Limiter) Down() bool { return l.down.Load() }

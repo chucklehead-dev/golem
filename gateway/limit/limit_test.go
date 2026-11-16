@@ -27,7 +27,7 @@ func TestSoft(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk.Complete(ctx, 80)
-	if got := l.Known("s"); got != 0 {
+	if got := l.KnownSpend("s"); got != 0 {
 		t.Fatalf("known %d before a snapshot counts the call: the gateway counts no spend", got)
 	}
 	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 9})
@@ -38,7 +38,7 @@ func TestSoft(t *testing.T) {
 	if _, err := l.Admit(ctx, scopeCall("c", "p2")); !errors.Is(err, ErrBudget) {
 		t.Fatalf("at the budget: %v, want ErrBudget", err)
 	}
-	if got := l.Known("s"); got != 10 {
+	if got := l.KnownSpend("s"); got != 10 {
 		t.Fatalf("known %d, want the snapshot's 10", got)
 	}
 }
@@ -212,7 +212,7 @@ func TestPeriodRollover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a new period: %v", err)
 	}
-	if got := l.Known("s"); got != 0 || tk.Period() != "2026-12" {
+	if got := l.KnownSpend("s"); got != 0 || tk.Period() != "2026-12" {
 		t.Fatalf("December's known spend %d, period %s: want 0, 2026-12", got, tk.Period())
 	}
 }
