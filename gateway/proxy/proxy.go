@@ -157,21 +157,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
-	body, req, rt := p.body, p.req, p.rt
 
-	// The call's attempts (model/attempts.md): the pool in order, each
-	// attempt from a deployment its health admits; one refused or never
-	// seen by its provider is retried, within the route's attempts and its
-	// pool's retry budget, until one commits (commit.go). The budget and
-	// the slots are the call's, admitted once at its first deployment (a
-	// call bills at most once, so its bound needs no check per attempt).
-	ex.tried = append(ex.tried[:0], make([]bool, len(rt.Pool))...) // pooled: held in c, a slice would escape
-	c := &callState{h: h, w: w, r: r, ctx: ctx, bg: context.WithoutCancel(ctx), principal: p.principal, req: req, rt: rt,
-		reqID: reqID, reqIDs: reqIDs, requestBytes: int64(len(body)), hl: h.health(), tried: ex.tried, betas: p.betas}
+	c := &callState{}
+	c.init(h, ctx, w, r, ex, &p, reqID, reqIDs)
 	h.runBeforePick(r)
 	// Only deployments that accept the request's betas are its pool here
 	// (ADR 0028): none, and it is refused before anything is counted.
-	if no := incapable(rt, c.betas); no != nil {
+	if no := incapable(p.rt, c.betas); no != nil {
 		h.fail(ctx, w, reqIDs, &p, no)
 		return
 	}
@@ -187,60 +179,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { c.hold.Release() }() // the last attempt's: when the call is over
-
-	var deadline time.Time // the call's end at the latest: renewals stop there
-	if rt.MaxDuration > 0 {
-		deadline = started.Add(rt.MaxDuration)
-	}
-	worst, ok := price.Worst(c.requestBytes, req.maxTokens, req.n, p.snap.Prices[c.target.Model])
-	if !ok {
-		h.fail(ctx, w, reqIDs, &p, &refusal{code: contract.RequestInvalid, msg: "the request's token count is too large to price safely: lower max_tokens or n"})
-		return
-	}
-	ticket, no := h.admit(ctx, c.principal, admission.Call{ID: reqIDs, Alias: rt.Alias, Deployment: c.target.Key(),
-		Model: c.target.Model, Started: started, Deadline: deadline})
-	if no != nil {
-		h.fail(ctx, w, reqIDs, &p, no)
-		return
-	}
-	// Only an admitted call earns its route retries: refused ones would
-	// refill the budget a failing pool's retries draw on.
-	c.hl.Called(rt.Alias)
-	// The accounting runs to its end whatever the caller does.
-	c.acct = settlement{ticket: ticket, ctx: c.bg, deadline: deadline, tail: cmp.Or(h.ProviderTail, 2*time.Minute)}
 	// Every admitted call's ticket ends exactly once. Should anything below
 	// panic before it does (a bug; the abort of a cut response comes after
 	// its end), the call is cancelled at its declared worst case and its
 	// slot held for the tail, rather than held for ever. Its row is not
 	// written: the panic's report is the record.
-	defer func() {
-		if !c.acct.ended {
-			c.acct.cancel(worst)
-		}
-	}()
+	defer c.cancelUnended()
+	defer c.unkeep()
 
-	// A retry needs the caller's body, to rewrite for the next deployment:
-	// it is kept until the call commits, within the gateway's bound on
-	// bodies kept (past it the call makes one attempt, rather than taking
-	// more memory).
-	c.kept = rt.MaxAttempts > 1 && h.keep(c.requestBytes)
-	if c.kept {
-		defer h.unkeep(c.requestBytes)
-	}
-
-	pr := c.principal
-	c.row = telemetry.Call{RequestID: reqIDs, Principal: pr.ID, PrincipalKind: pr.Kind, Key: pr.Key,
-		Scope: pr.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Started: started,
-		Currency: p.snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived(), ProviderAccount: p.snap.Accounts[c.target.Backend]}
-	if ticket != nil {
-		c.row.Period = ticket.Period() // admission's: one period per call
-		c.row.OverBudget = h.overBudget(w, pr, ticket)
+	if no := c.begin(&p, started); no != nil {
+		h.fail(ctx, w, reqIDs, &p, no)
+		return
 	}
 
 	// The route's bounds, over all its attempts: the caller's going away
 	// still cancels it too.
 	lim := &ex.lim
-	c.upCtx = lim.bound(ctx, started, rt)
+	c.upCtx = lim.bound(ctx, started, p.rt)
 	defer lim.end()
 	if h.InFlight != nil {
 		// Registered for the call's upstream life, taken off before its
@@ -253,23 +208,111 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var resp *http.Response
-	var upBody io.Reader
-	streamed := false
+	resp, upBody, streamed, committed := c.attempts(ex, p.snap, &in, p.body)
+	if !committed {
+		return
+	}
+	// Committed: this attempt's response is the caller's, and the caller's
+	// body is let go.
+	if in != nil {
+		putBody(in)
+		in = nil
+	}
+	c.respond(ex, resp, upBody, streamed)
+}
+
+// init sets up the call's state for its attempts, once its request is
+// prepared. It fills c in place, so ServeHTTP's callState stays on the
+// stack.
+func (c *callState) init(h *Handler, ctx context.Context, w http.ResponseWriter, r *http.Request, ex *exchange, p *prepared, reqID uuid.UUID, reqIDs string) {
+	// Reuse the exchange's pooled slice; a new one would be heap-allocated.
+	ex.tried = append(ex.tried[:0], make([]bool, len(p.rt.Pool))...)
+	*c = callState{h: h, w: w, r: r, ctx: ctx, bg: context.WithoutCancel(ctx), principal: p.principal, req: p.req, rt: p.rt,
+		reqID: reqID, reqIDs: reqIDs, requestBytes: int64(len(p.body)), hl: h.health(), tried: ex.tried, betas: p.betas}
+}
+
+// begin admits the call at its first deployment and opens its accounting:
+// the ticket and its settlement, the body kept for retries, and the ledger
+// row. A refusal leaves nothing to settle.
+func (c *callState) begin(p *prepared, started time.Time) *refusal {
+	h, rt := c.h, c.rt
+	var deadline time.Time // the call's end at the latest: renewals stop there
+	if rt.MaxDuration > 0 {
+		deadline = started.Add(rt.MaxDuration)
+	}
+	worst, ok := price.Worst(c.requestBytes, c.req.maxTokens, c.req.n, p.snap.Prices[c.target.Model])
+	if !ok {
+		return &refusal{code: contract.RequestInvalid, msg: "the request's token count is too large to price safely: lower max_tokens or n"}
+	}
+	ticket, no := h.admit(c.ctx, c.principal, admission.Call{ID: c.reqIDs, Alias: rt.Alias, Deployment: c.target.Key(),
+		Model: c.target.Model, Started: started, Deadline: deadline})
+	if no != nil {
+		return no
+	}
+	// Only an admitted call earns its route retries: refused ones would
+	// refill the budget a failing pool's retries draw on.
+	c.hl.Called(rt.Alias)
+	// The accounting runs to its end whatever the caller does.
+	c.acct = settlement{ticket: ticket, ctx: c.bg, deadline: deadline, tail: cmp.Or(h.ProviderTail, 2*time.Minute)}
+	c.worst = worst
+
+	// A retry needs the caller's body, to rewrite for the next deployment:
+	// it is kept until the call commits, within the gateway's bound on
+	// bodies kept (past it the call makes one attempt, rather than taking
+	// more memory).
+	c.kept = rt.MaxAttempts > 1 && h.keep(c.requestBytes)
+
+	pr := c.principal
+	c.row = telemetry.Call{RequestID: c.reqIDs, Principal: pr.ID, PrincipalKind: pr.Kind, Key: pr.Key,
+		Scope: pr.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Started: started,
+		Currency: p.snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived(), ProviderAccount: p.snap.Accounts[c.target.Backend]}
+	if ticket != nil {
+		c.row.Period = ticket.Period() // admission's: one period per call
+		c.row.OverBudget = h.overBudget(c.w, pr, ticket)
+	}
+	return nil
+}
+
+// cancelUnended cancels the call's ticket at its worst case if nothing has
+// ended it: a panic's. A call refused before admission has no ticket, so
+// this counts nothing.
+func (c *callState) cancelUnended() {
+	if !c.acct.ended {
+		c.acct.cancel(c.worst)
+	}
+}
+
+// unkeep returns the call's kept body to the handler's bound on bodies kept.
+func (c *callState) unkeep() {
+	if c.kept {
+		c.h.unkeep(c.requestBytes)
+	}
+}
+
+// attempts tries deployments in pool order. An attempt the provider never
+// received, or refused with 429/503/529, is retried on the next untried
+// deployment, within MaxAttempts and the retry budget. Admission happens
+// once, at the first deployment, because a call is billed once.
+//
+// It returns the committed attempt's response, read as upBody, or false
+// when the call has already ended, refused or unanswered. It releases the
+// caller's body (*in) as soon as no retry can need it.
+func (c *callState) attempts(ex *exchange, snap *snapshot.Compiled, in **[]byte, body []byte) (resp *http.Response, upBody io.Reader, streamed, committed bool) {
+	h, r, req, rt, lim := c.h, c.r, c.req, c.rt, &ex.lim
 	for c.attempt = 1; ; c.attempt++ {
 		t := c.target
-		c.price = p.snap.Prices[t.Model]
+		c.price = snap.Prices[t.Model]
 		c.row.Attempt, c.row.Model, c.row.Deployment, c.row.Provider = c.attempt, t.Model, t.Key(), t.Backend
-		c.row.ProviderAccount, c.row.PriceVersion = p.snap.Accounts[t.Backend], c.price.Version
+		c.row.ProviderAccount, c.row.PriceVersion = snap.Accounts[t.Backend], c.price.Version
 		c.row.Envelope = t.Envelope
 		out := getBody()
 		if n := len(body) + len(t.Model) + 64; cap(*out) < n {
 			*out = make([]byte, 0, n)
 		}
 		*out = ex.rewrite(h.Dialect, (*out)[:0], body, t.Model)
-		if !c.kept && in != nil {
-			putBody(in) // the caller's body is no longer needed
-			in, body = nil, nil
+		if !c.kept && *in != nil {
+			putBody(*in) // the caller's body is no longer needed
+			*in, body = nil, nil
 		}
 		if c.attempt > 1 {
 			lim.nextAttempt(rt)
@@ -285,7 +328,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// which reads as a request that may have gone out.
 			ub.Close()
 			c.endUnanswered(errUnsent)
-			return
+			return nil, nil, false, false
 		}
 		var err error
 		resp, err = t.Transport.RoundTrip(up)
@@ -295,7 +338,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			c.endUnanswered(err)
-			return
+			return nil, nil, false, false
 		}
 		lim.gotHeaders()
 		c.row.ProviderRequestID = cmp.Or(resp.Header.Get("Request-Id"), resp.Header.Get("X-Request-Id"))
@@ -315,7 +358,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				c.endFailedFirst(providerRetryAfter(resp))
-				return
+				return nil, nil, false, false
 			}
 			// The stream failed or ended before its first event (a reset, the
 			// idle alarm, the caller leaving): nothing to commit. The provider
@@ -324,20 +367,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := ex.first.unanswered(); err != nil {
 				resp.Body.Close()
 				c.endUnanswered(err)
-				return
+				return nil, nil, false, false
 			}
 			upBody = &ex.first
 		}
 		c.row.Committed = time.Now() // the first event in hand, or a whole response's headers
-		break
+		return resp, upBody, streamed, true
 	}
-	// Committed: this attempt's response is the caller's, and the caller's
-	// body is let go.
-	if in != nil {
-		putBody(in)
-		in = nil
-	}
-	c.respond(ex, resp, upBody, streamed)
 }
 
 // callState is an admitted call as its attempts and its end share it.
@@ -363,7 +399,8 @@ type callState struct {
 	hold    *route.Hold
 	price   libsnapshot.Price
 	attempt int
-	kept    bool // the caller's body is kept for a retry
+	kept    bool  // the caller's body is kept for a retry
+	worst   int64 // the call's worst-case cost, charged if a panic ends it
 
 	row   telemetry.Call  // the attempt's ledger row
 	acct  settlement      // the call's ticket
