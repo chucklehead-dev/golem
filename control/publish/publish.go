@@ -343,10 +343,10 @@ func (p *Publisher) floor(ctx context.Context, rec state.Record) (uint64, error)
 	case err != nil:
 		return 0, err
 	default:
-		// An unverifiable pointer proves nothing (gateways refuse it, and
-		// this publication replaces it).
-		// Its sequence counts only if it verifies as this pool's: another
-		// pool's signed pointer copied here would otherwise set the floor.
+		// A pointer counts only if it verifies as this pool's: an
+		// unverifiable one proves nothing (gateways refuse it, and this
+		// publication replaces it), and another pool's signed pointer copied
+		// here would otherwise set the floor.
 		if seq, ok := p.verifiedSeq(false, raw); ok {
 			ptrSeq, havePtr = seq, true
 		}

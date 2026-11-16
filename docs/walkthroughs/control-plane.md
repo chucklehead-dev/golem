@@ -31,7 +31,7 @@ The packages, bottom up:
 | `control/audit` | ships the document's audit outbox |
 | `control/entrasync` | the Entra group sync |
 | `control/metrics` | golem-control's metrics: observable instruments over the controller's state |
-| `cmd/golem-control` | the binary: flags, wiring, `keygen`, `pubkey`, `restore` |
+| `cmd/golem-control` | the binary: flags, wiring, `keygen`, `pubkey`, `restore`, `bootstrap` |
 
 The API that writes the document (`control/service`, `control/api`) is
 [control-api.md](control-api.md)'s; known spend's job (`control/spend`) is
@@ -129,7 +129,7 @@ Publication (§3), the group sync (§5.2) and the audit trim (§5.1) use it.
 **Validate-only.** `Store.Validate` (`state.go:356`) runs the same `apply`
 and writes nothing: the API's `validate_only` (control-plane.md §2). The
 service layer builds every change, with its audit event, once and hands it
-to either (`control/service/service.go:99`, `Service.apply`).
+to either (`control/service/service.go:102`, `Service.apply`).
 
 **The audit outbox's numbering.** A change appends `AuditEvent`s with
 `Seq` 0; `Document.number` (`state.go:97`) gives each the next number from
@@ -141,7 +141,7 @@ The outbox is in the document every write and every 500 ms read carries,
 and only the leader's shipper trims it, after archival (§5.1): without
 `-audit-archive`, or with the archive unreachable, it would grow without
 limit. `Store.MaxOutbox` bounds it (`DefaultMaxOutbox`, 10,000;
-`golem-control -audit-outbox-max`), and `checkOutbox` (`outbox.go:148`), the last check
+`golem-control -audit-outbox-max`), and `checkOutbox` (`outbox.go:150`), the last check
 `apply` makes, judges every write by the events it adds:
 
 - **Past the reserve** (`Reserve`: 80% of the bound) a write that grants
@@ -181,18 +181,18 @@ restrictive part alone (the group sync, §5.2).
 | Invariant | Where | Tested by |
 | --- | --- | --- |
 | The fence's epoch never goes back, and the fence is never dropped | `checkFence`, `state.go:415` | `TestFenceInvariant` |
-| A principal is a user or a service; its ID is not in the reserved `entra:` namespace; its scopes exist; its default is one of them; only a user with an Entra ID has synced memberships | `checkPrincipals`, `entitlements.go:139` | `TestEntitlementInvariants` |
+| A principal is a user or a service; its ID is not in the reserved `entra:` namespace; its scopes exist; its default is one of them; only a user with an Entra ID has synced memberships; a member's cap is in a scope that exists, above 0 and at most 2^50 | `checkPrincipals`, `entitlements.go:135` | `TestEntitlementInvariants` |
 | No two principals share an Entra ID | `checkPrincipals` | `TestEntitlementInvariants` |
-| A key's owner exists; a live key's owner is a member of its scope | `checkKeys`, `entitlements.go:171` | `TestEntitlementInvariants` |
-| A role is `manager`, of an existing principal on an existing scope | `checkRoles`, `entitlements.go:186` | `TestRolesAndAudit` |
-| The outbox loses only its oldest events and gains new ones numbered on without a gap; the counter never goes back | `outboxFollows`, `entitlements.go:306` | `TestRolesAndAudit`, `control/audit`'s tests |
-| Revocations are append-only, and a revoked key stays revoked | `checkRevocations`, `entitlements.go:204` | `TestEntitlementInvariants` |
+| A key's owner exists; a live key's owner is a member of its scope; its cap is 0 (none) to 2^50; no two keys share a display ID (the ledger's `key_id`, the key's spend account) | `checkKeys`, `entitlements.go:172` | `TestEntitlementInvariants` |
+| A role is `manager`, of an existing principal on an existing scope | `checkRoles`, `entitlements.go:196` | `TestRolesAndAudit` |
+| The outbox loses only its oldest events and gains new ones numbered on without a gap; the counter never goes back | `outboxFollows`, `entitlements.go:317` | `TestRolesAndAudit`, `control/audit`'s tests |
+| Revocations are append-only, and a revoked key stays revoked | `checkRevocations`, `entitlements.go:214` | `TestEntitlementInvariants` |
 | No pool's publication record is removed or goes back in sequence, epoch or source | `checkPublications`, `state.go:425` | `TestInvariants` |
 | A store that has read nothing starts from an empty document only where golem-control has not run (no `Installed` object), else `ErrMissing`; only `Bootstrap` creates one then | `refresh`, `installed`, `state.go:228` | `TestMissingDocument`, `TestBootstrapCommand` |
-| No pool is published from a record below what the bucket proves (its verified checkpoint or pointer): the document went back, `ErrRegressed` | `prepare` and `below`, `control/publish/publish.go:203` | `TestGuard` |
+| No pool is published from a record below what the bucket proves (its verified checkpoint or pointer): the document went back, `ErrRegressed` | `prepare` and `below`, `control/publish/publish.go:204` | `TestGuard` |
 | A write whose reply was lost is applied once: recognised by its ID among the document's last 32 (`Writes`), even after others wrote over it | `Update`, `wrote`, `state.go` | `TestLostReplyOvertaken`, `TestLostClaim` |
 | A leader-only write lands only under its own fence | `FencedUpdate`, `state.go:341` | `TestFenceInvariant`, `TestStaleLeaderFenced`, `TestSyncFenced`, `TestDeposedTrim` |
-| A write that adds audit events never leaves the outbox above its bound (`Store.MaxOutbox`); past 80% of it, only a write whose events are all restrictive and whose change widens nothing adds any | `checkOutbox`, `outbox.go:148`; `widens`, `outbox.go:191` | `TestOutboxBound`, `TestOutboxDefault`, `TestWidens`, `TestRestoreLandsPastReserve`; `control/service`'s `TestOutboxBackpressure`, `control/audit`'s `TestShippingReopensGrants` |
+| A write that adds audit events never leaves the outbox above its bound (`Store.MaxOutbox`); past 80% of it, only a write whose events are all restrictive and whose change widens nothing adds any | `checkOutbox`, `outbox.go:150`; `widens`, `outbox.go:190` | `TestOutboxBound`, `TestOutboxDefault`, `TestWidens`, `TestRestoreLandsPastReserve`; `control/service`'s `TestOutboxBackpressure`, `control/audit`'s `TestShippingReopensGrants` |
 | Every audit event is of a classified action | `checkOutbox` (`ErrInvariant`); the source, by `TestEveryActionClassified` | `TestUnclassifiedAction`, `TestEveryActionClassified` |
 
 Every refusal wraps `ErrInvariant`, which the API maps to Connect's
@@ -202,11 +202,11 @@ the outbox drains.
 
 ### 1.2 Restoring an older document
 
-`state.Restore` (`control/state/restore.go:36`) builds a document that
+`state.Restore` (`control/state/restore.go:37`) builds a document that
 brings an older one's entitlements back **without widening any right**:
 for every right, the narrower of the backup's and the current document's.
 A `restorer` walks the scopes, principals, roles and keys in turn
-(`scopes`, `principals`, `roles`, `keys`, `restore.go:57`-`119`), then
+(`scopes`, `principals`, `roles`, `keys`, `restore.go:58`-`140`), then
 revokes every live key whose owner is no longer a member of its scope:
 
 - what only the backup has (a scope, principal, membership, role or key
@@ -229,7 +229,7 @@ always the current document's (model/leadership.md's "preserve" restore):
 a restore cannot move publication back, change who leads, or revive a
 revoked key.
 
-`Store.Restore` (`restore.go:325`) runs it inside `Update` with a
+`Store.Restore` (`restore.go:258`) runs it inside `Update` with a
 `state.restore` audit event naming the actor and the backup's version (or,
 as a dry run, inside `Validate`). `golem-control restore` (§6) is its
 command line. `TestRestore` covers a backup with rights changed both ways;
@@ -243,8 +243,8 @@ Only the leader publishes and runs the jobs. Leadership is two objects
 (ADR 0049, model/leadership.md's fence design; `control/lead/lead.go`'s
 package comment):
 
-- the **lease**, `lead/lease.json` (`LeaseKey`, `lead.go:41`; the `lease`
-  type, `lead.go:44`): holder, epoch, duration, a diagnostic renewal time,
+- the **lease**, `lead/lease.json` (`LeaseKey`, `lead.go:40`; the `lease`
+  type, `lead.go:43`): holder, epoch, duration, a diagnostic renewal time,
   and `Released`. It holds no authority: losing it or rolling it back only
   delays a takeover. Renewing it rewrites this small object, not the
   document;
@@ -252,38 +252,38 @@ package comment):
   leader-only write checks it in its own compare-and-swap
   (`state.FencedUpdate`).
 
-`Elector.Try` (`lead.go:129`) reads the lease (`read`, `lead.go:170`; a
+`Elector.Try` (`lead.go:128`) reads the lease (`read`, `lead.go:169`; a
 missing one is free), then:
 
-- **mine** (`mine`, `lead.go:155`: held by this replica at the epoch it
+- **mine** (`mine`, `lead.go:154`: held by this replica at the epoch it
   leads at, or at the one it acquired and has yet to claim): `renew`
-  (`lead.go:214`) rewrites it conditionally on the object read; if its
+  (`lead.go:213`) rewrites it conditionally on the object read; if its
   claim is still pending (a claim that failed, or whose reply was lost),
   it claims now; and if the fence names another, this replica has been
   deposed (`errLost`);
 - **another's, not lapsed**: this replica does not lead. A lease is lapsed
-  (`lapsed`, `lead.go:188`) when this replica has seen the same object
+  (`lapsed`, `lead.go:187`) when this replica has seen the same object
   (its tag) unchanged for the lease's duration *by its own clock*, as
   client-go judges; the stored `RenewedAt` is only diagnostic, so clock
   skew does not matter;
-- **free, released or lapsed**: `take` (`lead.go:238`) acquires the lease
+- **free, released or lapsed**: `take` (`lead.go:237`) acquires the lease
   at one above the higher of its epoch and the fence's, then `claim`
-  (`lead.go:260`) writes the fence by `Update`, only if the fence's epoch
+  (`lead.go:259`) writes the fence by `Update`, only if the fence's epoch
   is below that. A rolled-back lease object therefore cannot reuse an
   epoch.
 
 A lease write that loses its race (`errHeld`) or a claim beaten by a later
 epoch (`errLost`) is not a failure: the replica steps down (`stepDown`,
-`lead.go:163`) and `Try` reports epoch 0. The replica leads once it has
+`lead.go:162`) and `Try` reports epoch 0. The replica leads once it has
 claimed. A claim whose reply was lost is adopted at the next try (the
 fence already names it, `claim`'s first case), and the store recognises
 its own write when a retried put fails its condition (the write ID, §1).
 
-`Elector.Fence` (`lead.go:112`) is the leadership this replica acts under,
+`Elector.Fence` (`lead.go:111`) is the leadership this replica acts under,
 for its leader-only writes; the controller passes it to the publisher and
 the group sync.
 
-**Giving up by one's own clock.** `Elector.Epoch` (`lead.go:104`) returns
+**Giving up by one's own clock.** `Elector.Epoch` (`lead.go:103`) returns
 0 once the replica has seen another holder, or once its own clock passes
 its last renewal plus the duration (`epochLocked`). Belief runs from the
 time stamped *before* the write, so a slow write only shortens it, and a
@@ -291,13 +291,13 @@ store error within the lease keeps it. A paused leader stops believing
 before any taker can have watched its lease for a whole duration. Whatever
 it believes, its writes are refused once another has claimed the fence.
 
-**Timing.** `Run` (`lead.go:300`) tries every `RenewEvery` (default a
+**Timing.** `Run` (`lead.go:299`) tries every `RenewEvery` (default a
 third of the 30 s `Duration`, so 10 s), and after a failed try again after
 `RetryEvery` (2 s), jittered by a quarter either way (`jitter`), so a store
 blip does not wait a whole renewal and replicas do not retry in step.
 
 **Giving up.** On SIGTERM, golem-control stops its publishing loop and the
-elector's, then calls `Elector.Release` (`lead.go:285`): belief ends
+elector's, then calls `Elector.Release` (`lead.go:284`): belief ends
 first, then the lease is marked released, and another replica takes it on
 its next try, so a rolling restart loses no publication time. The fence
 stays; the next taker claims a later epoch.
@@ -326,7 +326,7 @@ order:
    VERIFY): the floor is the highest of the pool's verified checkpoint and
    its signed pointer (each counted only if it verifies as this pool's),
    and the next publication is one above the record. A record **below**
-   the floor (`publish.go:203`) can only mean the document went back: a
+   the floor (`publish.go:204`) can only mean the document went back: a
    record is written before its checkpoint and pointer, and a restore keeps
    the current records. `below` (`publish.go:232`) re-reads the document
    first, so a record another publisher won meanwhile is `ErrConflict` (or
@@ -391,19 +391,19 @@ with the old key trusted goes on and re-signs; without it, `ErrTampered`;
 
 ## 4. The controller loop
 
-`Controller.Run` (`control/controller/controller.go:643`) starts the
-elector's loop and, every second, runs `tick` (`controller.go:668`): a
+`Controller.Run` (`control/controller/controller.go:687`) starts the
+elector's loop and, every second, runs `tick` (`controller.go:712`): a
 publication if due (`Step`), then, while this replica leads, the audit
 outbox shipped (§5.1) and the group sync if due (§5.2). Each error is
 logged once until it changes. `Run` returns only once the elector's loop
 has, so a `Release` after it cannot be undone by a renewal in flight.
 
-`Controller.Step` (`controller.go:294`):
+`Controller.Step` (`controller.go:299`):
 
 1. **Not leading** (`Elector.Fence` reports none): do nothing.
-2. **Entitlements**: refresh the state (`controller.go:302`) and hash its
+2. **Entitlements**: refresh the state (`controller.go:307`) and hash its
    principals, scopes, keys and revocations (`entitlementsSum`,
-   `controller.go:710`). The state version is not hashed: the publisher's
+   `controller.go:754`). The state version is not hashed: the publisher's
    own record write moves it at every publication.
 3. **Config compile** (`load`): hash the config directory; if it
    changed, decode it and trial-compile it with the state's entitlements,
@@ -434,7 +434,7 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    published to renew either, nothing is published. Before this, the last
    good config lived only in memory, and a restarted leader over a broken
    directory published nothing until every gateway's lease lapsed.
-4. **Due?** (`due`, `controller.go:463`) Each pool is due on its own
+4. **Due?** (`due`, `controller.go:471`) Each pool is due on its own
    (`poolState`): when the good config's hash, the entitlements' hash or
    the epoch differs from its last publication's, or the renewal interval
    (`Renew`, default a minute) has passed. Renewal extends the snapshots'
@@ -447,7 +447,7 @@ has, so a `Release` after it cannot be undone by a renewal in flight.
    a retry's wait). Nothing due: nothing is published, and the step's
    error still names each failing pool's last failure.
 5. **Known spend**: if a known-spend job is set, run it (§4.1).
-6. **Publish** every pool (`publish`, `controller.go:473`), in sorted order,
+6. **Publish** every pool (`publish`, `controller.go:481`), in sorted order,
    through one `PublishAll` with the same snapshot built by
    `compile.Compile` from the good config (or `compile.Renew`, step 3) and
    `entitlements`: the state's `Document.Entitlements` (scopes by ID, keys'
@@ -488,11 +488,18 @@ checks nothing). `TestScopeModels`, `TestKeyModelsFromConfig`.
 ### 4.1 Known spend
 
 With `-clickhouse`, `Controller.Spend` is a `spend.Job`: when a
-publication is due, `Step` runs `spend.Job.Step`, and `entitlements` puts
-its current result into every scope of the snapshot (`Period`, `Since`,
-`KnownSpend`, `controller.go:536`): each scope's spend this period from
-the ledger, up to a boundary a few minutes back. Gateways add their site's
-own minutes from that boundary on (ADR 0048). A failed query keeps the
+publication is due, `Step` runs `spend.Job.Step`, and `entitlements` lays
+its current result (a `spend.Known`: the period, the boundary and the
+ledger's `spend.Totals` by scope, by member in a scope and by key display
+ID) over the snapshot (`withKnownSpend`, `controller.go:554`): every
+scope gets `Period`, `Since` and its `KnownSpend`; every member who has
+spent is listed in its scope's `Members` with its spend (a member with a
+cap of its own in the state is listed with it, spent or not, and a
+scope's default cap, the config's, applies to the rest); and a key with
+a cap gets its own (an uncapped key's spend is not published: the
+gateway has no use for it). All of it is the ledger's spend this period
+up to a boundary a few minutes back. Gateways add their site's own
+minutes from that boundary on (ADR 0048). `TestWithKnownSpend`. A failed query keeps the
 last result for its period and is reported with the step; with no result
 at all a snapshot carries none and gateways count their site alone. How
 the job queries and why the boundary is safe:
@@ -508,15 +515,15 @@ hold the lock for a map copy, never across I/O), and `control/metrics`
 instruments, read when the meter collects:
 
 - **Each pool's last successful publication** by this replica
-  (`Publications`, `controller.go:215`): its time by the controller's
+  (`Publications`, `controller.go:219`): its time by the controller's
   clock, its sequence and the lease it issued (the built snapshot's
   `ValidUntil`, kept from the build callback), recorded in `publish` per
   pool, so a pool that publishes while another fails still moves. A
   replica that stops leading keeps its last values; the alerts take the
   newest across replicas.
-- **Failures** (`Failures`, `controller.go:225`): a count by pool and
+- **Failures** (`Failures`, `controller.go:229`): a count by pool and
   reason. Each pool's own failure in `publish` is classified by
-  `FailureReason` (`controller.go:162`), by `errors.Is` against the
+  `FailureReason` (`controller.go:166`), by `errors.Is` against the
   sentinels: `tampered` (`publish.ErrTampered`), `regressed`
   (`publish.ErrRegressed`, `state.ErrRegressed`, `state.ErrMissing`),
   `fenced` (`publish.ErrFenced`, `state.ErrFenced`), `conflict`
@@ -535,8 +542,8 @@ instruments, read when the meter collects:
   removal guard tripping (`GuardTrips`); the outbox's length is the
   store's (`Store.OutboxLen`, `state.go:275`: a `len` under its lock, no
   copy of the document), and its bound (`Store.OutboxMax`), so the alert
-  is a ratio; known spend's age and staleness are the job's
-  own (`spend.Job.Age`, `Stale`).
+  is a ratio; known spend's age and staleness, and each site's ingestion
+  lag, are the job's own (`spend.Job.Age`, `Stale`, `Lags`).
 
 | Instrument | Read from |
 | --- | --- |
@@ -545,6 +552,7 @@ instruments, read when the meter collects:
 | `golem.control.leader`, `golem.control.leader.epoch` | `Elector.Epoch` |
 | `golem.control.scope_policy.unmatched`, `golem.control.config.renewing` | `Controller.Unmatched`, `ConfigRenewing` |
 | `golem.control.spend.age`, `.stale` {period} | `spend.Job.Current`, `Age`, `Stale` |
+| `golem.control.spend.ingestion_lag`, `.ingestion_behind` {site} | `spend.Job.Lags` (no lag for a site with no rows) |
 | `golem.control.entra_sync.time`, `.guard_trips` | `Controller.SyncedAt`, `GuardTrips` |
 | `golem.control.audit.outbox`, `golem.control.audit.outbox_max`, `golem.control.audit.shipped.time` | `Store.OutboxLen`, `Store.OutboxMax`, `Controller.ShippedAt` |
 
@@ -582,7 +590,7 @@ and the first step that archives and trims makes room again
 ### 5.2 Entra group sync
 
 `Sync.Step` (`control/entrasync/sync.go:109`, ADR 0047) runs from the
-controller loop (`syncStep`, `controller.go:687`) every `SyncEvery` (five
+controller loop (`syncStep`, `controller.go:731`) every `SyncEvery` (five
 minutes) while this replica leads, under the elector's fence:
 
 1. **Read every bound group first** (`boundGroups`: each scope's
@@ -640,12 +648,15 @@ membership that is only a group's.
 ## 6. The binary
 
 `main` (`cmd/golem-control/main.go:58`) dispatches the subcommands
-(`dispatch`, `main.go:66`); anything else is golem-control itself, `run`
-(`main.go:281`): `parseFlags` (`main.go:239`), the bucket and signer
-opened, the state loaded, `newController` (`main.go:356`) wiring an
+(`dispatch`, `main.go:67`); anything else is golem-control itself, `run`
+(`main.go:278`): `parseFlags` (`main.go:235`), the bucket and signer
+opened, the state loaded, `newController` (`main.go:372`) wiring an
 elector and a publisher per pool and the jobs the flags ask for, then the
-state's refresh loop, the API (if `-listen`) and the controller until
-SIGTERM or a component fails. With `-telemetry`, `openMetrics` registers
+state's refresh loop, the probes (if `-probes`: `GET /livez` and
+`/readyz`, both ready once the state has loaded, a replica that does not
+lead included, as it serves the API and stands by), the API (if
+`-listen`) and the controller until SIGTERM or a component fails. The
+comma-separated flags (`-pools`, `-entra-audience`) are split by `list`. With `-telemetry`, `openMetrics` registers
 the controller's instruments (§4.2) on a meter provider over `lib/otlp`
 (`otlp.MeterProvider`), its resource naming the replica
 (`service.instance.id`). Shutdown is in order: the publishing loop stops
@@ -668,6 +679,7 @@ landed was cut before the key reached its caller. `TestAPIDrains`.
 | `-id` | this replica's name (default the host name): the lease holder |
 | `-lease` | the snapshots' authorization lease (default 4h) |
 | `-listen` | serve the control API here; needs `-entra-tenant` |
+| `-probes` | serve `GET /livez` and `/readyz` here, for Kubernetes' probes; empty: none |
 | `-drain` | at shutdown, how long the API's calls in flight may take before they are cut and the lease given up (10s) |
 | `-entra-tenant`, `-entra-audience` | the Entra tenant, and the control API registration's audiences (default `api://golem-control`, ADR 0046) |
 | `-audit-archive` | the audit archive bucket; empty: the outbox is not shipped and fills to its bound |
@@ -677,24 +689,25 @@ landed was cut before the key reached its caller. `TestAPIDrains`.
 | `-entra-sync-every`, `-entra-sync-max-removals` | the sync's interval (5m) and its removal guard (50) |
 | `-clickhouse`, `-clickhouse-user` | the ledger's ClickHouse for known spend (password in `$CLICKHOUSE_PASSWORD`); empty: snapshots carry none |
 | `-spend-allowance` | how far back known spend's boundary is (5m) |
+| `-counter-retention` | the gateways' site counter retention (6h): a known-spend result older than it less the lease is stale, and one that would leave every result stale (the lease and margin leaving no more than the allowance and a minute) is refused at start (`spend.Job.Validate`) |
 | `-period-zone` | the budget periods' time zone (default UTC; the gateways' `-period-zone`) |
 
 The subcommands:
 
-- `golem-control keygen <dir>` (`keygen`, `main.go:602`) writes a
+- `golem-control keygen <dir>` (`keygen`, `main.go:618`) writes a
   development key pair (`publishing.key`, never overwritten, and
   `publishing.pub` for gateways). `TestKeygen`.
-- `golem-control pubkey <signing key>` (`pubkey`, `main.go:531`) prints the
+- `golem-control pubkey <signing key>` (`pubkey`, `main.go:547`) prints the
   key's public half for gateways' `-keys` directories: a PEM with a
   `Key-ID` header (a KMS key's ARN, a file key's name), which
   `sign.LoadKeys` trusts under that ID. `TestPubkey`.
 - `golem-control restore -bucket <...> -from <document.json> -actor <who>
-  [-apply]` (`restore`, `main.go:170`) runs `Store.Restore` (§1.2) with a
+  [-apply]` (`restore`, `main.go:166`) runs `Store.Restore` (§1.2) with a
   backup document taken from the bucket's history or its Object Lock
   replica. Without `-apply` it is a dry run: it prints what would be
   withheld and rolled back and writes nothing. `TestRestoreCommand`.
 - `golem-control bootstrap -bucket <...> -keys <dir> -pools <a,b> -actor
-  <who> [-adopt]` (`bootstrap`, `main.go:111`) runs `Store.Bootstrap`
+  <who> [-adopt]` (`bootstrap`, `main.go:110`) runs `Store.Bootstrap`
   (§1) with each pool's floor (`Publisher.Floor`: the checkpoint and
   pointer verified with `-keys`, the publishing keys' public halves as
   gateways hold them): it creates a deleted document, empty of
@@ -705,10 +718,10 @@ The subcommands:
 ## 7. Worked example: a key revoked through the API reaches a gateway
 
 1. **The API call.** `keys.RevokeKey` (`control/api/keys.go:30`) calls
-   `Service.RevokeKey` (`control/service/service.go:435`), which checks the
+   `Service.RevokeKey` (`control/service/service.go:564`), which checks the
    caller is the key's owner, an admin, or, for a service's key, a manager
-   of its scope, and calls `Service.apply` (`service.go:99`) with a change
-   that calls `Document.Revoke` (`control/state/entitlements.go:217`): the
+   of its scope, and calls `Service.apply` (`service.go:102`) with a change
+   that calls `Document.Revoke` (`control/state/entitlements.go:227`): the
    key's `RevokedAt` is set and a `Revocation` appended. `apply` adds a
    `key.revoke` audit event.
 2. **The state update.** `Store.Update` (`state.go:288`) copies the
@@ -717,22 +730,22 @@ The subcommands:
    `stateVersion + 1` with `If-Match` (`state.go:311`). On a lost race it
    re-reads and reapplies; on a lost reply it finds its own write ID.
 3. **The controller's next step**, within a second on the leader (it may
-   be another replica: its `Refresh` at `controller.go:302` reads the new
-   document). `entitlementsSum` (`controller.go:710`) now differs, so
-   `due` (`controller.go:463`) says a publication is due.
+   be another replica: its `Refresh` at `controller.go:307` reads the new
+   document). `entitlementsSum` (`controller.go:754`) now differs, so
+   `due` (`controller.go:471`) says a publication is due.
 4. **The publication.** `Controller.publish` calls `PublishAll`
-   (`controller.go:473`) under the elector's fence. Each pool is numbered
-   from its record, checked against its checkpoint and pointer (`publish.go:199`-`206`), its
+   (`controller.go:488`) under the elector's fence. Each pool is numbered
+   from its record, checked against its checkpoint and pointer (`publish.go:199`-`205`), its
    snapshot built by `compile.Compile` with `Controller.entitlements`, in
-   which `Document.Entitlements` (`entitlements.go:247`) lists the key with
-   `Revoked: true` (`entitlements.go:289`). Every pool's record is won in
+   which `Document.Entitlements` (`entitlements.go:258`) lists the key with
+   `Revoked: true` (`entitlements.go:300`). Every pool's record is won in
    one `FencedUpdate` (`publish.go:154`), then each checkpoint and signed
    pointer is written (`publish.go:265`, `:275`).
 5. **The gateway's poll** (`gateway/snapshot/bucket.go:242`, `Bucket.Poll`),
    every second: a conditional get of the pointer, now changed. `read`
-   (`bucket.go:284`) verifies the signature, the pool and the floor
+   (`bucket.go:371`) verifies the signature, the pool and the floor
    (`openPointer`), fetches the snapshot, checks its hash and sequence
-   (`openSnapshot`), and `Holder.Apply` (`gateway/snapshot/holder.go:113`)
+   (`openSnapshot`), and `Holder.Apply` (`gateway/snapshot/holder.go:120`)
    swaps it in. The gateway refuses the key by name from then on.
 
 End to end: the write plus up to a second for the controller and a second

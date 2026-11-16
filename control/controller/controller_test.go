@@ -365,10 +365,10 @@ func TestWithKnownSpend(t *testing.T) {
 		Scopes: []snapshot.Scope{{ID: "team-a", Members: []snapshot.MemberAccount{{Principal: "carol", CapMicros: 9}}}, {ID: "team-b"}},
 		Keys:   []snapshot.Key{{Display: "glm_live_k1", Scope: "team-a", CapMicros: 5}, {Display: "glm_live_k2", Scope: "team-a"}},
 	}
-	withKnownSpend(&e, spend.Known{Period: "2026-11", Since: since,
-		Spend:   map[string]int64{"team-a": 10, "team-b": 1},
+	withKnownSpend(&e, spend.Known{Period: "2026-11", Since: since, Totals: spend.Totals{
+		Scopes:  map[string]int64{"team-a": 10, "team-b": 1},
 		Members: map[spend.Member]int64{{Scope: "team-a", Principal: "bob"}: 6, {Scope: "team-a", Principal: "alice"}: 4, {Scope: "team-b", Principal: "bob"}: 1},
-		Keys:    map[string]int64{"glm_live_k1": 4, "glm_live_k2": 6}})
+		Keys:    map[string]int64{"glm_live_k1": 4, "glm_live_k2": 6}}})
 	a := e.Scopes[0]
 	if a.Period != "2026-11" || !a.Since.Equal(since) || a.KnownSpend != 10 {
 		t.Fatalf("team-a %+v", a)

@@ -148,10 +148,7 @@ func outboxMax(n int) int {
 // restrictive writes. A write that adds no event is not judged: the trim,
 // publication and the fence go on whatever the outbox holds.
 func checkOutbox(old, next *Document, bound int) error {
-	n := 0 // the events kept, numbered up to old's counter (outboxFollows)
-	for n < len(next.Audit) && next.Audit[n].Seq <= old.AuditSeq {
-		n++
-	}
+	n := keptLen(old, next)
 	added := next.Audit[n:]
 	if len(added) == 0 {
 		return nil

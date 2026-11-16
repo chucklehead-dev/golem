@@ -393,10 +393,10 @@ func broken(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrInvariant}, args...)...)
 }
 
-// check is what every write must keep, the fence's and the publication
-// records' here, the entitlements' in checkEntitlements, and the audit
-// outbox's bound (checkOutbox), outbox, last: a change that breaks an
-// invariant says so, whatever the outbox holds.
+// check is what every write must keep: the fence's and the publication
+// records' invariants, the entitlements' (checkEntitlements), and last the
+// audit outbox's bound, outbox (checkOutbox), so a change that breaks an
+// invariant says so whatever the outbox holds.
 func check(old, next *Document, outbox int) error {
 	if err := checkFence(old, next); err != nil {
 		return err

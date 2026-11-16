@@ -58,18 +58,19 @@ type Controller struct {
 	// leads (control/audit).
 	Audit *audit.Shipper
 	// Spend, if set, is the known-spend job: each publication carries every
-	// scope's spend this period from the ledger, to a boundary (ADR 0048).
-	// It is read whenever a publication is due.
+	// scope's, member's and capped key's spend this period from the ledger,
+	// to a boundary (ADR 0048; withKnownSpend). It is read whenever a
+	// publication is due.
 	Spend *spend.Job
 	// Sync, if set, reconciles the bound Entra groups' members while this
 	// replica leads, every SyncEvery (default five minutes; ADR 0047).
 	Sync      *entrasync.Sync
 	SyncEvery time.Duration
 
-	synced  time.Time // when the group sync last ran
-	mu      sync.Mutex
-	good    v1.Objects // the last config that compiled; written under mu (ScopeModels reads it from the API's goroutines)
-	goodSum [32]byte
+	syncTried time.Time // when the group sync last ran, succeeding or not (status.synced: last succeeded)
+	mu        sync.Mutex
+	good      v1.Objects // the last config that compiled; written under mu (ScopeModels reads it from the API's goroutines)
+	goodSum   [32]byte
 	// unmatched is what the last publication found of scopes and
 	// ScopePolicies that do not match (under mu, by
 	// compile.Options.Unmatched): a scope of the state's with no policy,
@@ -309,7 +310,7 @@ func (c *Controller) Step(ctx context.Context) (bool, error) {
 	}
 	doc := c.Elector.State.Current()
 	cfgErr := c.load(doc)
-	if c.goodSum == ([32]byte{}) {
+	if !c.compiled() {
 		// No config has compiled since this replica started: renew what is
 		// published (it compiled when it was), so a restart over a broken
 		// edit cannot let every gateway's authorization lapse either.
@@ -382,6 +383,10 @@ func (c *Controller) pool(pool string) *poolState {
 // renew is the renewal interval: a minute unless set.
 func (c *Controller) renew() time.Duration { return cmp.Or(c.Renew, time.Minute) }
 
+// compiled reports whether a config has compiled since this replica
+// started (good holds it).
+func (c *Controller) compiled() bool { return c.goodSum != [32]byte{} }
+
 // backoff is how long a pool waits after its nth failed attempt in a row:
 // Retry (two seconds unless set), doubled at each failure after the first,
 // at most the renewal interval, less up to a quarter of jitter. The jitter
@@ -438,7 +443,7 @@ func (c *Controller) Unmatched() []compile.Problem {
 // the gateway still intersects a key's models with its scope's.
 func (c *Controller) ScopeModels(scope string) (models []string, ok bool) {
 	c.mu.Lock()
-	objs, good := c.good, c.goodSum != ([32]byte{})
+	objs, good := c.good, c.compiled()
 	c.mu.Unlock()
 	if !good {
 		var err error
@@ -487,7 +492,7 @@ func (c *Controller) publish(ctx context.Context, fence state.Fence, doc *state.
 			var s *snapshot.Snapshot
 			var err error
 			switch prev, renewing := c.renewing[p.Pool]; {
-			case c.goodSum != ([32]byte{}):
+			case c.compiled():
 				s, err = compile.Compile(c.good, o)
 			case renewing:
 				s, err = compile.Renew(prev, o)
@@ -553,7 +558,7 @@ func withKnownSpend(e *snapshot.Entitlements, k spend.Known) {
 	}
 	for i := range e.Scopes {
 		sc := &e.Scopes[i]
-		sc.Period, sc.Since, sc.KnownSpend = k.Period, k.Since, k.Spend[sc.ID]
+		sc.Period, sc.Since, sc.KnownSpend = k.Period, k.Since, k.Scopes[sc.ID]
 		listed := map[string]bool{}
 		for j := range sc.Members {
 			m := &sc.Members[j]
@@ -725,10 +730,10 @@ func (c *Controller) tick(ctx context.Context) error {
 // failed step is retried at the next interval, not every second.
 func (c *Controller) syncStep(ctx context.Context) error {
 	fence, leads := c.Elector.Fence()
-	if c.Sync == nil || !leads || c.now().Before(c.synced.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
+	if c.Sync == nil || !leads || c.now().Before(c.syncTried.Add(cmp.Or(c.SyncEvery, 5*time.Minute))) {
 		return nil
 	}
-	c.synced = c.now()
+	c.syncTried = c.now()
 	res, err := c.Sync.Step(ctx, fence)
 	c.mu.Lock()
 	switch {

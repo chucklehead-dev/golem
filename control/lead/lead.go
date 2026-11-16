@@ -24,12 +24,11 @@ package lead
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -328,11 +327,9 @@ func (e *Elector) Run(ctx context.Context) {
 
 // jitter is d ± a quarter.
 func jitter(d time.Duration) time.Duration {
-	var b [8]byte
-	rand.Read(b[:])
-	q := int64(d) / 4
+	q := d / 4
 	if q == 0 {
 		return d
 	}
-	return d - time.Duration(q) + time.Duration(int64(binary.LittleEndian.Uint64(b[:])%uint64(2*q)))
+	return d - q + rand.N(2*q)
 }

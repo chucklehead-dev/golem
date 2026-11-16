@@ -57,7 +57,8 @@ import (
 
 func main() {
 	if err := dispatch(os.Args[1:]); err != nil {
-		fail("%v", err)
+		fmt.Fprintf(os.Stderr, "golem-control: %v\n", err)
+		os.Exit(2)
 	}
 }
 
@@ -93,10 +94,8 @@ func dispatch(args []string) error {
 // looked for by name (state.Store.Installed).
 func installed(pools string) []string {
 	keys := []string{lead.LeaseKey}
-	for p := range strings.SplitSeq(pools, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			keys = append(keys, snapshot.CheckpointKey(p), snapshot.PointerKey(p))
-		}
+	for _, p := range list(pools) {
+		keys = append(keys, snapshot.CheckpointKey(p), snapshot.PointerKey(p))
 	}
 	return keys
 }
@@ -132,10 +131,7 @@ func bootstrap(ctx context.Context, w io.Writer, args []string) error {
 	}
 	st := &state.Store{Bucket: b, MaxOutbox: *outboxMax}
 	floors := map[string]uint64{}
-	for p := range strings.SplitSeq(*pools, ",") {
-		if p = strings.TrimSpace(p); p == "" {
-			continue
-		}
+	for _, p := range list(*pools) {
 		f, err := (&publish.Publisher{State: st, Bucket: b, Keys: keys, Pool: p}).Floor(ctx)
 		if err != nil {
 			return fmt.Errorf("pool %s (nothing written): %w", p, err)
@@ -392,16 +388,15 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 	}
 	c = &controller.Controller{Dir: o.config, Lease: o.authLease,
 		Elector: &lead.Elector{State: st, ID: replica}, Publishers: map[string]*publish.Publisher{}}
-	for _, p := range strings.Split(o.pools, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Keys: trusted, Pool: p}
-		}
+	for _, p := range list(o.pools) {
+		c.Publishers[p] = &publish.Publisher{State: st, Bucket: b, Signer: signer, Keys: trusted, Pool: p}
 	}
 	if o.archive != "" {
-		if c.Audit, closeAudit, err = openAudit(ctx, st, o.archive, o.telemetry, replica); err != nil {
-			closeAudit = func() {}
+		s, flush, err := openAudit(ctx, st, o.archive, o.telemetry, replica)
+		if err != nil {
 			return nil, closeAudit, err
 		}
+		c.Audit, closeAudit = s, flush
 	} else {
 		slog.Warn("golem-control: no -audit-archive: the audit outbox is not shipped; past 80% of -audit-outbox-max changes that grant access are refused, and at it every audited change", "audit-outbox-max", st.OutboxMax())
 	}
@@ -436,7 +431,7 @@ func apiServer(ctx context.Context, listen, tenant, audience string, svc *servic
 	if tenant == "" {
 		return nil, errors.New("the control API needs -entra-tenant: it authenticates every caller")
 	}
-	e := &entra.Verifier{Tenant: tenant, Audiences: audiences(audience), Scope: entra.ScopeManage}
+	e := &entra.Verifier{Tenant: tenant, Audiences: list(audience), Scope: entra.ScopeManage}
 	if err := e.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("Entra's signing keys: %w", err)
 	}
@@ -480,11 +475,12 @@ func serveAPI(ctx context.Context, srv *http.Server, serve func() error, drain t
 	return nil
 }
 
-// audiences splits a comma-separated list, dropping spaces and empty
-// entries ("api://a, api://b" is two audiences, not one with a space).
-func audiences(list string) []string {
+// list splits a comma-separated flag (pools, audiences), dropping spaces
+// and empty entries ("api://a, api://b" is two audiences, not one with a
+// space).
+func list(s string) []string {
 	var out []string
-	for a := range strings.SplitSeq(list, ",") {
+	for a := range strings.SplitSeq(s, ",") {
 		if a = strings.TrimSpace(a); a != "" {
 			out = append(out, a)
 		}
@@ -648,9 +644,4 @@ func keygen(dir string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "publishing.pub"), pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}), 0o644)
-}
-
-func fail(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "golem-control: "+format+"\n", args...)
-	os.Exit(2)
 }
