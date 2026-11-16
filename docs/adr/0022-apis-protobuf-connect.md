@@ -1,6 +1,6 @@
 # 0022: The control API in protobuf, served with Connect
 
-Status: Accepted (v1 baseline). From archive 0014, 0025.
+Status: Accepted (v1 baseline).
 
 ## Decision
 

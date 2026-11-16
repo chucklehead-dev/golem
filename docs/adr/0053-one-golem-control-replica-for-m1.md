@@ -1,105 +1,104 @@
-# 0053: One golem-control replica for M1
+# 0053: One golem-control replica, fenced by the state document
 
-Status: Accepted. Supersedes the parts of
-[0045](0045-leadership-in-the-state-document.md) and
-[0049](0049-lease-object-and-fence.md) that elect a leader among replicas
-(the lease, its renewals, its lapse by the taker's clock, `Release`), and
-[0030](0030-authorization-renewal-and-availability.md)'s 30-second leader
-failover target, for M1. Keeps everything else of 0049. Decided by the
-product owner, who judged golem's high availability over-built for one
-team's M1 rollout.
+Status: Accepted, consolidated 2026-11-16. This record is golem-control's
+leadership as it stands for M1. It absorbs
+[0045](0045-leadership-in-the-state-document.md) (leadership in the state
+document) and [0049](0049-lease-object-and-fence.md) (the fence, the
+checkpoint guard, lost replies), now stubs pointing here; it removes their
+lease and [0030](0030-authorization-renewal-and-availability.md)'s
+30-second leader failover. Decided by the product owner, who judged
+golem's high availability over-built for one team's M1 rollout. Earlier
+text is in git history.
 
 ## Context
 
-golem-control ran two replicas: one led (it published, shipped the audit
-outbox, ran the group sync), the other served the control API and stood
-by, taking over within about 40 seconds of a leader's death. Leadership
-was two objects: a lease (`lead/lease.json`, renewed every 10 s, judged
-lapsed by the taker's clock) and the fence in the state document, which
-every leader-only write checks (`state.FencedUpdate`).
+golem-control's leader publishes snapshots, ships the audit outbox and runs
+the group sync. Its epoch must fence those writes: a paused leader that
+writes after another has taken over must be refused, whether or not the
+successor has written yet. Earlier designs ran two replicas, with a lease
+(first in the state document, then its own object renewed every 10 s,
+judged lapsed by the taker's clock) beside the fence.
 
-Each replica's pod has its own git-sync sidecar, so each has its own
-checkout of the config repository, and they move independently. A replica
-that takes over can be behind the one it replaces: its first step then
-publishes an older config than the gateways hold (a route removed, a
-ScopePolicy narrowed or a model taken away comes back) until its git-sync
-catches up. Nothing in the publication path can tell an older checkout
-from a revert, which is a legitimate change. M1 is one team, one site,
-internal pools only; a control-plane outage of minutes costs it little,
-while the lease's code, model and timing arguments are a large part of
-what there is to review.
+Each replica's pod had its own git-sync checkout of the config repository
+(ADR 0054), and the two moved independently: a replica that took over
+could be behind, and its first step published an older config than the
+gateways held until its git-sync caught up. Nothing in the publication path
+can tell an older checkout from a revert. M1 is one team, one site, internal
+pools only: a control-plane outage of minutes costs it little, while the
+lease's code, model and timing arguments were a large part of what there
+was to review.
 
 ## Decision
 
 - **One replica.** The chart runs `replicas: 1` with the `Recreate`
-  strategy (the old pod is stopped before the new one starts) and no
-  PodDisruptionBudget (with one pod there is no other to keep up).
-- **The fence, claimed once.** golem-control claims the state document's
-  fence as it starts, at one above its epoch (`state.Store.Claim`), and
-  leads from then on. There is no lease object, no renewal and no release
-  (`control/lead` is removed).
-- **Every leader-only write stays fenced** (`state.FencedUpdate`):
-  publication, the audit outbox's trim, the group sync. A predecessor
-  still running (its pod paused, or on a node cut off and replaced) is
-  refused at its next fenced write; the controller then finds the
-  document's fence another's, stops (`controller.ErrDeposed`) and the
-  process exits non-zero.
-- Kept from 0049 unchanged: the fence in the document and its invariant
-  (its epoch never goes back), one fenced publication write a cycle, the
-  publication records and the checkpoint guard, lost replies recognised by
-  write ID (`RecentWrites`), restore carrying the fence and records
-  forward, `ErrMissing` for a deleted document.
+  strategy and no PodDisruptionBudget.
+- **The fence, claimed once.** The state document's `fence` (holder,
+  epoch). golem-control claims it as it starts, at one above its epoch
+  (`state.Store.Claim`; a claim whose reply was lost is adopted at the next
+  try), and leads from then on. No lease object, no renewal, no release.
+  The epoch counts golem-control's starts; the store refuses any write that
+  moves it back.
+- **Every leader-only write is fenced in its own write**
+  (`state.FencedUpdate`): publication, the audit outbox's trim, the group
+  sync. Checking the fence and then writing would not do: no transaction
+  spans two reads. A predecessor still running (its pod paused, or on a
+  node cut off and replaced) is refused at its next fenced write; the
+  controller then finds the fence another's, stops (`controller.ErrDeposed`)
+  and the process exits non-zero.
+- **One publication write a cycle**: every due pool's record is won in one
+  fenced update, whatever the number of pools.
+- **The checkpoint guard**: a publication is numbered above the highest of
+  the record, the verified checkpoint and the signed pointer; a record
+  below what the bucket proves is refused (`ErrRegressed`), and a checkpoint
+  that does not verify, or is missing once written, stops that pool
+  (`ErrTampered`) for a person to look at.
+- **Lost replies**: a write that lands but whose reply is lost is
+  recognised by the write ID it carries, among the document's last 32
+  (`RecentWrites`), even after others have written over it.
+- **Restore** (`golem-control restore`) carries the fence and the records
+  forward, as it does revocations. A document deleted where the bucket
+  shows golem-control has run (a pool's checkpoint or pointer) is
+  `ErrMissing` until it is put back or `golem-control bootstrap` creates
+  one deliberately.
+- The control API's own writes are not fenced: they are ordinary
+  compare-and-swap writes, safe from any number of writers.
 
 ## What is lost
 
-- **Sub-minute failover of the control API and the jobs.** While the one
-  pod restarts or is rescheduled (a rollout, a node drain, a node loss:
-  seconds to a few minutes, longer if the node is lost and Kubernetes
-  waits to evict), the control API refuses connections and nothing is
-  published.
+- **Sub-minute failover of the control API and the jobs.** While the pod
+  restarts or is rescheduled (seconds to minutes; longer if a node is lost
+  and Kubernetes waits to evict), the control API refuses connections and
+  nothing is published. Every rollout of golem-control is a short outage.
 - Gateways ride on their authorization lease meanwhile: four hours for
-  internal pools (ADR 0032), so an outage shorter than that is invisible
-  to callers; revocations and config changes wait for golem-control to be
-  back. **The edge pool's five-minute lease does not fit this**: before an
-  edge pool is published, revisit this decision (two replicas with one
-  checkout, or a longer edge lease).
-- Every rollout of golem-control is a short control-API outage.
-- The lease object was evidence, from a first start on, that golem-control
-  had run on a bucket; now the evidence for `ErrMissing` is the pools'
-  checkpoints and pointers, which exist from the first publication.
+  internal pools (ADR 0030), so callers see nothing; revocations and config
+  changes wait. **The edge pool's five-minute lease does not fit this**:
+  revisit before an edge pool is published.
 
 ## What it removes
 
-- **The hazard of two checkouts.** A takeover can no longer publish an
-  older config checkout than its predecessor's: there is one checkout,
-  which follows the branch, and a replacement pod clones the branch's head
-  before it starts.
+- The hazard of two checkouts publishing an older config on a takeover.
 - The lease, its renewals (a bucket write every 10 s), its clock
-  reasoning and its tests; the `lead/` prefix in the bucket policy.
+  reasoning, its model (model/leadership.md, retired) and its tests; the
+  `lead/` prefix in the bucket policy.
 
 ## Consequences
 
-- Each start claims a new epoch: the epoch counts golem-control's starts.
 - `golem.control.leader` is 1 while the replica runs and has not been
   deposed; 0 from a running process means a successor claimed over it.
-- The control API's own writes (the service layer's) were never fenced
-  and are not now: they are ordinary compare-and-swap writes, safe from
-  any number of writers, as they were with two replicas.
 - model/publication.md's connect test drives the claim: `takeLease` is a
-  replica's `Claim`, `noticeLoss` its reading another's fence. The
-  model's lease-lapse reasoning (model/leadership.md) no longer describes
-  the code; its fence placement, which the code keeps, does.
+  replica's `Claim`, `noticeLoss` its reading another's fence.
+- The bucket policy lets only golem-control's role write `state/`,
+  `control/` and `snapshots/`. Alarms: `ErrTampered`; a fence epoch or a
+  record sequence that repeats or goes down in the document's history.
 - Revisit for M2 or a second team: two replicas sharing one checkout (a
   config reader that publishes only a revision at least the last
   published one), or the CRD watch, which reads the cluster's one copy.
 
 ## Alternatives
 
-- **Keep two replicas, refuse an older checkout**: record the published
-  config revision and refuse to publish below it. Needs the revision to
-  be ordered (git commit ancestry, not time), and a revert to be a new
-  commit; more than M1 needs.
-- **Keep two replicas, share one checkout** (a volume both pods mount):
-  ReadWriteMany storage, and git-sync's writer is still one of them.
-- **Keep the lease, drop git-sync on the standby**: the standby would
-  need a checkout the moment it takes over, which is the same race.
+- **Two replicas, refusing an older checkout**: needs revisions ordered by
+  git ancestry and a revert to be a new commit; more than M1 needs.
+- **Two replicas sharing one checkout**: ReadWriteMany storage, one
+  git-sync writer.
+- **A Kubernetes Lease**: client-go and an API server on the leadership
+  path, in tests and standalone; the fence would still be needed.

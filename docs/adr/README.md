@@ -1,66 +1,69 @@
-# Architecture decision records: v1 baseline
+# Architecture decision records
 
-The decisions as they stand, one record per decision, without amendment
-chains. The 35 records that led here (five design passes and a review) are
-in [archive/](archive/), with a mapping from each to its baseline record.
-From here on a change to a decision is a new record that supersedes a
-baseline one, marked in both.
+One record per decision, as it stands. Where a decision was amended
+several times, the amendments are folded into one surviving record
+("Accepted, consolidated"), and the absorbed records are one-line stubs
+pointing at it; their full text, the 35 pre-baseline records that were in
+`archive/`, and every earlier version are in git history (`git log --
+docs/adr/`). A change to a decision is a new record, or an edit to its
+surviving record that says what it absorbed.
 
-| # | Decision |
-|---|---|
-| [0001](0001-dialects-canonical-model-and-envelopes.md) | Same-dialect pass-through; translation through one canonical model (an adapter pair per dialect); hosting as envelopes (Bedrock, Vertex, Foundry); the decision APIs |
-| [0002](0002-no-replay-after-first-byte.md) | Retries and failover stop at the first response byte |
-| [0003](0003-components-and-layering.md) | Gateway, golem-control (one Deployment, a leader), golemctl, console; layering checked by a test (the operator removed by 0036) |
-| [0004](0004-behind-the-mesh.md) | Behind the enterprise's ingress and mesh, not a Gateway API implementation |
-| [0005](0005-config-crds-and-overrides.md) | Five config CRDs read by golem-control, one validation path, expiring operational overrides (in M1 the config is a git checkout, no objects in the cluster, and no overrides: 0054) |
-| [0006](0006-state-and-distribution-in-object-storage.md) | Control-plane state as one CAS-updated document in S3; whole snapshots published there and polled by gateways |
-| [0007](0007-bucket-root-of-trust.md) | Signed snapshots, one publish sequence, safe restore, locked writes, offsite backup, audiences, emergency denylist |
-| [0008](0008-sites-and-regions.md) | One control plane and one S3 store for every site; no cross-cluster access; cold-standby second region |
-| [0009](0009-identity-and-authentication.md) | Authenticator chain, Entra, checksummed keys, agents by Entra token, mesh identity, pass-through |
-| [0010](0010-organisation-scopes-and-roles.md) | Scopes (teams with sub-teams, projects), four roles, rights by intersection |
-| [0011](0011-budgets.md) | Pools funded by grants, approvals, three enforcement levels, observe/warn/enforce |
-| [0012](0012-limits-and-accounting.md) | Valkey at every site, cut streams, provider quotas, reconciliation (its reservations and renewal superseded by 0031) |
-| [0013](0013-site-ceilings.md) | Site allocations (superseded by 0031) |
-| [0014](0014-lifecycle-hooks.md) | Four hook phases, in-process or remote, selected by CEL |
-| [0015](0015-telemetry-and-ledger.md) | OTLP routed by the collector; the ledger and audit in ClickHouse |
-| [0016](0016-capture-and-retention.md) | Capture per scope with override control, a Langfuse project per scope, per-record retention (M2) |
-| [0017](0017-self-hosted-model-servers.md) | Self-hosted servers: each instance a deployment; static ceilings in M1, adaptive in M2 |
-| [0018](0018-edge-gateways.md) | An edge pool for internet-facing consumers (M2) |
-| [0019](0019-background-jobs.md) | Jobs as idempotent scans by the leader; Temporal later |
-| [0020](0020-github-copilot.md) | Copilot by BYOK, enterprise models through the edge, usage as showback |
-| [0021](0021-design-envelope.md) | The design envelope and what it lets golem leave out |
-| [0022](0022-apis-protobuf-connect.md) | The control API in protobuf, served with Connect |
-| [0023](0023-standalone-gateway.md) | A standalone gateway for laptops from local CRD YAML; whole-system development in `make dev-up`, not an all-in-one binary |
-| [0024](0024-refusals-and-error-origin.md) | Non-retryable refusals are not 429 (budgets are 402); every error has an origin |
-| [0025](0025-ledger-and-price-model.md) | The ledger schema and the price model are contracts |
-| [0026](0026-identifiers-and-headers.md) | Keys carry their environment; request IDs; one session concept; golem's headers |
-| [0027](0027-provider-side-retention.md) | Provider-side storage forbidden unless a scope allows it |
-| [0028](0028-capabilities-and-determinism.md) | Capability-aware routing; deterministic encoders |
+**M1 scope**: [m1-plan.md](../m1-plan.md) is the scope of record. Records
+marked *M2* below apply from M2 (or later); nothing of them is built for M1.
 
-| [0029](0029-security-and-correctness-revision.md) | Security and correctness review amendments and production gates |
-| [0030](0030-authorization-renewal-and-availability.md) | Authorization renewed every minute within a five-minute lease; the control plane, bucket and KMS on the availability path; the accounting spool spike |
-| [0031](0031-soft-budgets.md) | Budgets are soft and eventually consistent; overshoot bounded by concurrency limits and an optional declared-worst-case check; no journal, reservations or site allocations (known spend's computation amended by 0042; the bound's status by 0044) |
-| [0032](0032-authorization-lease-length.md) | Internal pools: a four-hour authorization lease, renewed every minute; jitter on polls and retries, none on expiry |
-| [0033](0033-explicit-cross-dialect-conversion.md) | Cross-dialect conversion only where a route asks for it; no implicit cross-dialect failover |
-| [0034](0034-budgets-for-m2.md) | M2 budgets are caps and a cost-center mapping; grants and approvals wait for demand |
-| [0035](0035-capture-projects-and-the-collector.md) | A Langfuse project per top-level team, inheritable; retention per project; the collector holds the credentials |
-| [0036](0036-no-mesh-identity-no-operator.md) | No mesh-identity header; no operator (Helm, GitOps, Argo Rollouts) |
-| [0037](0037-request-policy-and-cache-stability.md) | Forward unknown fields, enforce the policy-relevant ones; semantic cache stability |
-| [0038](0038-accounting-refinements.md) | Dedicated provider accounts, monthly reconciliation within tolerance, renewed concurrency slots, bounded worst case |
-| [0039](0039-bypass-controls.md) | Block bypass: SCPs for Bedrock, egress blocks, provider key-creation limits, managed agent settings |
-| [0040](0040-argo-cd-and-crossplane.md) | Delivery through Argo CD and Argo Rollouts; cloud resources through the platform's Crossplane (`GolemInstallation`, `GolemSite`) |
-
-| [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, the pool capture boundary and a golem-owned capture collector, request feature modes by route class, delivery privileges, composite publication freshness by consistent reads (for M1's git checkout, restated by 0054), narrowed budget claims |
-| [0042](0042-known-spend-by-counter-watermark.md) | Known spend by counter sequence and ledger watermark: O(1) admission, exact under snapshot skew; supersedes the hand-off by event. Superseded by 0048 |
-| [0043](0043-ledger-durability.md) | Ledger durability in a node-local collector's persistent queue, not a gateway spool; rows written at a call's end with their numbers joined later; gaps reconstructed from the site counter before they are declared lost |
-| [0044](0044-budgets-are-controls-not-ceilings.md) | Budgets are admission and monitoring controls, not spending ceilings; provider-account limits are the financial backstop; reconciliation is authoritative; `strict` renamed `declaredWorstCaseCheck`, described by what it closes on |
-| [0045](0045-leadership-in-the-state-document.md) | golem-control's leadership is a lease in the state document, its epoch beside the publication record it fences |
-| [0046](0046-control-api-registration.md) | The control API has its own Entra registration (`api://golem-control`, `golem.manage`); a gateway token cannot call it; services recognised by `idtyp` |
-| [0047](0047-identity-from-entra-groups.md) | Users and their memberships come from the Entra groups bound to scopes, synced from Graph; only the sync and admins bind an Entra ID; `entra:` reserved |
-| [0048](0048-known-spend-by-time-boundary.md) | Known spend by a time boundary (an ingestion allowance back) and per-minute site counters; no numbering, no watermark job; late rows and lost minutes undercount until the next boundary, stated; recovery converges under load |
-| [0049](0049-lease-object-and-fence.md) | The lease in its own object, the fence in the document; every leader-only write fenced in its own write; one publication write a cycle; the checkpoint guard; lost replies recognised |
-| [0050](0050-scope-policy-is-config.md) | Scope policy is config, a ScopePolicy CRD joined with the state's scopes by ID (no policy: no models); the state keeps a scope's existence and bound groups; budget modes observe (default), warn, enforce |
-| [0051](0051-gateway-retries-are-failovers.md) | The gateway's retries are failovers, of refusals only: an attempt only to a deployment the call has not tried (a pool of one makes one attempt), and only after the provider never saw it or refused it before any output (not 500, 502, 504, a timeout or a cut) |
-| [0052](0052-accounting-for-m1.md) | Accounting for M1: known spend is the snapshot's alone (no site counter, no replays); scope budgets only (no member or key caps, no provider quota shares, no declared-worst-case check); spend within a snapshot's lag is a stated term of the bound |
-| [0053](0053-one-golem-control-replica-for-m1.md) | One golem-control replica for M1 (Recreate, no PDB): it claims the state document's fence once at start and fences every leader-only write by it, a lingering predecessor refused and exiting; no lease object. Supersedes 0049's lease and 0030's 30 s failover; loses sub-minute control-API failover (gateways ride on their lease), removes the hazard of two git-sync checkouts publishing an older config |
-| [0054](0054-m1-config-from-a-git-checkout.md) | M1 config from a git checkout: golem-control compiles git-sync's checkout of the GitOps repository, no config objects in the cluster (CRDs not installed), each snapshot naming its commit; freshness by the last fetch, no lease renewed past `-max-config-age`. Supersedes 0005's in-cluster objects and 0041 §7.2's consistent LIST, for M1 |
+| # | Decision | |
+|---|---|---|
+| [0001](0001-dialects-canonical-model-and-envelopes.md) | Same-dialect pass-through; translation through one canonical model; hosting as envelopes (Bedrock built) | |
+| [0002](0002-no-replay-after-first-byte.md) | Retries and failover stop at the first response byte | |
+| [0003](0003-components-and-layering.md) | Gateway, golem-control, golemctl, console; layering checked by a test | |
+| [0004](0004-behind-the-mesh.md) | Behind the enterprise's ingress and mesh, not a Gateway API implementation | |
+| [0005](0005-config-crds-and-overrides.md) | Config objects in the cluster and expiring overrides: superseded for M1 by 0054 | M2 |
+| [0006](0006-state-and-distribution-in-object-storage.md) | Control-plane state as one CAS-updated document in S3; whole snapshots published there and polled | |
+| [0007](0007-bucket-root-of-trust.md) | Signed snapshots, one publish sequence, safe restore, locked writes, offsite backup, emergency denylist | |
+| [0008](0008-sites-and-regions.md) | One control plane and one S3 store for every site; cold-standby second region (M3) | |
+| [0009](0009-identity-and-authentication.md) | Authenticator chain, Entra, checksummed keys, agents by Entra token | |
+| [0010](0010-organisation-scopes-and-roles.md) | Scopes, four roles, rights by intersection | |
+| [0011](0011-budgets.md) | Pools funded by grants, caps, three enforcement levels | M2 |
+| [0012](0012-limits-and-accounting.md) | Stub: consolidated into 0031 | |
+| [0013](0013-site-ceilings.md) | Stub: site allocations, superseded by 0031 | |
+| [0014](0014-lifecycle-hooks.md) | Four hook phases, in-process or remote, selected by CEL | M2 |
+| [0015](0015-telemetry-and-ledger.md) | OTLP routed by the collector; the ledger and audit in ClickHouse | |
+| [0016](0016-capture-and-retention.md) | Content capture per scope, a Langfuse project per scope, per-record retention | M2 |
+| [0017](0017-self-hosted-model-servers.md) | Self-hosted servers: each instance a deployment; static ceilings in M1 | |
+| [0018](0018-edge-gateways.md) | An edge pool for internet-facing consumers | M2 |
+| [0019](0019-background-jobs.md) | Jobs as idempotent scans by golem-control; Temporal later | |
+| [0020](0020-github-copilot.md) | Copilot by BYOK, enterprise models through the edge, usage as showback | M2 |
+| [0021](0021-design-envelope.md) | The design envelope and what it lets golem leave out | |
+| [0022](0022-apis-protobuf-connect.md) | The control API in protobuf, served with Connect | |
+| [0023](0023-standalone-gateway.md) | A standalone gateway for laptops from local YAML | |
+| [0024](0024-refusals-and-error-origin.md) | Non-retryable refusals are not 429 (budgets are 402); every error has an origin | |
+| [0025](0025-ledger-and-price-model.md) | The ledger schema and the price model are contracts | |
+| [0026](0026-identifiers-and-headers.md) | Keys carry their environment; request IDs; one session concept; golem's headers | |
+| [0027](0027-provider-side-retention.md) | Provider-side storage forbidden unless a scope allows it | |
+| [0028](0028-capabilities-and-determinism.md) | Capability-aware routing (betas only in M1); deterministic encoders | |
+| [0029](0029-security-and-correctness-revision.md) | Security and correctness review amendments and production gates | |
+| [0030](0030-authorization-renewal-and-availability.md) | **Consolidated** (with 0032): a signed authorization lease renewed every minute, four hours internal, five minutes edge; jitter on polls, none on expiry | |
+| [0031](0031-soft-budgets.md) | **Consolidated** (with 0012, 0013, 0038, 0042, 0044, 0048, 0052): budgets are soft admission controls on the snapshot's known spend; scope budgets only; provider-account limits the backstop; reconciliation authoritative | |
+| [0032](0032-authorization-lease-length.md) | Stub: consolidated into 0030 | |
+| [0033](0033-explicit-cross-dialect-conversion.md) | Cross-dialect conversion only where a route asks for it | |
+| [0034](0034-budgets-for-m2.md) | M2 budgets are caps and a cost-center mapping | M2 |
+| [0035](0035-capture-projects-and-the-collector.md) | A Langfuse project per top-level team; the collector holds the credentials | M2 |
+| [0036](0036-no-mesh-identity-no-operator.md) | No mesh-identity header; no operator | |
+| [0037](0037-request-policy-and-cache-stability.md) | Forward unknown fields, enforce the policy-relevant ones; semantic cache stability | |
+| [0038](0038-accounting-refinements.md) | Stub: consolidated into 0031 | |
+| [0039](0039-bypass-controls.md) | Block bypass: SCPs for Bedrock, egress blocks, key-creation limits, managed agent settings | |
+| [0040](0040-argo-cd-and-crossplane.md) | Delivery through Argo CD (M1); Argo Rollouts and Crossplane claims from M2 | |
+| [0041](0041-security-boundaries-and-incident-controls.md) | Incident denial and audit resilience, delivery privileges, publication freshness (for M1 by 0054), narrowed budget claims; capture boundaries from M2 | |
+| [0042](0042-known-spend-by-counter-watermark.md) | Stub: superseded, see 0031 | |
+| [0043](0043-ledger-durability.md) | Ledger durability in a collector's persistent queue beside the gateway, not a gateway spool | |
+| [0044](0044-budgets-are-controls-not-ceilings.md) | Stub: consolidated into 0031 | |
+| [0045](0045-leadership-in-the-state-document.md) | Stub: consolidated into 0053 | |
+| [0046](0046-control-api-registration.md) | The control API's own Entra registration; a gateway token cannot call it | |
+| [0047](0047-identity-from-entra-groups.md) | Users and memberships from the Entra groups bound to scopes | |
+| [0048](0048-known-spend-by-time-boundary.md) | Stub: consolidated into 0031 | |
+| [0049](0049-lease-object-and-fence.md) | Stub: consolidated into 0053 | |
+| [0050](0050-scope-policy-is-config.md) | Scope policy is config, joined with the state's scopes by ID; budget modes observe, warn, enforce | |
+| [0051](0051-gateway-retries-are-failovers.md) | Retries are failovers, of refusals only, to an untried deployment, before any output | |
+| [0052](0052-accounting-for-m1.md) | Stub: consolidated into 0031 | |
+| [0053](0053-one-golem-control-replica-for-m1.md) | **Consolidated** (with 0045, 0049): one golem-control replica, claiming the state document's fence at start; every leader-only write fenced | |
+| [0054](0054-m1-config-from-a-git-checkout.md) | **Consolidated** (with 0005's kinds and validation, 0041 §7.2): config is a git checkout compiled by golem-control, each snapshot naming its commit; freshness by the last fetch | |

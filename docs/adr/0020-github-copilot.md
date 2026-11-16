@@ -1,6 +1,6 @@
 # 0020: GitHub Copilot: BYOK through golem, enterprise models through the edge, usage as showback
 
-Status: Accepted (v1 baseline). From archive 0021.
+Status: Accepted (v1 baseline). **Applies from M2**: nothing of this record is built or planned for M1 (m1-plan.md).
 
 ## Decision
 

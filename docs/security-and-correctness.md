@@ -1,6 +1,17 @@
 # Security and correctness requirements
 
-Status: accepted design revision (ADRs 0029, 0041). Much is built (docs/walkthroughs);
+> **M1's scope of record is [m1-plan.md](m1-plan.md).** This page states
+> requirements for the whole design; for M1 three decisions narrow it:
+> budgets are soft admission controls on the snapshot's known spend, with
+> no site counter, no caps and no strict or declared-worst-case mode
+> ([ADR 0031](adr/0031-soft-budgets.md)); golem-control is one replica,
+> its fence claimed once at start ([ADR 0053](adr/0053-one-golem-control-replica-for-m1.md));
+> the config is a git checkout, not objects in the cluster, so there is no
+> CRD RBAC to test and freshness is the checkout's last fetch
+> ([ADR 0054](adr/0054-m1-config-from-a-git-checkout.md)). Statements
+> below that assume otherwise are marked.
+
+Status: accepted design revision (ADRs 0029, 0041). Much is built ([orientation](walkthroughs/README.md));
 validation against deployments is tracked in golem#7, and the M1 gates below say what remains.
 Decisions: [ADR 0029](adr/0029-security-and-correctness-revision.md), amended
 by [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md). ADR 0041 governs the
@@ -80,8 +91,8 @@ and secret-scanning revocation require fresh publication; encoded credential
 expiry and a locally applied denylist are the independent paths.
 
 Publication must prevent source regression after the authoritative publication
-record advances. The record is won in the same write that checks the lease's
-holder and epoch (ADR 0045), so a deposed leader is refused whether or not its
+record advances. The record is won in the same write that checks the
+state document's fence (ADR 0053), so a deposed leader is refused whether or not its
 successor has published, and the checkpoint and pointer only move forward; a
 leader whose own view is stale is bounded by source-read expiry (ADR 0041 §5). Pointer CAS
 alone is insufficient. A fencing generation and source revision are checked
@@ -188,8 +199,11 @@ have named administrators and audit records.
 
 ## 7. Configuration, audit and local mode
 
-Kubernetes RBAC restricts config spec writes to GitOps and audited break-glass
-identities; CODEOWNERS alone is not enforcement. Controllers receive only
+Config writes are restricted to reviewed changes and audited break-glass
+identities; CODEOWNERS alone is not enforcement. (In M1 the config is a git
+checkout, ADR 0054: the enforcement is the config repository's branch
+protection, and Kubernetes RBAC on config objects applies only when the
+CRD watch is built.) Controllers receive only
 needed read/status rights. Direct changes alert and GitOps reconciles drift.
 Anyone who can redirect a Backend or Hook is a content-egress administrator.
 Keep control API authorization in services, including list/search/filter
@@ -231,29 +245,30 @@ Ingress protection is an additional layer; the gateway enforces its own bounds.
 
 ## 9. Accounting, budgets and retries (M1)
 
-Amended by [ADR 0031](adr/0031-soft-budgets.md): budgets are soft and
-eventually consistent, with the overshoot bounded and stated, by accepted
-risk. The durable journal, money reservations, uncertain-liability recovery
-and site allocations are not required. What remains required:
+Amended by [ADR 0031](adr/0031-soft-budgets.md): budgets are soft
+admission controls, by accepted risk. The durable journal, money
+reservations, uncertain-liability recovery and site allocations are not
+required. What remains required:
 
-- Known spend (the deduplicated ledger balance published in snapshots,
-  plus the site's counter since then) is the only input to budget checks;
-  once it reaches a budget, every further call is refused on every site.
-- Per-principal concurrency limits are enforced; scopes with the
-  declared-worst-case check admit on the declared worst case (no cache discount,
-  `max_tokens` × `n`, no server-side tools). Budgets are controls, not
-  ceilings: no estimate or declared worst case is claimed to bound real
-  spend, and the provider account's limit is the backstop (ADR 0044).
-- Numeric aggregate bounds are not established by the single-principal
-  accounting model. ADR 0041 §6 (and §7.3 for failed renewal) requires scope/multi-site bounds,
-  counter handoff and failed-renewal scenarios before such claims are made.
-- Reconciliation is monthly with daily previews and ADR 0038's 3–5%
-  tolerance; unexplained larger differences are investigated.
+- Known spend (the deduplicated ledger balance published in each snapshot)
+  is the only input to budget checks; once it reaches an `enforce` budget,
+  further calls are refused on every site, within the snapshot's lag.
+- Per-principal (per scope) and per-scope concurrency limits and request
+  rate limits are enforced. Budgets are controls, not ceilings: no estimate
+  is claimed to bound real spend, and the provider account's limit is the
+  backstop.
+- Numeric aggregate bounds are stated by model/exposure.md (in-flight
+  limits, waivers and the snapshot's lag as terms), not proven; they are
+  not advertised to budget owners as ceilings.
+- Reconciliation is monthly with daily previews and a 3–5% tolerance;
+  unexplained larger differences are investigated. In M1 it is a query
+  with a written record.
 
 Separate logical request_id, attempt_id and accounting event_id. An attempt
 records deployment/account, provider ID, pinned price version, usage, cost and
-certainty. Re-check known spend and quota before each fallback;
-multiple attempts may be billed. No bytes delivered to a caller does not
+certainty. A call is admitted once; a failover goes only to an untried
+deployment and only for an attempt never reached or refused before any
+output (ADR 0051), so a call bills at most once. No bytes delivered to a caller does not
 prove that upstream execution never happened. Replay only operations whose
 retry policy explicitly accepts that ambiguity or has verified provider
 idempotency; disable automatic replay of side-effecting/stateful operations.
@@ -283,8 +298,8 @@ add later. Record spike results and approval of exceptions in docs/spikes/.
 | SSRF and raw routes | Redirects, rebinding, IPv6, metadata and encoded paths cannot escape approved destinations |
 | GitOps bypass and audit | Unauthorized spec writes denied; audit archive survives collector outage and query-store deletion |
 | DoS and standalone | Bounded memory under slow/flooded traffic; hostile web origin and Host requests refused locally |
-| Budget exposure | Establish aggregate bounds, snapshot/counter handoff and failed slot-renewal behavior before claiming bounded exposure (ADR 0041) |
-| Reconciliation | Monthly account/model reconciliation with daily previews, explained adjustments and ADR 0038's tolerance |
+| Budget exposure | The stated bound's terms (in-flight limits, waivers, the snapshot's lag) and failed slot-renewal behavior checked by model/exposure.md and its connect test (ADR 0031, 0041) |
+| Reconciliation | Monthly account/model reconciliation with daily previews and the 3–5% tolerance; in M1 a query and a written record |
 | Replay and ledger dedup | Duplicate events and multiple adjustments keep balances stable |
 
 The canonical encoder's prefix property applies to provider cache-relevant
@@ -299,6 +314,7 @@ features cannot waive these gates.
 
 Additional M1 gates from [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md): denylist survival
 through Argo sync/prune/restarts; restrictive writes during audit backpressure;
-negative Argo/Crossplane authorization tests; composite state/config freshness
-and restrictive-right restore scenarios. Capture-pipeline and human-access
+negative Argo authorization tests (Crossplane's are M2's: no claims in M1);
+freshness of the state and the config checkout (ADR 0054) and
+restrictive-right restore scenarios. Capture-pipeline and human-access
 checks are M2 gates. Model extensions remain outstanding.

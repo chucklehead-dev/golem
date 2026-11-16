@@ -14,9 +14,9 @@ later.
 ## Decision
 
 - 429 with `Retry-After` only for limits that time will lift (rate,
-  concurrency, provider quota shares); 503 with `Retry-After` when every
+  concurrency); 503 with `Retry-After` when every
   deployment failed before the first byte.
-- Budget, cap and ceiling exhaustion in `enforce` mode: **402**; not
+- Budget exhaustion in `enforce` mode: **402** (caps, from M2, too); not
   authenticated: 401; not allowed: 403; not routable or not translatable:
   400 or 404. None of these is retried by the SDKs.
 - Bodies in the caller's dialect's error shape, with a stable golem code,

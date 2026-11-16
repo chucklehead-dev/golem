@@ -8,7 +8,7 @@ be run without lmt; `make verify-tangled` checks they match.
 | Model | Question it answers |
 |---|---|
 | [publication.md](publication.md) | After a revocation is acknowledged, how long can any gateway keep serving the key, and what must hold for that bound? |
-| [attempts.md](attempts.md) | When a call is retried or fails over before it commits, does each caller get one answer, is every attempt charged once, does the budget bound hold, do retries stay within the slots, quotas and budgets, and does an ejected deployment see only its probe? |
+| [attempts.md](attempts.md) | When a call is retried or fails over before it commits, does each caller get one answer, is every attempt charged once, does the budget bound hold, do retries stay within the slots, the deployments' ceilings and the budgets, and does an ejected deployment see only its probe? |
 | [exposure.md](exposure.md) | For a scope shared by several principals on several gateways, with late ingestion, Valkey outages and cancelled calls, does the scope stay within a stated bound, and is the rest of the exposure recorded (ADR 0041 §6)? |
 
 `make check` type-checks each model and runs a random simulation of a
@@ -30,7 +30,9 @@ reads them); they are no longer checked or maintained.
   and the config CRDs; ADR 0041 §5, §7.2). It modelled a CRD watch that
   M1 does not build.
 - **leadership.md**: compared placements of the lease and the fence and
-  chose ADR 0049's. Its counterexamples are Go tests now:
-  control/publish's `TestGuard` and control/lead's tests.
+  chose ADR 0049's fence placement, which ADR 0053 keeps with one
+  replica and no lease. Its counterexamples that still apply are Go
+  tests: control/publish's `TestGuard`, control/state's `TestClaim` and
+  `TestFenceInvariant`.
 
-Planned (testing.md §3): approvals and grants.
+Planned (testing.md §4): approvals and grants, when grants are built (M2).

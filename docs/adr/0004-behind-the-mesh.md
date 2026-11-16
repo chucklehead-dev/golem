@@ -1,6 +1,6 @@
 # 0004: golem runs behind the enterprise's ingress and mesh
 
-Status: Accepted (v1 baseline). From archive 0006.
+Status: Accepted (v1 baseline).
 
 ## Decision
 

@@ -1,8 +1,11 @@
 # 0041: Security boundaries and incident controls after the second review
 
-Status: Accepted, with the adaptations in §7; §7.6's hand-off amended by
-[0042](0042-known-spend-by-counter-watermark.md). Amends ADRs 0029, 0031,
-0032, 0035, 0037 and 0040 in the areas below. These are requirements and assumptions to validate,
+Status: Accepted, with the adaptations in §7. For M1: §5 and §7.2's
+freshness is restated for a git checkout by
+[0054](0054-m1-config-from-a-git-checkout.md); §6 and §7.3's budget
+statements are [0031](0031-soft-budgets.md)'s (no strict or
+declared-worst-case mode, no site counter); §2 and §7.4 (capture) apply
+from M2. Amends ADRs 0029, 0031, 0035, 0037 and 0040 in the areas below. These are requirements and assumptions to validate,
 not implemented controls or proofs. Four-hour internal leases, soft budgets,
 collector-held capture credentials and platform delivery remain the design.
 
@@ -138,6 +141,13 @@ trusted-root compromise; signatures do not remove this assumption.
 
 ## 5. Publication evidence includes config and restrictive rights (M1)
 
+> **For M1, [ADR 0054](0054-m1-config-from-a-git-checkout.md):** the config
+> is a git checkout, not Kubernetes objects: each publication binds the
+> state version, the config's digest and its commit, and the config is as
+> fresh as git-sync's last fetch, past `-max-config-age` renewing no lease.
+> The text below, written for config objects in the cluster, applies to the
+> CRD watch if it is built (M2).
+
 A snapshot combines two authorities: the CAS state document and accepted
 Kubernetes config. The source manifest must bind state_version plus the
 complete accepted config set (UID, generation and content digest, including
@@ -158,7 +168,8 @@ publication.qnt proves properties of key revocations in a single source;
 it does not yet prove this composite protocol. (Amended: the record's
 write now checks the lease's holder and epoch, ADR 0045, and both models
 require it, so a deposed leader is refused at once; a leader publishing
-from a stale view is the bounded case, subject to source expiry.)
+from a stale view is the bounded case, subject to source expiry. With one
+replica, ADR 0053, the fence is claimed once at start.)
 
 Extend model scenarios and implementation tests to include role removal,
 service deletion, capture/storage prohibition, route narrowing, CRD rollback,
@@ -183,14 +194,14 @@ TTL renewal scheduling is not proof that renewal succeeded.
 When slot renewal cannot be confirmed, stop admitting dependent work and
 attempt cancellation before lease expiry, reporting uncertain provider work.
 
-> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md):** no scope cancels calls in flight when renewal cannot be confirmed. Until the store recovers, new calls are admitted only within the gateway's own in-flight counts, each recorded as a waiver; calls already running continue.
+> **Superseded in part by [ADR 0031](0031-soft-budgets.md):** no scope cancels calls in flight when renewal cannot be confirmed. Until the store recovers, new calls are admitted only within the gateway's own in-flight counts, each recorded as a waiver; calls already running continue.
 Cancellation cannot guarantee that provider billing stops. Any fail-open mode
 explicitly waives the concurrency/spend bound and records its exposure.
 Strict mode accepts only modalities and billing categories with a verified
 conservative bound; body bytes alone do not bound URL-referenced images,
 documents, framing or tool/cache charges.
 
-> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** No mode claims a verified bound on cost. The declared-worst-case check (formerly strict) refuses what it can name: a declared worst case over the budget, no `max_tokens`, server-side tools or MCP servers, an unpriceable cost. It does not claim to bound URL-referenced inputs, framing or units billed outside tokens; provider-account limits contain them.
+> **Superseded by [ADR 0031](0031-soft-budgets.md).** No mode claims a verified bound on cost, and there is no strict mode: provider-account limits contain what golem cannot bound.
 
 Until those gates pass, describe budgets as eventually enforced, with
 unquantified additional exposure under failures. Use global concurrency,
@@ -229,7 +240,9 @@ set by the kind of traffic, not one value for everything:
 - A scope can always tighten to restricted; loosening a restricted scope to
   compatible needs its owner's and security's approval, as §3 says.
 
-**7.2 Freshness by consistent reads (adapts §5).** golem-control
+**7.2 Freshness by consistent reads (adapts §5; for M1 replaced by
+[ADR 0054](0054-m1-config-from-a-git-checkout.md)'s freshness by the last
+fetch, applying from M2 to the CRD watch).** golem-control
 establishes freshness of both inputs on every renewal directly, rather than
 through watch synchronization barriers: a consistent (quorum) LIST of the
 config CRDs from the API server and a GET of the state document, both cheap
@@ -248,9 +261,8 @@ slot renewal (Valkey unreachable):
   developer's ten-minute agent turn for an infrastructure blip is the
   worse outcome), and the exposure is recorded as a waiver of the bound
   for that interval;
-- in **strict** scopes, it attempts cancellation as §6 requires.
-
-  > **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** Decided: no scope cancels calls in flight on a failed renewal, `declaredWorstCaseCheck` included (an admission check only). Every scope behaves as the soft bullet above: until the store recovers, new calls are admitted only within the gateway's own in-flight counts, each recorded as a waiver, and calls already running continue.
+- (superseded: there is no strict mode, ADR 0031; no scope cancels calls
+  in flight on a failed renewal.)
 
 **7.4 A golem-owned capture collector (adapts §2).** The isolated capture
 pipeline is a separate OpenTelemetry collector Deployment owned by golem,
@@ -261,19 +273,11 @@ Its compromise exposes the capture credentials it holds and nothing else;
 the enterprise collector keeps operational telemetry and holds no Langfuse
 credentials.
 
-**7.5 The freshness model (adds to §5).** [model/freshness.md](../../model/freshness.md)
-checks §5 and §7.2 on the model: rights from both sources, deletions and
-Git rollbacks as config revisions, stale watch caches, leader changes,
-pauses between read and publish, and restore. It shows each rule necessary
-(a mutant per rule: freshness from the watch cache, the lease anchored to
-the state read, fencing on the state version only, restore that keeps only
-some restrictions) and states the guarantee per source: a restriction in
-either source is honoured within one lease of that source's change. It is
-not stated for the intersection, because two reads at different moments can
-pair a state and a config that never coexisted (a route narrowed, the member
-removed, the route widened back); no read atomic across S3 and the API
-server exists, and each restriction is still bounded. Simulation, not
-proof; implementation tests remain M1 gates.
+**7.5 The freshness model (adds to §5).** Retired with the CRD watch
+it modelled (model/README.md, *Retired models*); M1's freshness is ADR
+0054's. Its result stands for the watch if built: a restriction in either
+source is honoured within one lease of that source's change, per source,
+not for the intersection.
 
 **7.6 Scope exposure (adapts §6).** [model/exposure.md](../../model/exposure.md)
 checks a scope shared by several principals, on several gateways of a site,
@@ -284,11 +288,9 @@ necessary by a mutant:
 - **A scope in-flight limit** alongside the principal's: without it a
   scope's exposure is the sum of its active principals' limits. The bound a
   scope can be told is `scope limit × W` over its budget (soft), on one site.
-- **Counter handoff by event** (superseded by ADR 0042, the hand-off by counter sequence and watermark): the site counter is keyed by event ID and
-  known spend is the snapshot plus the counter's events the snapshot does
-  not include (the snapshot names its ingested events by a ledger
-  watermark). A counter that restarts with each snapshot loses increments
-  not yet ingested; one simply added counts twice.
+- (A counter hand-off between snapshot and site counter: removed with
+  the site counter, ADR 0031; known spend is the snapshot's, and its lag
+  is a term of the bound.)
 - **A cancelled call keeps its slot** until its upstream has ended: the
   connection's close where the provider stops on close, else the
   deployment's maximum duration. Freeing it at cancellation lets cancel and
@@ -298,8 +300,8 @@ necessary by a mutant:
 
 While Valkey is unreachable, admissions against a gateway's local counts are
 recorded as waivers (§7.3); with several gateways they can exceed the limits,
-and the model shows the bound holds once waived calls and spend lost to
-failures are added, the two terms reported rather than bounded in advance.
+and the model shows the bound holds once waived calls and the snapshot's
+lag are added, those terms reported rather than bounded in advance.
 Several sites are not modelled: each active site adds its own `scope limit
 × W` and what the others spend within one snapshot lag. Simulation, not
 proof.

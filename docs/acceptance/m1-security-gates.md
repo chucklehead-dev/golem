@@ -13,7 +13,7 @@ failed. Tests run under `go test -race ./...`.
 | A caller gone before the headers is `cancelled`, charged its input | `TestUncertainUpstream` (the caller left before the headers) | — | ee14c74 |
 | After an ambiguous end the slot is held for the provider's tail, then freed | `TestUncertainUpstream`; `TestConcurrencyAndCancel` (slot held, then free) | — | ee14c74 |
 | A failed ledger batch is retried with bounded backoff, not dropped (collector restart) | `gateway/telemetry` `TestLedgerQueueRetries` | — | ee14c74 |
-| A batch the collector took but did not acknowledge is resent whole, each row keeping its event_id; deduplication by event counts it once | `TestLedgerQueuePartialDelivery`; `golem.spend_dedup` (one row per event_id; the snapshot's spend is summed from it, ADR 0048) | — | edfadd1 |
+| A batch the collector took but did not acknowledge is resent whole, each row keeping its event_id; deduplication by event counts it once | `TestLedgerQueuePartialDelivery`; `golem.spend_dedup` (one row per event_id; the snapshot's spend is summed from it, ADR 0031) | — | edfadd1 |
 | Shutdown racing emission, retries or an export in flight keeps its deadline and accounts for every row (delivered + failed + dropped = emitted) | `TestLedgerQueueShutdownRaces` (three cases, -race; a stress test, which a logical race between atomics can pass) | yes | edfadd1 |
 | A row past the closed check when Shutdown begins is queued before the worker's last drain, so delivered or counted: emission and shutdown share a lock | `TestLedgerQueueEmitDuringShutdown` (the emission held between its check and its enqueue) | yes | 2c0d42e |
 | A ForceFlush racing Shutdown returns once the worker has stopped, never waiting on it forever | `TestLedgerQueueFlushDuringShutdown` (the flush held until the shutdown finished) | yes (hangs) | 54a912b |
@@ -54,7 +54,7 @@ ceiling). f394c10 on security/request-accounting-hardening; it replaces
   satisfies policy, and who presents client certificates if it does not,
   is undecided: an assumption, not proof (operations.md, "Telemetry
   transport"; golem#7).
-- The provider-account spending limits (ADR 0044, operations.md) are a
+- The provider-account spending limits (ADR 0031, operations.md) are a
   deployment requirement golem cannot verify: evidence is the release
   checklist's record of each account's limit, not a test.
 
@@ -65,9 +65,6 @@ for lifting `releaseGate`.
 ## Validation of this record
 
 `go test ./...`, `go vet ./...`, race tests of the gateway, telemetry and
-JSON scanning, and the models' sampled checks (`model/check-*.sh`) pass.
-The accounting model's exhaustive search (`check-accounting.sh` with the
-gotogether CLI) explores every run up to 12 steps of the small instance:
-it holds for the soft and declared-worst-case designs and finds each
-broken design's counterexample; it is complete to that depth, not
-beyond.
+JSON scanning, and the models' sampled checks (`make -C model check`) pass.
+(The accounting model's exhaustive search, cited here when this record was
+written, was retired with that model: model/README.md.)

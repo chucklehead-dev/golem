@@ -2,9 +2,9 @@
 
 Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
 and [security-and-correctness.md](security-and-correctness.md) govern the
-affected guarantees and release gates. Built so far: see the walkthroughs
-(docs/walkthroughs) and the "Built" notes; release evidence is tracked in
-golem#7.
+affected guarantees and release gates. What is built: the code's
+[orientation](walkthroughs/README.md) and the "Built" notes; release
+evidence is tracked in golem#7.
 
 Status: v1 baseline. The system as components, their APIs, and the
 rules that keep them apart. Each component's inside has its own document:
@@ -22,12 +22,18 @@ rules that keep them apart. Each component's inside has its own document:
 | [entra.md](entra.md) | the Entra ID app registrations they need |
 | [testing.md](testing.md) | the testing regime, and where gotogether is trialled |
 
+> **M1's scope of record is [m1-plan.md](m1-plan.md).** For M1:
+> golem-control is one replica (ADR 0053), its config a git checkout with
+> no objects in the cluster (ADR 0054), its API the org and key methods;
+> budgets are scope budgets on the snapshot's known spend, with no caps
+> (ADR 0031). Parts of this page marked M2 are not built.
+
 ## 1. Components
 
 | Component | Does | Does not | State |
 |---|---|---|---|
-| **golem-gateway** | Serves model requests: authn, routing, limits, hooks, upstream calls, telemetry | Change anything; serve any management API; call the control plane or Kubernetes | Caches; limit counters in Valkey; reads its snapshots from object storage |
-| **golem-control** | The control API (config read, explain, overrides, entitlements, self-service, admin, spend) and the watch on config CRDs and their status; its leader (a lease in the state document, ADR 0045) runs the jobs and signs and publishes snapshots | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADRs 0006, 0007); reads ClickHouse |
+| **golem-gateway** | Serves model requests: authn, routing, limits, upstream calls, telemetry (hooks from M2) | Change anything; serve any management API; call the control plane or Kubernetes | Caches; slots and rate buckets in Valkey; reads its snapshots from object storage |
+| **golem-control** | The control API (entitlements and self-service in M1; config read, explain, overrides and spend from M2); compiles the config checkout (ADR 0054); one replica, which claims the state document's fence, runs the jobs and signs and publishes snapshots (ADR 0053) | Serve model traffic; reach any other cluster | The state document in the bucket (owner, ADRs 0006, 0007); reads ClickHouse |
 | **golemctl** | CLI for users, managers, budget managers and admins | Anything the API does not offer | Local credentials cache |
 | **golem-console** | A small web UI for the same tasks (M2) | Anything the API does not offer | None |
 | **Backstage plugin** | Keys, spend and budgets inside Backstage (M3, optional) | Same | None |
@@ -42,13 +48,13 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
 
 ```
    users, managers, admins                       platform team (GitOps)
-   golemctl · console · Backstage                 config CRDs ──────────────┐
-            │                                     (Backend, ModelRoute,     │ watch,
-            │ control API (Connect, Entra)         ScopePolicy, Hook,       │ status
-            ▼                                      PriceList)               │
-   golem-control ◀────────────────────────────────────────────────┘
-     entitlements · overrides · spend · audit · explain
-     leader: jobs; signs and publishes snapshots
+   golemctl · console · Backstage                 config repository ────────┐
+            │                                     (Backend, ModelRoute,     │ git-sync
+            │ control API (Connect, Entra)         ScopePolicy, PriceList)  │ checkout
+            ▼                                                               │
+   golem-control (one replica) ◀────────────────────────────────────┘
+     entitlements · audit · known spend
+     the fence: jobs; signs and publishes snapshots
             │  state document: CAS (If-Match)        Argo CD + Argo Rollouts deliver;
             │  snapshots + signed pointers           Crossplane composes the bucket,
             ▼                                        KMS, IAM, Valkey, Entra apps
@@ -56,13 +62,13 @@ ClickHouse and Langfuse, Grafana, Istio (Gloo Mesh, ambient).
             ▲  poll signed pointer, fetch by hash; write status/<pool>/<id>
             │
    golem-gateway ×N ──▶ providers, model servers
-            │   └──▶ Valkey (limits, quotas)
+            │   └──▶ Valkey (slots, rate limits)
             ├──▶ OTLP collector ──▶ ClickStack · ClickHouse golem.spend, audit
             └──▶ captured traces ──▶ Langfuse (a project per capturing scope)
 ```
 
 Two kinds of change, one path each: declarative config through GitOps
-(CRDs, reviewed as code); entitlements and incident levers through the
+(the config repository, reviewed as code); entitlements and incident levers through the
 control API. golemctl, the console and the Backstage plugin are API
 clients with no private endpoints. The gateway's only input is its pool's
 snapshots in object storage: it never calls the control plane.
@@ -111,14 +117,13 @@ control/
   api/                     Connect handlers: authenticate, decode, call service, encode; no rules
   service/                 rules and authorization: org, keys, groups
   state/                   the state document over a bucket's compare-and-swap (ADR 0006)
-  lead/                    leadership: the lease in the state document (ADR 0045)
   publish/                 a pool's publication: record, checkpoint, signed pointer
-  controller/              the leader's loop: compile, publish, renew; runs the jobs
+  controller/              the loop: claim the fence, compile the checkout, publish, renew; runs the jobs
   audit/                   audit shipping: archive, emit, trim
   entrasync/               Entra group sync (ADR 0047)
-  spend/                   known spend from the ledger in ClickHouse (ADR 0048)
+  spend/                   known spend from the ledger in ClickHouse (ADR 0031)
   metrics/                 golem-control's metrics: observable instruments over the controller
-  config/                  the CRD watch (planned)
+  config/                  the CRD watch (planned, M2 if at all: ADR 0054)
 console/                   web UI (Go html/template + htmx), a client of the control API (planned)
 plugins/backstage/         TypeScript, generated client (M3)
 lib/                       shared libraries with no control-plane or Kubernetes-client deps:
@@ -128,7 +133,7 @@ lib/                       shared libraries with no control-plane or Kubernetes-
                            (lib/compile), key, period, contract
 internal/archtest/         the rules below, as tests
 model/                     the Quint models, literate (model/*.md)
-deploy/                    Helm charts, Crossplane composition, ClickHouse DDL (planned in part)
+deploy/                    Helm charts, the Argo sample, otel/ (the ledger's collector), clickhouse/spend.sql
 docs/
 ```
 
@@ -166,27 +171,25 @@ Each binary also gets its own image and its own dependency list in
 ## 5. Data flow, by example
 
 - **The platform team adds a model alias.** They open a PR with a
-  `ModelRoute` CRD; CI runs `golemctl config validate` on the repository
-  offline (the snapshot compiler as a library). After merge, Argo CD
-  applies it (the API server enforces the schema's rules). golem-control sees it through its watch, builds the new
-  snapshot, and publishes it for every gateway pool that
-  selects it; the pools' gateways pick it up within a second, compile it and
-  write their status; golem-control writes
-  `Applied: 12/12` in the CRD's status.
-- **An incident.** A provider deployment misbehaves; an admin runs
-  `golemctl overrides create --disable deployment/openai-east --for 2h
-  --reason INC-123`. It reaches the gateways in about a second and expires
-  on its own; the audit log has who, why and when.
-- **A user mints a key.** `golemctl keys create --scope team/platform
-  --models 'claude-*' --cap 50/month`. golem-control checks the user's
+  `ModelRoute`; CI runs `golemctl config validate` on the repository
+  offline (the snapshot compiler as a library). After merge, git-sync
+  checks the commit out beside golem-control within 30 seconds; its next
+  step compiles it and publishes every pool's snapshot, naming the commit;
+  the gateways pick it up within a second, compile it and write their
+  status. golem-control's log and metrics say whether it was applied.
+- **An incident.** A provider deployment misbehaves; the gateways eject
+  it on their own after its failures, and a ModelRoute PR takes it out of
+  the pool for good. (Expiring overrides through the API are M2's.)
+- **A user mints a key.** `golemctl keys create --scope team-platform
+  --models coder --expires 30d`. golem-control checks the user's
   membership and rights, stores the hash with its audit event in one write, and the
   key reaches the gateways in about a second (ADR 0006).
-- **A request is charged.** The gateway checks known spend against the
-  key cap, the member cap and the scope's pool, takes a concurrency slot
-  (ADR 0031), calls the provider, adds the actual cost to the site's
-  counter, and emits the access-log record, which becomes
-  the `golem.spend` row in ClickHouse.
-- **A budget manager approves a one-time adjustment.** The request's state
+- **A request is charged.** The gateway checks the snapshot's known spend
+  against the scope's budget and takes its concurrency slots (ADR 0031),
+  calls the provider, and emits the ledger row through the pod's collector,
+  which becomes the `golem.spend` row in ClickHouse; the next snapshots'
+  known spend includes it.
+- **(M2) A budget manager approves a one-time adjustment.** The request's state
   becomes `approved`; the grant takes effect in the same transaction; the
   pool's new total reaches gateways in the next snapshot.
 - **The control plane is down.** Gateways keep polling object storage;
@@ -200,7 +203,7 @@ Each binary also gets its own image and its own dependency list in
 |---|---|---|
 | Laptop | none | `golem-gateway --standalone ./config/`: the gateway alone from CRD YAML, in-memory limits, the developer's own provider credentials (ADR 0023) |
 | Development of golem itself | MinIO | `make dev-up`: kind, MinIO, Valkey, dex, ClickHouse and Langfuse in containers, production code unchanged; also the integration-test environment |
-| Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (2 replicas, one leader), gateways across zones; ElastiCache for Valkey; Helm charts through GitOps (ADR 0036) |
+| Single region (EKS in us-east-2, first) | The state document and snapshots in an S3 bucket in us-east-2 | golem-control (one replica, ADR 0053), gateways across zones; ElastiCache for Valkey; Helm charts through GitOps (ADR 0036) |
 | Second region (M3: us-west-2) | The bucket replicated to us-west-2 | us-west-2's gateways read the replica; a golem-control there scaled to zero, started by the failover runbook (ADR 0008); Valkey there as at any site |
 | AKS or on-prem sites (initial phase) | The shared us-east-2 bucket (ADR 0008): AKS through Entra-to-AWS federation, on-prem through IAM Roles Anywhere | Gateway pools only; the control plane and their config CRDs stay on EKS; a Valkey per site; budgets by known spend in snapshots (ADR 0031); no cross-cluster Kubernetes access (ADR 0008); Bedrock through the same federation |
 

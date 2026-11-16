@@ -10,7 +10,7 @@ Status: Accepted; delivery and infrastructure detailed by [0040](0040-argo-cd-an
   namespaces and service accounts can reach golem at all. Revisit only for a
   service that cannot use Entra.
 - **No golem-operator.** Installation and day-2 are Helm charts deployed by
-  Argo CD, with Argo Rollouts for gateway canaries;
+  Argo CD (Argo Rollouts for gateway canaries from M2, ADR 0040);
   drains are the gateway's `preStop` and `terminationGracePeriodSeconds`;
   mesh policies and mounted Secrets are chart templates; Langfuse
   provisioning is a golem-control job (ADR 0035). docs/operations.md

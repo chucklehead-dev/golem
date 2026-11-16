@@ -4,7 +4,7 @@ Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
 and its normative security and correctness requirements. Baseline text below
 must be read with those amendments.
 
-Status: Accepted (v1 baseline), M2. From archive 0022.
+Status: Accepted (v1 baseline). **Applies from M2**: nothing of this record is built or planned for M1 (m1-plan.md); before an edge pool is published, revisit ADR 0053 (its five-minute lease needs a control plane that fails over).
 
 ## Decision
 

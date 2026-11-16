@@ -4,7 +4,7 @@ Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
 and its normative security and correctness requirements. Baseline text below
 must be read with those amendments.
 
-Status: Accepted (v1 baseline). From archive 0009, 0015, 0026, 0027, 0028, 0032.
+Status: Accepted (v1 baseline). As built for M1 (control-plane.md §2): JSON, not yet protobuf and zstd, holding the fence, publication records, principals, scopes, keys, revocations, roles and the audit outbox; grants, caps, pools, site ceilings, overrides, registrations and notifications are not in it (from M2, if at all).
 
 ## Decision
 
@@ -31,9 +31,10 @@ Status: Accepted (v1 baseline). From archive 0009, 0015, 0026, 0027, 0028, 0032.
 
 ### Distribution
 
-- The leader compiles each gateway pool's **whole snapshot** (config CRDs
-  for the pool, the entitlements its audience allows, its site's ceilings)
-  on any change, debounced to once a second; signs it; writes
+- golem-control compiles each gateway pool's **whole snapshot** (the
+  config, from a git checkout in M1: ADR 0054; the entitlements its
+  audience allows; each scope's known spend) on any change, at the next
+  one-second step; signs it; writes
   `snapshots/<pool>/<hash>.pb`; then the signed pointer
   `snapshots/<pool>/current` by CAS (ADR 0007).
 - Gateways poll their pointer every second, verify, fetch, compile, swap,

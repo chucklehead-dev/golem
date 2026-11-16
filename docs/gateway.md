@@ -2,11 +2,12 @@
 
 Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
 and [security-and-correctness.md](security-and-correctness.md) govern the
-affected guarantees and release gates. Built so far: see the walkthroughs
-(docs/walkthroughs) and the "Built" notes; release evidence is tracked in
-golem#7.
+affected guarantees and release gates. What is built: the code's
+[orientation](walkthroughs/README.md) and the "Built" notes; release
+evidence is tracked in golem#7.
 
-Status: draft, third pass. The system's components and how they fit are in
+Status: §2–§4a describe what is built (M1); the rest mixes the built and
+the planned, each marked. M1's scope is [m1-plan.md](m1-plan.md). The system's components and how they fit are in
 [architecture.md](architecture.md); this document is the gateway's inside.
 The gateway does data-plane work only: it serves model requests. It has no
 API for changing anything, no database, no Kubernetes client, and it never
@@ -37,7 +38,7 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
   control plane publishes it (ADR 0006); a request takes the pointer once and uses
   it to the end. No locks on the request path for config.
 - **Standard library first.** Dependencies only where the standard library
-  has no answer (OTel, CEL, JWT/JOSE, the RESP client, provider signers),
+  has no answer (OTel, JOSE, the RESP client, the AWS SDK's signer; §5),
   each behind a small interface in one package.
 - **Context everywhere, goroutines owned.** Every goroutine is started by
   `sync.WaitGroup.Go` or an errgroup owned by its request or the server, and
@@ -49,231 +50,172 @@ ClientHello with `cryptobyte` for the SNI and nothing more). Updated:
 ## 2. Shape
 
 ```
-request:   ztunnel (mesh mTLS) → listener → frontend (dialect, scan) → authn (Principal, scope)
-           → Request hooks → router (alias, pool, deployment) → limits (check: known spend, concurrency, rate, quota)
-           → attempt loop (retry, failover; backend dialect) → provider (direct or egress gateway)
-response:  provider → backend dialect → usage + cost (reconcile) → frontend encode → caller
-inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic Snapshot (ADR 0006)
-           or, standalone (ADR 0023), CRD YAML in a local directory compiled in-process
-state:     the site's Valkey, over TLS with AUTH (spend since the snapshot by account, concurrency slots, rate limits and provider quota shares in requests a minute) (ADR 0031)
-outputs:   OTLP → collector (ADR 0015); captured traces → the scope's Langfuse project (ADR 0016);
+request:   ztunnel (mesh mTLS) → listener (guard) → authenticate (Principal, scope) → read and scan the body
+           → route (alias, pool) → policy, betas, rate limits → admission (known spend, slots)
+           → attempt loop (failover before the commit) → provider (direct, or Bedrock's envelope)
+response:  provider → usage read from the stream as it passes → caller; the ledger row; the ticket ended
+inputs:    snapshots/<pool>/current in object storage → fetch by hash → compile → atomic snapshot (ADR 0006)
+           or, standalone (ADR 0023), config YAML in a local directory compiled in-process
+state:     the site's Valkey, over TLS with AUTH: in-flight slots and request rate buckets (ADR 0031);
+           known spend is the snapshot's
+outputs:   OTLP to the pod's collector sidecar on loopback (ADR 0043): spans, metrics, ledger rows;
            status/<pool>/<id> in object storage (applied hash, compile errors)
-local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin port; explain is golem-control's)
+local:     /livez /readyz, pprof
 ```
+
+Hooks (ADR 0014), translation through `canon` (M1.5) and shadow requests
+are not built; their places in the path are marked in the code.
 
 ## 3. The request path
 
-1. **Accept.** `net/http.Server` with `Protocols` set for HTTP/1.1 and
-   HTTP/2 (h2c behind a mesh). Headers bounded to 64 KiB (keys and tokens
-   are a few KB) and the default `MaxHeaderValueCount`; `ReadHeaderTimeout`
-   10 s, idle keep-alives closed after two minutes, HTTP/2 at most 256
-   streams per connection with pings after 30 s of silence. No
-   `WriteTimeout` (streams are long): instead each write to the caller has
-   a deadline (`WriteStall`, 30 s; `ResponseController.SetWriteDeadline`
-   set before it and cleared after, as nginx's `send_timeout`), so a client
-   that stops reading is a caller gone, and no deadline is armed while the
-   provider is silent (under HTTP/2 an armed one resets the stream).
-   Connections are bounded by `gateway/guard.Listener`: `-max-conns`
-   (8192) open at once, past which new ones wait in the backlog, and
-   `-max-conns-per-source` (off) from one address, for a gateway reached
-   directly.
-   Before anything else is checked, `guard.Guard` takes the request from
-   its source's budgets: `-source-rate` requests a second (off: an
-   authenticated caller's are the policy's), and `-auth-failures` failed
-   authentications a second (20, burst 200). A source past its failures
-   has every request refused, `limit.source` with a Retry-After, before
-   its credential is checked or its body read: its flood cannot be told
-   from its valid calls, and each failure (a token's signature) costs more
-   than a refusal. The source is the connection's address, or with
-   `-source-header` the last value of a header the proxy in front sets
-   (X-Forwarded-For). Behind a sidecar every connection is the sidecar's,
-   so the budgets are the pod's; set `-source-header` where the mesh sets
-   one. At most 65,536 sources are kept; past them, refilled ones are
-   forgotten, and new ones share one budget.
-2. **Frontend.** `ServeMux` method-and-path patterns select the dialect
-   (`POST /v1/chat/completions`, `POST /v1/messages`, ...). The body is read
-   into a pooled buffer with a size cap (`http.MaxBytesReader`). A
-   `jsontext.Decoder` scan extracts the routing fields; it scans the complete
-   document and rejects duplicate members, and nesting deeper than 128
-   (`jsonscan.MaxDepth`: a provider's parser, Python's on a vLLM box, may
-   refuse or misread it), before forwarding; unknown fields
-   are forwarded and logged by name, policy-relevant ones enforced
-   (ADR 0037). Hook rewrites
-   trigger policy and capability revalidation.
-3. **Authenticate** (ADR 0009). The chain yields a `Principal` (user or
-   service, scope, key) or an error in the
-   caller's dialect. Keys are
-   looked up by hash in the entitlements snapshot (no network call); Entra
-   JWTs are verified locally against cached JWKS (fetched at start, but
-   not required to start: until the first fetch, tokens are refused as
-   `gateway.not_ready` and golem keys work). Effective rights are
-   computed from the snapshot: scope policy ∩ membership ∩ key constraints
-   (org model §3).
-4. **Request hooks**, selected by precompiled CEL programs; they may
-   reject, rewrite, or add routing hints (ADR 0014).
-5. **Route.** Alias to route; CEL conditions; authorization check; pool
-   selection by strategy (affinity key first, then the strategy among
-   healthy deployments).
-   The pool is first narrowed to the deployments that accept the
-   request's `anthropic-beta` values (a Deployment's `betas`, unset: any;
-   ADR 0028's capability routing, betas only for now): a failover never
-   lands on a deployment that would refuse the request (Bedrock takes a
-   subset of Anthropic's betas), and a request none accepts is refused
-   `route.no_capable_deployment`, naming the beta, before anything is
-   counted.
-6. **Check** (ADR 0031), in one Valkey round trip: known spend (the
-   snapshot's, plus the site's counter since) against the scope's budget,
-   with the request's declared worst case added in scopes with the
-   declared-worst-case check (bounded by the scope's `max_tokens` and
-   input-size ceilings, input tokens by byte count: ADR 0038); and
-   concurrency slots for the principal and the scope, renewed every 30
-   seconds while the call is in flight. The key's cap and the member's
-   (its own, or the scope's default) are accounts beside the scope's, in
-   the same round trip: each a counter at the site, checked in the order
-   key, member, scope, the first reached refusing (`budget.key_cap`,
-   `budget.member_cap`, `budget.pool_exhausted`), under the scope's
-   budget mode (org-model.md §4.2). Refusals are 402 (budgets and caps)
-   or 429 (limits).
+As built: `gateway/proxy`'s `Handler.ServeHTTP`, a step at a time. The
+code's walk through it, with each step's function, is the
+[orientation](walkthroughs/README.md#2-a-requests-path-through-the-gateway).
 
-   A call takes a request from its scope's **rate limits** once, before
-   admission (a ScopePolicy's `rateLimits: {member: {requestsPerMinute},
-   scope: {requestsPerMinute}}`, PRD §5.5), and each **attempt** one from
-   its deployment's share of the provider's quota (a Deployment's
-   `quota: {requestsPerMinute}`, the site's share, PRD §9.2). Each is a
-   bucket in Valkey, shared by the site's gateways, refilled continuously
-   and holding a minute's worth; a call's member and scope buckets are
-   taken together or not at all. Requests only: a provider's token limits
-   are its 429s, which the attempt loop fails over on, and spend is the
-   budgets' (ADR 0044). Past a rate limit, `limit.rate` with a
-   Retry-After, naming which, in every budget mode. A deployment at its
-   share is passed over as one at its ceiling is (model/attempts.md's
-   `QUOTA_PER_ATTEMPT`); a call that finds every deployment at its share
-   is refused `limit.provider_quota` with the earliest Retry-After. One
-   Valkey round trip per call with rate limits, and per attempt on a
-   deployment with a quota; with Valkey unreachable they fail open (PRD
-   §5.5), logged once a minute.
+1. **Accept.** `net/http.Server` for HTTP/1.1 and HTTP/2 (h2c behind a
+   mesh). Headers bounded to 64 KiB; `ReadHeaderTimeout` 10 s; idle
+   keep-alives closed after two minutes; HTTP/2 at most 256 streams per
+   connection with pings after 30 s of silence. No `WriteTimeout`
+   (streams are long): each write to the caller has its own deadline
+   (`WriteStall`, 30 s), so a client that stops reading is a caller gone,
+   and none is armed while the provider is silent. Connections are bounded
+   by `guard.Listener`: `-max-conns` (8192) open at once, and
+   `-max-conns-per-source` (off) from one address.
+2. **The floor before authentication** (`gateway/guard`). Each request is
+   taken from its source's request rate (`-source-rate`, off by default),
+   and each failed authentication from its source's failure budget
+   (`-auth-failures`, 20 a second, burst 200). Only a refusal that is the
+   credential's fault counts: a key unknown, revoked, expired or of
+   another installation, a token invalid or expired, none sent; never
+   `gateway.not_ready`, a token refused for golem's copy of Entra's keys
+   (too old, or missing the signing key), or a valid credential refused by
+   policy. A source past its failures still has a golem key looked up, and
+   **a valid key always passes**; its invalid ones and its Entra tokens
+   (before their signature check) are refused `limit.source` with a
+   Retry-After. The source is the connection's address, or with
+   `-source-header` the last value of a header the proxy in front sets.
+   Behind a sidecar every connection is the sidecar's, so the gateway
+   chart turns the failure budget **off unless `guard.sourceHeader` is
+   set**. At most 65,536 sources are kept; past that, new ones are not
+   limited (logged at most once a minute) rather than sharing one bucket.
+3. **Authenticate** (ADR 0009). A credential sent twice is refused first.
+   Golem keys are looked up by hash in the snapshot; Entra JWTs are
+   verified locally against cached keys (fetched at start, not required to
+   start: until then tokens are `gateway.not_ready` and golem keys work).
+   Rights come from the snapshot: scope policy ∩ membership ∩ key
+   constraints (org-model.md §3). An expired authorization lease refuses
+   every request (`gateway.authorization_expired`).
+4. **Read the body, bounded.** A `Content-Length` over the scope's
+   `maxInputBytes` is refused unread. The bodies being read at once are
+   bounded per gateway (`-max-reading`, 512 MiB of bytes) and per principal
+   (`-max-reading-per-principal`, 8 bodies); past either, `limit.concurrency`
+   with Retry-After 1. The body is read into a pooled buffer with a cap
+   (32 MiB by default; zero is the default, not "no body"), within a body
+   timeout.
+5. **Scan.** A `jsontext` scan of the whole document extracts the routing
+   and policy fields; duplicate members, trailing data and nesting past 128
+   are refused, names compared unescaped. Unknown fields are forwarded,
+   policy-relevant ones enforced (ADR 0037). **File and item references
+   are refused in both dialects**, escaped or nested (`jsonscan.Objects`):
+   in Responses a non-null `file_id` anywhere in `input` or
+   `instructions`, an `item_reference`, `previous_response_id`,
+   `conversation`, `background`, a stored `prompt`, `store: true`; in
+   Messages a content block whose source is a file or which names a
+   `file_id`. Each is `authz.provider_storage_forbidden`: golem refers to
+   nothing a provider keeps (ADR 0027).
+6. **Route.** The alias, within the principal's models, to its route; the
+   route's feature mode (restricted or compatible: approved betas and API
+   versions), then the scope's policy (`maxOutputTokens` over `max_tokens`
+   × `n`, `maxInputBytes`, provider storage; server-side tools are
+   detected but admitted, ADR 0031). The pool is
+   narrowed to the deployments that accept the request's `anthropic-beta`
+   values (ADR 0028, betas only); none, `route.no_capable_deployment`,
+   before anything is counted.
+7. **Rate limits**: the member's and the scope's requests-a-minute
+   buckets in Valkey (a ScopePolicy's `rateLimits`), taken together once a
+   call, `limit.rate` naming which, in every budget mode; with Valkey
+   unreachable they fail open. Requests only: token limits are the
+   provider's 429s, which the attempt loop fails over on.
+8. **The first deployment**: the pool in order, each through its health
+   (`route.Health`: `maxInFlight`, `maxInFlightPerPrincipal`, ejection, one
+   probe at a time). A call every deployment passes over for its
+   principal's own share is told `limit.concurrency`; otherwise
+   `upstream.unavailable` with the earliest Retry-After.
+9. **Admission** (ADR 0031), one Valkey round trip
+   (`gateway/limit`, behind `gateway/admission`'s `Admitter`): the scope's
+   known spend, **the snapshot's alone**, against its budget, and the
+   principal's (counted per scope) and the scope's in-flight slots, renewed
+   every 30 s while the call runs. Under `enforce` a spent budget is
+   `budget.pool_exhausted` (402); under `observe` and `warn` the call is
+   admitted and its row marked `over_budget`, `warn` adding `golem-warning`.
+   In-flight limits refuse in every mode (`limit.concurrency`, 429).
+   **There are no member or key caps, no provider quota shares and no
+   declared-worst-case check** (ADR 0031). A store call is bounded
+   (250 ms) and a caller leaving during it leaves no slot behind. With
+   Valkey unreachable the gateway admits on its own in-flight counts, each
+   admission a waiver, re-registers its calls when Valkey returns, and is
+   ready all the same. Only an admitted call credits the route's retry
+   budget. From here the call's ticket ends exactly once.
+10. **Attempt loop.** The body's `model` is spliced for the deployment;
+    only allowlisted headers cross (an Anthropic call's `anthropic-version`
+    and `anthropic-beta`; **an OpenAI call forwards none, so a caller's
+    `OpenAI-Organization` is not forwarded**: the Backend's credential
+    decides the organisation billed); the deployment's transport (or
+    Bedrock's envelope) sends it. Retried, on a deployment the call has not
+    tried (ADR 0051), only an attempt the provider never saw (a dial, DNS
+    or TLS failure, or **a Bedrock request that never left the gateway**:
+    a body, rewrite or signing failure, `envelope.ErrNotSent`) or refused
+    before any output (429, 503, 529, a stream whose first event is an
+    error), within the route's `maxAttempts` and retry budget. A stream
+    commits at its first event; once committed nothing is retried (ADR
+    0002). An attempt sent and unanswered ends the call, charged its
+    declared worst case as uncertain. **A caller gone, or a call withdrawn
+    by a sweep, is no deployment failure**: its attempt's lease is released,
+    not failed, so cancelled calls cannot eject a healthy deployment.
+11. **Respond.** Headers through an allowlist; the body copied as it
+    arrives, the same bytes through the dialect's usage reader, flushed per
+    event. **A stream that carried its provider's error event after output
+    is a failed call** (`upstream.stream_failed`, of the provider; its
+    billing unchanged). A cut stream gets the contract's error event and an
+    abort, so no client takes it for whole. A non-streamed response is kept
+    up to 1 MiB to read its usage; past it, estimated.
+12. **Record.** The usage priced from the snapshot's price list (integer
+    micro-units, half-even); the ledger row written; then the ticket ended:
+    the slot freed, or, after an ambiguous end (uncertain, cut, abandoned),
+    held for the provider's tail (`ProviderTail`, 2 minutes, at most to the
+    call's deadline). Usage the provider did not report is estimated high:
+    every byte received a token, at most `max_tokens` × `n`; every request
+    byte a token (golem#3, golem#4).
 
-   The proxy sees admission only as `gateway/admission`: `Admitter.Admit`
-   returns a `Ticket`, ended exactly once by `Complete` (the cost) or
-   `Cancel` (the cost seen, and when to free the slot: the provider's
-   tail), or a `*Refusal` rendered with its code and Retry-After; a caller
-   gone during admission is told nothing. `gateway/limit` is golem's
-   implementation (`Limiter.Admitter`), with its renewal and recovery loop
-   (`Run`) and last accounting (`Finish`). Admission is a
-   fixed stage after routing, not a hook: ADR 0014 has no phase after
-   routing, its hooks are stateless per phase, and its Complete phase may
-   drop work, while an admitted call holds a slot across its life and is
-   counted exactly once. Nor does the limiter's outage behaviour fit a
-   hook's fail-open or fail-closed: it admits on its own in-flight counts,
-   each admission a waiver, then replays and re-acquires in a grace after
-   recovery (ADR 0041 §7.3). A gateway that starts while the site's
-   Valkey is unreachable starts in that mode, retries the connection in
-   the background, and is ready all the same: readiness never depends on
-   the site store. Stateless refusals (deny lists, size rules)
-   fit a Request hook. Rate limits are taken just before admission, in
-   their own round trip: they count requests, so a call then refused for
-   its budget or slots has used one of its minute, as a provider's own
-   meter counts a refused request.
-7. **Attempt loop.** For each attempt: build the upstream request (fast
-   path: same bytes, spliced model name; else the frontend's decoder and the
-   backend's encoder through `canon`), wrap it in the deployment's envelope
-   (URL, model placement, auth, stream framing), send it on the deployment's
-   `http.Transport`. Retry or fail over on a retryable outcome *before the
-   attempt commits*: a stream commits when its first event is written to
-   the caller, so a 200 whose first event is an error is still retryable
-   (`gateway/proxy/commit.go`); after it, the attempt is committed. Only
-   an attempt the provider never saw or refused before any output is
-   retried, and only on a deployment the call has not tried (ADR 0051: a
-   retry is a failover; the client retries the same endpoint); one sent
-   and unanswered ends the call (model/attempts.md:
-   its retry would run beside the provider's tail). The budget is checked
-   once, at the first attempt; each attempt takes a lease from its
-   deployment's health (ceiling, ejection, one probe), within the route's
-   `maxAttempts` and a retry budget per route (`gateway/route/health.go`).
-8. **Respond.** Fast path: copy headers through an allowlist, copy the
-   body through a tee whose other side is an SSE scanner feeding the usage
-   extractor; flush per event. Translated: decode upstream events, encode
-   frontend events.
-9. **Record**: price the actual usage from the catalog; add it to the
-   site's spend counters; release the concurrency slot (a cancelled or cut
-   call holds it through the provider's tail, `ProviderTail`); record metrics and
-   the access log record (which is also the
-   ledger's input, ADR 0015); queue `Complete` hooks (bounded queue,
-   dropped work counted).
-
-Shadow requests (M2) branch at step 7 onto their own goroutine with a
-context detached from the caller's cancellation
-(`context.WithoutCancel`) but with its own deadline, and a semaphore
-bounding shadow concurrency so mirroring cannot exhaust the pool.
-
-## 4. Packages
-
-All under `gateway/` (architecture.md §4 gives the repository and the
-import rules that keep the gateway free of control-plane code):
-
-```
-cmd/golem-gateway/     main: flags, signals, wiring; nothing else
-gateway/proxy/         the request path (§3): the only package that knows the order of steps
-gateway/dialect/       one subpackage per dialect: openai/{chat,responses,embeddings,decisions},
-                       anthropic/messages, typesafe/systemone, bedrock/converse; each: the
-                       pass-through scan and splice, errors, stream events, usage extraction,
-                       and its adapter pair (decode to, encode from the canonical model)
-gateway/canon/         the canonical model (requests, responses, stream events); internal, never an API
-gateway/envelope/      how hosts carry a dialect: anthropic, bedrock (InvokeModel, event-stream
-                       framing, SigV4), vertex, foundry, openai, vllm
-gateway/auth/          Authenticator, chain, Principal; keys, entra (JWT)
-gateway/snapshot/      the compiled Snapshot (routes + entitlements), the object-storage poller,
-                       the file source, the on-disk last-good copy, status writes
-gateway/route/         aliases, pools, strategies, affinity, ejection, retry budget
-gateway/admission/     the request path's contract with admission: Call, Admitter, Ticket, Refusal (a leaf)
-gateway/limit/         Limiter (admission's implementation): known-spend checks, concurrency slots; Valkey and in-memory stores
-                       (built: known spend as snapshot spend plus the site counter's minutes from the snapshot's boundary (ADR 0048);
-                       soft and declared-worst-case checks; principal and scope slots; holding on cancel; outages with waivers, replay and a
-                       recovery grace; over an in-memory store and Valkey (Lua scripts; slot TTLs on the server's clock);
-                       both checked against model/exposure.md)
-gateway/price/         model catalog lookups and pricing (the catalog comes in the snapshot)
-gateway/hook/          phases, in-process registry, remote client, built-ins
-gateway/upstream/      per-deployment transports, provider auth (keys, SigV4, Entra, Roles Anywhere)
-gateway/telemetry/     OTel setup, semconv helpers, access log, flight recorder
-gateway/local/         probes, pprof, snapshot hash
-```
-
-`proxy` depends on interfaces from the others; nothing depends on `proxy`.
-Each dialect package depends only on `canon` (for its adapters), never on
-another dialect; envelopes depend on neither. A translated request is
-`encode(backend, decode(frontend, req))` wrapped by the backend's
-envelope, assembled by `proxy`.
+A snapshot or denylist entry that withdraws a call's grant (a key
+revoked, its principal gone from the scope or from golem, a key or
+principal denied) ends that call within seconds in its dialect's error,
+charged what was produced, its row `terminated`; lease expiry, a key's own
+expiry and a scope losing a model end none.
 
 ## 3a. Endpoints beside the calls
 
-- `POST /v1/responses` (dialect `openai.responses`,
-  `gateway/dialect/openai/responses`): OpenAI's Responses API, stateless
+- `POST /v1/responses` (`openai.responses`): the Responses API, stateless
   only (security-and-correctness.md §4, whatever the scope allows): store
-  is written false (an absent store is the provider's true); a request
-  needing provider-side state (`previous_response_id`, `conversation`,
-  `background`, a stored `prompt`, a `file_id` in its input, a
-  `file_search` tool) or asking `store: true` is refused,
-  `authz.provider_storage_forbidden`, before any provider call; the
-  stored object endpoints (`/v1/responses/{id}`, its cancel and input
-  items) are refused alike. Usage is read from the stream's terminal event
-  (`response.completed`, `.incomplete`, `.failed`) or the whole
-  response's; an `error` event first is refused before the commit. An
-  OpenAI caller's model list holds its Chat and Responses routes.
-
-- `GET /v1/models`, `GET /v1/models/{id}` (`proxy.ServeModels`): the
-  aliases the caller's scope may call, of the dialect it calls with, in
-  that dialect's shape (Anthropic's when it sends anthropic-version, as its
-  SDKs and agents do; OpenAI's otherwise). A model the scope may not use
-  is not listed, and asked for by ID is `route.unknown_model`: a list must
-  not tell a caller what other scopes have. Authenticated; nothing
+  written false (an absent store is the provider's true); the refusals of
+  §3 step 5, before any provider call; the stored object endpoints
+  (`/v1/responses/{id}`, its cancel and input items) refused alike. Usage
+  from the terminal event (`response.completed`, `.incomplete`,
+  `.failed`) or the whole response; an `error` event first is refused
+  before the commit.
+- `GET /v1/models`, `GET /v1/models/{id}` (`ServeModels`): the aliases the
+  caller's scope may call, of the dialect it calls with, in that dialect's
+  shape (Anthropic's when it sends anthropic-version). Another scope's
+  model is `route.unknown_model`, not forbidden. Authenticated; nothing
   admitted or charged.
-- `POST /v1/messages/count_tokens` (`proxy.ServeCountTokens`): checked as
-  a Messages call is (the scope's alias, the route's features), sent to
-  the route's first deployment that takes it, at its count endpoint (a
-  bedrock deployment's envelope uses Bedrock's CountTokens, over the body
-  InvokeModel would take, and answers in Anthropic's shape). Free: no
-  admission, no slot, no ledger row; providers bill no count. Its rate
-  limit is step 4's (m1-plan.md).
+- `POST /v1/messages/count_tokens` (`ServeCountTokens`): **held to a
+  call's checks, short of admission**: authenticated, the scope's alias,
+  the route's features, the betas check (`route.no_capable_deployment`),
+  the scope's input ceiling, a request from its rate limits, and the
+  shared health (ejections, ceilings, the principal's share); sent to the
+  route's first deployment that takes it, at its count endpoint (Bedrock's
+  CountTokens through the envelope, answered in Anthropic's shape). Free:
+  no admission, no slot, no ledger row.
 
 ## 3b. Local boxes (vLLM)
 
@@ -283,15 +225,13 @@ per-deployment fields are for a shared box:
 
 - `maxInFlight`: the box's static concurrency. Past it the attempt is not
   sent; the call goes to the pool's next deployment.
-- `maxInFlightPerPrincipal`: one principal's share (route.Health counts
-  leases by principal). Past it, the same.
-- `healthCheck: {path, intervalSeconds}`: route.Checker, one per gateway,
-  GETs the path on the deployment's host with the backend's credential
-  (default every 10 s, each check bounded by 5 s). A failure ejects the box
-  as a failed probe does (the ejection doubling); a 2xx after the ejection
-  readmits it, as a probe's commit does. A pass during an ejection does not
-  end it: a box that lists its models may still be refusing calls with a
-  Retry-After, and a liveness check cannot speak for calls.
+- `maxInFlightPerPrincipal`: one principal's share. Past it, the same; a
+  principal every deployment passes over for its share is told
+  `limit.concurrency`.
+- `healthCheck: {path, intervalSeconds}`: one checker per gateway GETs the
+  path with the backend's credential (default every 10 s, each check
+  bounded by 5 s). A failure ejects the box; a 2xx after the ejection
+  readmits it. A pass during an ejection does not end it.
 
 ```yaml
 apiVersion: golem.dev/v1alpha1
@@ -304,7 +244,7 @@ spec:
   deployments:
   - name: dgx-1
     url: https://dgx-1.lan:8000/v1/chat/completions
-    model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    model: local-coder
     maxInFlight: 32
     maxInFlightPerPrincipal: 8
     healthCheck: {path: /v1/models}
@@ -316,94 +256,115 @@ spec:
   alias: coder
   pool:                       # in order: the box, then the hosted fallback
   - {backend: dgx, deployment: dgx-1}
-  - {backend: openai, deployment: gpt}
+  - {backend: openai, deployment: hosted}
 ```
+
+## 4. Packages
+
+As built (the [orientation](walkthroughs/README.md#1-the-package-map) says
+where to start reading each):
+
+```
+cmd/golem-gateway/        flags, wiring, signals, the lifecycle's drain, probes, the release gate
+gateway/proxy/            the request path (§3): the only package that knows the order of steps
+gateway/guard/            the floor before authentication: sources' requests and failures, connections
+gateway/auth/             credential to Principal from the snapshot: golem keys, Entra tokens; the denylist
+gateway/dialect/          anthropic/messages, openai/chat, openai/responses: scan, splice, errors, usage;
+                          internal/jsonscan (the shared scanner), internal/openaiusage
+gateway/sse/              server-sent events from any chunking; a filter that withholds events
+gateway/route/            aliases, pools in order, deployment health (ceilings, ejection, probes,
+                          health checks), retry budgets
+gateway/admission/        the request path's contract with admission: Call, Admitter, Ticket, Refusal (a leaf)
+gateway/limit/            Admitter's implementation: snapshot known spend against the scope's budget,
+                          in-flight slots, rate buckets; Valkey (Lua) and in-memory stores; outages as waivers
+gateway/price/            integer pricing from the snapshot's price list
+gateway/canon/            the canonical model (only Usage so far)
+gateway/envelope/         an attempt's attribution; envelope/bedrock (InvokeModel, event stream, SigV4)
+gateway/snapshot/         the compiled snapshot behind an atomic pointer; the bucket and directory
+                          sources; upstream transports and the dial check; status writes
+gateway/telemetry/        OTel setup, spans and metrics, the ledger row and its queue
+```
+
+Planned, not packages yet: hooks (ADR 0014, from M2), the canonical
+model's adapters (M1.5), more envelopes (Vertex, Foundry: M2).
+`internal/archtest` checks the rules: nothing but the binary imports
+`proxy`; a dialect imports only `canon` and `dialect/internal`; an
+envelope imports no dialect; the gateway imports nothing of the control
+plane, and no database, ClickHouse or Kubernetes client.
 
 ## 4a. The bedrock envelope
 
-Built: `gateway/envelope/bedrock`, an `http.RoundTripper` over the
-deployment's transport, so the request path sees an Anthropic provider. A
-Backend says `envelope: bedrock` and `aws: {region: ...}`, with no auth;
-each deployment names a Bedrock model ID, inference profile ID or ARN, and
-may name its own `region` (a failover to another region is another
-deployment) and `url` (a VPC endpoint; else the region's
-`bedrock-runtime` host). Per attempt it:
+`gateway/envelope/bedrock`, an `http.RoundTripper` over the deployment's
+transport, so the request path sees an Anthropic provider. A Backend says
+`envelope: bedrock` and `aws: {region: ...}`, with no auth; each deployment
+names a Bedrock model ID, inference profile ID or ARN, and may name its own
+`region` (a failover to another region is another deployment) and `url` (a
+VPC endpoint). Per attempt it:
 
 - moves the Messages body into Bedrock's: `model` and `stream` out (the
-  model is a path segment, escaped as the AWS SDK escapes an ARN; the
-  action is `invoke` or `invoke-with-response-stream`),
+  model a path segment; `invoke` or `invoke-with-response-stream`),
   `anthropic_version: bedrock-2023-05-31` in, the `anthropic-beta`
-  header's values added to the body's `anthropic_beta`; the anthropic-*
-  headers dropped;
-- signs with SigV4 for `bedrock` in the deployment's region, with the
-  gateway's credentials (the AWS SDK's default chain: IRSA or Pod
-  Identity in the cluster, cached and refreshed; nil credentials fail the
-  call with what to configure, before anything is sent);
-- reads a streamed answer's AWS event stream (the SDK's decoder, which
-  checks each message's CRCs) and gives the Messages SSE each chunk
-  carries, `event: <type>` and its JSON; an exception as the dialect's
-  error event (throttling a rate limit, unavailability an overload), so
-  the commit point refuses one that comes first and the call fails over
-  (ADR 0051); a bad CRC or a cut is a read error, the request path's cut;
+  header's values into the body's `anthropic_beta`;
+- signs with SigV4 for the deployment's region, with the gateway's
+  credentials (the AWS SDK's default chain: IRSA or Pod Identity). **A
+  request that never left the gateway** (its body, rewrite or signing
+  failed, credentials unavailable included) is `envelope.ErrNotSent`:
+  unreached, so free and failed over, not charged as uncertain;
+- reads a streamed answer's AWS event stream (CRCs checked) and gives the
+  Messages SSE each chunk carries; an exception becomes the dialect's error
+  event (throttling a rate limit, unavailability an overload), so the
+  commit point refuses one that comes first and the call fails over; one
+  after output fails the call (§3 step 11); a bad CRC or a cut is the
+  request path's cut;
 - returns a Bedrock error answer in Anthropic's shape, its status kept;
-- sends the attempt's attribution as Bedrock's request metadata
-  (`X-Amzn-Bedrock-Request-Metadata`, signed, as Bedrock requires):
-  `golem_request_id`, `golem_attempt_id` (the ledger row's `event_id`),
-  `golem_principal`, `golem_scope` and `golem_key` (the key's display ID;
-  none for an Entra token). Bedrock's invocation logs then carry it, so
-  each of its records joins the ledger row for the same attempt. The proxy
-  attaches the attribution only for an enveloped deployment
-  (`gateway/envelope`), so other calls pay nothing for it.
+  **for a credentials refusal** (an access-denied or other authentication
+  or authorization exception, a 401 or 403) the caller gets golem's own
+  message, not Bedrock's, which names the gateway's role and account;
+  Bedrock's text is logged for the platform team;
+- sends the attempt's attribution as Bedrock's signed request metadata
+  (`golem_request_id`, `golem_attempt_id`, `golem_principal`,
+  `golem_scope`, `golem_key`), so Bedrock's invocation logs join the
+  ledger per attempt.
 
-Usage is read from the events as for Anthropic (`message_start`,
-`message_delta`); Bedrock's `amazon-bedrock-invocationMetrics` in
-`message_stop` passes through to the caller. Each ledger row names its
-envelope. Tests: the envelope's (`TestRewrite`, `TestRequest` with the
-signature reproduced by re-signing, `TestReframe`, `TestErrorResponse`,
-`TestNoCredentials`) and proxy's `TestBedrockEndToEnd` (config to SSE
-through two regions, a throttle failed over, a stub that verifies each
-signature); ablated: unsigned, one region for all, exceptions dropped.
-
-The gateway's role needs `bedrock:InvokeModel` and
-`bedrock:InvokeModelWithResponseStream` on the models and inference
-profiles its routes name (operations.md).
+Usage is read as for Anthropic (`message_start`, `message_delta`);
+Bedrock's `amazon-bedrock-invocationMetrics` passes through. Tests: the
+envelope's `TestRewrite`, `TestRequest`, `TestReframe`, `TestErrorResponse`,
+`TestNoCredentials`, `TestNotSent`, `TestCredentialsRefused`, `TestMetadata`,
+`TestCountTokens`, and proxy's `TestBedrockEndToEnd`. The gateway's role
+needs `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on
+the models and profiles its routes name (operations.md).
 
 ## 5. Go 1.27 facilities used
 
 | Facility | Release | Where |
 |---|---|---|
-| `encoding/json/v2`, `encoding/json/jsontext` (GA; v1 now backed by v2) | 1.27 | Token-level body scans, streaming SSE payload decode, `omitzero` on generated types |
-| Generic methods | 1.27 | Typed accessors on the snapshot (e.g. `Snapshot.Lookup[T]`) where they replace an interface switch |
-| `uuid` package | 1.27 | Request IDs, key IDs (no third-party UUID module) |
-| `testing/synctest` (`Test`, `Wait`, `Sleep`) and `httptest.NewTestServer` in-memory network | 1.25 / 1.27 | Timeouts, retries, ejection, drain and limiter windows tested on fake time, no sleeps |
-| HTTP/1 response body drained on close | 1.27 | Better upstream connection reuse when a caller disconnects mid-response |
-| `Server.MaxHeaderValueCount`; HTTP/2 RFC 9218 priorities | 1.27 | Inbound limits; priority classes (M3) |
-| Green Tea GC (default), size-specialized small allocations | 1.26 / 1.27 | Free: lower GC cost for many small per-request objects |
-| Container-aware GOMAXPROCS | 1.25 | Free; do not set GOMAXPROCS in the chart |
-| `runtime/trace.FlightRecorder` | 1.25 | Snapshot traces of slow requests (PRD §5.8) |
-| `goroutineleak` profile (GA) | 1.27 | Exposed on admin pprof; checked in tests |
-| Goroutine labels in tracebacks | 1.27 | Request ID and route as pprof labels show up in crash dumps |
-| `sync.WaitGroup.Go`, `errors.AsType`, `slog.NewMultiHandler` | 1.25 / 1.26 | Goroutine ownership; typed error matching; slog to stderr and OTel at once |
-| `new(expr)` | 1.26 | Optional pointer fields in config and API types |
-| `os.Root` | 1.24+ | Reading config and mounted secrets without path traversal |
-| `http.CrossOriginProtection` | 1.25 | Admin API (browser-reachable via port-forward) |
-| `httputil.ReverseProxy.Rewrite` (Director deprecated) | 1.26 | Raw pass-through routes only (§5.1.4); the main path is its own loop |
-| Hybrid post-quantum TLS key exchange default; ML-DSA in TLS 1.3, `crypto/mldsa` | 1.26 / 1.27 | Inbound and upstream TLS, nothing to configure |
-| FIPS 140-3 native module | 1.24+ | `fips140=on` mode for regulated deployments |
-| `runtime/secret` | experimental | Not used until GA; noted for zeroing upstream keys |
+| `encoding/json/v2`, `encoding/json/jsontext` | 1.27 | Token-level body scans, SSE payloads, `omitzero` |
+| `uuid` package | 1.27 | Request IDs; retried attempts' IDs as UUIDv5s of the request ID |
+| `testing/synctest` | 1.25 | Timeouts, ejection, drain and limiter windows on fake time |
+| `http.CrossOriginProtection` | 1.25 | Standalone's guard against browser pages |
+| `os.Root` | 1.24+ | Reading config, the denylist and mounted secrets without path traversal |
+| `sync.WaitGroup.Go`, `errors.AsType` | 1.25 / 1.26 | Goroutine ownership; typed error matching |
+| Container-aware GOMAXPROCS, Green Tea GC | 1.25 / 1.26 | Free; GOMAXPROCS is not set in the chart |
 
-Extended libraries: `golang.org/x/sync` (errgroup, singleflight for JWKS
-and introspection fetches, semaphore for shadow concurrency),
-`golang.org/x/net/http2` only if a server knob is missing from net/http.
+Dependencies, from go.mod, each confined to the packages that need it:
 
-Third-party, each confined to one package: OpenTelemetry Go SDK and
-`otelslog` bridge (telemetry), `cel-go` (route, hook), `go-jose/v4`
-(auth/entra), `valkey-go` (limit), `aws-sdk-go-v2`'s SigV4 signer and credential providers only
-(upstream/bedrock), `azidentity` (upstream/azure), the blob adapters'
-read path (snapshot), protobuf for the snapshot format. No `pgx`, ClickHouse, Graph or
-Kubernetes client: the import test (architecture.md §4.2) fails if one
-appears. The core (proxy, dialect, route, price) imports none of these
-except OTel's API.
+- `go.opentelemetry.io/otel` and its SDK and OTLP/HTTP exporters (traces,
+  metrics, logs): gateway/telemetry, lib/otlp, golem-control's metrics and
+  audit records;
+- `github.com/aws/aws-sdk-go-v2` (config, credentials, the event stream,
+  KMS, S3) and `github.com/aws/smithy-go`: the Bedrock envelope's SigV4 and
+  event stream, lib/bucket/s3bucket, lib/sign/kmssign;
+- `github.com/valkey-io/valkey-go`: gateway/limit;
+- `github.com/go-jose/go-jose/v4`: lib/entra;
+- `connectrpc.com/connect` and `google.golang.org/protobuf`: the control
+  API (control/api, cmd/golemctl);
+- `golang.org/x/net`: tests only (a DNS server in gateway/snapshot's);
+- `sigs.k8s.io/yaml`: reading config YAML (lib/api/v1alpha1);
+- `github.com/chucklehead-dev/gotogether`: tests only (the models'
+  connect tests).
+
+No CEL, database, ClickHouse, Graph or Kubernetes client in the gateway:
+the import test fails if one appears.
 
 ## 6. Snapshot lifecycle
 
@@ -423,8 +384,10 @@ except OTel's API.
   the gateway's future, or a snapshot whose lease runs further ahead than
   `-max-lease` (four hours, the publisher's `-lease`) plus that skew:
   refused rather than clamped, failing closed, so a publisher's clock a day
-  ahead cannot grant a day-long lease. Once the signed authorization lease has expired (five minutes
-  by default, ADR 0030) the gateway refuses new model requests.
+  ahead cannot grant a day-long lease. Once the signed authorization lease has expired (four hours
+  for internal pools, ADR 0030) the gateway refuses new model requests. A
+  snapshot stating another period zone than the gateway's `-period-zone`
+  is refused.
 - An **emergency denylist** (a ConfigMap mounted as a file, read with
   `os.Root`) is applied over every snapshot: a site admin's way to revoke a
   key or principal when the control plane or the bucket is unreachable.
@@ -435,14 +398,14 @@ except OTel's API.
   headers with its dialect's error, a whole response already begun by a
   cut; charged what was produced, the slot held for the provider's tail,
   the ledger outcome `terminated`. Lease expiry stops new requests only.
-- Each new snapshot is compiled (CEL, lookup maps) off the request path and
+- Each new snapshot is compiled (lookup maps, transports) off the request path and
   swapped in; a failure to compile keeps the previous snapshot.
 - After each apply (or failure) the gateway writes
   `status/<pool>/<gateway-id>`: hash, versions, compile errors, time.
-  golem-control reads these for `Applied n/m` and `golemctl gateways`.
-- Runtime state that must survive updates (transports, ejection state,
-  EWMAs, affinity tables) is keyed by deployment identity, not held in the
-  snapshot.
+  Nothing reads them yet (`Applied n/m` and `golemctl gateways` are M2's).
+- Runtime state that must survive updates (transports, ejection state)
+  is keyed by deployment identity, not held in the snapshot. Each applied
+  snapshot hands its per-scope known spend to the limiter.
 
 ## 6a. Standalone mode
 
@@ -459,8 +422,9 @@ a request within it deferred, not dropped), never on the request path; a
 gateway started while Entra is unreachable serves golem keys and refuses
 tokens as `gateway.not_ready` until a retried fetch succeeds; the scope from `golem-scope`, else the principal's default, rights
 from the snapshot; `-entra-tenant`, `-entra-jwks`), the
-limiter in the request path (402 budgets in enforce mode; over a budget in observe or warn mode, admitted and the ledger row marked, warn adding `golem-warning`; 429 concurrency, cancellation
-holding the slot until the upstream closes), `golemctl config validate`
+limiter in the request path (in-memory: 429 for concurrency and rate
+limits, cancellation holding the slot for the provider's tail; budgets
+never refuse standalone, since nothing publishes known spend, ADR 0031), `golemctl config validate`
 and `golemctl keys mint --dev`. Without a LocalIdentity a standalone gateway
 has one implicit local principal, which takes only the gateway's own local
 key (a dev key generated on first start into a file only its user may
@@ -538,9 +502,6 @@ without a preflight it never gets. SDKs and curl pass all three.
 - Upstream TLS sessions resumed; DNS cached by the resolver, not golem.
 - SSE scanning reads lines from the tee without copying the payload when
   it is not a usage-bearing event (look for the event type first).
-- Token estimation for the declared-worst-case check uses a cheap byte-count heuristic per
-  model family by default; exact counting (provider `count_tokens` or a
-  local tokenizer) is opt-in per limit where precision matters.
 - Benchmarks against a stub upstream, with `pprof` and the flight recorder,
   belong in M0 so every later feature is measured against the baseline.
 
@@ -549,22 +510,19 @@ without a preflight it never gets. SDKs and curl pass all three.
 - Unit tests per dialect from recorded provider fixtures (requests,
   responses, SSE streams, errors), including truncated and malformed
   streams.
-- Translation tested round-trip and against provider SDK conformance
-  fixtures.
+- Translation (M1.5) to be tested round-trip and against provider SDK
+  conformance fixtures.
 - `synctest` for anything with time: retry backoff, ejection windows,
   limiter windows, drain, idle-chunk timeouts.
 - Fuzzing (`go test -fuzz`) the body scanners and SSE parser.
-- The router, limiter and failover loop are a good fit for deterministic
-  simulation with fault injection (lost responses, 429 storms, slow first
-  byte, a provider recovering): gotogether's qenv doubles can drive them,
-  with a small Quint model of "never double-charge, never replay a started
-  stream" as the judge. Worth doing once M1's routing settles.
-- The limiter is judged by `model/exposure.md` (its connect test and a
-  Hegel state machine drive `gateway/limit` against it, over the in-memory
-  and the Valkey store); `model/accounting.md` judges the books: no double
-  count, matching after reconciliation, overshoot within ADR 0031's bound.
+- The models' connect tests drive the code: `model/exposure.md` the
+  limiter (`TestExposureModel`, over the in-memory store, and
+  `TestExposureModelValkey`), `model/attempts.md` the attempt loop
+  (`TestAttemptsModel`), `model/publication.md` the gateway's snapshot
+  source (`TestPublicationModel`).
 - Limit scripts tested against a Valkey service in CI (the store
-  contract, and the exposure model's connect test over Valkey).
-- End-to-end: kind cluster with Istio ambient, the chart, a stub provider,
-  ClickHouse, and the real OpenAI and Anthropic SDKs (and a coding agent)
-  as clients.
+  contract, the two stores' differential test, the exposure model over
+  Valkey).
+- The real OpenAI and Anthropic SDKs against a gateway (test/compat), and
+  the ledger end to end through the collector into ClickHouse
+  (test/ledger). A kind cluster with the charts is not built.

@@ -5,22 +5,21 @@ Status: draft, third pass. Every tool here is a client of the control API
 
 ## 1. golemctl
 
-**Built so far:** `config validate`, `keys mint --dev`, `login` (Entra's
+**Built (M1):** `config validate`, `keys mint --dev`, `login` (Entra's
 device code flow; tenant, client ID and API remembered), `token`, and over
 the control API `scopes create` (an ID: a scope's policy is its
-ScopePolicy, changed by a pull request, ADR 0050), `members add|remove`, `managers add`,
-`keys create` (owner defaults to the caller; `--expires 30d`, `--cap 50`),
-`keys revoke`, and the caps `members cap <scope> <principal> <amount>` (a
-scope's managers; 0 removes it, the ScopePolicy's default applying) and
-`keys cap <hash> <amount>` (the key's owner, its scope's managers), each
-amount in the currency for each period (org-model.md §4.1), each mutating
-one with `--dry-run`; and the reads `whoami`,
-`scopes list|get` and `keys list [--scope]` (a scope's members, managers
-and admins read it, and outsiders are told it is not found; keys are seen
-by their owner, their scope's managers and admins, never the key itself). Tokens are cached in a
-file only their owner reads (`GOLEMCTL_HOME`, else the user's config
-directory) and refreshed from the refresh token; the OS keychain, browser
-sign-in with PKCE, `-o json` and the rest of the table below come later.
+ScopePolicy, changed by a pull request, ADR 0050), `members add|remove`,
+`groups bind|unbind`, `managers add`, `keys create` (owner defaults to the
+caller; `--models`, `--expires 30d`) and `keys revoke`, each mutating one
+with `--dry-run`; and the reads `whoami`, `scopes list|get` and `keys list
+[--scope]` (a scope's members, managers and admins read it, and outsiders
+are told it is not found; keys are seen by their owner, their scope's
+managers and admins, never the key itself). Tokens are cached in a file
+only their owner reads (`GOLEMCTL_HOME`, else the user's config directory)
+and refreshed from the refresh token. There are no caps in M1 (ADR 0031).
+The table below is the whole design; what M1 does not build is in
+m1-plan.md (*Not building in M1*): caps, grants, spend, overrides,
+explain, gateways, agent setup, the console.
 
 One binary for every persona; commands are hidden from `--help` only when
 the caller lacks every role they need. Sign-in is Entra (device code, or

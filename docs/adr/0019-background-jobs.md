@@ -1,10 +1,10 @@
 # 0019: Background jobs are idempotent scans by the leader; Temporal later
 
-Status: Accepted (v1 baseline). From archive 0020, 0032. Amended by [0045](0045-leadership-in-the-state-document.md) (leadership is a lease in the state document).
+Status: Accepted (v1 baseline). Amended by [0053](0053-one-golem-control-replica-for-m1.md) (one replica, its writes fenced). Built in M1: the publication and renewal loop, known spend, audit shipping and the Entra group sync (control-plane.md §5); the other jobs below apply from M2 (roadmap.md).
 
 ## Decision
 
-- golem-control's leader (a Kubernetes Lease) runs every job as an
+- golem-control (its one replica, ADR 0053) runs every job as an
   idempotent scan: Entra group sync (also revoking disabled users' keys),
   period rollover, ceiling rebalance, audit shipping, pointer refresh,
   expiry of keys, requests and registrations, reminders, threshold

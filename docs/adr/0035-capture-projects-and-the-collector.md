@@ -3,7 +3,7 @@
 Amended by [ADR 0041](0041-security-boundaries-and-incident-controls.md)
 updates the security boundary, requirements and acceptance evidence below.
 
-Status: Accepted. Amends [0016](0016-capture-and-retention.md) and security-and-correctness.md §6.
+Status: Accepted. Amends [0016](0016-capture-and-retention.md) and security-and-correctness.md §6. **Applies from M2**: nothing of this record is built or planned for M1 (m1-plan.md).
 
 ## Decision
 

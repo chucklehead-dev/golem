@@ -2,9 +2,13 @@
 
 Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
 and [security-and-correctness.md](security-and-correctness.md) govern the
-affected guarantees and release gates. Built so far: see the walkthroughs
-(docs/walkthroughs) and the "Built" notes; release evidence is tracked in
-golem#7.
+affected guarantees and release gates. What is built: the code's
+[orientation](walkthroughs/README.md) and the "Built" notes; release
+evidence is tracked in golem#7.
+
+**M1's scope of record is [m1-plan.md](m1-plan.md)**: what is built, what
+remains, and what is not being built in M1. Where this page's Phase 2 lists
+more, m1-plan.md wins; the rest moves to M2 or later.
 
 Status: draft. Replaces the milestone table in the PRD. Phases are ordered
 by dependency and by risk: what could invalidate the design is tried first,
@@ -25,7 +29,7 @@ in `docs/spikes/` and, where the answer changes the design, an ADR update.
 | vLLM on the Macs and Sparks | `/v1/messages`, `/metrics`, `--api-key` behind Caddy; the concurrency each box sustains (for its static ceiling) | ADR 0017 |
 | Langfuse | organisation API (project creation, retention), batch trace deletion, per-project OTLP basic auth | ADR 0016 |
 | Copilot BYOK | VS Code and Copilot CLI against a stub "OpenAI-compatible" endpoint: request shapes, headers, streaming | ADR 0020 |
-| Valkey scripts | the check script (known spend, concurrency slot, rate, quota) on ElastiCache for Valkey: latency, behaviour across a failover | ADRs 0012, 0031 |
+| Valkey scripts | the admission script (known spend, concurrency slots) and rate buckets on ElastiCache for Valkey: latency, behaviour across a failover | ADR 0031 |
 | SDK retry rules (SDKs done: [docs/spikes/sdk-compat.md](spikes/sdk-compat.md); agents open) | Which status codes each OpenAI and Anthropic SDK, Claude Code and Codex retry, and their session headers; confirms 402 for budgets | ADRs 0024, 0026 |
 | Agent credentials | Claude Code's `apiKeyHelper` and Codex's equivalent returning an Entra access token, with the scope header; which agents need a minted key | ADR 0009 |
 
@@ -42,7 +46,8 @@ The gateway end to end with nothing optional.
   codes, headers and ledger schema of contracts.md as code and DDL.
 - The Crossplane composition (`GolemInstallation`, `GolemSite`) for the
   bucket, KMS keys, IAM roles, Valkey and Entra registrations, and
-  `golemctl bootstrap` (control-plane.md §5).
+  `golemctl bootstrap` (moved to M2: M1 makes them by hand, and
+  `golem-control bootstrap` exists for a missing document, control-plane.md §7).
 - Benchmarks and the stub-upstream load test as baselines.
 - Standalone mode (`--standalone`, ADR 0023) and `make dev-up` (kind,
   MinIO, Valkey, dex, ClickHouse, Langfuse) as the integration-test
@@ -58,46 +63,35 @@ fast-path budget.
 The platform team's own apps and coding agents, us-east-2, EKS. What is
 built, the order of the rest and each item's evidence: [m1-plan.md](m1-plan.md).
 
-- **Gateway**: Chat, Responses, Messages, Embeddings, models list; three
-  backends with no translation (ADR 0001): Claude on Bedrock (the Messages
-  envelope), OpenAI (pass-through), standalone vLLM (pass-through for
-  Chat, Completions, Embeddings and Messages; static endpoints, discovered
-  models, static concurrency ceilings, per-principal limits, overflow);
-  aliases, capability-aware routing (ADR 0028), weighted and least-in-flight
-  balancing, failover,
-  retries with a retry budget, ejection, prompt-cache affinity; provider
-  quota limits per deployment (below); in-process hooks (`Request`,
-  `Response`, `Complete`).
-- **Policy**: provider-side storage forbidden by default (ADR 0027); the
-  threat model reviewed; the model onboarding checklist; CODEOWNERS on
-  config.
-- **Identity**: virtual keys (`glm_live_`, checksummed, secret-scanning webhook
-  revocation), Entra users and services, `golemctl token` for agents with
-  a credential helper, minted keys for the rest, `golemctl agent setup` for
-  Claude Code, Codex and Copilot BYOK, the emergency denylist.
-- **Org**: scopes (teams), members, managers, services, keys with
-  constraints, caps, team pools granted by admins; enforcement modes
-  (below), starting in `observe`.
-- **Limits**: Valkey; soft budgets on known spend with the optional
-  declared-worst-case check (controls, not ceilings: ADR 0044), concurrency slots, rate limits, cut-stream estimates
-  (ADR 0031).
-- **Control plane**: golem-control (one Deployment, a leader) on the S3
-  state document; CRD config with schema rules and offline validation;
-  operational overrides; signed snapshot publication; explain; audit
-  through the document's outbox.
-- **Ledger and dashboards**: ClickHouse `golem.spend` by materialized view,
-  with the contract's schema, TTLs and the full price model;
-  Grafana dashboards for spend, limits, latency, TTFT; snapshot-age alerts,
-  a synthetic request per pool, provider usage reconciliation.
-- **Install**: Helm charts through Argo CD, Argo Rollouts for gateway canaries, Crossplane claims for cloud resources (ADRs 0036, 0040).
-- **Bypass controls** for the first team: the Bedrock SCP, egress blocks, provider key-creation limits, managed agent settings (ADR 0039).
-- **Dedicated provider accounts or projects** for golem (ADR 0038).
-- **Testing**: the regime of testing.md for these parts; Quint models of
-  accounting (overshoot bound, dedup, reconciliation) and the attempt loop with their mutants; the limiter in
-  simulation (gotogether trial 1, testing.md §3.2).
+- **Gateway**: Chat, Responses (stateless), Messages, models list,
+  `count_tokens`; Claude on Bedrock (the Messages envelope), OpenAI and
+  vLLM boxes, all pass-through (ADR 0001); aliases, betas-aware routing
+  (ADR 0028), failover in pool order with ejection, health checks and a
+  retry budget (ADR 0051), static and per-principal ceilings.
+- **Policy**: provider-side storage forbidden by default (ADR 0027);
+  request feature modes; the threat model reviewed; CODEOWNERS on config.
+- **Identity**: `glm_live_` keys, Entra users and services, `golemctl
+  token` for agents with a credential helper, minted keys, the emergency
+  denylist.
+- **Org**: scopes, members (from bound Entra groups), managers, services,
+  keys with model constraints; budget modes, starting in `observe`.
+- **Limits**: scope budgets on the snapshot's known spend, concurrency
+  slots and request rate limits in Valkey, cut-stream estimates (ADR 0031).
+- **Control plane**: one golem-control replica (ADR 0053) on the S3 state
+  document; config from a git checkout with offline validation (ADR 0054);
+  signed snapshot publication; audit through the document's outbox.
+- **Ledger**: ClickHouse `golem.spend` through the gateway pod's collector
+  (deploy/otel, deploy/clickhouse/spend.sql); reconciliation as a query
+  with a written record.
+- **Install**: Helm charts through Argo CD; cloud resources by hand or
+  Terraform, recorded.
+- **Bypass controls** for the first team (ADR 0039) and **dedicated
+  provider accounts** (ADR 0031).
+- **Testing**: testing.md; the publication, exposure and attempts models,
+  each with its connect test.
 
 Exit: the platform team uses golem for all its model traffic for two
-weeks; ledger within 3–5% of provider usage for those accounts (ADR 0038); outage
+weeks; ledger within 3–5% of provider usage for those accounts (ADR 0031); outage
 drills fail over without caller changes (a Bedrock region to another
 region or inference profile; a local box to its fallback pool); budgets switched from
 `observe` to `enforce` for the team.
@@ -121,6 +115,38 @@ Bedrock through an explicit route, with tool use and streaming, for a week
 without a translation defect.
 
 ## Phase 3 (M2): enterprise default (10–12 weeks)
+
+Moved here from M1 (m1-plan.md, *Not building in M1*) and from the control
+plane's design, one line each:
+
+- **Config objects in the cluster** and the CRD watch, with 0041 §7.2's
+  consistent LIST and status on the objects (ADR 0005), if a second
+  golem-control replica or team needs it (ADR 0053, 0054).
+- **Operational overrides**: expiring disable, weight, freeze and fallback
+  levers through the API (ADR 0005).
+- **Grants, team pools, cost centers and adjustment requests** (ADR 0011,
+  0034), with `BudgetService`.
+- **Member and key caps** (ADR 0034), with known spend per member and key.
+- **`SpendService`**: spend queries filtered by the caller's rights.
+- **Threshold notifications** (50/80/100%) by email (Graph `sendMail`) and
+  Teams webhooks, with idempotency keys in the state.
+- **Expiry jobs and reminders** for keys, adjustment requests and
+  registrations.
+- **Registrations** of model server endpoints, with a TTL.
+- **A reconciliation job** writing `adjustment` rows (M1's is a query).
+- **Per-key and token rate limits, $/min limits, `x-ratelimit-*` headers**;
+  provider quota shares per site.
+- **Pool selectors**: a snapshot per pool by site and audience; gateway
+  status read back (`Applied n/m`, `golemctl gateways`).
+- **Argo Rollouts canaries, Crossplane claims, dashboards as code**
+  (ADR 0040).
+- **The secret-scanning webhook** revoking leaked keys; `golemctl agent
+  setup`; restore over the API (`golemctl state restore`); `golemctl
+  explain`.
+- **Weighted and least-in-flight balancing**, session affinity, in-process
+  hooks (ADR 0014).
+
+The rest of M2:
 
 - **Org**: projects and sub-teams, monthly caps per scope set by admins or
   parent managers, cost-center mapping for chargeback, threshold
@@ -178,7 +204,7 @@ PRD §9, scheduled in the phases above.
 ## Sizing
 
 Settled by the design envelope (PRD §9.12, ADR 0021): three gateways per
-site, two replicas of golem-control (one leader), one Valkey primary with
+site, one golem-control replica in M1 (ADR 0053), one Valkey primary with
 a replica per site, the state document at about 1–2 MB, and ClickHouse far
 inside its limits. Per-principal limits on local GPU pools are M1, with
 those pools.
@@ -189,7 +215,7 @@ Phase 0 must validate publication fencing/trusted checkpoints,
 duplicate-safe ledger queries, mesh header overwrite,
 and Langfuse ingestion permissions. M0 produces the contracts and DDL. M1
 requires the M1 acceptance matrix in security-and-correctness.md, including
-CRD RBAC, immutable audit archival and authenticated standalone mode. M2
+immutable audit archival and authenticated standalone mode. M2
 features require their respective gates before activation. Budgets are soft
 and eventually consistent by accepted risk (ADR 0031): no durable journal or
 site allocations. Stored provider objects
@@ -201,8 +227,7 @@ must be measured before the milestone durations are treated as commitments.
 M0 delivery renders and negative authorization tests cover platform trust
 boundaries. M1 gates: incident denylist survival, audit backpressure with
 restrictive capacity, request feature modes, composite state/CRD publication
-freshness and expanded restrictive-right restore tests. Budget bounds remain
-conditional pending counter-handoff, aggregate exposure and failed-renewal
-validation. M2 capture gates prove dedicated pipeline destination restrictions
+freshness (for M1's git checkout, ADR 0054) and expanded restrictive-right
+restore tests. Budget bounds are stated, not proven (ADR 0031). M2 capture gates prove dedicated pipeline destination restrictions
 and project reader synchronization within the accepted pool compromise boundary.
 See [ADR 0041](adr/0041-security-boundaries-and-incident-controls.md) for acceptance and assumptions.

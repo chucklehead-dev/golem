@@ -1,6 +1,6 @@
 # 0021: Designed for the enterprise's size, with the envelope stated
 
-Status: Accepted (v1 baseline). From archive 0026.
+Status: Accepted (v1 baseline).
 
 ## Decision
 

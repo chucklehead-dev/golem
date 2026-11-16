@@ -2,9 +2,9 @@
 
 Review amendment: [ADR 0029](adr/0029-security-and-correctness-revision.md)
 and [security-and-correctness.md](security-and-correctness.md) govern the
-affected guarantees and release gates. Built so far: see the walkthroughs
-(docs/walkthroughs) and the "Built" notes; release evidence is tracked in
-golem#7.
+affected guarantees and release gates. What is built: the code's
+[orientation](walkthroughs/README.md) and the "Built" notes; release
+evidence is tracked in golem#7.
 
 Status: v1 baseline. The interfaces other people and systems will depend
 on, written down before the first caller does: refusals and their status
@@ -20,9 +20,9 @@ retry pointlessly and users wait through backoff before seeing why.
 
 | Situation | Status | Golem code (examples) | Retryable |
 |---|---|---|---|
-| Rate or concurrency limit; provider quota share full | 429 + `Retry-After` | `limit.rate`, `limit.concurrency`, `limit.provider_quota` | yes, after the delay |
+| Rate or concurrency limit (a principal past its own share of a deployment included); `limit.provider_quota` is reserved, unused since quota shares were removed (ADR 0031) | 429 + `Retry-After` | `limit.rate`, `limit.concurrency`, `limit.provider_quota` | yes, after the delay |
 | Too many requests, or failed authentications, from one address (before authentication) | 429 + `Retry-After` | `limit.source` | yes, after the delay (a failed key or token: fix it first) |
-| Budget or cap reached by known spend (in `enforce` mode) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
+| Budget reached by known spend (in `enforce` mode); the cap codes are reserved for M2's caps, unused in M1 (ADR 0031) | 402 | `budget.pool_exhausted`, `budget.member_cap`, `budget.key_cap` | no |
 | Not authenticated (missing, unknown, expired, revoked key or token; a key of the other installation) | 401 | `auth.missing`, `auth.key_unknown`, `auth.key_expired`, `auth.key_revoked`, `auth.key_wrong_installation`, `auth.token_invalid`, `auth.token_expired` | no |
 | Authenticated, not allowed (model, scope, dialect, capture policy, provider storage); a standalone gateway reached from a web page or by a non-loopback host name | 403 | `authz.model_not_allowed`, `authz.scope_not_member`, `authz.provider_storage_forbidden`, `authz.origin_forbidden`, `authz.feature_forbidden` | no |
 | A credential or caller on the site's emergency denylist | 403 | `auth.denied` | no |
@@ -103,16 +103,16 @@ prevent double counting.
 | `currency` | FixedString(3) | |
 | `price_version` | String | the `PriceList` version used: `<name>/<spec.version>`, or `<name>@sha256:<16 hex digits of its spec's digest>` for a list without one (§4) |
 | `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away), `terminated` (the gateway ended the call in flight, its authorization withdrawn, §1: charged as a cancelled call is, what was produced, its slot held for the provider's tail; the code is the refusal's), `failed`, or `uncertain` (the call failed after the provider may have received it: charged its worst case as an estimate until reconciliation, golem#4); the failure's §2 origin and §1 code |
-| `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), each side is charged by rules chosen to err high, not an average: output every byte of the response received a token (whatever its fields or framing), at most the request's `max_tokens × n`; input, if not reported, every byte of the request a token (as the declared worst case; an estimate, not a bound on real spend: ADR 0044). Reconciliation corrects it (ADR 0031) |
+| `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), each side is charged by rules chosen to err high, not an average: output every byte of the response received a token (whatever its fields or framing), at most the request's `max_tokens × n`; input, if not reported, every byte of the request a token (an estimate, not a bound on real spend: ADR 0031). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
 | `over_budget` | Bool | admitted over its scope's budget because the scope's budget mode is `observe` or `warn` (§1, ADR 0050): a call `enforce` would have refused |
 
-- Known spend (ADR 0048): a snapshot carries, per scope and period, a
+- Known spend (ADR 0031): a snapshot carries, per scope and period, a
   boundary B (a minute, an ingestion allowance before the snapshot's
   time) and the sum of `cost_micros` over `golem.spend_dedup`'s rows of
   that scope and period with `ended_at` before B, deduplicated by
-  `event_id`. The site counter holds the same calls' costs by the minute
-  of their end, so a call is counted on one side of B only. A row that
+  `event_id`. The gateway checks it alone (there is no site counter), so a
+  call that ended after B is not yet in known spend. A row that
   arrives later than the allowance is counted from the next snapshot
   whose boundary passes it, and by reconciliation; golem-control reports
   each site whose latest ingested `ended_at` is more than the allowance
@@ -289,7 +289,7 @@ and golem's usage and stream parsing):
 |---|---|
 | `store`, `previous_response_id`, `background`, conversation identifiers | provider-side storage (ADR 0027; M1 refuses stateful use). Enforced: where a scope forbids storage (the default), `store: true` reaches the provider as `false` (a `store` that is not a boolean or null is refused, `request.invalid`), and an Anthropic `container` is refused (`authz.provider_storage_forbidden`) |
 | file, container and upload identifiers | provider-side storage |
-| `mcp_servers`, server-side tools with network access (web search, fetch, code execution) | egress and data movement; billing units. Enforced: refused in scopes with the declared-worst-case check, since such a request declares no worst case (`authz.feature_forbidden`, ADR 0044) |
+| `mcp_servers`, server-side tools with network access (web search, fetch, code execution) | egress and data movement; billing units. Detected, and admitted in every mode (ADR 0031: no declared-worst-case check); their units are not priced yet (§4) |
 | `n`, `max_tokens` above the scope's ceiling, input above the scope's size ceiling | cost (ADR 0038). Enforced: `max_tokens` × `n` over the scope's `maxOutputTokens`, a missing `max_tokens` under it, or a body over `maxInputBytes` is refused (`request.over_ceiling`); the declared worst case counts `n` completions |
 | `metadata.user_id`, `user`, session fields | attribution only, never identity |
 
@@ -298,6 +298,8 @@ and golem's usage and stream parsing):
 golem's providers run on dedicated accounts or projects. Each month the
 ledger is compared with provider usage and cost per account and model;
 differences within 3–5% are booked as adjustments, larger ones
-investigated. Chargeback uses the provider's cost per account and model,
+investigated. In M1 the comparison is a SQL query over `golem.spend_dedup`
+with a written record (m1-plan.md, exit 2); no job writes `adjustment` rows
+yet. Chargeback uses the provider's cost per account and model,
 split across scopes in proportion to golem's per-request attribution.
 
