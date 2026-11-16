@@ -240,8 +240,8 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 			targets[targetKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
 				URL: u, Transport: rt, Header: header, MaxInFlight: d.MaxInFlight, MaxPerPrincipal: d.MaxInFlightPerPrincipal, Envelope: b.Envelope,
 				HealthPath: d.HealthPath, HealthInterval: time.Duration(d.HealthIntervalMs) * time.Millisecond,
-				QuotaRPM: d.QuotaRPM,
-				ID:       b.Name + "/" + d.Name}
+				QuotaRPM: d.QuotaRPM, Betas: setOf(d.Betas),
+				ID: b.Name + "/" + d.Name}
 		}
 	}
 	return targets, used, nil
@@ -355,4 +355,16 @@ func checkDestination(address string, allowPrivate bool) error {
 		return fmt.Errorf("golem: refusing to dial %s: a loopback or private address, which this backend is not granted (spec.network.allowPrivateAddresses)", ip)
 	}
 	return nil
+}
+
+// setOf is a list as a set; nil for none.
+func setOf(xs []string) map[string]bool {
+	if len(xs) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(xs))
+	for _, x := range xs {
+		m[x] = true
+	}
+	return m
 }

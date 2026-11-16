@@ -269,7 +269,7 @@ func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder)
 		}
 		rpm := quota(obj, at, d.Quota, add)
 		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, Region: r, MaxInFlight: max(d.MaxInFlight, 0),
-			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), QuotaRPM: rpm})
+			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), QuotaRPM: rpm, Betas: betasOf(d.Betas)})
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out
@@ -282,6 +282,15 @@ var regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`) // read-only
 // deployments validates a Backend's spec.deployments and compiles them,
 // sorted by name. Each is compiled, problems or not, so that the catalog
 // knows it.
+// betasOf is a deployment's accepted betas, sorted, each once; nil for
+// any.
+func betasOf(bs []string) []string {
+	if len(bs) == 0 {
+		return nil
+	}
+	return slices.Compact(slices.Sorted(slices.Values(bs)))
+}
+
 // quota validates a deployment's quota share, giving its requests a
 // minute (0 for none).
 func quota(obj, at string, q *v1.Rate, add adder) int64 {
@@ -339,7 +348,7 @@ func deployments(obj string, ds []v1.Deployment, standalone bool, add adder) []s
 		path, every := healthCheck(obj, at, d.HealthCheck, add)
 		rpm := quota(obj, at, d.Quota, add)
 		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, MaxInFlight: max(d.MaxInFlight, 0),
-			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), HealthPath: path, HealthIntervalMs: every, QuotaRPM: rpm})
+			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), HealthPath: path, HealthIntervalMs: every, QuotaRPM: rpm, Betas: betasOf(d.Betas)})
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out

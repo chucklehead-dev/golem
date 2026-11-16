@@ -250,11 +250,11 @@ func TestLocalBox(t *testing.T) {
 	box := func(d string) string {
 		return strings.Replace(good, "{name: sonnet, url: \"https://api.anthropic.com/v1/messages\", model: claude-sonnet-4-5}", "{name: sonnet, url: \"https://api.anthropic.com/v1/messages\", model: claude-sonnet-4-5, "+d+"}", 1)
 	}
-	s, err := Compile(objects(t, map[string]string{"golem.yaml": box("maxInFlightPerPrincipal: 2, healthCheck: {path: /v1/models}, quota: {requestsPerMinute: 50}")}), published)
+	s, err := Compile(objects(t, map[string]string{"golem.yaml": box("maxInFlightPerPrincipal: 2, healthCheck: {path: /v1/models}, quota: {requestsPerMinute: 50}, betas: [b2, b1, b2]")}), published)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := s.Backends[0].Deployments[0]; d.MaxInFlightPerPrincipal != 2 || d.HealthPath != "/v1/models" || d.HealthIntervalMs != 10000 || d.QuotaRPM != 50 {
+	if d := s.Backends[0].Deployments[0]; d.MaxInFlightPerPrincipal != 2 || d.HealthPath != "/v1/models" || d.HealthIntervalMs != 10000 || d.QuotaRPM != 50 || !slices.Equal(d.Betas, []string{"b1", "b2"}) {
 		t.Fatalf("%+v", d)
 	}
 	for _, c := range []struct{ name, d, want string }{

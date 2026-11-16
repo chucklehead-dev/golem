@@ -114,6 +114,13 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
 5. **Route.** Alias to route; CEL conditions; authorization check; pool
    selection by strategy (affinity key first, then the strategy among
    healthy deployments).
+   The pool is first narrowed to the deployments that accept the
+   request's `anthropic-beta` values (a Deployment's `betas`, unset: any;
+   ADR 0028's capability routing, betas only for now): a failover never
+   lands on a deployment that would refuse the request (Bedrock takes a
+   subset of Anthropic's betas), and a request none accepts is refused
+   `route.no_capable_deployment`, naming the beta, before anything is
+   counted.
 6. **Check** (ADR 0031), in one Valkey round trip: known spend (the
    snapshot's, plus the site's counter since) against the scope's budget,
    with the request's declared worst case added in scopes with the

@@ -92,3 +92,45 @@ spec:
 		}
 	}
 }
+
+// TestBetaRouting: a deployment that does not accept a request's beta is
+// passed over for one that does, even ahead of it in the pool; a beta no
+// deployment accepts is refused route.no_capable_deployment, naming it,
+// before any provider is called; a request without betas takes the pool
+// in order.
+func TestBetaRouting(t *testing.T) {
+	bedrock, direct := &stub{events: anthropicStream(1)}, &stub{events: anthropicStream(1)}
+	u, _ := url.Parse("https://provider.example/v1/messages")
+	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(&route.Route{
+		Alias: "claude", Dialect: AnthropicMessages.Name(), MaxAttempts: 2, Agent: true,
+		Pool: []*route.Target{
+			{Backend: "bedrock", Deployment: "east", Model: "claude-sonnet", URL: u, Transport: bedrock, Betas: map[string]bool{"context-1m-2025-08-07": true}},
+			{Backend: "anthropic", Deployment: "direct", Model: "claude-sonnet", URL: u, Transport: direct},
+		}})})}
+	call := func(beta string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(smallRequest))
+		r.Header.Set("Anthropic-Version", "2023-06-01")
+		if beta != "" {
+			r.Header.Set("Anthropic-Beta", beta)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("fine-grained-tool-streaming-2025-05-14"); w.Code != 200 || bedrock.got != nil || direct.got == nil {
+		t.Fatalf("a beta bedrock lacks: %d, bedrock %v direct %v; want direct's", w.Code, bedrock.got != nil, direct.got != nil)
+	}
+	direct.got = nil
+	if w := call(""); w.Code != 200 || bedrock.got == nil || direct.got != nil {
+		t.Fatalf("no beta: %d, want the pool's first, bedrock", w.Code)
+	}
+	bedrock.got = nil
+	h.Snapshots.(*gsnap.Holder).Applied().Routes.Lookup([]byte("claude")).Pool[1].Betas = map[string]bool{}
+	w := call("fine-grained-tool-streaming-2025-05-14")
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "route.no_capable_deployment") || !strings.Contains(w.Body.String(), "fine-grained-tool-streaming-2025-05-14") {
+		t.Fatalf("a beta no deployment accepts: %d %s", w.Code, w.Body)
+	}
+	if bedrock.got != nil || direct.got != nil {
+		t.Fatal("a provider was called for a request none accepts")
+	}
+}

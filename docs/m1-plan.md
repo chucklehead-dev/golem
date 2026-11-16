@@ -365,6 +365,12 @@ Status:
   attempt loop fails over on. Tests: `TestQuotaFailover`,
   `TestRateLimits`, the store suite's rate buckets on Mem and Valkey,
   `TestMetersFailOpen`; ablated: the per-attempt check, the rate check.
+- **Built: capability routing, betas only** (ADR 0028, gateway.md §3
+  step 5): a Deployment's `betas`; a deployment that does not accept a
+  request's is passed over, none accepting `route.no_capable_deployment`.
+  Test: `TestBetaRouting` (ablated: the filter). Context window and the
+  other capabilities wait for translation (M1.5), when pools mix unlike
+  models.
 - **Out of M1, by decision** (accounting is good enough: ADR 0044): $/min
   and token rate limits, per-key rate limits, `x-ratelimit-*` headers,
   team pools and grants (M2).

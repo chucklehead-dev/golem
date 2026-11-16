@@ -219,6 +219,8 @@ type Deployment struct {
 	// QuotaRPM is the site's share of the provider's quota, requests a
 	// minute (lib/api's Quota); 0: none.
 	QuotaRPM int64 `json:"quotaRPM,omitempty"`
+	// Betas are the anthropic-beta values it accepts; nil: any.
+	Betas []string `json:"betas,omitempty"`
 }
 
 // Route is an alias and its pool.

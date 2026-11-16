@@ -124,6 +124,12 @@ type Deployment struct {
 	// it goes to the pool's next deployment, and a call that finds every
 	// one at its quota is refused limit.provider_quota with a Retry-After.
 	Quota *Rate `json:"quota,omitempty"`
+	// Betas, if set, are the anthropic-beta values the deployment accepts
+	// (Bedrock takes a subset of Anthropic's): a request with another is
+	// not sent to it, so a failover never lands where it would be refused,
+	// and a request no deployment of its pool accepts is refused
+	// route.no_capable_deployment (ADR 0028). Unset: any.
+	Betas []string `json:"betas,omitempty"`
 }
 
 // Rate is a per-minute allowance of requests; 0: no limit. Requests only:

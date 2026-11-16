@@ -200,6 +200,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.beforePick != nil {
 		h.beforePick(r)
 	}
+	// Only deployments that accept the request's betas are its pool here
+	// (ADR 0028): none, and it is refused before anything is counted.
+	betas := requestBetas(h.Dialect, r.Header)
+	if no := incapable(rt, betas); no != nil {
+		h.fail(ctx, w, no)
+		return
+	}
 	// The call takes a request from its rate limits once (PRD §5.5), and
 	// each attempt one from its deployment's quota share (§9.2).
 	mctx := context.WithoutCancel(ctx)
@@ -215,7 +222,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	quotaFull := false
 	quota := func(t *route.Target) (bool, time.Time) { return takeQuota(mctx, h.Meters, t, &quotaFull) }
-	target, lease, retryAt := pick(hl, rt, tried, principal.ID, quota)
+	target, lease, retryAt := pick(hl, rt, tried, principal.ID, betas, quota)
 	if target == nil {
 		if quotaFull {
 			h.fail(ctx, w, &refusal{code: contract.LimitProviderQuota, retryAfter: time.Until(retryAt),
@@ -329,7 +336,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !kept || attempt >= rt.MaxAttempts || r.Context().Err() != nil || terminatedBy(upCtx) != nil {
 				return false
 			}
-			next, nl, _ := pick(hl, rt, tried, principal.ID, quota)
+			next, nl, _ := pick(hl, rt, tried, principal.ID, betas, quota)
 			if next == nil {
 				return false
 			}

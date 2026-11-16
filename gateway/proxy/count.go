@@ -62,7 +62,7 @@ func (h *Handler) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, no)
 		return
 	}
-	target, lease, retryAt := pick(h.health(), rt, make([]bool, len(rt.Pool)), principal.ID, nil)
+	target, lease, retryAt := pick(h.health(), rt, make([]bool, len(rt.Pool)), principal.ID, requestBetas(h.Dialect, r.Header), nil)
 	if target == nil {
 		h.fail(ctx, w, &refusal{code: contract.UpstreamUnavailable, retryAfter: time.Until(retryAt),
 			msg: "every deployment of this route is resting after failures or at its ceiling; retry shortly"})

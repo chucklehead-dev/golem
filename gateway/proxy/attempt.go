@@ -4,10 +4,12 @@ import (
 	"cmp"
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/route"
+	"github.com/chucklehead-dev/golem/lib/contract"
 )
 
 // The attempt loop's parts (model/attempts.md); the loop is ServeHTTP's.
@@ -31,7 +33,7 @@ func (h *Handler) health() *route.Health {
 // may take an attempt again (zero: unknown). A deployment its health takes
 // must also have quota for the attempt (quota; nil: none checked): one at
 // its quota is passed over, as one at its ceiling is, and left untried.
-func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, quota func(*route.Target) (bool, time.Time)) (*route.Target, *route.Lease, time.Time) {
+func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, betas []string, quota func(*route.Target) (bool, time.Time)) (*route.Target, *route.Lease, time.Time) {
 	var earliest time.Time
 	later := func(at time.Time) {
 		if !at.IsZero() && (earliest.IsZero() || at.Before(earliest)) {
@@ -39,8 +41,8 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, quo
 		}
 	}
 	for i, t := range rt.Pool {
-		if tried[i] {
-			continue
+		if tried[i] || !t.Accepts(betas) {
+			continue // a deployment the request's betas would be refused by is no failover (ADR 0028)
 		}
 		l, at := hl.Acquire(t, principal)
 		if l == nil {
@@ -60,6 +62,47 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, quo
 		return t, l, time.Time{}
 	}
 	return nil, nil, earliest
+}
+
+// requestBetas are an Anthropic request's anthropic-beta values, each
+// comma list split; another dialect's, none.
+func requestBetas(d Dialect, hdr http.Header) []string {
+	if d != AnthropicMessages {
+		return nil
+	}
+	var out []string
+	for _, v := range hdr.Values("Anthropic-Beta") {
+		for b := range strings.SplitSeq(v, ",") {
+			if b = strings.TrimSpace(b); b != "" {
+				out = append(out, b)
+			}
+		}
+	}
+	return out
+}
+
+// incapable is the refusal of a request no deployment of rt accepts, for
+// its betas (ADR 0028), or nil: the first beta no deployment takes, or
+// the combination none takes whole.
+func incapable(rt *route.Route, betas []string) *refusal {
+	if len(betas) == 0 {
+		return nil
+	}
+	for _, t := range rt.Pool {
+		if t.Accepts(betas) {
+			return nil
+		}
+	}
+	for _, b := range betas {
+		taken := false
+		for _, t := range rt.Pool {
+			taken = taken || t.Accepts([]string{b})
+		}
+		if !taken {
+			return &refusal{code: contract.RouteNoCapableDeployment, msg: "no deployment of route " + rt.Alias + " accepts anthropic-beta " + b + ": drop it, or call a route that serves it"}
+		}
+	}
+	return &refusal{code: contract.RouteNoCapableDeployment, msg: "no deployment of route " + rt.Alias + " accepts these anthropic-beta values together (" + strings.Join(betas, ", ") + "): send fewer"}
 }
 
 // takeQuota takes an attempt's request from t's quota share, if it has
