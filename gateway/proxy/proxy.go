@@ -171,7 +171,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ex.tried = append(ex.tried[:0], make([]bool, len(rt.Pool))...) // pooled: held in c, a slice would escape
 	c := &callState{h: h, w: w, r: r, ctx: ctx, bg: context.WithoutCancel(ctx), principal: p.principal, req: req, rt: rt,
 		reqID: reqID, reqIDs: reqIDs, requestBytes: int64(len(body)), hl: h.health(), tried: ex.tried, betas: p.betas}
-	c.hl.Called(rt.Alias)
 	h.paused(r)
 	// Only deployments that accept the request's betas are its pool here
 	// (ADR 0028): none, and it is refused before anything is counted.
@@ -206,6 +205,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(ctx, w, no)
 		return
 	}
+	// Only an admitted call earns its route retries: refused ones would
+	// refill the budget a failing pool's retries draw on.
+	c.hl.Called(rt.Alias)
 	// The accounting runs to its end whatever the caller does.
 	c.acct = settlement{ticket: ticket, ctx: c.bg, deadline: deadline, tail: cmp.Or(h.ProviderTail, 2*time.Minute)}
 	// Every admitted call's ticket ends exactly once. Should anything below

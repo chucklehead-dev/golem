@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
+	"github.com/chucklehead-dev/golem/lib/contract"
 	libsnapshot "github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
@@ -269,4 +271,29 @@ func TestCallerGoneIsNoFailure(t *testing.T) {
 			t.Fatalf("status %d, deployment %+v after a sweep withdrew its call: want 401 and it not ejected", resp.StatusCode, dh)
 		}
 	})
+}
+
+// TestRefusedCallsEarnNoRetries: the route's retry budget is credited by
+// admitted calls only: a flood of refused ones (here by admission) must
+// not refill the retries a failing pool draws on.
+func TestRefusedCallsEarnNoRetries(t *testing.T) {
+	ok := &counting{fn: func(int32) (*http.Response, error) { return streamOf(anthropicStream(1)), nil }}
+	h, _ := poolHandler(t, 2, ok, ok)
+	h.Health = &route.Health{RetryBurst: 2, RetryRatio: 1}
+	for h.Health.Retry("claude") { // drained
+	}
+	h.Limiter = &admitter{t: t, refuse: &admission.Refusal{Code: contract.LimitConcurrency, Msg: "busy"}}
+	for range 4 {
+		if w := serveOne(h); w.Code != 429 {
+			t.Fatalf("status %d: want the admitter's refusal", w.Code)
+		}
+	}
+	if n := h.Health.Retries("claude"); n != 0 {
+		t.Fatalf("%v retries after four refused calls: want none credited", n)
+	}
+	h.Limiter = nil
+	serveOne(h)
+	if n := h.Health.Retries("claude"); n != 1 {
+		t.Fatalf("%v retries after one admitted call: want its credit, 1", n)
+	}
 }
