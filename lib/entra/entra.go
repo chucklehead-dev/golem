@@ -8,6 +8,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 // Verifier verifies Entra ID v2 access tokens for one golem API, locally
@@ -53,10 +55,26 @@ type Verifier struct {
 	MaxKeyAge time.Duration
 
 	keys    atomic.Pointer[map[string]*rsa.PublicKey]
-	keysAt  atomic.Int64 // when the key set was fetched, Unix nanoseconds
+	keysAt  atomic.Int64  // when the key set was fetched, Unix nanoseconds
+	keysGen atomic.Uint64 // counts key set replacements; a cached token from an older set is checked again
 	wake    chan struct{}
 	wakeOne sync.Once
+
+	cacheOne sync.Once
+	cache    *lru.Cache[[sha256.Size]byte, verified]
 }
+
+// verified is a token that passed Verify, kept so the next request with it
+// skips the signature check. The entry is used only while the token has not
+// expired and the key set it was checked against is still the current one.
+type verified struct {
+	id      Identity
+	expires time.Time // the token's exp plus the leeway Verify allows
+	keysGen uint64
+}
+
+// cacheSize bounds the verified tokens kept: about 100 bytes each.
+const cacheSize = 10_000
 
 // leeway tolerates clock skew between Entra and the gateway.
 const leeway = time.Minute
@@ -112,9 +130,42 @@ var errNoKeys = &Error{Unavailable: true, Msg: "golem cannot check Entra tokens 
 func (e *Error) Error() string { return e.Msg }
 
 // Verify checks a token and says who it names; a refusal is an *Error.
+//
+// A token that passed is cached by its hash, so a caller's next requests skip
+// the signature check (about 60 µs). A cached token is still refused once it
+// expires, once the key set is replaced, and whenever the key set is too old.
+// Only identity is cached: the caller checks membership and the denylist on
+// every request.
 func (e *Verifier) Verify(raw string) (Identity, error) {
-	invalid := func(why string) (Identity, error) {
-		return Identity{}, &Error{Msg: "the Entra token is not valid for golem: " + why}
+	sum := sha256.Sum256([]byte(raw))
+	gen := e.keysGen.Load()
+	if v, ok := e.cached().Get(sum); ok && v.keysGen == gen && e.now().Before(v.expires) && !e.keysTooOld() {
+		return v.id, nil
+	}
+	id, exp, err := e.verify(raw)
+	if err == nil {
+		e.cached().Add(sum, verified{id: id, expires: exp.Add(leeway), keysGen: gen})
+	}
+	return id, err
+}
+
+// keysTooOld reports whether the key set has gone unrefreshed past MaxKeyAge.
+func (e *Verifier) keysTooOld() bool {
+	at := e.keysAt.Load()
+	return at != 0 && e.now().Sub(time.Unix(0, at)) > cmp.Or(e.MaxKeyAge, 24*time.Hour)
+}
+
+func (e *Verifier) cached() *lru.Cache[[sha256.Size]byte, verified] {
+	e.cacheOne.Do(func() {
+		e.cache, _ = lru.New[[sha256.Size]byte, verified](cacheSize) // errors only for a size below one
+	})
+	return e.cache
+}
+
+// verify is Verify without the cache. It also returns the token's expiry.
+func (e *Verifier) verify(raw string) (_ Identity, exp time.Time, _ error) {
+	invalid := func(why string) (Identity, time.Time, error) {
+		return Identity{}, time.Time{}, &Error{Msg: "the Entra token is not valid for golem: " + why}
 	}
 	// RS256 only: anything else (none, HMAC with a public key as its
 	// secret) is refused before a key is looked at.
@@ -127,9 +178,9 @@ func (e *Verifier) Verify(raw string) (Identity, error) {
 	}
 	if e.keys.Load() == nil {
 		e.requestRefresh() // Run is retrying already; this wakes it
-		return Identity{}, errNoKeys
+		return Identity{}, time.Time{}, errNoKeys
 	}
-	if at := e.keysAt.Load(); at != 0 && e.now().Sub(time.Unix(0, at)) > cmp.Or(e.MaxKeyAge, 24*time.Hour) {
+	if e.keysTooOld() {
 		return invalid("golem's copy of Entra's signing keys is too old to trust (they have not been refreshed); the platform team is alerted")
 	}
 	key := e.key(tok.Headers[0].KeyID)
@@ -152,7 +203,7 @@ func (e *Verifier) Verify(raw string) (Identity, error) {
 	}, leeway)
 	switch {
 	case errors.Is(err, jwt.ErrExpired):
-		return Identity{}, &Error{Expired: true, Msg: "the Entra token has expired: get a new one (golemctl token)"}
+		return Identity{}, time.Time{}, &Error{Expired: true, Msg: "the Entra token has expired: get a new one (golemctl token)"}
 	case errors.Is(err, jwt.ErrInvalidIssuer):
 		return invalid("issued by another tenant or not a v2 token")
 	case errors.Is(err, jwt.ErrInvalidAudience):
@@ -162,12 +213,13 @@ func (e *Verifier) Verify(raw string) (Identity, error) {
 	case c.Tid != e.Tenant || c.Ver != "2.0":
 		return invalid("not a v2 token of this tenant")
 	}
+	exp = std.Expiry.Time()
 	scope := cmp.Or(e.Scope, ScopeAccess)
 	switch {
 	case slices.Contains(strings.Fields(c.Scp), scope) && c.Oid != "" && c.Idtyp != "app":
-		return Identity{ID: c.Oid, Admin: slices.Contains(c.Roles, RoleAdmin)}, nil
+		return Identity{ID: c.Oid, Admin: slices.Contains(c.Roles, RoleAdmin)}, exp, nil
 	case c.Scp == "" && c.Idtyp == "app" && slices.Contains(c.Roles, RoleService) && c.Azp != "":
-		return Identity{Service: true, ID: c.Azp, Admin: slices.Contains(c.Roles, RoleAdmin)}, nil
+		return Identity{Service: true, ID: c.Azp, Admin: slices.Contains(c.Roles, RoleAdmin)}, exp, nil
 	case c.Scp == "" && c.Idtyp != "app" && slices.Contains(c.Roles, RoleService):
 		return invalid("an app-only token without idtyp \"app\" (the registration must request the idtyp optional claim, entra.md)")
 	}
@@ -195,6 +247,7 @@ func (e *Verifier) SetKeys(set jose.JSONWebKeySet) { e.setKeys(signingKeys(set))
 func (e *Verifier) setKeys(m map[string]*rsa.PublicKey) {
 	e.keys.Store(&m)
 	e.keysAt.Store(e.now().UnixNano())
+	e.keysGen.Add(1) // tokens cached against the old set are checked again
 }
 
 // signingKeys are a key set's RSA signing keys, by key ID: the keys Verify

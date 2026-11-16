@@ -13,6 +13,7 @@ require (
 	github.com/aws/smithy-go v1.28.9
 	github.com/chucklehead-dev/gotogether v0.0.0-20261116190645-398439a9e0ac
 	github.com/go-jose/go-jose/v4 v4.1.9
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/valkey-io/valkey-go v1.0.79
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
