@@ -821,13 +821,13 @@ func (h *Handler) policy(ex *exchange, p *auth.Principal, req scanned, requestBy
 			return &refusal{code: contract.RequestOverCeiling, msg: fmt.Sprintf("max_tokens %d for %d completions is over this scope's ceiling of %d tokens a request", req.maxTokens, req.n, c)}
 		}
 	}
-	// M1 keeps nothing at the provider for a Responses call, whatever the
-	// scope allows (security-and-correctness.md §4): a stable, not
-	// retryable, policy refusal.
+	// M1 refers to nothing the provider keeps, whatever the scope allows
+	// (security-and-correctness.md §4): no stored responses, no uploaded
+	// files, no item references. A stable, not retryable, policy refusal.
 	switch {
 	case req.stateful != "":
-		return &refusal{code: contract.AuthzProviderStorageForbidden, msg: "golem serves stateless responses only, and " + req.stateful +
-			" needs state the provider keeps: send the whole conversation in input each turn, with store false"}
+		return &refusal{code: contract.AuthzProviderStorageForbidden, msg: "golem refers to nothing the provider keeps, and " + req.stateful +
+			" does: send the content itself in the request"}
 	case req.storeTrue:
 		return &refusal{code: contract.AuthzProviderStorageForbidden, msg: "golem serves stateless responses only: send store false, or leave it out (golem sends false)"}
 	}

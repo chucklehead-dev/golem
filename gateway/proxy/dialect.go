@@ -113,7 +113,7 @@ func (ex *exchange) scan(d Dialect, body []byte) (scanned, error) {
 		err := ex.msg.Scan(body)
 		f := ex.msg.Flags
 		return scanned{alias: ex.msg.Model, stream: ex.msg.Stream, maxTokens: ex.msg.MaxTokens, hasMax: ex.msg.HasMaxTokens,
-			n: 1, state: f&messages.FlagContainer != 0, unknown: ex.msg.Unknown}, err
+			n: 1, state: f&messages.FlagContainer != 0, unknown: ex.msg.Unknown, stateful: ex.msg.Stateful}, err
 	}
 	if d == OpenAIResponses {
 		err := ex.resp.Scan(body)

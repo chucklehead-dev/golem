@@ -49,6 +49,7 @@ spec:
 	}{
 		{"a server tool", open, `{"model":"claude","max_tokens":10,` + webSearch + `"messages":[]}`, 200, ""},
 		{"storage forbidden: a container", plain, `{"model":"claude","max_tokens":10,"container":"c1","messages":[]}`, 403, "authz.provider_storage_forbidden"},
+		{"a provider-held file", plain, `{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file_1"}}]}]}`, 403, "authz.provider_storage_forbidden"},
 		{"storage allowed: a container", open, `{"model":"claude","max_tokens":10,"container":"c1","messages":[]}`, 200, ""},
 		{"ceiling: within", capped, `{"model":"claude","max_tokens":1000,"messages":[]}`, 200, ""},
 		{"ceiling: max_tokens over", capped, `{"model":"claude","max_tokens":1001,"messages":[]}`, 400, "request.over_ceiling"},
