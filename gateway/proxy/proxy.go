@@ -242,7 +242,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	pr := c.principal
 	c.row = telemetry.Call{RequestID: reqIDs, Principal: pr.ID, PrincipalKind: pr.Kind, Key: pr.Key,
 		Scope: pr.Scope, Frontend: h.Dialect.Name(), Backend: rt.Dialect, Alias: rt.Alias, Started: started,
-		Currency: p.snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived()}
+		Currency: p.snap.Snapshot.Currency, Waived: ticket != nil && ticket.Waived(), ProviderAccount: p.snap.Accounts[c.target.Backend]}
 	if ticket != nil {
 		c.row.Period = ticket.Period() // admission's: one period per call
 		c.row.OverBudget = h.overBudget(w, pr, ticket)
@@ -271,6 +271,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		t := c.target
 		c.price = p.snap.Prices[t.Model]
 		c.row.Attempt, c.row.Model, c.row.Deployment, c.row.Provider = c.attempt, t.Model, t.Key(), t.Backend
+		c.row.ProviderAccount, c.row.PriceVersion = p.snap.Accounts[t.Backend], c.price.Version
 		c.row.Envelope = t.Envelope
 		out := getBody()
 		if n := len(body) + len(t.Model) + 64; cap(*out) < n {

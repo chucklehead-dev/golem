@@ -201,7 +201,7 @@ func compileBackends(srcs []v1.Source[v1.Backend], standalone bool, add adder) (
 			add(obj, "spec.dialect", "%q is not a dialect golem serves (%s)", b.Spec.Dialect, strings.Join(Dialects, ", "))
 		}
 		sb := snapshot.Backend{Name: b.Metadata.Name, Dialect: b.Spec.Dialect, AllowPrivate: b.Spec.Network.AllowPrivateAddresses,
-			Envelope: b.Spec.Envelope}
+			Envelope: b.Spec.Envelope, ProviderAccount: cmp.Or(b.Spec.ProviderAccount, b.Metadata.Name)}
 		switch b.Spec.Envelope {
 		case "":
 			sb.Auth = backendAuth(obj, b.Spec.Auth, standalone, add)

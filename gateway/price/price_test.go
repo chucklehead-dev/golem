@@ -26,3 +26,23 @@ func TestCost(t *testing.T) {
 		t.Errorf("an absurd usage report costs %d, want MaxCost: it must saturate, not wrap", c)
 	}
 }
+
+// TestCostCacheWriteLifetimes: one-hour writes at the one-hour rate, the
+// rest of the writes at the five-minute rate; with no one-hour rate, every
+// write at the five-minute rate; a breakdown over the total charges no more
+// writes than the total.
+func TestCostCacheWriteLifetimes(t *testing.T) {
+	p := snapshot.Price{CacheWritePerMTok: 3_750_000, CacheWrite1hPerMTok: 6_000_000}
+	// 1000 writes, 400 of them for an hour: 600 × 3.75 + 400 × 6 = 4650.
+	if got := Cost(canon.Usage{CacheWrite: 1000, CacheWrite1h: 400}, p); got != 4650 {
+		t.Fatalf("cost %d, want 4650", got)
+	}
+	p.CacheWrite1hPerMTok = 0
+	if got := Cost(canon.Usage{CacheWrite: 1000, CacheWrite1h: 400}, p); got != 3750 {
+		t.Fatalf("without a one-hour rate: cost %d, want 3750 (every write at the five-minute rate)", got)
+	}
+	p.CacheWrite1hPerMTok = 6_000_000
+	if got := Cost(canon.Usage{CacheWrite: 100, CacheWrite1h: 400}, p); got != 600 {
+		t.Fatalf("a breakdown over the total: cost %d, want 600 (the total, at the one-hour rate)", got)
+	}
+}

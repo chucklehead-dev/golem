@@ -43,6 +43,10 @@ func TestHolder(t *testing.T) {
 		t.Fatalf("current %v %v", c, err)
 	}
 	tr := c.Routes.Lookup([]byte("claude")).Pool[0].Transport
+	// A backend without a provider account is recorded by its name.
+	if b := c.Snapshot.Backends[0]; b.ProviderAccount != "" || c.Accounts[b.Name] != b.Name {
+		t.Fatalf("accounts %v for backend %q: want its name", c.Accounts, b.Name)
+	}
 
 	// The floor: a replay or a stale publisher's snapshot is refused, and
 	// so is the applied one again.

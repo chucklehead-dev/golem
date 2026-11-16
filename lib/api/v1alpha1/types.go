@@ -51,11 +51,17 @@ type BackendSpec struct {
 	// provider's own API) or "bedrock" (Claude on Amazon Bedrock: the
 	// Messages body to InvokeModel, signed with SigV4 by the gateway's AWS
 	// role; ADR 0001). A bedrock backend has no auth: its region is AWS's.
-	Envelope    string       `json:"envelope,omitempty"`
-	AWS         *AWS         `json:"aws,omitempty"`
-	Auth        Auth         `json:"auth,omitzero"`
-	Deployments []Deployment `json:"deployments"`
-	Network     Network      `json:"network,omitzero"`
+	Envelope string `json:"envelope,omitempty"`
+	// ProviderAccount is the provider's account the backend's calls are
+	// billed to (an Anthropic organisation or workspace ID, an OpenAI
+	// organisation or project ID, an AWS account ID), recorded on each
+	// ledger row as provider_account for reconciliation against the bill
+	// (contracts.md §3); unset, the row records the backend's name.
+	ProviderAccount string       `json:"providerAccount,omitempty"`
+	AWS             *AWS         `json:"aws,omitempty"`
+	Auth            Auth         `json:"auth,omitzero"`
+	Deployments     []Deployment `json:"deployments"`
+	Network         Network      `json:"network,omitzero"`
 }
 
 // AWS is a bedrock backend's AWS side: the region its deployments are in
@@ -308,13 +314,21 @@ type PriceList struct {
 type PriceListSpec struct {
 	Currency string  `json:"currency"`
 	Prices   []Price `json:"prices"`
+	// Version names this revision of the list, recorded with its name on
+	// each ledger row it prices (price_version, contracts.md §3: name/version);
+	// unset, the row records the list's digest instead (name@sha256:...),
+	// which changes with every change to the spec.
+	Version string `json:"version,omitempty"`
 }
 
 // Price is a model's rates in micro-units per million tokens.
 type Price struct {
-	Model             string `json:"model"` // the provider's model name
-	InputPerMTok      int64  `json:"inputPerMTok"`
-	OutputPerMTok     int64  `json:"outputPerMTok"`
-	CacheReadPerMTok  int64  `json:"cacheReadPerMTok,omitempty"`
-	CacheWritePerMTok int64  `json:"cacheWritePerMTok,omitempty"`
+	Model            string `json:"model"` // the provider's model name
+	InputPerMTok     int64  `json:"inputPerMTok"`
+	OutputPerMTok    int64  `json:"outputPerMTok"`
+	CacheReadPerMTok int64  `json:"cacheReadPerMTok,omitempty"`
+	// CacheWritePerMTok prices the five-minute cache writes, and the
+	// one-hour writes too unless CacheWrite1hPerMTok is set.
+	CacheWritePerMTok   int64 `json:"cacheWritePerMTok,omitempty"`
+	CacheWrite1hPerMTok int64 `json:"cacheWrite1hPerMTok,omitempty"`
 }

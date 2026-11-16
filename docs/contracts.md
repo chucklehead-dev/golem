@@ -96,12 +96,12 @@ prevent double counting.
 | `scope_id`, `scope_path` | | `scope_path` is the team/sub-team/project chain at request time |
 | `funding` | Array(Tuple(source, share)) | the scope's funding sources and shares at request time; on the wire (§3.1) a list of `{source, share}` maps. Empty until scopes carry funding |
 | `frontend_dialect`, `backend_dialect`, `envelope` | LowCardinality(String) | |
-| `alias`, `model`, `deployment`, `provider_account` | | `model` as the provider names it (inference profile ID on Bedrock) |
-| `tokens_input`, `tokens_output`, `tokens_cache_read`, `tokens_cache_write_5m`, `tokens_cache_write_1h`, `tokens_reasoning` | UInt64 | |
+| `alias`, `model`, `deployment`, `provider_account` | | `model` as the provider names it (inference profile ID on Bedrock); `provider_account` the Backend's `spec.providerAccount` (the provider's organisation, workspace, project or AWS account ID the call is billed to), the Backend's name if it sets none |
+| `tokens_input`, `tokens_output`, `tokens_cache_read`, `tokens_cache_write_5m`, `tokens_cache_write_1h`, `tokens_reasoning` | UInt64 | cache writes by lifetime: Anthropic's `cache_creation` breakdown (`ephemeral_1h_input_tokens`; the rest of `cache_creation_input_tokens` five-minute writes); a provider without one reports five-minute writes only |
 | `units` | Map(String, UInt64) | other billed units: `web_search`, `code_execution_seconds`, `images`; on the wire a map of integers. Empty until a dialect reads them |
 | `cost_micros` | Int64 | in the configured currency's millionths; computed by golem |
 | `currency` | FixedString(3) | |
-| `price_version` | String | the `PriceList` version used |
+| `price_version` | String | the `PriceList` version used: `<name>/<spec.version>`, or `<name>@sha256:<16 hex digits of its spec's digest>` for a list without one (§4) |
 | `outcome`, `error_origin`, `error_code` | | `completed`, `cancelled` (the caller went away), `terminated` (the gateway ended the call in flight, its authorization withdrawn, §1: charged as a cancelled call is, what was produced, its slot held for the provider's tail; the code is the refusal's), `failed`, or `uncertain` (the call failed after the provider may have received it: charged its worst case as an estimate until reconciliation, golem#4); the failure's §2 origin and §1 code |
 | `estimated_fraction` | Float32 | the share of `cost_micros` estimated rather than reported: 0 for actual rows. When a provider's report is missing (a stream cut, a response without usage; never for an error response, which no provider bills), each side is charged by rules chosen to err high, not an average: output every byte of the response received a token (whatever its fields or framing), at most the request's `max_tokens × n`; input, if not reported, every byte of the request a token (as the declared worst case; an estimate, not a bound on real spend: ADR 0044). Reconciliation corrects it (ADR 0031) |
 | `waived` | Bool | admitted outside the budget's bound: while the site store was unreachable, or in the grace after a recovery (ADR 0041 §7.3); the exposure the bound does not cover |
@@ -165,7 +165,7 @@ provider), from an effective date, in micro-units per million tokens or
 per unit:
 
 - input; output; reasoning (if billed separately);
-- cache read; cache write by TTL (5 minutes, 1 hour);
+- cache read; cache write by TTL (5 minutes, 1 hour: `cacheWritePerMTok`, and `cacheWrite1hPerMTok`, which defaults to the five-minute rate);
 - tiers by prompt length (for example above 200k input tokens), each tier
   with its own rates;
 - batch discount (a factor or explicit rates);
@@ -176,7 +176,11 @@ per unit:
 - for self-hosted models, internal rates set by the platform team.
 
 Versions are immutable once used by a ledger row; a change is a new
-version with a new effective date. The vendored list is refreshed by a
+version with a new effective date. Built: a PriceList's version is its
+`spec.version` with its name (`default/2026-11`), recorded as each row's
+`price_version`; a list without one is versioned by its spec's digest,
+which any change moves. Only the per-token rates are built (no tiers,
+batch, premiums or units yet: ADR 0044's "good enough"). The vendored list is refreshed by a
 scheduled PR (PRD §9.7); enterprise rates override it.
 
 ## 5. Identifiers and headers (ADR 0026)

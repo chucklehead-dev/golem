@@ -49,8 +49,15 @@ type Call struct {
 	Frontend, Backend             string // dialects
 	Envelope                      string // the deployment's: "" or "bedrock"
 	Alias, Model, Deployment      string
-	Provider, ProviderRequestID   string
-	Started, Ended                time.Time
+	Provider, ProviderRequestID   string // Provider: the backend's name
+	// ProviderAccount is the backend's provider account (snapshot's
+	// Backend.ProviderAccount), the ledger's provider_account; empty, the
+	// row records Provider.
+	ProviderAccount string
+	// PriceVersion is the PriceList version Cost was priced by (the
+	// snapshot's Price.Version), the ledger's price_version.
+	PriceVersion   string
+	Started, Ended time.Time
 	// Period is the budget period the call is counted in (the limiter's,
 	// lib/period); empty: the ledger names it from Started.
 	Period                          string

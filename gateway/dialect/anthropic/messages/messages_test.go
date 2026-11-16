@@ -3,6 +3,7 @@ package messages
 import (
 	"encoding/json"
 	"maps"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -142,6 +143,45 @@ func TestResponseUsage(t *testing.T) {
 	u.Response([]byte(`{"id":"msg_1","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":3,"output_tokens":7,"cache_read_input_tokens":null}}`))
 	if want := (canon.Usage{Input: 3, Output: 7}); u.Usage != want || u.Err != nil {
 		t.Fatalf("usage = %+v, %v; want %+v", u.Usage, u.Err, want)
+	}
+}
+
+// TestCacheCreationBreakdown: cache_creation's one-hour writes are
+// CacheWrite1h, the rest of cache_creation_input_tokens the five-minute
+// writes; parts that exceed the total are charged as the parts; a report
+// without the breakdown has no one-hour writes; a malformed one is an error.
+func TestCacheCreationBreakdown(t *testing.T) {
+	for _, c := range []struct {
+		usage string
+		want  canon.Usage
+		err   bool
+	}{
+		{`{"input_tokens":3,"output_tokens":7,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200}}`,
+			canon.Usage{Input: 3, Output: 7, CacheWrite: 300, CacheWrite1h: 200}, false},
+		{`{"output_tokens":7,"cache_creation":{"ephemeral_1h_input_tokens":50,"ephemeral_5m_input_tokens":20},"cache_creation_input_tokens":10}`,
+			canon.Usage{Output: 7, CacheWrite: 70, CacheWrite1h: 50}, false},
+		{`{"output_tokens":7,"cache_creation_input_tokens":10,"cache_creation":null}`, canon.Usage{Output: 7, CacheWrite: 10}, false},
+		{`{"output_tokens":7,"cache_creation":{"ephemeral_1h_input_tokens":-1}}`, canon.Usage{}, true},
+	} {
+		var u StreamUsage
+		u.Response([]byte(`{"content":[],"usage":` + c.usage + `}`))
+		if c.err {
+			if u.Err == nil || u.Final {
+				t.Errorf("%s: Err=%v Final=%v, want a non-final invalid report", c.usage, u.Err, u.Final)
+			}
+			continue
+		}
+		if u.Usage != c.want || u.Err != nil || u.Usage.CacheWrite5m() != c.want.CacheWrite-c.want.CacheWrite1h {
+			t.Errorf("%s: usage = %+v, %v; want %+v", c.usage, u.Usage, u.Err, c.want)
+		}
+	}
+	// In a stream, message_start's report stands when message_delta's has
+	// no breakdown.
+	s := strings.Replace(stream, `"cache_creation_input_tokens":100,`, `"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":40,"ephemeral_1h_input_tokens":60},`, 1)
+	want := streamUsage
+	want.CacheWrite1h = 60
+	if got, err := usageOf(s); err != nil || got != want {
+		t.Fatalf("stream usage = %+v, %v; want %+v", got, err, want)
 	}
 }
 

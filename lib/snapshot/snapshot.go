@@ -139,11 +139,17 @@ type Key struct {
 
 // Price is a model's rates in micro-units per million tokens.
 type Price struct {
-	Model             string `json:"model"`
-	InputPerMTok      int64  `json:"inputPerMTok"`
-	OutputPerMTok     int64  `json:"outputPerMTok"`
-	CacheReadPerMTok  int64  `json:"cacheReadPerMTok,omitempty"`
-	CacheWritePerMTok int64  `json:"cacheWritePerMTok,omitempty"`
+	Model            string `json:"model"`
+	InputPerMTok     int64  `json:"inputPerMTok"`
+	OutputPerMTok    int64  `json:"outputPerMTok"`
+	CacheReadPerMTok int64  `json:"cacheReadPerMTok,omitempty"`
+	// CacheWritePerMTok prices five-minute cache writes, and one-hour
+	// writes unless CacheWrite1hPerMTok is set (gateway/price).
+	CacheWritePerMTok   int64 `json:"cacheWritePerMTok,omitempty"`
+	CacheWrite1hPerMTok int64 `json:"cacheWrite1hPerMTok,omitempty"`
+	// Version is the PriceList's, recorded on the rows it prices
+	// (price_version): name/version, or name@sha256:<digest> of its spec.
+	Version string `json:"version,omitempty"`
 }
 
 // Source names the inputs a snapshot was built from (model/freshness.md).
@@ -186,9 +192,13 @@ type Backend struct {
 	Name    string `json:"name"`
 	Dialect string `json:"dialect"`
 	// Envelope is "" or "bedrock" (lib/api's BackendSpec.Envelope).
-	Envelope    string       `json:"envelope,omitempty"`
-	Auth        Auth         `json:"auth"`
-	Deployments []Deployment `json:"deployments"`
+	Envelope string `json:"envelope,omitempty"`
+	// ProviderAccount is the account its calls are billed to (lib/api's
+	// BackendSpec.ProviderAccount), the backend's name if that is unset:
+	// the ledger's provider_account.
+	ProviderAccount string       `json:"providerAccount,omitempty"`
+	Auth            Auth         `json:"auth"`
+	Deployments     []Deployment `json:"deployments"`
 	// AllowPrivate grants loopback and private addresses (golem#5).
 	AllowPrivate bool `json:"allowPrivate,omitempty"`
 }

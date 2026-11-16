@@ -2,7 +2,9 @@ package compile
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -183,6 +185,7 @@ func priceList(objs v1.Objects, add adder) (string, []snapshot.Price) {
 			add(obj, "spec.currency", "%s, but another PriceList uses %s: one currency per installation", pl.Spec.Currency, currency)
 		}
 		currency = pl.Spec.Currency
+		version := priceVersion(pl)
 		for i, p := range pl.Spec.Prices {
 			at := fmt.Sprintf("spec.prices[%d]", i)
 			switch {
@@ -192,13 +195,28 @@ func priceList(objs v1.Objects, add adder) (string, []snapshot.Price) {
 			case seen[p.Model]:
 				add(obj, at+".model", "model %q is priced twice", p.Model)
 				continue
-			case p.InputPerMTok < 0 || p.OutputPerMTok < 0 || p.CacheReadPerMTok < 0 || p.CacheWritePerMTok < 0:
+			case p.InputPerMTok < 0 || p.OutputPerMTok < 0 || p.CacheReadPerMTok < 0 || p.CacheWritePerMTok < 0 || p.CacheWrite1hPerMTok < 0:
 				add(obj, at, "rates must not be negative")
 			}
 			seen[p.Model] = true
-			prices = append(prices, snapshot.Price(p))
+			prices = append(prices, snapshot.Price{Model: p.Model, InputPerMTok: p.InputPerMTok, OutputPerMTok: p.OutputPerMTok,
+				CacheReadPerMTok: p.CacheReadPerMTok, CacheWritePerMTok: p.CacheWritePerMTok,
+				CacheWrite1hPerMTok: p.CacheWrite1hPerMTok, Version: version})
 		}
 	}
 	slices.SortFunc(prices, func(a, b snapshot.Price) int { return cmp.Compare(a.Model, b.Model) })
 	return currency, prices
+}
+
+// priceVersion is the version a PriceList's rows record (price_version):
+// its name and spec.version, or, without one, its name and the first 16
+// hex digits of its spec's SHA-256, so any change to an unversioned list is
+// a new version (contracts.md §4: versions are immutable once used).
+func priceVersion(pl v1.PriceList) string {
+	if pl.Spec.Version != "" {
+		return pl.Metadata.Name + "/" + pl.Spec.Version
+	}
+	b, _ := json.Marshal(pl.Spec) // plain data: never fails
+	sum := sha256.Sum256(b)
+	return pl.Metadata.Name + "@sha256:" + hex.EncodeToString(sum[:8])
 }

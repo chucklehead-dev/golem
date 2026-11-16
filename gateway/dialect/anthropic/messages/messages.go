@@ -213,6 +213,9 @@ type StreamUsage struct {
 	// whole response's usage). Else the gateway estimates it from the
 	// response's bytes (proxy's estimate).
 	Final bool
+	// cacheWrite5m is cache_creation's five-minute writes, which only
+	// bound CacheWrite from below.
+	cacheWrite5m int64
 }
 
 // Want skips the data of events that carry no usage: content deltas are
@@ -298,6 +301,8 @@ func (u *StreamUsage) readUsage(d *jsonscan.Decoder) (hasOutput bool, err error)
 		var dst *int64
 		isOutput := false
 		switch string(name) {
+		case "cache_creation":
+			return u.readCacheCreation(d)
 		case "input_tokens":
 			dst = &u.Usage.Input
 		case "output_tokens":
@@ -325,5 +330,39 @@ func (u *StreamUsage) readUsage(d *jsonscan.Decoder) (hasOutput bool, err error)
 		hasOutput = hasOutput || isOutput
 		return nil
 	})
+	// The breakdown is of cache_creation_input_tokens: a report whose
+	// parts exceed the total is charged the parts.
+	u.Usage.CacheWrite = max(u.Usage.CacheWrite, u.Usage.CacheWrite1h+u.cacheWrite5m)
 	return hasOutput, err
+}
+
+// readCacheCreation reads usage's cache_creation, the cache writes by
+// lifetime: ephemeral_1h_input_tokens is Usage.CacheWrite1h, the rest of
+// cache_creation_input_tokens the five-minute writes.
+func (u *StreamUsage) readCacheCreation(d *jsonscan.Decoder) error {
+	v, _, err := d.ReadValue()
+	if err != nil || v.Kind() == 'n' {
+		return err
+	}
+	return jsonscan.Object(v, func(name []byte, d *jsonscan.Decoder) error {
+		var dst *int64
+		switch string(name) {
+		case "ephemeral_1h_input_tokens":
+			dst = &u.Usage.CacheWrite1h
+		case "ephemeral_5m_input_tokens":
+			dst = &u.cacheWrite5m
+		default:
+			return d.SkipValue()
+		}
+		v, _, err := d.ReadValue()
+		if err != nil || v.Kind() == 'n' {
+			return err
+		}
+		n, ok := jsonscan.Int(v)
+		if !ok || n < 0 {
+			return ErrField
+		}
+		*dst = n
+		return nil
+	})
 }

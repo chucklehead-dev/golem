@@ -26,7 +26,12 @@ spec:
                   properties:
                     cacheReadPerMTok:
                       type: integer
+                    cacheWrite1hPerMTok:
+                      type: integer
                     cacheWritePerMTok:
+                      description: CacheWritePerMTok prices the five-minute cache
+                        writes, and the one-hour writes too unless CacheWrite1hPerMTok
+                        is set.
                       type: integer
                     inputPerMTok:
                       type: integer
@@ -37,6 +42,12 @@ spec:
                       type: integer
                   type: object
                 type: array
+              version:
+                description: 'Version names this revision of the list, recorded with
+                  its name on each ledger row it prices (price_version, contracts.md
+                  §3: name/version); unset, the row records the list''s digest instead
+                  (name@sha256:...), which changes with every change to the spec.'
+                type: string
             type: object
         required:
         - spec

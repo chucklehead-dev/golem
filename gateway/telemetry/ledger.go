@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"cmp"
 	"context"
 	"maps"
 	"slices"
@@ -82,17 +83,17 @@ func (l *Ledger) row(dst *[ledgerColumns]attribute.KeyValue, c *Call) {
 		s("alias", c.Alias),
 		s("model", c.Model),
 		s("deployment", c.Deployment),
-		s("provider_account", c.Provider),
+		s("provider_account", cmp.Or(c.ProviderAccount, c.Provider)),
 		i("tokens_input", c.Usage.Input),
 		i("tokens_output", c.Usage.Output),
 		i("tokens_cache_read", c.Usage.CacheRead),
-		i("tokens_cache_write_5m", c.Usage.CacheWrite),
-		i("tokens_cache_write_1h", 0),
+		i("tokens_cache_write_5m", c.Usage.CacheWrite5m()),
+		i("tokens_cache_write_1h", min(c.Usage.CacheWrite1h, c.Usage.CacheWrite)),
 		i("tokens_reasoning", c.Usage.Reasoning),
 		{Key: "units", Value: unitsValue(c.Units)},
 		i("cost_micros", c.Cost),
 		s("currency", c.Currency),
-		s("price_version", ""),
+		s("price_version", c.PriceVersion),
 		s("outcome", c.Outcome),
 		s("error_origin", c.ErrorOrigin),
 		s("error_code", c.ErrorCode),

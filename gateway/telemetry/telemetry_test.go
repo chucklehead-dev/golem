@@ -230,3 +230,23 @@ func TestRowListAndMapTypes(t *testing.T) {
 		t.Fatalf("a call without funding or units: %s, %s; want [] and {}", f, u)
 	}
 }
+
+// TestRowAttribution: the row splits cache writes by lifetime, and records
+// the price version and the provider account, the backend's name without
+// one.
+func TestRowAttribution(t *testing.T) {
+	r := newRig(t)
+	c := call
+	c.Usage.CacheWrite, c.Usage.CacheWrite1h = 300, 200
+	c.PriceVersion, c.ProviderAccount = "default/2026-11", "org-123"
+	r.t.Ended(t.Context(), c)
+	r.t.Ended(t.Context(), call)
+	rows := r.ledgerRows(t)
+	if got := rows[0]; got["tokens_cache_write_5m"] != 100.0 || got["tokens_cache_write_1h"] != 200.0 ||
+		got["price_version"] != "default/2026-11" || got["provider_account"] != "org-123" {
+		t.Fatalf("row %v", got)
+	}
+	if got := rows[1]; got["provider_account"] != "anthropic" || got["tokens_cache_write_1h"] != 0.0 {
+		t.Fatalf("a call without an account: %v; want the backend's name", got)
+	}
+}

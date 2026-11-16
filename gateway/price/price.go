@@ -4,16 +4,20 @@
 package price
 
 import (
+	"cmp"
 	"math"
 
 	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// Cost is usage's cost under p, in micro-units.
+// Cost is usage's cost under p, in micro-units: the one-hour cache writes
+// at p's one-hour rate (its five-minute rate if it has none), the rest at
+// the five-minute rate.
 func Cost(u canon.Usage, p snapshot.Price) int64 {
 	n, ok := numerator([2]int64{u.Input, p.InputPerMTok}, [2]int64{u.Output, p.OutputPerMTok},
-		[2]int64{u.CacheRead, p.CacheReadPerMTok}, [2]int64{u.CacheWrite, p.CacheWritePerMTok})
+		[2]int64{u.CacheRead, p.CacheReadPerMTok}, [2]int64{u.CacheWrite5m(), p.CacheWritePerMTok},
+		[2]int64{min(u.CacheWrite1h, u.CacheWrite), cmp.Or(p.CacheWrite1hPerMTok, p.CacheWritePerMTok)})
 	if !ok {
 		return MaxCost // an absurd report saturates: never wraps to a small or negative spend
 	}

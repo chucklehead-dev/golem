@@ -44,6 +44,9 @@ type Compiled struct {
 	// lets everyone call everything.
 	Auth   *auth.Keys
 	Prices map[string]snapshot.Price // by the provider's model name
+	// Accounts are the backends' provider accounts, by backend name: the
+	// ledger's provider_account (the backend's name where none is set).
+	Accounts map[string]string
 }
 
 // Errors the request path reports as 503s.
@@ -181,8 +184,12 @@ func (h *Holder) compile(s *snapshot.Snapshot, hash string, secrets Secrets) (*C
 	for _, p := range s.Prices {
 		prices[p.Model] = p
 	}
+	accounts := make(map[string]string, len(s.Backends))
+	for _, b := range s.Backends {
+		accounts[b.Name] = cmp.Or(b.ProviderAccount, b.Name)
+	}
 	return &Compiled{Snapshot: s, Hash: hash, Routes: route.NewTable(routes...),
-		Auth: h.compileAuth(s.Entitlements), Prices: prices}, nil
+		Auth: h.compileAuth(s.Entitlements), Prices: prices, Accounts: accounts}, nil
 }
 
 // targetKey names a deployment in a snapshot.

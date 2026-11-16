@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/chucklehead-dev/golem/lib/key"
+	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
 var devKey = key.New(key.Dev)
@@ -55,6 +56,44 @@ func TestEntitlements(t *testing.T) {
 	}
 	if len(s.Prices) != 1 || s.Currency != "USD" {
 		t.Fatalf("prices %+v %s", s.Prices, s.Currency)
+	}
+}
+
+// TestLedgerAttribution: a price carries its PriceList's version, its
+// spec.version or else its spec's digest (which any change moves), and the
+// one-hour cache write rate; a backend its provider account, or its name
+// without one.
+func TestLedgerAttribution(t *testing.T) {
+	compile := func(yaml string) *snapshot.Snapshot {
+		t.Helper()
+		s, err := Compile(objects(t, map[string]string{"golem.yaml": yaml}), standalone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	s := compile(identity(""))
+	if v := s.Prices[0].Version; !strings.HasPrefix(v, "default@sha256:") || len(v) != len("default@sha256:")+16 {
+		t.Fatalf("an unversioned list's version %q, want default@sha256:<16 hex digits>", v)
+	}
+	if s.Backends[0].ProviderAccount != "anthropic" {
+		t.Fatalf("provider account %q, want the backend's name", s.Backends[0].ProviderAccount)
+	}
+	digest := s.Prices[0].Version
+	if v := compile(strings.Replace(identity(""), "inputPerMTok: 3000000", "inputPerMTok: 3000001", 1)).Prices[0].Version; v == digest {
+		t.Fatalf("a changed list kept its version %q", v)
+	}
+	s = compile(strings.Replace(strings.Replace(identity(""), "currency: USD", "currency: USD\n  version: 2026-11", 1),
+		"outputPerMTok: 15000000}", "outputPerMTok: 15000000, cacheWritePerMTok: 3750000, cacheWrite1hPerMTok: 6000000}", 1) +
+		"---\n" + strings.Replace(strings.Replace(strings.Split(good, "---")[0], "  dialect: anthropic.messages", "  dialect: anthropic.messages\n  providerAccount: org-123", 1), "metadata: {name: anthropic}", "metadata: {name: other}", 1))
+	var account string
+	for _, b := range s.Backends {
+		if b.Name == "other" {
+			account = b.ProviderAccount
+		}
+	}
+	if p := s.Prices[0]; p.Version != "default/2026-11" || p.CacheWrite1hPerMTok != 6000000 || p.CacheWritePerMTok != 3750000 || account != "org-123" {
+		t.Fatalf("price %+v, account %q: want version default/2026-11, the one-hour rate, account org-123", p, account)
 	}
 }
 
