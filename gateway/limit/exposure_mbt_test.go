@@ -96,7 +96,7 @@ func (d *expDriver) Step(s *connect.Step) error {
 			if err := itf.Decode(s.Get("snaps"), &snaps); err != nil {
 				return err
 			}
-			d.gws[gw()].ApplySnapshot(ctx, scope, Known{Period: thePeriod, Spend: snaps[gw()]})
+			d.gws[gw()].ApplySnapshot(ctx, scope, ScopeSpend{Period: thePeriod, Spend: snaps[gw()]})
 			return nil
 		},
 		"valkeyDown": func(*connect.Step) error {

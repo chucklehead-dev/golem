@@ -27,7 +27,7 @@ The words the code uses for golem's concepts, each for one thing only.
 |---|---|---|
 | ticket | an admitted call's admission record: its slots, period and cost; it ends exactly once, completed or cancelled | `admission.Ticket`, `limit.Ticket` |
 | slot | one place of concurrency, held by a call in flight against a principal's or a scope's in-flight limit | `Limiter.Admit`, `admitScript` |
-| hold | one attempt's reservation of a deployment, against its ceilings; committed, failed or released | `route.Hold` (being renamed from `route.Lease` on the gateway's branch) |
+| hold | one attempt's reservation of a deployment, against its ceilings; committed, failed or released | `route.Hold` |
 | grant | what an authentication honoured: the principal and the key or token, so a later snapshot can be asked whether it still would | `auth.Grant`, `Keys.Honours` |
 | lease | only the snapshot's authorization lease: how long a snapshot may be served (`ValidUntil`), renewed every minute by publication | `snapshot.Snapshot.ValidUntil`, `-lease`, `-max-lease` |
 | fence | golem-control's claim to write state: a holder and an epoch in the state document, checked by every leader-only write | `state.Fence`, `Store.Claim`, `Store.FencedUpdate` |
@@ -61,7 +61,7 @@ links `lib/` and the generated clients only, a dialect imports only
 | `gateway/auth` | a credential to a `Principal` from the snapshot alone: golem keys by hash, Entra tokens by cached keys; the emergency denylist | `Keys.AuthenticateGrant`, `Keys.Honours`, `DenyFile.Load` |
 | `gateway/dialect/...` | one package per API: the pass-through scan and splice, error shapes, usage from a response or stream | `messages.Request.Scan`, `chat.Request.Scan`, `responses.Request.Scan`; `jsonscan.Object` |
 | `gateway/sse` | server-sent events split from any chunking; a filter that withholds some | `Parser`, `Filter` |
-| `gateway/route` | alias to `Route`; a deployment's health: ceilings, ejection, probes, retry budgets, active checks | `Table.Lookup`, `Health.AcquireWhy`, `Lease.Commit`, `Lease.Fail`, `Checker.Run` |
+| `gateway/route` | alias to `Route`; a deployment's health: ceilings, ejection, probes, retry budgets, active checks | `Table.Lookup`, `Health.AcquireWhy`, `Hold.Commit`, `Hold.Fail`, `Checker.Run` |
 | `gateway/admission` | the contract between the path and admission (a leaf) | `Admitter`, `Ticket`, `Refusal` |
 | `gateway/limit` | admission's implementation: the snapshot's known spend against the scope's budget, in-flight slots per principal (per scope) and per scope, rate buckets; Valkey and in-memory stores; outages as waivers | `Limiter.Admit`, `admitScript`, `Ticket.Cancel`, `Limiter.Renew`, `Limiter.Recover`, `Limiter.Take` |
 | `gateway/price` | integer micro-unit pricing, half-even, saturating | `Cost`, `Worst` |
@@ -109,8 +109,10 @@ through `canon` (M1.5); upstream transports live in `gateway/snapshot`
 
 ## 2. A request's path through the gateway
 
-`Handler.ServeHTTP`, top to bottom; each step refuses in the caller's
-dialect with a contract code (`Handler.fail`, `appendError`). One `Handler`
+`Handler.ServeHTTP`, top to bottom: it calls `Handler.prepare` (prepare.go)
+for step 2, `callState.begin` for admission, `callState.attempts` for the
+attempts and `callState.respond` for the response (proxy.go). Each step refuses in the caller's dialect with a contract code
+(`Handler.fail`, refuse.go); the accounting is in settle.go. One `Handler`
 per dialect, sharing one `InFlight`, `route.Health`, `guard.Guard` and
 `Reading` (`newMux`).
 
@@ -164,7 +166,7 @@ per dialect, sharing one `InFlight`, `route.Health`, `guard.Guard` and
    attempts and retry budget. A stream commits at its first event
    (`firstEvent.await`); an error event first is a refusal, and a stream
    that fails or ends before any event is uncertain. A caller gone or
-   a sweep's withdrawal releases the attempt's lease, not fails it.
+   a sweep's withdrawal releases the attempt's hold, not fails it.
 10. **Respond** (`callState.respond`, `Handler.relay`): the bytes copied
     as they come, the same bytes through the dialect's usage reader; a
     stream whose provider sent an error event after output is `failed`; a
@@ -232,12 +234,12 @@ the same process; its writes are ordinary compare-and-swap updates.
 | Connections are bounded in all and per address | `guard.Listener` | `TestListener`, `TestListenerMax` |
 | A body claiming more than the scope's ceiling is refused unread; bytes and bodies being read are bounded | `prepare`, `Reading.start`, `Reading.take` | `TestReadingClaimOverCeiling`, `TestReadingBounds`, `TestClaimedLengthNotTrusted`, `TestReadingFlags` |
 | A retry is a failover, before the commit, of an attempt never reached or refused, within the route's attempts and retry budget | `pick`, `callState.retry`, `retryable`, `reachedProvider`, `firstEvent` | `TestAttemptsModel`, `TestFailover`, `TestFinalAttempts`, `TestAttemptBudgets`, `TestFailedBeforeCommit`, `TestNoFirstEvent`, `TestNoRetryPastTheCallsEnd`, `TestFailoverDrill`, `TestReachedProvider` |
-| A cancelled call or a withdrawn one, or an attempt its call ended before it was sent, is no deployment failure | `callState.endUnanswered`, `callState.retry` (lease released) | `TestCallerGoneIsNoFailure`, `TestUnsentAttempt` |
+| A cancelled call or a withdrawn one, or an attempt its call ended before it was sent, is no deployment failure | `callState.endUnanswered`, `callState.retry` (hold released) | `TestCallerGoneIsNoFailure`, `TestUnsentAttempt` |
 | Only an admitted call earns its route retries | `Health.Called` after `admit` | `TestRefusedCallsEarnNoRetries` |
 | A principal at its own per-principal ceiling is told `limit.concurrency` | `Health.AcquireWhy`, `noDeployment` | `TestOwnShareIsTheCallersLimit`, `TestAcquireWhy` |
 | A request's betas never fail over to a deployment that refuses them | `requestBetas`, `incapable`, `pick` | `TestBetaRouting` |
 | A deployment's attempts stay within its ceiling and per-principal ceiling | `Health.Acquire` | `TestCeiling`, `TestPerPrincipalCeiling`, `TestCeilingFailsOver` |
-| Failures eject; an ejected deployment takes one probe; a commit readmits | `Health.eject`, `Lease.Fail`, `Lease.Commit` | `TestEjection`, `TestProbeAbandoned`, `TestReadmissionEndsProbes` |
+| Failures eject; an ejected deployment takes one probe; a commit readmits | `Health.eject`, `Hold.Fail`, `Hold.Commit` | `TestEjection`, `TestProbeAbandoned`, `TestReadmissionEndsProbes` |
 | A failed health check ejects a box; a pass readmits it once its ejection is over | `Checker`, `Health.Checked` | `TestCheckerEjectsAndReadmits` |
 | A route's retries are a share of its calls | `Health.Called`, `Health.Retry` | `TestRetryBudget`, `TestRetryBudgetBoundsTheStorm` |
 | A stream's provider error after output is a failed call | the usage readers' error flag, `callState.respond` | `TestStreamErrorAfterOutput`, `TestBedrockStreamErrorAfterOutput` |
@@ -262,7 +264,7 @@ the same process; its writes are ordinary compare-and-swap updates.
 | A principal's slots are counted per scope | `principalOf`, `Valkey.principalKey` | `TestPrincipalPerScope` |
 | Only an enforced budget refuses; in-flight limits refuse in every mode | `refusing`, `Limiter.track` | `TestBudgetModes` (limit and proxy), `TestBudgetWarning` |
 | A caller leaving during admission leaves no untracked slot | `Limiter.storeContext`, `Limiter.Admit` | `TestCallerLeavesDuringAdmission`, `TestCallerCancelIsNoOutage` |
-| A cancelled call keeps its slot for its tail; a renewal never revives an ended call | `Ticket.Cancel`, `Ticket.EndAt`, `Limiter.reacquired` | `TestLimits`, `TestRenewalDoesNotRevive`, `TestRenewalStopsAtDeadline` |
+| A cancelled call keeps its slot for its tail; a renewal never revives an ended call | `Ticket.Cancel`, `Ticket.EndAt`, `Limiter.reacquired` | `TestInFlightLimits`, `TestRenewalDoesNotRevive`, `TestRenewalStopsAtDeadline` |
 | A gateway starts and serves with Valkey down; outage and grace admissions are waivers; running calls re-registered and calls ended in the outage released on recovery, probed from a second after it began | `DialValkey`, `Limiter.MarkDown`, `admitLocally`, `Limiter.Recover`, `Limiter.Run` | `TestStartWithValkeyDown`, `TestOutage`, `TestOutageCounts`, `TestPoolModeValkeyDown`, `TestEndedDuringOutage`, `TestMarkDownDuringRecover`, `TestRecoveryProbed` |
 | A call is counted in the period it started | `Limiter.period`, `Ticket.Period` | `TestPeriodOfStart`, `TestPeriodRollover`, `TestPeriodIsTheStart` |
 | A request is taken from every rate bucket or none; meters fail open | `Mem.Take`, `Valkey.Take`, `Limiter.Take` | `TestMetersFailOpen`, `TestRateLimits` |

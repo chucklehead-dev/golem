@@ -113,7 +113,7 @@ Here the Lease is one atomic value: who leads, at which epoch. In golem it
 is the state document's fence, claimed by a replica that has first
 acquired the lease object (ADR 0049); how the lease object, the claim and
 rollbacks of either fit together was decided by ADR 0049 (its
-counterexamples are control/publish's TestGuard and control/lead's tests),
+counterexamples are control/publish's TestRegressedOrTamperedRefused and control/lead's tests),
 and this model takes that answer as given.
 
 Leadership is one holder and an epoch that increases

@@ -31,11 +31,11 @@ func TestKnownSpendIsTheSnapshots(t *testing.T) {
 	if got := l.KnownSpend("s"); got != 0 {
 		t.Fatalf("known %d before a snapshot counts the call: the gateway counts no spend", got)
 	}
-	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 9})
+	l.ApplySnapshot(ctx, "s", ScopeSpend{Period: "2026-11", Spend: 9})
 	if _, err := l.Admit(ctx, scopeCall("b", "p1")); err != nil {
 		t.Fatalf("9 < 10 admits: %v", err)
 	}
-	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 10})
+	l.ApplySnapshot(ctx, "s", ScopeSpend{Period: "2026-11", Spend: 10})
 	if _, err := l.Admit(ctx, scopeCall("c", "p2")); !errors.Is(err, ErrBudget) {
 		t.Fatalf("at the budget: %v, want ErrBudget", err)
 	}
@@ -87,7 +87,7 @@ func TestOutage(t *testing.T) {
 		t.Fatalf("%v %v: both admitted and both waivers", err1, err2)
 	}
 	// The snapshot still refuses: it needs no store.
-	g1.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 10})
+	g1.ApplySnapshot(ctx, "s", ScopeSpend{Period: "2026-11", Spend: 10})
 	if _, err := g1.Admit(ctx, scopeCall("c", "p2")); !errors.Is(err, ErrBudget) {
 		t.Fatalf("over the budget during an outage: %v, want ErrBudget", err)
 	}
@@ -206,7 +206,7 @@ func TestPeriodRollover(t *testing.T) {
 	l := New(NewMem())
 	now := time.Date(2026, 11, 30, 23, 59, 0, 0, time.UTC)
 	l.Now = func() time.Time { return now }
-	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 12})
+	l.ApplySnapshot(ctx, "s", ScopeSpend{Period: "2026-11", Spend: 12})
 	if _, err := l.Admit(ctx, scopeCall("late", "p1")); !errors.Is(err, ErrBudget) {
 		t.Fatalf("November is spent (12 of 10): %v", err)
 	}
@@ -227,13 +227,13 @@ func TestPeriodOfStart(t *testing.T) {
 	ctx := t.Context()
 	l := New(NewMem())
 	l.Now = func() time.Time { return time.Date(2026, 12, 1, 0, 0, 0, 2e8, time.UTC) }
-	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 10})
+	l.ApplySnapshot(ctx, "s", ScopeSpend{Period: "2026-11", Spend: 10})
 	c := scopeCall("late", "p1")
 	c.Started = time.Date(2026, 11, 30, 23, 59, 59, 9e8, time.UTC)
 	if _, err := l.Admit(ctx, c); !errors.Is(err, ErrBudget) {
 		t.Fatalf("a call started in November is checked against November: %v", err)
 	}
-	l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 0})
+	l.ApplySnapshot(ctx, "s", ScopeSpend{Period: "2026-11", Spend: 0})
 	tk, err := l.Admit(ctx, c)
 	if err != nil {
 		t.Fatal(err)

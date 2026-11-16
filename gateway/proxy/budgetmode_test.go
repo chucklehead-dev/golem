@@ -64,7 +64,7 @@ spec:
 			// Within the budget (0, then 6,204,000 spent), then over it
 			// (12,408,000 of 10,000,000: 124%).
 			for i := range 3 {
-				lim.ApplySnapshot(t.Context(), "team-a", limit.Known{Period: period.Of(time.Now(), time.UTC), Spend: int64(i) * 6_204_000})
+				lim.ApplySnapshot(t.Context(), "team-a", limit.ScopeSpend{Period: period.Of(time.Now(), time.UTC), Spend: int64(i) * 6_204_000})
 				s.events = anthropicStream(1)
 				w := send(h, alice, stream)
 				want, warning := 200, ""

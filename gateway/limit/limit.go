@@ -25,9 +25,9 @@ var (
 // Call is the call the limiter admits, as admission defines it.
 type Call = admission.Call
 
-// Known is one scope's known spend for one budget period, from the
+// ScopeSpend is one scope's known spend for one budget period, from the
 // snapshot. It is the ledger's spend as golem-control last published it.
-type Known struct {
+type ScopeSpend struct {
 	Period string
 	Spend  int64
 }
@@ -62,7 +62,7 @@ type Limiter struct {
 	openLogged atomic.Int64               // when a rate limit last failed open, logged, in Unix ns
 
 	mu          sync.Mutex
-	spend       map[string]Known        // known spend by scope, from the snapshot
+	spend       map[string]ScopeSpend        // known spend by scope, from the snapshot
 	running     map[string]*Ticket      // this gateway's calls the provider may still be working on
 	tails       map[*Ticket]*time.Timer // cancelled calls' slots, held until their timer fires
 	byPrincipal map[principalIn]int     // running calls counted, so an outage's local check is O(1)
@@ -111,7 +111,7 @@ const maxEndedDown = 1 << 16
 
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
-	return &Limiter{store: store, spend: map[string]Known{},
+	return &Limiter{store: store, spend: map[string]ScopeSpend{},
 		running: map[string]*Ticket{}, tails: map[*Ticket]*time.Timer{}, byPrincipal: map[principalIn]int{}, byScope: map[string]int{},
 		Grace: 2 * renewInterval, StoreTimeout: 250 * time.Millisecond, Location: time.UTC,
 		downed: make(chan struct{}, 1), probeFirst: probeFirst}
@@ -428,7 +428,7 @@ func (t *Ticket) Ended(ctx context.Context) {
 }
 
 // ApplySnapshot takes a snapshot's known spend for a scope.
-func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k Known) {
+func (l *Limiter) ApplySnapshot(_ context.Context, scope string, k ScopeSpend) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.spend[scope] = k

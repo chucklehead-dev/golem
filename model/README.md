@@ -32,7 +32,7 @@ reads them); they are no longer checked or maintained.
 - **leadership.md**: compared placements of the lease and the fence and
   chose ADR 0049's fence placement, which ADR 0053 keeps with one
   replica and no lease. Its counterexamples that still apply are Go
-  tests: control/publish's `TestGuard`, control/state's `TestClaim` and
+  tests: control/publish's `TestRegressedOrTamperedRefused`, control/state's `TestClaim` and
   `TestFenceInvariant`.
 
 Planned (testing.md §4): approvals and grants, when grants are built (M2).

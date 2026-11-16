@@ -63,7 +63,7 @@ func (p *published) gateway(t *testing.T) *Bucket {
 
 func (p *published) publish(t *testing.T) snapshot.Pointer {
 	t.Helper()
-	ptr, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+	ptr, err := p.pub.Publish(t.Context(), state.Fence{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 		return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, ValidUntil: time.Now().Add(time.Hour).UTC()}, nil
 	})
 	if err != nil {
@@ -289,7 +289,7 @@ func TestApplyRetried(t *testing.T) {
 	gw.Holder.Now = func() time.Time { return now }
 	gw.Secrets = mounting{&mounted}
 	gw.ApplyRetry = 30 * time.Second
-	if _, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+	if _, err := p.pub.Publish(t.Context(), state.Fence{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 		s := snap(seq, now.Add(time.Hour))
 		return s, nil
 	}); err != nil {
@@ -317,7 +317,7 @@ func TestLastGoodRetried(t *testing.T) {
 	path := filepath.Join(p.dir, "last-good.json")
 	gw := p.gateway(t)
 	gw.LastGood, gw.Secrets = path, fixed{"a/key": "sk"}
-	if _, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+	if _, err := p.pub.Publish(t.Context(), state.Fence{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 		return snap(seq, time.Now().Add(time.Hour)), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -377,7 +377,7 @@ func TestClockBounds(t *testing.T) {
 	publishAt := func(p *published, at time.Time, lease time.Duration) {
 		t.Helper()
 		p.pub.Now = func() time.Time { return at }
-		if _, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+		if _, err := p.pub.Publish(t.Context(), state.Fence{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 			return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, IssuedAt: at, ValidUntil: at.Add(lease)}, nil
 		}); err != nil {
 			t.Fatal(err)

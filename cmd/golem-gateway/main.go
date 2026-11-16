@@ -400,7 +400,7 @@ func newHealth(holder *snapshot.Holder) (*route.Health, func(context.Context)) {
 func applyKnown(l *limit.Limiter, e *gsnapshot.Entitlements) {
 	ctx := context.Background()
 	for _, s := range e.Scopes {
-		l.ApplySnapshot(ctx, s.ID, limit.Known{Period: s.Period, Spend: s.KnownSpend})
+		l.ApplySnapshot(ctx, s.ID, limit.ScopeSpend{Period: s.Period, Spend: s.KnownSpend})
 	}
 }
 

@@ -118,12 +118,12 @@ spec:
 	// admits calls while it is below, and refuses them once a snapshot
 	// says it is reached.
 	now := period.Of(time.Now(), time.UTC)
-	lim.ApplySnapshot(t.Context(), "team-a", limit.Known{Period: now, Spend: 99_999_999})
+	lim.ApplySnapshot(t.Context(), "team-a", limit.ScopeSpend{Period: now, Spend: 99_999_999})
 	s.events = anthropicStream(1)
 	if w := send(h, alice, stream); w.Code != 200 {
 		t.Fatalf("below the budget: %d %s", w.Code, w.Body)
 	}
-	lim.ApplySnapshot(t.Context(), "team-a", limit.Known{Period: now, Spend: 100_000_000})
+	lim.ApplySnapshot(t.Context(), "team-a", limit.ScopeSpend{Period: now, Spend: 100_000_000})
 	if w := send(h, alice, stream); w.Code != 402 || errorCode(t, w) != "budget.pool_exhausted" {
 		t.Fatalf("after spending the budget: %d %s", w.Code, w.Body)
 	}

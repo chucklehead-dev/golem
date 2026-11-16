@@ -25,10 +25,6 @@ var checked = []string{"cmd", "control", "gateway", "internal", "lib", "test"} /
 
 // excluded are trees not yet held to the rule.
 var excluded = []string{ // read-only
-	// TODO(integrator): remove once the gateway readability branch (the
-	// other agent's, renaming route.Lease to route.Hold) is merged; it
-	// clears gateway/'s citations of stub ADRs and section numbers.
-	"gateway",
 }
 
 // adrList matches an ADR's citation, "ADR" and its number, and lists such

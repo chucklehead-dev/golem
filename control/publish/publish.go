@@ -75,12 +75,6 @@ func (p *Publisher) Record(ctx context.Context) (state.Record, error) {
 	return p.State.Current().Publications[p.Pool], nil
 }
 
-// Lease is the old name of state.Fence.
-//
-// Deprecated: use state.Fence. TODO: remove once gateway/snapshot's tests
-// use state.Fence; they are another branch's to change.
-type Lease = state.Fence
-
 // Publish is PublishAll for one pool. build makes the publication given
 // its sequence number. It is published under fence, from the state
 // version source.

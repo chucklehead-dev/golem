@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chucklehead-dev/golem/control/publish"
+	"github.com/chucklehead-dev/golem/control/state"
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
@@ -25,7 +25,7 @@ func TestPeriodZone(t *testing.T) {
 			p := newPublished(t)
 			gw := p.gateway(t)
 			gw.PeriodZone = tc.gateway
-			if _, err := p.pub.Publish(t.Context(), publish.Lease{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
+			if _, err := p.pub.Publish(t.Context(), state.Fence{Holder: "r1", Epoch: 1}, 1, func(seq uint64) (*snapshot.Snapshot, error) {
 				return &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: seq, PeriodZone: tc.published, ValidUntil: time.Now().Add(time.Hour).UTC()}, nil
 			}); err != nil {
 				t.Fatal(err)

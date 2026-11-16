@@ -43,7 +43,7 @@ func TestBudgetModes(t *testing.T) {
 					t.Fatalf("mode %d: a call within the budget is over", mode)
 				}
 				first.Complete(ctx, 10)
-				l.ApplySnapshot(ctx, "s", Known{Period: "2026-11", Spend: 10}) // the budget, spent
+				l.ApplySnapshot(ctx, "s", ScopeSpend{Period: "2026-11", Spend: 10}) // the budget, spent
 				if tc.outage {
 					st.(*Mem).SetDown(true)
 				}
