@@ -156,11 +156,10 @@ type Store interface {
 	// Since returns an account's spend for the period in the minutes from
 	// since's on (for reports; admission computes it inside Admit).
 	Since(ctx context.Context, account, period string, since time.Time) (int64, error)
-	// Take takes a request and tokens from every rate bucket of ms or from
-	// none (rate.go), reporting the first without room and the wait until
-	// it has; Adjust gives tokens back to each (negative: takes more).
-	Take(ctx context.Context, ms []Meter, tokens int64) (ok bool, over int, wait time.Duration, err error)
-	Adjust(ctx context.Context, ms []Meter, tokens int64) error
+	// Take takes a request from every rate bucket of ms or from none
+	// (rate.go), reporting the first without room and the wait until it
+	// has.
+	Take(ctx context.Context, ms []Meter) (ok bool, over int, wait time.Duration, err error)
 }
 
 // Mem is an in-memory Store: the standalone gateway's, and the tests'. Its

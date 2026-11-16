@@ -75,7 +75,7 @@ spec:
   budgetMicros: 500000000        # this period's budget, micro-units
   defaultMemberCapMicros: 0      # a member's cap without its own; 0: none
   rateLimits:                    # this site's; 0 or unset: none
-    member: {requestsPerMinute: 60, tokensPerMinute: 400000}
+    member: {requestsPerMinute: 60}
     scope: {requestsPerMinute: 600}
   budgetMode: observe            # observe (default) | warn | enforce; caps follow it
   declaredWorstCaseCheck: false

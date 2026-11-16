@@ -27,7 +27,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
-	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/auth"
 	"github.com/chucklehead-dev/golem/gateway/envelope/bedrock"
 	"github.com/chucklehead-dev/golem/gateway/route"
@@ -241,8 +240,8 @@ func (h *Holder) targets(backends []snapshot.Backend, secrets Secrets) (targets 
 			targets[targetKey{b.Name, d.Name}] = &route.Target{Backend: b.Name, Deployment: d.Name, Model: d.Model,
 				URL: u, Transport: rt, Header: header, MaxInFlight: d.MaxInFlight, MaxPerPrincipal: d.MaxInFlightPerPrincipal, Envelope: b.Envelope,
 				HealthPath: d.HealthPath, HealthInterval: time.Duration(d.HealthIntervalMs) * time.Millisecond,
-				Quota: admission.Rate{RequestsPerMinute: d.QuotaRPM, TokensPerMinute: d.QuotaTPM},
-				ID:    b.Name + "/" + d.Name}
+				QuotaRPM: d.QuotaRPM,
+				ID:       b.Name + "/" + d.Name}
 		}
 	}
 	return targets, used, nil

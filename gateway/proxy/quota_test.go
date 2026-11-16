@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chucklehead-dev/golem/gateway/admission"
 	"github.com/chucklehead-dev/golem/gateway/limit"
 	"github.com/chucklehead-dev/golem/gateway/route"
 	gsnap "github.com/chucklehead-dev/golem/gateway/snapshot"
@@ -16,12 +15,12 @@ import (
 )
 
 // quotaRoute is a route over two deployments of one stub each, with quotas.
-func quotaRoute(a, b *stub, qa, qb admission.Rate) *gsnap.Holder {
+func quotaRoute(a, b *stub, qa, qb int64) *gsnap.Holder {
 	u, _ := url.Parse("https://provider.example/v1/messages")
 	return gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(&route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(), MaxAttempts: 2,
 		Pool: []*route.Target{
-			{Backend: "anthropic", Deployment: "a", Model: "claude-sonnet", URL: u, Transport: a, Quota: qa},
-			{Backend: "anthropic", Deployment: "b", Model: "claude-sonnet", URL: u, Transport: b, Quota: qb},
+			{Backend: "anthropic", Deployment: "a", Model: "claude-sonnet", URL: u, Transport: a, QuotaRPM: qa},
+			{Backend: "anthropic", Deployment: "b", Model: "claude-sonnet", URL: u, Transport: b, QuotaRPM: qb},
 		}})})
 }
 
@@ -39,8 +38,7 @@ func quotaCall(h *Handler) *httptest.ResponseRecorder {
 // Retry-After, no provider called.
 func TestQuotaFailover(t *testing.T) {
 	a, b := &stub{events: anthropicStream(1)}, &stub{events: anthropicStream(1)}
-	one := admission.Rate{RequestsPerMinute: 1}
-	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, b, one, one), Meters: limit.New(limit.NewMem())}
+	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, b, 1, 1), Meters: limit.New(limit.NewMem())}
 	if w := quotaCall(h); w.Code != 200 || a.got == nil || b.got != nil {
 		t.Fatalf("the first call: %d, a %v b %v; want a's", w.Code, a.got != nil, b.got != nil)
 	}
@@ -55,25 +53,6 @@ func TestQuotaFailover(t *testing.T) {
 	}
 	if a.got != nil || b.got != nil {
 		t.Fatal("a provider called past its quota")
-	}
-}
-
-// TestQuotaTokens: an attempt is charged its estimate (bytes over four
-// and max_tokens) and corrected to its usage when it ends: here 2,052
-// tokens (uncached input and output, not cache reads) of a 3,000 share,
-// so the second call is admitted into debt and the third refused. Without
-// the correction three estimates of a few dozen tokens would all fit.
-func TestQuotaTokens(t *testing.T) {
-	a := &stub{events: anthropicStream(1)}
-	q := admission.Rate{TokensPerMinute: 3000}
-	h := &Handler{Dialect: AnthropicMessages, MaxBody: 1 << 20, Snapshots: quotaRoute(a, &stub{}, q, q), Meters: limit.New(limit.NewMem())}
-	h.Snapshots = gsnap.Static(&gsnap.Compiled{Routes: route.NewTable(&route.Route{Alias: "claude", Dialect: AnthropicMessages.Name(),
-		Pool: []*route.Target{{Backend: "anthropic", Deployment: "a", Model: "claude-sonnet", URL: upstreamURL, Transport: a, Quota: q}}})})
-	for i, want := range []int{200, 200, http.StatusTooManyRequests} {
-		a.events = anthropicStream(1)
-		if w := quotaCall(h); w.Code != want {
-			t.Fatalf("call %d: %d %s, want %d", i, w.Code, w.Body, want)
-		}
 	}
 }
 

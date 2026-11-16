@@ -39,9 +39,9 @@ type Limits struct {
 	BudgetMicros    int64
 	MemberCapMicros int64 // the member's own, or the scope's default; 0: none
 	KeyCapMicros    int64 // 0: none
-	// MemberRate and ScopeRate are the scope's rate limits: each member's,
-	// and the whole scope's (PRD §5.5); zero: none.
-	MemberRate, ScopeRate  admission.Rate
+	// MemberRPM and ScopeRPM are the scope's rate limits, requests a
+	// minute: each member's, and the whole scope's (PRD §5.5); 0: none.
+	MemberRPM, ScopeRPM    int64
 	BudgetMode             admission.BudgetMode // the snapshot's; an unknown one is enforce
 	DeclaredWorstCaseCheck bool
 	PrincipalInFlight      int
@@ -143,8 +143,7 @@ func compileScopes(ss []snapshot.Scope) map[string]*rights {
 			r.models[a] = true
 		}
 		r.limits.MemberCapMicros = s.DefaultMemberCapMicros
-		r.limits.MemberRate = admission.Rate{RequestsPerMinute: s.MemberRPM, TokensPerMinute: s.MemberTPM}
-		r.limits.ScopeRate = admission.Rate{RequestsPerMinute: s.ScopeRPM, TokensPerMinute: s.ScopeTPM}
+		r.limits.MemberRPM, r.limits.ScopeRPM = s.MemberRPM, s.ScopeRPM
 		for _, m := range s.Members {
 			if m.CapMicros > 0 {
 				if r.caps == nil {

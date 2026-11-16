@@ -128,31 +128,23 @@ local:     /livez /readyz /healthz /startupz, pprof, the snapshot hash (admin po
    budget mode (org-model.md §4.2). Refusals are 402 (budgets and caps)
    or 429 (limits).
 
-   A call is charged its scope's **rate limits** once, before admission
-   (a ScopePolicy's `rateLimits: {member: {requestsPerMinute,
-   tokensPerMinute}, scope: {...}}`, PRD §5.5): a bucket per member and
-   one for the scope, taken together or not at all, each as the quota
-   buckets below (a request, estimated tokens, corrected at the end). Past
-   either, `limit.rate` with a Retry-After, naming which, in every budget
-   mode (a limit, not a budget). One Valkey round trip per call on a
-   scope with rate limits; failing open with Valkey down.
-
-   Each **attempt** is charged its deployment's share of the provider's
-   quota (a Deployment's `quota: {requestsPerMinute, tokensPerMinute}`,
-   the site's share, PRD §9.2): a bucket per deployment in Valkey, shared
-   by the site's gateways, refilled continuously and holding a minute's
-   worth. An attempt takes a request and an estimate of its tokens (the
-   input's bytes over four, plus `max_tokens`), admitted while the bucket
-   is not in debt, so a large request is never starved and the next waits
-   for its debt; the estimate is corrected to the attempt's usage
-   (uncached input, cache writes and output) when it ends, and given back
-   whole for one refused before any output. A deployment at its share is
-   passed over as one at its ceiling is (model/attempts.md's
-   `QUOTA_PER_ATTEMPT`); a call that finds every deployment at its share is
-   refused `limit.provider_quota` with the earliest Retry-After. One more
-   Valkey round trip per attempt on a deployment with a quota; with Valkey
-   unreachable the check fails open (PRD §5.5), logged once a minute, the
-   provider's own 429 the backstop.
+   A call takes a request from its scope's **rate limits** once, before
+   admission (a ScopePolicy's `rateLimits: {member: {requestsPerMinute},
+   scope: {requestsPerMinute}}`, PRD §5.5), and each **attempt** one from
+   its deployment's share of the provider's quota (a Deployment's
+   `quota: {requestsPerMinute}`, the site's share, PRD §9.2). Each is a
+   bucket in Valkey, shared by the site's gateways, refilled continuously
+   and holding a minute's worth; a call's member and scope buckets are
+   taken together or not at all. Requests only: a provider's token limits
+   are its 429s, which the attempt loop fails over on, and spend is the
+   budgets' (ADR 0044). Past a rate limit, `limit.rate` with a
+   Retry-After, naming which, in every budget mode. A deployment at its
+   share is passed over as one at its ceiling is (model/attempts.md's
+   `QUOTA_PER_ATTEMPT`); a call that finds every deployment at its share
+   is refused `limit.provider_quota` with the earliest Retry-After. One
+   Valkey round trip per call with rate limits, and per attempt on a
+   deployment with a quota; with Valkey unreachable they fail open (PRD
+   §5.5), logged once a minute.
 
    The proxy sees admission only as `gateway/admission`: `Admitter.Admit`
    returns a `Ticket`, ended exactly once by `Complete` (the cost) or

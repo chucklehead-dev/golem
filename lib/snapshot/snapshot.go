@@ -216,10 +216,9 @@ type Deployment struct {
 	// (lib/api's HealthCheck), its default filled in; "": none.
 	HealthPath       string `json:"healthPath,omitempty"`
 	HealthIntervalMs int64  `json:"healthIntervalMs,omitempty"`
-	// QuotaRPM and QuotaTPM are the site's share of the provider's quota
-	// (lib/api's Quota); 0: none.
+	// QuotaRPM is the site's share of the provider's quota, requests a
+	// minute (lib/api's Quota); 0: none.
 	QuotaRPM int64 `json:"quotaRPM,omitempty"`
-	QuotaTPM int64 `json:"quotaTPM,omitempty"`
 }
 
 // Route is an alias and its pool.

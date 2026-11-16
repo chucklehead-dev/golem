@@ -126,13 +126,11 @@ type Deployment struct {
 	Quota *Rate `json:"quota,omitempty"`
 }
 
-// Rate is a per-minute allowance: requests, and tokens (uncached input,
-// cache writes and output; a request is charged its input's bytes over
-// four and its max_tokens, corrected to its usage when it ends). 0 in
-// either: no limit on it.
+// Rate is a per-minute allowance of requests; 0: no limit. Requests only:
+// a provider's token limits are its 429s to enforce, which golem fails
+// over on, and spend is budgets' to account (ADR 0044).
 type Rate struct {
 	RequestsPerMinute int64 `json:"requestsPerMinute,omitempty"`
-	TokensPerMinute   int64 `json:"tokensPerMinute,omitempty"`
 }
 
 // HealthCheck is a deployment's active check: a GET of Path on its URL's

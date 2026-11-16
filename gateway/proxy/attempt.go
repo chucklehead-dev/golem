@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/chucklehead-dev/golem/gateway/admission"
-	"github.com/chucklehead-dev/golem/gateway/canon"
 	"github.com/chucklehead-dev/golem/gateway/route"
 )
 
@@ -30,9 +29,9 @@ func (h *Handler) health() *route.Health {
 // is a failover or nothing, and a pool of one makes one attempt. It marks
 // the one it takes in tried. With none, it returns the earliest time one
 // may take an attempt again (zero: unknown). A deployment its health takes
-// must also have quota for the attempt (q, nil for none): one at its quota
-// is passed over, as one at its ceiling is, and left untried.
-func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, q *meterHold) (*route.Target, *route.Lease, time.Time) {
+// must also have quota for the attempt (quota; nil: none checked): one at
+// its quota is passed over, as one at its ceiling is, and left untried.
+func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, quota func(*route.Target) (bool, time.Time)) (*route.Target, *route.Lease, time.Time) {
 	var earliest time.Time
 	later := func(at time.Time) {
 		if !at.IsZero() && (earliest.IsZero() || at.Before(earliest)) {
@@ -48,7 +47,11 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, q *
 			later(at)
 			continue
 		}
-		if ok, at := q.take(t); !ok {
+		if quota == nil {
+			tried[i] = true
+			return t, l, time.Time{}
+		}
+		if ok, at := quota(t); !ok {
 			l.Release() // not attempted: the deployment as it was
 			later(at)
 			continue
@@ -59,71 +62,19 @@ func pick(hl *route.Health, rt *route.Route, tried []bool, principal string, q *
 	return nil, nil, earliest
 }
 
-// meterHold is what a request holds of meters (admission.Meters): a
-// call's rate limits, or an attempt's deployment's quota share (PRD §5.5,
-// §9.2). Each took a request and the tokens estimated (the input's bytes
-// over four, and max_tokens), corrected when the request ends: to its
-// usage, or given back whole for an attempt refused before any output.
-// Its zero value, or one with no Meters, holds nothing.
-type meterHold struct {
-	m      admission.Meters
-	ctx    context.Context
-	tokens int64
-	held   []admission.Meter // nil: none
-	one    [1]admission.Meter
-	full   bool         // a deployment was passed over at its quota
-	usage  *canon.Usage // the call's usage, once there is a call
-}
-
-// takeAll takes ms (none limited: nothing), reporting the first without
-// room and when it will have.
-func (h *meterHold) takeAll(ms []admission.Meter) (bool, int, time.Time) {
-	if h == nil || h.m == nil || len(ms) == 0 {
-		return true, 0, time.Time{}
-	}
-	ok, over, wait := h.m.Take(h.ctx, ms, h.tokens)
-	if !ok {
-		return false, over, time.Now().Add(wait)
-	}
-	h.held = ms
-	return true, 0, time.Time{}
-}
-
-// take takes t's quota share, if it has one, for an attempt.
-func (h *meterHold) take(t *route.Target) (bool, time.Time) {
-	if h == nil || t.Quota == (admission.Rate{}) {
+// takeQuota takes an attempt's request from t's quota share, if it has
+// one (PRD §9.2), reporting when the share has room again if not; it
+// records in full that a deployment was passed over at its quota.
+func takeQuota(ctx context.Context, m admission.Meters, t *route.Target, full *bool) (bool, time.Time) {
+	if m == nil || t.QuotaRPM == 0 {
 		return true, time.Time{}
 	}
-	h.one[0] = admission.Meter{Key: admission.QuotaMeter(t.Key()), Rate: t.Quota}
-	ok, _, at := h.takeAll(h.one[:])
+	ok, _, wait := m.Take(ctx, []admission.Meter{{Key: admission.QuotaMeter(t.Key()), PerMinute: t.QuotaRPM}})
 	if !ok {
-		h.full = true
+		*full = true
+		return false, time.Now().Add(wait)
 	}
-	return ok, at
-}
-
-// refund gives the held attempt's tokens back: it was refused, or never
-// reached its provider. Its request stays counted, as the provider's own
-// meter counts it.
-func (h *meterHold) refund() { h.correct(0) }
-
-// done settles the hold when the request is over: to the usage of its
-// last attempt, or, before any attempt began, nothing used.
-func (h *meterHold) done() {
-	var used int64
-	if h != nil && h.usage != nil {
-		u := h.usage
-		used = u.Input + u.CacheWrite + u.Output // what providers meter: cache reads are not
-	}
-	h.correct(used)
-}
-
-func (h *meterHold) correct(used int64) {
-	if h == nil || h.held == nil {
-		return
-	}
-	h.m.Adjust(h.ctx, h.held, h.tokens-used)
-	h.held = nil
+	return true, time.Time{}
 }
 
 // retryable reports a provider's status for a request it refused before

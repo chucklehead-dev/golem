@@ -745,15 +745,15 @@ func TestMetersFailOpen(t *testing.T) {
 	ctx := t.Context()
 	st := NewMem()
 	l := New(st)
-	q := []Meter{{Key: admission.QuotaMeter("anthropic/a"), Rate: Rate{RequestsPerMinute: 1}}}
-	if ok, _, _ := l.Take(ctx, q, 0); !ok {
+	q := []Meter{{Key: admission.QuotaMeter("anthropic/a"), PerMinute: 1}}
+	if ok, _, _ := l.Take(ctx, q); !ok {
 		t.Fatal("the first request of the minute")
 	}
-	if ok, _, wait := l.Take(ctx, q, 0); ok || wait <= 0 {
+	if ok, _, wait := l.Take(ctx, q); ok || wait <= 0 {
 		t.Fatalf("the second: %v %v, want refused with a wait", ok, wait)
 	}
 	st.SetDown(true)
-	if ok, _, _ := l.Take(ctx, q, 0); !ok || !l.Down() {
+	if ok, _, _ := l.Take(ctx, q); !ok || !l.Down() {
 		t.Fatalf("the store unreachable: %v, down %v; want admitted, and the limiter down", ok, l.Down())
 	}
 }

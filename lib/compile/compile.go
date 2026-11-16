@@ -267,9 +267,9 @@ func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder)
 		if d.MaxInFlightPerPrincipal < 0 {
 			add(obj, at+".maxInFlightPerPrincipal", "must not be negative (0: no ceiling)")
 		}
-		rpm, tpm := quota(obj, at, d.Quota, add)
+		rpm := quota(obj, at, d.Quota, add)
 		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, Region: r, MaxInFlight: max(d.MaxInFlight, 0),
-			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), QuotaRPM: rpm, QuotaTPM: tpm})
+			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), QuotaRPM: rpm})
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out
@@ -282,19 +282,16 @@ var regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`) // read-only
 // deployments validates a Backend's spec.deployments and compiles them,
 // sorted by name. Each is compiled, problems or not, so that the catalog
 // knows it.
-// quota validates a deployment's quota share, giving its requests and
-// tokens a minute (0, 0 for none).
-func quota(obj, at string, q *v1.Rate, add adder) (int64, int64) {
+// quota validates a deployment's quota share, giving its requests a
+// minute (0 for none).
+func quota(obj, at string, q *v1.Rate, add adder) int64 {
 	if q == nil {
-		return 0, 0
+		return 0
 	}
 	if q.RequestsPerMinute < 0 {
 		add(obj, at+".quota.requestsPerMinute", "must not be negative (0: no limit)")
 	}
-	if q.TokensPerMinute < 0 {
-		add(obj, at+".quota.tokensPerMinute", "must not be negative (0: no limit)")
-	}
-	return max(q.RequestsPerMinute, 0), max(q.TokensPerMinute, 0)
+	return max(q.RequestsPerMinute, 0)
 }
 
 // healthCheck validates a deployment's active check, giving its path and
@@ -340,9 +337,9 @@ func deployments(obj string, ds []v1.Deployment, standalone bool, add adder) []s
 			add(obj, at+".maxInFlightPerPrincipal", "must not be negative (0: no ceiling)")
 		}
 		path, every := healthCheck(obj, at, d.HealthCheck, add)
-		rpm, tpm := quota(obj, at, d.Quota, add)
+		rpm := quota(obj, at, d.Quota, add)
 		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, MaxInFlight: max(d.MaxInFlight, 0),
-			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), HealthPath: path, HealthIntervalMs: every, QuotaRPM: rpm, QuotaTPM: tpm})
+			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), HealthPath: path, HealthIntervalMs: every, QuotaRPM: rpm})
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out

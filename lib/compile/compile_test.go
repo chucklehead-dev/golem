@@ -250,11 +250,11 @@ func TestLocalBox(t *testing.T) {
 	box := func(d string) string {
 		return strings.Replace(good, "{name: sonnet, url: \"https://api.anthropic.com/v1/messages\", model: claude-sonnet-4-5}", "{name: sonnet, url: \"https://api.anthropic.com/v1/messages\", model: claude-sonnet-4-5, "+d+"}", 1)
 	}
-	s, err := Compile(objects(t, map[string]string{"golem.yaml": box("maxInFlightPerPrincipal: 2, healthCheck: {path: /v1/models}, quota: {requestsPerMinute: 50, tokensPerMinute: 80000}")}), published)
+	s, err := Compile(objects(t, map[string]string{"golem.yaml": box("maxInFlightPerPrincipal: 2, healthCheck: {path: /v1/models}, quota: {requestsPerMinute: 50}")}), published)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := s.Backends[0].Deployments[0]; d.MaxInFlightPerPrincipal != 2 || d.HealthPath != "/v1/models" || d.HealthIntervalMs != 10000 || d.QuotaRPM != 50 || d.QuotaTPM != 80000 {
+	if d := s.Backends[0].Deployments[0]; d.MaxInFlightPerPrincipal != 2 || d.HealthPath != "/v1/models" || d.HealthIntervalMs != 10000 || d.QuotaRPM != 50 {
 		t.Fatalf("%+v", d)
 	}
 	for _, c := range []struct{ name, d, want string }{
@@ -262,7 +262,7 @@ func TestLocalBox(t *testing.T) {
 		{"interval", "healthCheck: {path: /health, intervalSeconds: -5}", "spec.deployments[0].healthCheck.intervalSeconds: must not be negative"},
 		{"path", "healthCheck: {path: v1/models}", `spec.deployments[0].healthCheck.path: "v1/models": give a path`},
 		{"query", "healthCheck: {path: \"/health?x=1\"}", `spec.deployments[0].healthCheck.path: "/health?x=1"`},
-		{"quota", "quota: {tokensPerMinute: -1}", "spec.deployments[0].quota.tokensPerMinute: must not be negative"},
+		{"quota", "quota: {requestsPerMinute: -1}", "spec.deployments[0].quota.requestsPerMinute: must not be negative"},
 	} {
 		_, err := Compile(objects(t, map[string]string{"golem.yaml": box(c.d)}), published)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
