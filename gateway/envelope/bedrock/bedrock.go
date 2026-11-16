@@ -93,7 +93,7 @@ func EndpointFor(region string) *url.URL {
 // RoundTrip rewrites the request for Bedrock, signs it, and sends it; a
 // streamed answer comes back as SSE, an error as Anthropic's error shape.
 func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readBody(r)
 	r.Body.Close()
 	if err != nil {
 		return nil, envelope.NotSent(err)
@@ -271,70 +271,6 @@ func betas(h http.Header) []string {
 		}
 	}
 	return out
-}
-
-// rewrite is a Messages body as Bedrock takes it: model and stream taken
-// out (the model is the path's, streaming the action's), anthropic_version
-// set, and the header's betas added as anthropic_beta (after the body's
-// own, if it has any). It reports whether the request streams.
-func rewrite(body []byte, headerBetas []string) (out []byte, stream bool, err error) {
-	dec := jsontext.NewDecoder(bytes.NewReader(body))
-	var buf bytes.Buffer
-	enc := jsontext.NewEncoder(&buf)
-	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
-		return nil, false, errors.New("not a JSON object")
-	}
-	enc.WriteToken(jsontext.BeginObject)
-	hasVersion := false
-	var bodyBetas []string
-	for dec.PeekKind() != '}' {
-		tok, err := dec.ReadToken()
-		if err != nil {
-			return nil, false, err
-		}
-		name := tok.String() // a token is valid only until the next read
-		v, err := dec.ReadValue()
-		if err != nil {
-			return nil, false, err
-		}
-		switch name {
-		case "model":
-			continue
-		case "stream":
-			stream = string(v) == "true"
-			continue
-		case "anthropic_beta":
-			bs, ok := stringList(v)
-			if !ok {
-				return nil, false, errors.New("anthropic_beta is not a list of strings")
-			}
-			bodyBetas = bs
-			continue
-		case "anthropic_version":
-			hasVersion = true
-		}
-		enc.WriteToken(jsontext.String(name))
-		enc.WriteValue(v)
-	}
-	if _, err := dec.ReadToken(); err != nil {
-		return nil, false, err
-	}
-	if !hasVersion {
-		enc.WriteToken(jsontext.String("anthropic_version"))
-		enc.WriteToken(jsontext.String(Version))
-	}
-	if all := append(bodyBetas, headerBetas...); len(all) > 0 {
-		enc.WriteToken(jsontext.String("anthropic_beta"))
-		enc.WriteToken(jsontext.BeginArray)
-		for _, b := range all {
-			enc.WriteToken(jsontext.String(b))
-		}
-		enc.WriteToken(jsontext.EndArray)
-	}
-	if err := enc.WriteToken(jsontext.EndObject); err != nil {
-		return nil, false, err
-	}
-	return bytes.TrimSpace(buf.Bytes()), stream, nil
 }
 
 // stringList is a JSON array of strings, or not ok.
