@@ -579,8 +579,7 @@ func (c *callState) respond(ex *exchange, resp *http.Response, upBody io.Reader,
 			if res.Terminated {
 				ev = errorEvent(h.Dialect, ended.code, ended.message(), c.reqIDs)
 			}
-			w.Write(ev)
-			http.NewResponseController(w).Flush()
+			ex.send(ev, true) // bounded by the stall, as every write to the caller
 		}
 		panic(http.ErrAbortHandler)
 	}
