@@ -120,6 +120,3 @@ func (t *Table) Targets() []*Target {
 	}
 	return slices.SortedFunc(maps.Values(seen), func(a, b *Target) int { return strings.Compare(a.Key(), b.Key()) })
 }
-
-// Len is the number of routes.
-func (t *Table) Len() int { return len(t.byAlias) }

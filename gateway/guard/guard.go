@@ -27,7 +27,7 @@ type Guard struct {
 	// gateway sets to the caller's address, its last comma-separated value
 	// taken (X-Forwarded-For, appended by the proxy last). Unset, the
 	// source is the connection's address: behind a sidecar every caller's
-	// is the sidecar's, and the budgets are the pool's.
+	// is the sidecar's, and the budgets are this gateway's.
 	SourceHeader string
 	// Rate and Burst are each source's requests before authentication; 0:
 	// no limit.
@@ -123,7 +123,7 @@ func (g *Guard) Admit(src string) *Refusal {
 	now := g.now()
 	s := g.source(src, now)
 	if g.FailRate > 0 {
-		s.fail.fill(now, g.FailRate, cmp.Or(g.FailBurst, g.FailRate))
+		g.fillFail(s, now)
 		if s.fail.tokens < 1 {
 			return &Refusal{Msg: "too many failed authentications from this address: check the key or token; retry later", RetryAfter: s.fail.wait(g.FailRate)}
 		}
@@ -147,8 +147,13 @@ func (g *Guard) Failed(src string) {
 	defer g.mu.Unlock()
 	now := g.now()
 	s := g.source(src, now)
-	s.fail.fill(now, g.FailRate, cmp.Or(g.FailBurst, g.FailRate))
+	g.fillFail(s, now)
 	s.fail.tokens = max(s.fail.tokens-1, 0)
+}
+
+// fillFail brings s's failures bucket to now.
+func (g *Guard) fillFail(s *source, now time.Time) {
+	s.fail.fill(now, g.FailRate, cmp.Or(g.FailBurst, g.FailRate))
 }
 
 // source is src's buckets; at MaxSources, once a second, the sources whose
@@ -161,17 +166,18 @@ func (g *Guard) source(src string, now time.Time) *source {
 	if g.sources == nil {
 		g.sources = map[string]*source{}
 	}
-	if len(g.sources) >= cmp.Or(g.MaxSources, 65536) {
+	limit := cmp.Or(g.MaxSources, 65536)
+	if len(g.sources) >= limit {
 		if now.Sub(g.swept) < time.Second {
 			return &g.overflow
 		}
 		g.swept = now
 		for k, s := range g.sources {
-			if g.full(&s.req, now, g.Rate, g.Burst) && g.full(&s.fail, now, g.FailRate, g.FailBurst) {
+			if s.req.full(now, g.Rate, g.Burst) && s.fail.full(now, g.FailRate, g.FailBurst) {
 				delete(g.sources, k)
 			}
 		}
-		if len(g.sources) >= cmp.Or(g.MaxSources, 65536) {
+		if len(g.sources) >= limit {
 			return &g.overflow
 		}
 	}
@@ -180,8 +186,8 @@ func (g *Guard) source(src string, now time.Time) *source {
 	return s
 }
 
-// full reports whether b would be full now.
-func (g *Guard) full(b *bucket, now time.Time, rate, burst float64) bool {
+// full reports whether b would be full now (a bucket with no rate is).
+func (b *bucket) full(now time.Time, rate, burst float64) bool {
 	if rate <= 0 || b.at.IsZero() {
 		return true
 	}

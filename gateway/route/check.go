@@ -3,6 +3,7 @@ package route
 import (
 	"context"
 	"io"
+	"maps"
 	"net/http"
 	"sync"
 	"time"
@@ -96,9 +97,7 @@ func (c *Checker) check(ctx context.Context, t *Target) bool {
 	if err != nil {
 		return false
 	}
-	for k, v := range t.Header {
-		req.Header[k] = v
-	}
+	maps.Copy(req.Header, t.Header)
 	rt := t.Transport
 	if rt == nil {
 		rt = http.DefaultTransport

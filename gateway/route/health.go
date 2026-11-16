@@ -139,10 +139,25 @@ func (l *Lease) Commit() {
 		return
 	}
 	l.done = true
-	if !l.d.until.IsZero() {
-		l.d.admitted++
+	l.d.readmit()
+}
+
+// readmit forgets d's failures and ends its ejection and any probe.
+func (d *deployment) readmit() {
+	if !d.until.IsZero() {
+		d.admitted++
 	}
-	l.d.fails, l.d.until, l.d.ejections, l.d.probing = 0, time.Time{}, 0, false
+	d.fails, d.until, d.ejections, d.probing = 0, time.Time{}, 0, false
+}
+
+// eject ejects d from now: for its next ejection's length (doubling each
+// time in a row, up to MaxEjection), or for wait if that is longer.
+func (h *Health) eject(d *deployment, now time.Time, wait time.Duration) {
+	e := cmp.Or(h.Ejection, 10*time.Second) << min(d.ejections, 10)
+	e = min(e, cmp.Or(h.MaxEjection, 5*time.Minute))
+	d.until = now.Add(max(e, wait))
+	d.ejections++
+	d.fails = 0
 }
 
 // Fail reports the attempt failed before it committed, the provider's
@@ -160,11 +175,7 @@ func (l *Lease) Fail(retryAfter time.Duration) {
 			d.probing = false
 		}
 		if probe || d.fails >= cmp.Or(l.h.EjectAfter, 3) {
-			e := cmp.Or(l.h.Ejection, 10*time.Second) << min(d.ejections, 10)
-			e = min(e, cmp.Or(l.h.MaxEjection, 5*time.Minute))
-			d.until = l.h.now().Add(max(e, retryAfter))
-			d.ejections++
-			d.fails = 0
+			l.h.eject(d, l.h.now(), retryAfter)
 		}
 	}
 	l.release()
@@ -210,14 +221,9 @@ func (h *Health) Checked(t *Target, ok bool) {
 	ejected := !d.until.IsZero()
 	switch {
 	case ok && ejected && !now.Before(d.until):
-		d.admitted++
-		d.fails, d.until, d.ejections, d.probing = 0, time.Time{}, 0, false
+		d.readmit()
 	case !ok && (!ejected || !now.Before(d.until)):
-		e := cmp.Or(h.Ejection, 10*time.Second) << min(d.ejections, 10)
-		e = min(e, cmp.Or(h.MaxEjection, 5*time.Minute))
-		d.until = now.Add(e)
-		d.ejections++
-		d.fails = 0
+		h.eject(d, now, 0)
 	}
 }
 

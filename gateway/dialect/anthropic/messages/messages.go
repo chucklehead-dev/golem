@@ -112,11 +112,8 @@ func (r *Request) Scan(body []byte) error {
 			if err != nil {
 				return err
 			}
-			switch v.Kind() {
-			case 't':
-				r.Stream = true
-			case 'f', 'n': // null: the default, not streamed
-			default:
+			var ok bool
+			if r.Stream, ok = jsonscan.Bool(v); !ok {
 				return ErrField
 			}
 		case "max_tokens":

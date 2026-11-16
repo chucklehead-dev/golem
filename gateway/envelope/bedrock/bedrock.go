@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -57,7 +58,8 @@ type Transport struct {
 	// Now is the signing clock (tests set it).
 	Now func() time.Time
 
-	signer *v4.Signer
+	signerOnce sync.Once // RoundTrip is concurrent
+	signer     *v4.Signer
 }
 
 // MetadataHeader carries a request's metadata to Bedrock's invocation
@@ -107,10 +109,7 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		// Anthropic's token count is Bedrock's CountTokens, over the body
 		// InvokeModel would take (which needs max_tokens; a count's has
 		// none), base64 inside its input.
-		action, stream = "count-tokens", false
-		if body, err = countBody(body); err != nil {
-			return nil, err
-		}
+		action, stream, body = "count-tokens", false, countBody(body)
 	case stream:
 		action = "invoke-with-response-stream"
 	}
@@ -118,8 +117,7 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// inference profile's ARN has colons and slashes); the signature is
 	// over the path as sent.
 	u := *t.Endpoint
-	base := strings.TrimSuffix(u.Path, "/")
-	u.Path = base + "/model/" + t.Model + "/" + action
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/model/" + t.Model + "/" + action
 	u.RawPath = strings.TrimSuffix(t.Endpoint.EscapedPath(), "/") + "/model/" + modelSegment(t.Model) + "/" + action
 	up := r.Clone(r.Context())
 	up.URL, up.Host = &u, u.Host
@@ -171,9 +169,7 @@ func (t *Transport) sign(ctx context.Context, up *http.Request, body []byte) err
 	if err != nil {
 		return fmt.Errorf("bedrock: AWS credentials: %w", err)
 	}
-	if t.signer == nil {
-		t.signer = v4.NewSigner()
-	}
+	t.signerOnce.Do(func() { t.signer = v4.NewSigner() })
 	now := time.Now
 	if t.Now != nil {
 		now = t.Now
@@ -189,13 +185,13 @@ func modelSegment(model string) string {
 
 // countBody is CountTokens' request for an InvokeModel body: the body,
 // with a max_tokens if it has none, base64 in input.invokeModel.body.
-func countBody(invoke []byte) ([]byte, error) {
+func countBody(invoke []byte) []byte {
 	if !hasMember(invoke, "max_tokens") {
 		invoke = append(bytes.TrimSuffix(bytes.TrimSpace(invoke), []byte("}")), []byte(`,"max_tokens":1}`)...)
 	}
 	b := []byte(`{"input":{"invokeModel":{"body":"`)
 	b = base64.StdEncoding.AppendEncode(b, invoke)
-	return append(b, `"}}}`...), nil
+	return append(b, `"}}}`...)
 }
 
 // hasMember reports whether a JSON object has a top-level member.
@@ -250,12 +246,16 @@ func countAnswer(resp *http.Response) (*http.Response, error) {
 	if n < 0 {
 		return nil, fmt.Errorf("bedrock: a token count with no inputTokens: %.200s", raw)
 	}
-	body := []byte(`{"input_tokens":` + strconv.FormatInt(n, 10) + "}")
+	return withJSON(resp, []byte(`{"input_tokens":`+strconv.FormatInt(n, 10)+"}")), nil
+}
+
+// withJSON is resp with body, a JSON document, as its body.
+func withJSON(resp *http.Response, body []byte) *http.Response {
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	resp.Header.Set("Content-Type", "application/json")
-	return resp, nil
+	return resp
 }
 
 // betas are the request's anthropic-beta values, each comma list split.
@@ -302,8 +302,8 @@ func rewrite(body []byte, headerBetas []string) (out []byte, stream bool, err er
 			stream = string(v) == "true"
 			continue
 		case "anthropic_beta":
-			var bs []string
-			if err := jsonUnmarshalStrings(v, &bs); err != nil {
+			bs, ok := stringList(v)
+			if !ok {
 				return nil, false, errors.New("anthropic_beta is not a list of strings")
 			}
 			bodyBetas = bs
@@ -335,19 +335,20 @@ func rewrite(body []byte, headerBetas []string) (out []byte, stream bool, err er
 	return bytes.TrimSpace(buf.Bytes()), stream, nil
 }
 
-func jsonUnmarshalStrings(v jsontext.Value, out *[]string) error {
+// stringList is a JSON array of strings, or not ok.
+func stringList(v jsontext.Value) (out []string, ok bool) {
 	dec := jsontext.NewDecoder(bytes.NewReader(v))
 	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '[' {
-		return errors.New("not a list")
+		return nil, false
 	}
 	for dec.PeekKind() != ']' {
 		tok, err := dec.ReadToken()
 		if err != nil || tok.Kind() != '"' {
-			return errors.New("not a string")
+			return nil, false
 		}
-		*out = append(*out, tok.String())
+		out = append(out, tok.String())
 	}
-	return nil
+	return out, true
 }
 
 // errorType is an Anthropic error type for a Bedrock exception: what the
@@ -376,16 +377,8 @@ func anthropicError(resp *http.Response) (*http.Response, error) {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
 	exception := resp.Header.Get("X-Amzn-Errortype")
-	if i := strings.IndexAny(exception, ":"); i >= 0 {
-		exception = exception[:i]
-	}
-	msg := bedrockMessage(raw)
-	body := errorJSON(errorType(exception), msg)
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	resp.ContentLength = int64(len(body))
-	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	resp.Header.Set("Content-Type", "application/json")
-	return resp, nil
+	exception, _, _ = strings.Cut(exception, ":")
+	return withJSON(resp, errorJSON(errorType(exception), bedrockMessage(raw))), nil
 }
 
 // bedrockMessage is a Bedrock error body's message, or the body itself.
