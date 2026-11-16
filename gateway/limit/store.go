@@ -114,7 +114,7 @@ func (m *Mem) Admit(_ context.Context, a Admission) (Outcome, error) {
 func (m *Mem) acquire(s Slot, principalLimit, scopeLimit int) bool {
 	byPrincipal, byScope := 0, 0
 	for _, o := range m.slots {
-		if o.Principal == s.Principal {
+		if o.Principal == s.Principal && o.Scope == s.Scope { // a principal's limit is per scope
 			byPrincipal++
 		}
 		if o.Scope == s.Scope {

@@ -56,6 +56,26 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatal("the re-registered slots count against the scope")
 		}
 	})
+	t.Run("a principal's limit is per scope", func(t *testing.T) {
+		// p1's call in s2 does not count against its limit in s, nor
+		// fill it: another scope's calls cannot exhaust a principal's
+		// slots here. Scope and principal IDs that would join to the same
+		// string ("a:b" + "c", "a" + "b:c") are distinct.
+		ctx, st := t.Context(), newStore(t)
+		if !acquire(t, st, Slot{"a", "p1", "s2"}, 1, 0) || !acquire(t, st, Slot{"b", "p1", "s"}, 1, 0) {
+			t.Fatal("p1's first call in each scope")
+		}
+		if acquire(t, st, Slot{"c", "p1", "s"}, 1, 0) {
+			t.Fatal("a second call for p1 in s with a principal limit of 1")
+		}
+		if !acquire(t, st, Slot{"d", "c", "a:b"}, 1, 0) || !acquire(t, st, Slot{"e", "b:c", "a"}, 1, 0) {
+			t.Fatal("scope a:b's principal c and scope a's principal b:c are not one")
+		}
+		st.Release(ctx, Slot{"a", "p1", "s2"})
+		if acquire(t, st, Slot{"c", "p1", "s"}, 1, 0) {
+			t.Fatal("releasing p1's call in s2 freed its slot in s")
+		}
+	})
 	t.Run("budget", func(t *testing.T) {
 		ctx, st := t.Context(), newStore(t)
 		for _, tc := range []struct {

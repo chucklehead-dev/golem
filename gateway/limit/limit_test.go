@@ -137,6 +137,29 @@ func TestCallerCancelIsNoOutage(t *testing.T) {
 	}
 }
 
+// TestPrincipalPerScope: a principal's in-flight limit counts its calls in
+// the call's scope only, at the store and on an outage's local counts.
+func TestPrincipalPerScope(t *testing.T) {
+	ctx := t.Context()
+	in := func(id, scope string) Call {
+		return Call{ID: id, Principal: "p1", Scope: scope, PrincipalLimit: 1}
+	}
+	for _, down := range []bool{false, true} {
+		st := NewMem()
+		st.SetDown(down)
+		l := New(st)
+		if _, err := l.Admit(ctx, in("a", "other")); err != nil {
+			t.Fatalf("down %v: %v", down, err)
+		}
+		if _, err := l.Admit(ctx, in("b", "s")); err != nil {
+			t.Fatalf("down %v: p1's first call in s: %v; its call in another scope was counted", down, err)
+		}
+		if _, err := l.Admit(ctx, in("c", "s")); !errors.Is(err, ErrConcurrency) {
+			t.Fatalf("down %v: p1's second call in s: %v, want ErrConcurrency", down, err)
+		}
+	}
+}
+
 // leaving is a store over which the caller goes away while its admission
 // is at the store, which then admits it.
 type leaving struct {
