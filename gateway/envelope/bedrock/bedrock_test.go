@@ -289,7 +289,6 @@ func TestErrorResponse(t *testing.T) {
 		{429, "ThrottlingException", "rate_limit_error"},
 		{503, "ServiceUnavailableException", "overloaded_error"},
 		{400, "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/", "invalid_request_error"},
-		{403, "AccessDeniedException", "permission_error"},
 	} {
 		cp := &capture{resp: &http.Response{StatusCode: c.status, Header: http.Header{"X-Amzn-Errortype": {c.exception}},
 			Body: io.NopCloser(strings.NewReader(`{"message":"no"}`))}}
@@ -307,6 +306,50 @@ func TestErrorResponse(t *testing.T) {
 		if resp.StatusCode != c.status || e.Type != "error" || e.Error.Type != c.want || e.Error.Message != "bedrock: no" {
 			t.Errorf("%s: status %d, %s", c.exception, resp.StatusCode, b)
 		}
+	}
+}
+
+// TestCredentialsRefused: Bedrock's refusal of the gateway's own
+// credentials names golem's role and account; the caller is told golem's
+// message instead, in an answer and in a stream's exception alike, the
+// status and error type kept.
+func TestCredentialsRefused(t *testing.T) {
+	const leak = "User: arn:aws:sts::123456789012:assumed-role/golem-gateway/i-1 is not authorized to perform: bedrock:InvokeModel"
+	for _, c := range []struct {
+		status    int
+		exception string
+		want      string
+	}{
+		{403, "AccessDeniedException", "permission_error"},
+		{403, "UnrecognizedClientException", "api_error"},
+		{400, "ExpiredTokenException", "api_error"},
+		{403, "", "api_error"},
+	} {
+		cp := &capture{resp: &http.Response{StatusCode: c.status, Header: http.Header{"X-Amzn-Errortype": {c.exception}},
+			Body: io.NopCloser(strings.NewReader(`{"message":"` + leak + `"}`))}}
+		r, _ := http.NewRequest("POST", "https://x/v1/messages", strings.NewReader(`{"model":"m"}`))
+		resp, err := transport(cp).RoundTrip(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		var e struct {
+			Error struct{ Type, Message string }
+		}
+		json.Unmarshal(b, &e)
+		if resp.StatusCode != c.status || e.Error.Type != c.want || e.Error.Message != refusedMessage || strings.Contains(string(b), "123456789012") {
+			t.Errorf("%q: status %d, %s", c.exception, resp.StatusCode, b)
+		}
+	}
+	var m eventstream.Message
+	m.Headers.Set(":message-type", eventstream.StringValue("exception"))
+	m.Headers.Set(":exception-type", eventstream.StringValue("accessDeniedException"))
+	m.Payload = []byte(`{"message":"` + leak + `"}`)
+	var buf bytes.Buffer
+	eventstream.NewEncoder().Encode(&buf, m)
+	out, err := io.ReadAll(&reframer{src: io.NopCloser(&buf), dec: eventstream.NewDecoder()})
+	if err != nil || !strings.Contains(string(out), refusedMessage) || strings.Contains(string(out), "123456789012") {
+		t.Fatalf("a stream's exception: %v\n%s", err, out)
 	}
 }
 
