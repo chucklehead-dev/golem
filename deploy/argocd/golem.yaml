@@ -1,15 +1,22 @@
 # A sample of how Argo CD installs golem (docs/operations.md §1): fill in
 # the repository URLs, the account's role ARNs and the sites, and apply to
-# the Argo CD namespace. golem-control first (with the CRDs), then a
-# gateway pool per site: the sync waves order them when these are synced by
-# an app of apps; synced directly, sync golem-control first.
+# the Argo CD namespace.
+#
+# Upgrades: the gateway pools first, then golem-control. A gateway decodes
+# snapshots strictly (a member it does not know is refused), so a
+# publisher that adds a member must find every gateway able to read it:
+# the sync waves order them when these are synced by an app of apps
+# (gateways wave 0, golem-control wave 1); synced directly, sync and roll
+# out every pool before golem-control. The first install is the other way
+# round (docs/operations.md, First install): golem-control publishes
+# first, else the new gateways have nothing to serve.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: golem-control
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   project: default
   source:
@@ -54,7 +61,7 @@ spec:
     metadata:
       name: "golem-gateway-{{.pool}}-{{.site}}"
       annotations:
-        argocd.argoproj.io/sync-wave: "1"
+        argocd.argoproj.io/sync-wave: "0"
     spec:
       project: default
       source:

@@ -1,7 +1,9 @@
 # Helm charts
 
-M1's install (docs/m1-plan.md step 5): Argo CD syncs these, golem-control
-first, then a gateway pool per site.
+M1's install (docs/m1-plan.md step 5): Argo CD syncs these. An upgrade
+goes gateway pools first, then golem-control (a gateway refuses snapshot
+members it does not know); the first install golem-control first
+(docs/operations.md §4, deploy/argocd/golem.yaml).
 
 - `golem-control`: two replicas (one leads, by a lease in the state
   bucket), the control API, `/livez` and `/readyz` on `-probes`, and a
