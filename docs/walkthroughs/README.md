@@ -234,7 +234,7 @@ the same process; its writes are ordinary compare-and-swap updates.
 | Only an enforced budget refuses; in-flight limits refuse in every mode | `refusing`, `Limiter.track` | `TestBudgetModes` (limit and proxy), `TestBudgetWarning` |
 | A caller leaving during admission leaves no untracked slot | `Limiter.storeContext`, `Limiter.Admit` | `TestCallerLeavesDuringAdmission`, `TestCallerCancelIsNoOutage` |
 | A cancelled call keeps its slot for its tail; a renewal never revives an ended call | `Ticket.Cancel`, `Ticket.EndAt`, `Limiter.reacquired` | `TestLimits`, `TestRenewalDoesNotRevive`, `TestRenewalStopsAtDeadline` |
-| A gateway starts and serves with Valkey down; outage and grace admissions are waivers; running calls re-registered on recovery | `DialValkey`, `Limiter.MarkDown`, `admitLocally`, `Limiter.Recover` | `TestStartWithValkeyDown`, `TestOutage`, `TestOutageCounts`, `TestPoolModeValkeyDown` |
+| A gateway starts and serves with Valkey down; outage and grace admissions are waivers; running calls re-registered and calls ended in the outage released on recovery, probed from a second after it began | `DialValkey`, `Limiter.MarkDown`, `admitLocally`, `Limiter.Recover`, `Limiter.Run` | `TestStartWithValkeyDown`, `TestOutage`, `TestOutageCounts`, `TestPoolModeValkeyDown`, `TestEndedDuringOutage`, `TestMarkDownDuringRecover`, `TestRecoveryProbed` |
 | A call is counted in the period it started | `Limiter.period`, `Ticket.Period` | `TestPeriodOfStart`, `TestPeriodRollover`, `TestPeriodIsTheStart` |
 | A request is taken from every rate bucket or none; meters fail open | `Mem.Take`, `Valkey.Take`, `Limiter.Take` | `TestMetersFailOpen`, `TestRateLimits` |
 

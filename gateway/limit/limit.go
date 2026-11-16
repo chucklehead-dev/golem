@@ -3,6 +3,7 @@ package limit
 import (
 	"cmp"
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,19 @@ type Limiter struct {
 	// flight are released after it.
 	reacquiring int
 	endedDuring []Slot
+	// A call that ends while the store is down cannot release its slot,
+	// which an outage shorter than the TTL leaves at the store: its slot
+	// waits here, released by Recover (at most maxEndedDown of them; past
+	// that the TTL frees the rest).
+	endedDown []Slot
+	// downGen counts MarkDown's calls: Recover marks the limiter up only
+	// if none landed while it re-registered the running calls.
+	downGen uint64
+	// downed wakes Run when an outage begins, to probe for recovery soon
+	// rather than at the next renewal.
+	downed chan struct{}
+	// probeFirst is the first recovery probe's wait (tests shorten it).
+	probeFirst time.Duration
 }
 
 // periodName is a month's period name, formatted once for the month.
@@ -85,11 +99,22 @@ type periodName struct {
 // 0038), well inside their TTL.
 const renewInterval = 30 * time.Second
 
+// probeFirst is the wait before an outage's first recovery probe; each
+// failed probe doubles it, up to renewInterval. A store back after a blip
+// is found within about a second, and a long outage costs a probe every
+// renewal interval, as before.
+const probeFirst = time.Second
+
+// maxEndedDown bounds the slots of calls ended during an outage kept for
+// release on recovery: a long outage's would expire by their TTL anyway.
+const maxEndedDown = 1 << 16
+
 // New returns a gateway's limiter over the site store.
 func New(store Store) *Limiter {
 	return &Limiter{store: store, known: map[string]Known{},
 		running: map[string]*Ticket{}, tails: map[*Ticket]*time.Timer{}, byPrincipal: map[principalIn]int{}, byScope: map[string]int{},
-		Grace: 2 * renewInterval, StoreTimeout: 250 * time.Millisecond, Location: time.UTC}
+		Grace: 2 * renewInterval, StoreTimeout: 250 * time.Millisecond, Location: time.UTC,
+		downed: make(chan struct{}, 1), probeFirst: probeFirst}
 }
 
 // Ticket is an admitted call. It ends once, by Complete or Cancel (a
@@ -264,12 +289,37 @@ type inProcess interface{ inProcess() }
 // or the store was found unreachable before any call (a gateway starting
 // during a Valkey outage). Calls are admitted on local counts as waivers
 // until Run's Recover finds the store answering.
-func (l *Limiter) MarkDown(err error) {
+//
+// One failed call marks the store down, not a run of them. After a failed
+// call the store's state is unknown (an admission's script may have taken
+// the slot, a release may not have landed), and a gateway that went on
+// trusting it would admit against counts it knows to be wrong; counting
+// locally does count the call. A blip so costs local counting until the
+// first recovery probe, about a second later, and the waivers of the grace
+// after it: the price of never admitting on a store believed sound.
+func (l *Limiter) MarkDown(err error) { l.markDown(err) }
+
+// markDown is MarkDown, keeping the slots of calls whose release failed
+// with err for Recover to release.
+func (l *Limiter) markDown(err error, unreleased ...Slot) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.keepEnded(unreleased...)
+	l.downGen++
 	if !l.down.Swap(true) {
 		slog.Warn("limit: the site store is unreachable; admitting on local counts, recorded as waivers", "err", err)
+		select {
+		case l.downed <- struct{}{}:
+		default: // Run is already told
+		}
 	}
+}
+
+// keepEnded keeps ended calls' slots for release on recovery, within
+// maxEndedDown; mu is held.
+func (l *Limiter) keepEnded(slots ...Slot) {
+	n := min(len(slots), maxEndedDown-len(l.endedDown))
+	l.endedDown = append(l.endedDown, slots[:max(n, 0)]...)
 }
 
 // track records a running call, admitted at known spend known; mu is
@@ -285,9 +335,11 @@ func (l *Limiter) track(c Call, period string, waived bool, known int64) *Ticket
 	return t
 }
 
-// finish marks a ticket done and forgets the call; it reports whether it
-// was still running.
-func (l *Limiter) finish(t *Ticket) bool {
+// finish marks a ticket done and forgets the call; it reports whether its
+// caller is to release the slot now. A call ending while a renewal is in
+// flight is released after it; one ending while the store is down, on
+// recovery.
+func (l *Limiter) finish(t *Ticket) (release bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if t.freed {
@@ -295,12 +347,17 @@ func (l *Limiter) finish(t *Ticket) bool {
 	}
 	t.freed = true
 	delete(l.running, t.call.ID)
-	if l.reacquiring > 0 {
-		l.endedDuring = append(l.endedDuring, t.slot())
-	}
 	decr(l.byPrincipal, principalOf(t.call))
 	decr(l.byScope, t.call.Scope)
-	return true
+	switch {
+	case l.reacquiring > 0:
+		l.endedDuring = append(l.endedDuring, t.slot())
+	case l.Down():
+		l.keepEnded(t.slot())
+	default:
+		return true
+	}
+	return false
 }
 
 // decr counts one fewer, forgetting a count at zero so the maps stay as
@@ -328,7 +385,7 @@ func (t *Ticket) slot() Slot { return slotOf(t.call) }
 
 // Complete frees the call's slot: one round trip. Its cost is the ledger
 // row's, which the snapshots count (ADR 0052); the site keeps no spend. If
-// the store does not take the release, the slot's TTL frees it.
+// the store does not take the release, it is released on recovery.
 func (t *Ticket) Complete(ctx context.Context, _ int64) {
 	if !t.l.claimEnd(t) {
 		return
@@ -365,13 +422,13 @@ func (t *Ticket) Ended(ctx context.Context) {
 	l.mu.Lock()
 	delete(l.tails, t)
 	l.mu.Unlock()
-	if !l.finish(t) || l.Down() {
-		return // when down, the slot's TTL frees it
+	if !l.finish(t) {
+		return // released later: after a renewal, or on recovery
 	}
 	sctx, cancel := l.storeContext(ctx)
 	defer cancel()
 	if err := l.store.Release(sctx, t.slot()); err != nil {
-		l.MarkDown(err)
+		l.markDown(err, t.slot())
 	}
 }
 
@@ -407,12 +464,22 @@ func (l *Limiter) reacquire(ctx context.Context) error {
 	sctx, cancel := l.storeContext(ctx)
 	err := l.store.Reacquire(sctx, slots)
 	cancel()
-	for _, s := range l.reacquired() {
-		sctx, cancel := l.storeContext(ctx)
-		l.store.Release(sctx, s) // if it fails, the slot's TTL frees it
-		cancel()
-	}
+	l.release(ctx, l.reacquired())
 	return err
+}
+
+// release frees ended calls' slots at the store. If one fails, the store
+// is down: it and the rest wait for Recover.
+func (l *Limiter) release(ctx context.Context, slots []Slot) {
+	for i, s := range slots {
+		sctx, cancel := l.storeContext(ctx)
+		err := l.store.Release(sctx, s)
+		cancel()
+		if err != nil {
+			l.markDown(err, slots[i:]...)
+			return
+		}
+	}
 }
 
 // reacquired ends a renewal: the last of those in flight takes the slots
@@ -454,9 +521,14 @@ type pinger interface{ Ping(context.Context) error }
 // Recover is called when the store answers again: every call still
 // running re-registers its slot, so calls that streamed through the
 // outage still count, and the limiter is marked up, its admissions
-// waivers for a grace while peers recover theirs. No lock is held across
-// a store call.
+// waivers for a grace while peers recover theirs; then the slots of calls
+// that ended during the outage are released. A store call that failed
+// meanwhile (a MarkDown since Recover began) keeps it down. No lock is
+// held across a store call.
 func (l *Limiter) Recover(ctx context.Context) error {
+	l.mu.Lock()
+	gen := l.downGen
+	l.mu.Unlock()
 	// With nothing running, the renewal touches no store: ask it first,
 	// or an unreachable one would be marked up (and found down again by
 	// the next call).
@@ -472,11 +544,22 @@ func (l *Limiter) Recover(ctx context.Context) error {
 		return err
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	if l.downGen != gen {
+		l.mu.Unlock()
+		return errFailedDuringRecovery
+	}
 	l.down.Store(false)
 	l.graceUntil = l.now().Add(l.Grace)
+	ended := l.endedDown
+	l.endedDown = nil
+	l.mu.Unlock()
+	l.release(ctx, ended)
 	return nil
 }
+
+// errFailedDuringRecovery is a recovery cut short: a store call failed
+// while it ran.
+var errFailedDuringRecovery = errors.New("limit: a site store call failed during recovery; still admitting on local counts")
 
 // endGrace ends the grace after a recovery at once, as the model's
 // graceEnds does once every gateway has recovered: for tests (no operator
@@ -495,25 +578,38 @@ func (l *Limiter) Known(scope string) int64 { return l.knownFor(scope, l.period(
 func (l *Limiter) Down() bool { return l.down.Load() }
 
 // Run keeps running calls' slots alive (ADR 0038: every 30 seconds) and,
-// after an outage, re-acquires slots, until ctx ends.
+// in an outage, probes for recovery, until ctx ends. A probe follows an
+// outage's start by probeFirst, and each failed one doubles the wait, up
+// to the renewal interval.
 func (l *Limiter) Run(ctx context.Context) {
-	t := time.NewTicker(renewInterval)
+	wait := renewInterval
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-l.downed: // an outage began
+			wait = l.probeFirst
+			t.Reset(wait)
+			continue
 		case <-t.C:
 		}
-		if l.Down() {
+		switch {
+		case l.Down():
 			if err := l.Recover(ctx); err != nil {
 				slog.Warn("limiter store still unreachable; admitting on local counts, recorded as waivers", "err", err)
+				wait = min(2*wait, renewInterval)
+			} else {
+				wait = renewInterval
 			}
-			continue
+		default:
+			if err := l.Renew(ctx); err != nil {
+				slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
+			}
+			wait = renewInterval // a failure is told on downed
 		}
-		if err := l.Renew(ctx); err != nil {
-			slog.Warn("slot renewal failed; admitting on local counts until the store answers", "err", err)
-		}
+		t.Reset(wait)
 	}
 }
 
