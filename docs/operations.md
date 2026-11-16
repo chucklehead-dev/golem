@@ -172,6 +172,86 @@ already knows every cluster; nothing in one cluster reaches another's API server
 the same GitOps repository golem-control publishes from (ADR 0054; per-site
 selection by label is not built in M1: every pool gets the same snapshot).
 
+## 4. First install
+
+What the charts assume exists before Argo CD syncs them, in the order to
+make it. The `GolemInstallation` Crossplane claim (ADR 0040) is to make
+steps 1 to 3; until it is built, make them by hand. Names below are the
+charts' defaults (deploy/charts/*/values.yaml); the namespace is `golem`.
+
+1. **The state bucket and its policy.** S3, versioned, in golem's
+   account. Its policy lets only golem-control's role write `state/`,
+   `control/` and `snapshots/` (*Leadership and tampering*, §2), lets each
+   gateway pool's role read `snapshots/<pool>/` and `control/<pool>/` and
+   write `status/<pool>/`, and nothing else write at all. Lifecycle rules:
+   noncurrent versions of `state/` and `control/` kept 30 days; objects
+   under `snapshots/<pool>/` other than `current` expired two days after
+   creation (*State history*, *Snapshot objects*). The audit archive, if
+   used (`auditArchive`): an Object Lock bucket in a separate account,
+   writable by golem-control's role.
+2. **The publishing key.** A KMS key, `ECC_NIST_P256`, `SIGN_VERIFY`; its
+   key policy grants golem-control's role `kms:Sign` and
+   `kms:GetPublicKey` and no one else `kms:Sign`. golem-control's
+   `signingKey` is `kms:<its ARN>`.
+3. **The IAM roles, by IRSA or Pod Identity.** `golem-control`: the
+   bucket as above, the key, the audit archive. One role per gateway
+   pool: the bucket as above, and `bedrock:InvokeModel*` if a backend is
+   Bedrock (*Bedrock*, below). Each role trusts its ServiceAccount
+   (`golem/golem-control`, `golem/golem-gateway-<pool>`); the charts'
+   `serviceAccount.annotations` name it.
+4. **The site's Valkey and ClickHouse.** ElastiCache for Valkey with
+   in-transit encryption and an ACL user `golem-gateway` (the chart's
+   `valkey.user`). ClickHouse with three users: `golem_admin` (DDL, for
+   golem-control's `clickhouse.ddl` Job or run by hand from
+   deploy/clickhouse/spend.sql), `golem_ingest` (inserts, for the
+   gateways' collectors), `golem_control` (read-only on `golem.spend`).
+5. **The Secrets** (`kubectl -n golem create secret generic ...`):
+   - `golem-config-deploy-key`: keys `ssh` (a read-only deploy key of the
+     config repository) and `known_hosts` (the repository host's);
+   - `golem-valkey`: key `password`, the ACL user's;
+   - `golem-clickhouse`: key `password`, `golem_control`'s (with
+     `clickhouse.url`); `golem-clickhouse-admin`, `golem_admin`'s (with
+     the DDL Job); `golem-clickhouse-ingest`, `golem_ingest`'s (the
+     gateways' collectors);
+   - each provider Secret a pool's backends name (`providerSecrets`; a
+     Backend's `auth.secretRef` is `<Secret>/<key>`), unless the backend
+     uses workload identity.
+6. **The ConfigMaps**, outside Argo CD (it must not own or prune them):
+   - `golem-publishing-keys`: the publishing key's public half, which
+     every gateway's `-keys` trusts:
+     `golem-control pubkey kms:<ARN> > publishing.pub`, then
+     `kubectl -n golem create configmap golem-publishing-keys --from-file=publishing.pub`;
+   - `golem-emergency-denylist`, key `denylist`: the site's emergency
+     denylist, empty to start (a `#` comment line is enough; format in
+     control-plane.md §5); the gateways do not start without it (ADR 0041
+     §1);
+   - the gateways' collector config, unless the chart carries its copy
+     (`files/otel-collector.yaml`): `kubectl -n golem create configmap
+     golem-gateway-<pool>-collector --from-file=collector.yaml=deploy/otel/collector.yaml`;
+   - a private CA bundle for a remote collector, only with
+     `collector.enabled: false` (`caBundle`).
+7. **The config repository.** Backends, ModelRoutes, a PriceList for
+   every model a budget reaches, and a ScopePolicy per scope to be
+   created; `golemctl config validate` passes on its branch (and runs in
+   its CI); branch protection forbids force-pushes (ADR 0054). It is not an
+   Argo Application.
+8. **The Entra registrations**: the gateway's (`api://golem`, the
+   gateway chart's `entra`) and the control API's (`api://golem-control`,
+   `golem.manage`, ADR 0046; its tenant is golem-control's
+   `api.entraTenant`); the first admin is whoever holds the `golem.admin`
+   app role.
+9. **Sync golem-control first** (on the first install only; upgrades go
+   the other way, §2). On a bucket it has never run on it creates the state
+   document, claims the fence and publishes every pool in `pools`: its log
+   shows `published` for each, with the config's `configRevision`.
+10. **Then the gateway pools.** The observe-phase site sets
+    `acceptUnreleased: true` with its recorded decision (golem#7); the
+    shared values agree with golem-control's (`maxLease` ≥ `lease`, the
+    same `periodZone`). Each gateway raises its floor from the pool's
+    checkpoint, applies the publication and becomes ready.
+11. **Create the scopes** (`golemctl scopes create <id>`, matching their
+    ScopePolicies), their members or bound Entra groups, and keys.
+
 ## Bedrock: the gateway's AWS role
 
 A bedrock backend's calls are signed with the gateway's credentials, the
