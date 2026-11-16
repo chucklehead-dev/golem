@@ -115,3 +115,132 @@ ORDER BY site;
 --   INSERT INTO golem.ingest_by_site SELECT site, max(ended_at) FROM golem.spend GROUP BY site;
 CREATE MATERIALIZED VIEW IF NOT EXISTS golem.ingest_by_site_mv TO golem.ingest_by_site AS
 SELECT site, max(ended_at) AS latest FROM golem.spend GROUP BY site;
+
+-- From the collector (deploy/otel, ADR 0043): the gateway sends each row as
+-- an OTLP log record, event golem.spend, whose attributes are golem.spend's
+-- columns (contracts.md §3.1). The collector's ClickHouse exporter
+-- (opentelemetry-collector-contrib's clickhouseexporter, create_schema
+-- off) inserts its own logs shape into golem.spend_otlp below, every
+-- attribute as text in LogAttributes, and the views read the columns back
+-- into their types. The landing tables are Null: nothing is kept in them,
+-- the views see each inserted block.
+--
+-- golem.spend_otlp has the columns the exporter inserts: a collector
+-- version that changes them fails its inserts, and the end-to-end test
+-- (test/ledger), which runs the version deploy/otel pins.
+CREATE TABLE IF NOT EXISTS golem.spend_otlp (
+    Timestamp          DateTime64(9),
+    TraceId            String,
+    SpanId             String,
+    TraceFlags         UInt8,
+    SeverityText       LowCardinality(String),
+    SeverityNumber     UInt8,
+    ServiceName        LowCardinality(String),
+    Body               String,
+    ResourceSchemaUrl  LowCardinality(String),
+    ResourceAttributes Map(LowCardinality(String), String),
+    ScopeSchemaUrl     LowCardinality(String),
+    ScopeName          String,
+    ScopeVersion       LowCardinality(String),
+    ScopeAttributes    Map(LowCardinality(String), String),
+    LogAttributes      Map(LowCardinality(String), String),
+    EventName          String
+)
+ENGINE = Null;
+
+-- Each record checked: reason is empty for a row golem.spend can hold
+-- exactly, else the first column that would not convert. Such a record
+-- must not fail its insert: the collector would retry the whole batch,
+-- every good row in it, for ever (its queue's retries have no end, ADR
+-- 0043). It is kept whole in golem.spend_rejected instead, and alerted on
+-- (operations.md, "The ledger's collector").
+CREATE TABLE IF NOT EXISTS golem.spend_checked (
+    reason        LowCardinality(String),
+    Timestamp     DateTime64(9),
+    EventName     String,
+    LogAttributes Map(LowCardinality(String), String)
+)
+ENGINE = Null;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_checked_mv TO golem.spend_checked AS
+SELECT
+    multiIf(
+        EventName != 'golem.spend', 'event_name',
+        toUInt16OrNull(LogAttributes['schema_version']) IS NULL, 'schema_version',
+        LogAttributes['row_kind'] NOT IN ('attempt', 'adjustment'), 'row_kind',
+        toUUIDOrNull(LogAttributes['request_id']) IS NULL, 'request_id',
+        toUUIDOrNull(LogAttributes['attempt_id']) IS NULL, 'attempt_id',
+        toUUIDOrNull(LogAttributes['event_id']) IS NULL, 'event_id',
+        parseDateTime64BestEffortOrNull(LogAttributes['started_at'], 3, 'UTC') IS NULL, 'started_at',
+        parseDateTime64BestEffortOrNull(LogAttributes['ended_at'], 3, 'UTC') IS NULL, 'ended_at',
+        toDateOrNull(LogAttributes['period']) IS NULL, 'period',
+        toInt64OrNull(LogAttributes['cost_micros']) IS NULL, 'cost_micros',
+        length(LogAttributes['currency']) != 3, 'currency',
+        '') AS reason,
+    Timestamp, EventName, LogAttributes
+FROM golem.spend_otlp;
+
+-- The rows, each column from its attribute. No conversion here can fail
+-- (the OrZero forms), and every row reaching them passed the checks above.
+-- funding arrives as a JSON array of {"source", "share"} objects, units as
+-- a JSON object of integers: the collector's text for an OTLP list and
+-- map. An absent token count is zero.
+CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_otlp_mv TO golem.spend AS
+SELECT
+    toUInt16OrZero(a['schema_version'])                                     AS schema_version,
+    CAST(if(a['row_kind'] = 'adjustment', 'adjustment', 'attempt') AS Enum8('attempt' = 1, 'adjustment' = 2)) AS row_kind,
+    toUUIDOrZero(a['request_id'])                                           AS request_id,
+    toUUIDOrZero(a['attempt_id'])                                           AS attempt_id,
+    toUUIDOrZero(a['event_id'])                                             AS event_id,
+    a['provider_request_id']                                                AS provider_request_id,
+    parseDateTime64BestEffortOrZero(a['started_at'], 3, 'UTC')              AS started_at,
+    parseDateTime64BestEffortOrZero(a['ended_at'], 3, 'UTC')                AS ended_at,
+    toDateOrZero(a['period'])                                               AS period,
+    a['site']                                                               AS site,
+    a['gateway_pool']                                                       AS gateway_pool,
+    a['principal_kind']                                                     AS principal_kind,
+    a['principal_id']                                                       AS principal_id,
+    a['key_id']                                                             AS key_id,
+    a['scope_id']                                                           AS scope_id,
+    a['scope_path']                                                         AS scope_path,
+    JSONExtract(a['funding'], 'Array(Tuple(source String, share Float64))') AS funding,
+    a['frontend_dialect']                                                   AS frontend_dialect,
+    a['backend_dialect']                                                    AS backend_dialect,
+    a['envelope']                                                           AS envelope,
+    a['alias']                                                              AS alias,
+    a['model']                                                              AS model,
+    a['deployment']                                                         AS deployment,
+    a['provider_account']                                                   AS provider_account,
+    toUInt64OrZero(a['tokens_input'])                                       AS tokens_input,
+    toUInt64OrZero(a['tokens_output'])                                      AS tokens_output,
+    toUInt64OrZero(a['tokens_cache_read'])                                  AS tokens_cache_read,
+    toUInt64OrZero(a['tokens_cache_write_5m'])                              AS tokens_cache_write_5m,
+    toUInt64OrZero(a['tokens_cache_write_1h'])                              AS tokens_cache_write_1h,
+    toUInt64OrZero(a['tokens_reasoning'])                                   AS tokens_reasoning,
+    JSONExtract(a['units'], 'Map(String, UInt64)')                          AS units,
+    toInt64OrZero(a['cost_micros'])                                         AS cost_micros,
+    toFixedString(substring(a['currency'], 1, 3), 3)                        AS currency,
+    a['price_version']                                                      AS price_version,
+    a['outcome']                                                            AS outcome,
+    a['error_origin']                                                       AS error_origin,
+    a['error_code']                                                         AS error_code,
+    toFloat32OrZero(a['estimated_fraction'])                                AS estimated_fraction,
+    a['waived'] = 'true'                                                    AS waived,
+    a['over_budget'] = 'true'                                               AS over_budget
+FROM (SELECT LogAttributes AS a FROM golem.spend_checked WHERE reason = '');
+
+-- Records golem.spend cannot hold, whole, with the first reason found.
+-- Empty in a healthy installation: alert on any row, fix the sender, and
+-- insert the repaired rows into golem.spend by hand.
+CREATE TABLE IF NOT EXISTS golem.spend_rejected (
+    received_at   DateTime64(3, 'UTC') DEFAULT now64(3),
+    reason        LowCardinality(String),
+    Timestamp     DateTime64(9),
+    EventName     String,
+    LogAttributes Map(LowCardinality(String), String)
+)
+ENGINE = MergeTree
+ORDER BY received_at;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS golem.spend_rejected_mv TO golem.spend_rejected AS
+SELECT reason, Timestamp, EventName, LogAttributes FROM golem.spend_checked WHERE reason != '';

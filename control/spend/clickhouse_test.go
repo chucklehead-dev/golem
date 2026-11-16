@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -30,18 +31,7 @@ func TestClickHouseLedger(t *testing.T) {
 		t.Skip("no ClickHouse: set GOLEM_CLICKHOUSE_URL (e.g. http://127.0.0.1:8123) to run the ledger's DDL and query")
 	}
 	ch := chClient{base: base, user: os.Getenv("GOLEM_CLICKHOUSE_USER"), password: os.Getenv("GOLEM_CLICKHOUSE_PASSWORD")}
-	db := "golem_test_" + strings.ToLower(rand.Text()[:10])
-	ddl, err := os.ReadFile("../../deploy/clickhouse/spend.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ch.exec(context.Background(), "DROP DATABASE IF EXISTS "+db) })
-	for _, stmt := range statements(strings.ReplaceAll(string(ddl), "golem.", db+".")) {
-		stmt = strings.Replace(stmt, "CREATE DATABASE IF NOT EXISTS golem", "CREATE DATABASE IF NOT EXISTS "+db, 1)
-		if err := ch.exec(t.Context(), stmt); err != nil {
-			t.Fatalf("%v\n%s", err, stmt)
-		}
-	}
+	db := ch.ledger(t)
 	row := func(event, scope, ended string, cost int64, period string) string {
 		return fmt.Sprintf(`{"schema_version":2,"row_kind":"attempt","request_id":%q,"attempt_id":%q,"event_id":%q,"started_at":%q,"ended_at":%q,"period":%q,"scope_id":%q,"cost_micros":%d,"currency":"USD"}`,
 			event, event, event, ended, ended, period, scope, cost)
@@ -86,18 +76,7 @@ func TestClickHouseIngestion(t *testing.T) {
 		t.Skip("no ClickHouse: set GOLEM_CLICKHOUSE_URL (e.g. http://127.0.0.1:8123) to run the ledger's DDL and query")
 	}
 	ch := chClient{base: base, user: os.Getenv("GOLEM_CLICKHOUSE_USER"), password: os.Getenv("GOLEM_CLICKHOUSE_PASSWORD")}
-	db := "golem_test_" + strings.ToLower(rand.Text()[:10])
-	ddl, err := os.ReadFile("../../deploy/clickhouse/spend.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ch.exec(context.Background(), "DROP DATABASE IF EXISTS "+db) })
-	for _, stmt := range statements(strings.ReplaceAll(string(ddl), "golem.", db+".")) {
-		stmt = strings.Replace(stmt, "CREATE DATABASE IF NOT EXISTS golem", "CREATE DATABASE IF NOT EXISTS "+db, 1)
-		if err := ch.exec(t.Context(), stmt); err != nil {
-			t.Fatalf("%v\n%s", err, stmt)
-		}
-	}
+	db := ch.ledger(t)
 	c := ClickHouse{URL: base, User: ch.user, Password: ch.password, Database: db}
 	if got, err := c.Latest(t.Context()); err != nil || len(got) != 0 {
 		t.Fatalf("an empty ledger: %v %v", got, err)
@@ -135,6 +114,34 @@ func TestClickHouseIngestion(t *testing.T) {
 		t.Fatalf("lags %+v: want us-1 behind by 7m30s, eu-1 not", lags)
 	}
 }
+
+// ledger runs deploy/clickhouse/spend.sql in a database of its own, which
+// it drops when the test ends, and returns the database's name.
+func (c chClient) ledger(t *testing.T) string {
+	t.Helper()
+	db := "golem_test_" + strings.ToLower(rand.Text()[:10])
+	ddl, err := os.ReadFile("../../deploy/clickhouse/spend.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.exec(context.Background(), "DROP DATABASE IF EXISTS "+db) })
+	for _, stmt := range statements(inDatabase(string(ddl), db)) {
+		if err := c.exec(t.Context(), stmt); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+	return db
+}
+
+// inDatabase is the DDL with its database golem renamed db: each table
+// golem.x, not a string such as the event name 'golem.spend'.
+func inDatabase(ddl, db string) string {
+	ddl = strings.Replace(ddl, "CREATE DATABASE IF NOT EXISTS golem;", "CREATE DATABASE IF NOT EXISTS "+db+";", 1)
+	return tableRef.ReplaceAllString(ddl, "${1}"+db+".")
+}
+
+// tableRef is golem. outside a quoted string's start.
+var tableRef = regexp.MustCompile(`(^|[^'\w])golem\.`)
 
 // statements splits the DDL file into statements, comments dropped.
 func statements(ddl string) []string {

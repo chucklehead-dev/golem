@@ -1,0 +1,41 @@
+# Everything but the ledger, forwarded: loaded after ledger.yaml
+# (--config ledger.yaml --config forward.yaml), whose receiver it shares.
+# The gateway's spans and metrics, and every log record that is not a
+# golem.spend row, go on to the enterprise collector (ADR 0015) over
+# OTLP/HTTP, with the exporter's usual in-memory queue: they are not
+# billing data.
+#
+# Environment:
+#   GOLEM_OTEL_UPSTREAM_ENDPOINT  required: the enterprise collector's base
+#                                 URL, https://collector.example:4318
+#                                 (the exporter adds /v1/traces, ...)
+
+processors:
+  # The complement of ledger.yaml's filter: golem.spend records are the
+  # ledger pipeline's alone.
+  filter/not-ledger:
+    error_mode: propagate
+    logs:
+      log_record:
+        - 'log.event_name == "golem.spend"'
+  batch/forward: {}
+
+exporters:
+  otlphttp/upstream:
+    endpoint: ${env:GOLEM_OTEL_UPSTREAM_ENDPOINT}
+    compression: gzip
+
+service:
+  pipelines:
+    traces/forward:
+      receivers: [otlp]
+      processors: [batch/forward]
+      exporters: [otlphttp/upstream]
+    metrics/forward:
+      receivers: [otlp]
+      processors: [batch/forward]
+      exporters: [otlphttp/upstream]
+    logs/forward:
+      receivers: [otlp]
+      processors: [filter/not-ledger, batch/forward]
+      exporters: [otlphttp/upstream]

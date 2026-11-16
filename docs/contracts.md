@@ -131,6 +131,33 @@ prevent double counting.
 - Schema changes are additive within a version; a breaking change is a new
   table version with a view keeping the old shape for one release.
 
+### 3.1 From the gateway to the table
+
+- **The record.** Each row leaves the gateway as one OTLP log record
+  whose event name (and body) is `golem.spend`, whose timestamp is
+  `ended_at`, and whose attributes are the table's columns, named as
+  they are, in the DDL's order (`gateway/telemetry/ledger.go`, checked
+  against `deploy/clickhouse/spend.sql`). Integers, floats and booleans
+  are OTLP's; IDs, times (RFC 3339, UTC), the period's first day and
+  enums are strings; `funding` is a list of `{source, share}` maps and
+  `units` a map of integers. Standalone, the same attributes are a JSON
+  line on stdout.
+- **The collector** (`deploy/otel/ledger.yaml`, operations.md, "The
+  ledger's collector") keeps `golem.spend` records in a pipeline of their
+  own, queues them on node-local disk (ADR 0043) and writes them with the
+  contrib ClickHouse exporter into `golem.spend_otlp`, a Null table of the
+  exporter's shape (every attribute as text).
+- **The views** (`spend.sql`) read each record's columns back into their
+  types and insert the row into `golem.spend`, whose own views then fill
+  `golem.spend_by_event` and `golem.ingest_by_site`. A record that would
+  not convert (an ID that is not a UUID, an unparseable time, a missing
+  cost, a currency not of three letters, another event) is not inserted:
+  it is kept whole in `golem.spend_rejected` with the first column at
+  fault, so it never fails the batch of good rows it arrived with.
+- **Delivery is at least once**: the collector's retries and the
+  gateway's re-exports can insert a row twice. The second copy has the
+  same `event_id`, and every reader deduplicates by it (above).
+
 ## 4. The price model (ADR 0025)
 
 A `PriceList` entry prices a model on a provider account (or a whole
