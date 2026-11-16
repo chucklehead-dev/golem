@@ -13,16 +13,16 @@ import (
 	"github.com/chucklehead-dev/golem/lib/period"
 )
 
-// schemaVersion is golem.spend's contract version (contracts.md): 2,
-// rows written at their call's end (ADR 0043), whose ended_at puts them on
-// one side of a snapshot's boundary (ADR 0031).
+// schemaVersion is golem.spend's contract version (contracts.md). Version 2
+// rows are written at their call's end, so ended_at puts each row on one
+// side of a snapshot's boundary. ADR 0031.
 const schemaVersion = 2
 
-// Ledger writes the access-log records that are golem.spend's rows, one per
-// upstream attempt, as OTel log records whose attributes are the table's
-// columns; the collector writes them to ClickHouse. A row is written when
-// its call ends, whatever the site store's state, so an outage keeps no
-// billing rows in memory (ADR 0043).
+// Ledger writes golem.spend's rows, one per upstream attempt. Each is an
+// OTel log record whose attributes are the table's columns, and the
+// collector writes them to ClickHouse. A row is written when its call ends,
+// whatever the site store's state, so an outage keeps no billing rows in
+// memory. ADR 0043.
 type Ledger struct {
 	logger     otellog.Logger
 	site, pool string
@@ -35,8 +35,8 @@ func NewLedger(logger otellog.Logger, site, pool string) *Ledger {
 	return &Ledger{logger: logger, site: site, pool: pool, Period: time.UTC}
 }
 
-// Ended writes a finished call's row: a golem.spend event (its name also
-// the body), stamped with the call's end.
+// Ended writes a finished call's row as a golem.spend event, stamped with
+// the call's end. The event's name is also its body.
 func (l *Ledger) Ended(ctx context.Context, c Call) {
 	var row [ledgerColumns]attribute.KeyValue
 	l.row(&row, &c)

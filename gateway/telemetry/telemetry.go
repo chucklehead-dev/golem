@@ -1,11 +1,14 @@
-// Package telemetry is the gateway's OpenTelemetry (ADR 0015): a span per
-// request with the GenAI semantic conventions and golem's attributes, the
-// GenAI token and duration metrics, time to first token, counters of calls
-// by outcome and error origin, of attempts by result and of refusals, the
-// deployments' health (ObserveState), and the access-log
-// record that is also the ledger's row (contracts.md), all over OTLP to
-// the enterprise collector. Standalone, ledger rows go to stdout as JSON
-// lines instead (ADR 0023).
+// Package telemetry is the gateway's OpenTelemetry. It records a span per
+// request, with the GenAI semantic conventions and golem's attributes. It
+// records the GenAI token and duration metrics and the time to first token.
+// It counts calls by outcome and error origin, attempts by result, and
+// refusals. It reports the deployments' health (ObserveState).
+//
+// Each call's access-log record is also its ledger row (contracts.md). All
+// of it goes over OTLP to the enterprise collector. A standalone gateway
+// writes ledger rows to stdout as JSON lines instead. ADR 0015.
+//
+// Package variables marked read-only are never written after init.
 package telemetry
 
 import (
@@ -30,8 +33,8 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/canon"
 )
 
-// GenAI semantic-convention names (the OTel Go release golem uses does not
-// yet generate them).
+// GenAI semantic-convention names. The OTel Go release golem uses does not
+// generate them yet.
 const (
 	attrOperation     = "gen_ai.operation.name"
 	attrProvider      = "gen_ai.provider.name"
@@ -44,10 +47,10 @@ const (
 	metricDuration    = "gen_ai.client.operation.duration"
 )
 
-// golem's request-path instruments (operations.md). Their attributes
-// are bounded by the snapshot's routes and deployments and by the fixed
-// sets of outcomes, origins and attempt results: never a principal or a
-// request.
+// golem's request-path instruments (operations.md). Their attributes come
+// from the snapshot's routes and deployments and from fixed sets of
+// outcomes, origins and attempt results. They never name a principal or a
+// request, so their cardinality stays bounded.
 const (
 	MetricTTFT     = "golem.ttft"
 	MetricCalls    = "golem.calls"
@@ -63,27 +66,28 @@ const (
 	attrAttemptResult = "golem.attempt.result"
 )
 
-// An attempt's result (model/attempts.md), Call.AttemptResult: how the
-// attempt the row records ended.
+// The results an attempt can end with, as Call.AttemptResult records them.
+// model/attempts.md defines them.
 const (
-	// AttemptCommitted: the provider answered and its response is the
-	// caller's (a stream's first event was not an error).
+	// AttemptCommitted means the provider answered and its response is the
+	// caller's. A stream's first event was not an error.
 	AttemptCommitted = "committed"
-	// AttemptRefused: refused before any output (429, 503, 529, or 200 with
-	// an error as the first event): retried, or relayed if it was the last.
+	// AttemptRefused means the provider refused before any output, with a
+	// 429, 503 or 529, or an error as a stream's first event. The attempt
+	// is retried, or relayed if it was the last.
 	AttemptRefused = "refused"
-	// AttemptUnreached: the provider never had the request (DNS, dial,
-	// TLS).
+	// AttemptUnreached means the provider never had the request, because
+	// DNS, the dial or TLS failed.
 	AttemptUnreached = "unreached"
-	// AttemptUncertain: the request went out and no answer came (a reset,
-	// a timeout): the provider may have worked on it.
+	// AttemptUncertain means the request went out and no answer came, as
+	// after a reset or a timeout. The provider may have worked on it.
 	AttemptUncertain = "uncertain"
 )
 
 // attemptResults are the results in attemptIndex's order.
 var attemptResults = [...]string{AttemptCommitted, AttemptRefused, AttemptUnreached, AttemptUncertain} // read-only
 
-// attemptIndex is result's place in attemptResults, or -1: no attempt.
+// attemptIndex is a result's place in attemptResults, or -1 for no attempt.
 func attemptIndex(result string) int {
 	switch result {
 	case AttemptCommitted:
@@ -103,20 +107,19 @@ type Call struct {
 	RequestID                     string
 	Principal, PrincipalKind, Key string
 	Scope                         string
-	Frontend, Backend             string // dialects
-	Envelope                      string // the deployment's: "" or "bedrock"
+	Frontend, Backend             string // the caller's dialect and the route's
+	Envelope                      string // the deployment's envelope, "" or "bedrock"
 	Alias, Model, Deployment      string
-	Provider, ProviderRequestID   string // Provider: the backend's name
-	// ProviderAccount is the backend's provider account (snapshot's
-	// Backend.ProviderAccount), the ledger's provider_account; empty, the
-	// row records Provider.
+	Provider, ProviderRequestID   string // Provider is the backend's name
+	// ProviderAccount is the backend's provider account, the ledger's
+	// provider_account. When it is empty, the row records Provider.
 	ProviderAccount string
-	// PriceVersion is the PriceList version Cost was priced by (the
-	// snapshot's Price.Version), the ledger's price_version.
+	// PriceVersion is the version of the price list Cost was priced by, the
+	// ledger's price_version.
 	PriceVersion   string
 	Started, Ended time.Time
-	// Period is the budget period the call is counted in (the limiter's,
-	// lib/period); empty: the ledger names it from Started.
+	// Period is the budget period the call is counted in, as the limiter
+	// named it. When it is empty, the ledger names it from Started.
 	Period                          string
 	Usage                           canon.Usage
 	Cost                            int64 // micro-units
@@ -124,33 +127,35 @@ type Call struct {
 	Status                          int
 	Outcome, ErrorOrigin, ErrorCode string
 	// EstimatedFraction is the share of Cost estimated from what was seen
-	// (a cut stream, a missing usage report), not reported: 0 for actual.
+	// rather than reported, as for a cut stream. It is 0 for a reported cost.
 	EstimatedFraction float64
-	// Waived: admitted outside the budget's bound, while the site store was
-	// unreachable or in the grace after a recovery (ADR 0041).
+	// Waived is set for a call admitted without the store's check, during an
+	// outage or the grace after one. ADR 0041.
 	Waived bool
-	// OverBudget: admitted over its scope's budget in observe or warn
-	// mode, a call enforce would have refused (prd.md, ADR 0050).
+	// OverBudget is set for a call admitted over its scope's budget in
+	// observe or warn mode, one that enforce mode would refuse. ADR 0050.
 	OverBudget bool
-	// Attempt is the call's attempt the row records, from 1 (0 is 1): each
-	// attempt is its own ledger event (AttemptID), so a retried call's
-	// rows are never deduplicated into one.
+	// Attempt is the number of the attempt the row records, from 1, and 0
+	// counts as 1. Each attempt is its own ledger event (AttemptID), so a
+	// retried call's rows are never deduplicated into one.
 	Attempt int
-	// AttemptResult is how that attempt ended (AttemptCommitted, ...),
-	// counted by golem.attempts; empty for a call that made none (one
-	// withdrawn as it was admitted).
+	// AttemptResult is how that attempt ended, one of the Attempt results.
+	// golem.attempts counts it. It is empty for a call withdrawn before any
+	// attempt.
 	AttemptResult string
-	// Committed is the call's commit point: when a stream's first event was
-	// complete, to be relayed, or a whole response's headers arrived; zero
-	// if no attempt committed. golem.ttft records Committed − Started for a
+	// Committed is the call's commit point. That is when a stream's first
+	// event was complete, or a whole response's headers arrived. It is zero
+	// if no attempt committed. golem.ttft records Committed - Started for a
 	// call answered below 400.
 	Committed time.Time
 	// Funding is the scope's funding sources and their shares at request
-	// time, and Units its other billed units by name (web_search, ...):
-	// golem.spend's funding and units (contracts.md). The request path
-	// fills neither yet; the row carries them as an empty list and map.
+	// time (contracts.md). The request path does not fill it yet, so the row
+	// carries an empty list.
 	Funding []Funding
-	Units   map[string]int64
+	// Units are the call's other billed units by name, such as web_search.
+	// The request path does not fill them yet, so the row carries an empty
+	// map.
+	Units map[string]int64
 }
 
 // Funding is one funding source of a scope and its share of the cost.
@@ -159,10 +164,9 @@ type Funding struct {
 	Share  float64
 }
 
-// AttemptID is the attempt's ID, its ledger event's: the request ID for a
-// call's first attempt, then AttemptUUID's of the request ID and the
-// attempt's number, a UUID like the request ID's (golem.spend's columns are
-// UUIDs, contracts.md).
+// AttemptID is the attempt's ID, which is its ledger event's ID. The first
+// attempt's is the request ID, and a later one's is AttemptUUID of the
+// request ID and its number. Both are UUIDs, as golem.spend's columns are.
 func (c *Call) AttemptID() string {
 	if c.Attempt <= 1 {
 		return c.RequestID
@@ -170,13 +174,14 @@ func (c *Call) AttemptID() string {
 	return AttemptUUID(c.RequestID, c.Attempt)
 }
 
-// AttemptUUID is attempt n's ID in the call requestID, for n > 1: the
-// name-based UUID, version 5 (RFC 9562: SHA-1), whose namespace is the
-// request ID and whose name is n in decimal ("2"), in the canonical
-// lowercase form. Anyone with the request ID can derive it again, and
-// distinct (request, attempt) pairs have distinct IDs. A request ID that is
-// not a UUID (only tests have one) is hashed as the name's prefix
-// instead, under the nil namespace: still a UUID, still deterministic.
+// AttemptUUID is the ID of a call's attempt n, for n > 1. It is the
+// name-based version 5 UUID (SHA-1) in the request ID's namespace, named by
+// n in decimal, in canonical lowercase. Anyone with the request ID can
+// derive it again, and distinct attempts have distinct IDs.
+//
+// A request ID that is not a UUID, which only tests use, is hashed as a
+// prefix of the name under the nil namespace instead. The result is still
+// a deterministic UUID.
 func AttemptUUID(requestID string, n int) string {
 	h := sha1.New()
 	if ns, err := uuid.Parse(requestID); err == nil {
@@ -194,8 +199,9 @@ func AttemptUUID(requestID string, n int) string {
 	return id.String()
 }
 
-// Telemetry records calls. Its methods are safe for concurrent use, and on
-// a nil *Telemetry do nothing (a gateway without telemetry, tests).
+// Telemetry records calls. Its methods are safe for concurrent use. On a
+// nil *Telemetry they do nothing, for a gateway without telemetry and for
+// tests.
 type Telemetry struct {
 	tracer   trace.Tracer
 	tokens   metric.Int64Histogram
@@ -208,30 +214,30 @@ type Telemetry struct {
 	refusalLog
 
 	// Attribute sets are built once per route and per refusal code, not per
-	// request: building and merging them was a quarter of a call's
-	// allocations. The keys are bounded by the snapshot's routes and the
-	// contract's codes.
+	// request, since building and merging them was a quarter of a call's
+	// allocations. The snapshot's routes and the contract's codes bound the
+	// keys.
 	routes  sync.Map // routeKey -> *routeSets
-	ends    sync.Map // endKey -> []metric.AddOption: golem.calls'
+	ends    sync.Map // endKey -> golem.calls' []metric.AddOption
 	refused sync.Map // code name -> []metric.AddOption
 	starts  sync.Map // frontend -> []trace.SpanStartOption
 }
 
-// routeKey is a route's deployment: an alias and the deployment an attempt
-// went to. The deployment's key names its backend and model, but they are
-// in the key too, as the attributes are built from them.
+// routeKey is an alias and the deployment an attempt went to. The provider
+// and model are in the key too, since the attributes are built from them.
 type routeKey struct{ provider, alias, model, deployment string }
 
 // routeSets are one route's deployment's precomputed options.
 type routeSets struct {
-	name          string // the span's: "chat <alias>"
+	name          string // the span's name, "chat <alias>"
 	input, output []metric.RecordOption
 	duration      []metric.RecordOption
 	ttft          []metric.RecordOption
 	attempts      [len(attemptResults)][]metric.AddOption // by attemptIndex
 }
 
-// routeSets are c's route's options, made on its first call.
+// routeSets returns the options for a call's route and deployment, made on
+// first use.
 func (t *Telemetry) routeSets(c *Call) *routeSets {
 	return cached(&t.routes, routeKey{c.Provider, c.Alias, c.Model, c.Deployment}, func() *routeSets {
 		attrs := []attribute.KeyValue{attribute.String(attrProvider, c.Provider), attribute.String(attrRequestModel, c.Alias),
@@ -254,8 +260,8 @@ func (t *Telemetry) routeSets(c *Call) *routeSets {
 // endKey is a call's end as golem.calls counts it.
 type endKey struct{ alias, deployment, outcome, origin string }
 
-// endSets are golem.calls' options for c's end, made on its first use. The
-// outcomes and origins are the contract's few (contracts.md).
+// endSets returns golem.calls' options for a call's end, made on first use.
+// The outcomes and origins are the contract's few (contracts.md).
 func (t *Telemetry) endSets(c *Call) []metric.AddOption {
 	return cached(&t.ends, endKey{c.Alias, c.Deployment, c.Outcome, c.ErrorOrigin}, func() []metric.AddOption {
 		return []metric.AddOption{metric.WithAttributeSet(attribute.NewSet(attribute.String(attrRequestModel, c.Alias),
@@ -264,17 +270,17 @@ func (t *Telemetry) endSets(c *Call) []metric.AddOption {
 	})
 }
 
-// attempted counts c's attempt by its result, if it made one.
+// attempted counts the call's attempt by its result, if it made one.
 func (t *Telemetry) attempted(ctx context.Context, rs *routeSets, c *Call) {
 	if i := attemptIndex(c.AttemptResult); i >= 0 {
 		t.attempts.Add(ctx, 1, rs.attempts[i]...)
 	}
 }
 
-// cached is m's value for k, made by mk and stored on first use; racing
-// first uses all get the one stored. k is typed, not any, so that each
-// call boxes it on its own: the lookup's box stays on the stack, and only
-// a first use's escapes into the map.
+// cached returns the map's value for a key, made by mk and stored on first
+// use. Racing first uses all get the one stored. The key is typed rather
+// than any, so a lookup's box stays on the stack. Only a first use's key
+// escapes into the map.
 func cached[K comparable, V any](m *sync.Map, k K, mk func() V) V {
 	if v, ok := m.Load(k); ok {
 		return v.(V)
@@ -287,10 +293,10 @@ func cached[K comparable, V any](m *sync.Map, k K, mk func() V) V {
 type Providers struct {
 	Tracer trace.TracerProvider
 	Meter  metric.MeterProvider
-	Logger otellog.LoggerProvider // the ledger's rows; nil: the global one
-	// Log is where refusals are logged (Refused); nil: slog.Default().
+	Logger otellog.LoggerProvider // the ledger's rows; nil uses the global one
+	// Log is where refusals are logged (Refused); nil logs to slog.Default().
 	Log *slog.Logger
-	// Ledger, if set, is the rows' queue: its losses are reported as the
+	// Ledger, if set, is the rows' queue. Its losses are reported as the
 	// golem.ledger.dropped and golem.ledger.failed counters.
 	Ledger *LedgerQueue
 }
@@ -342,8 +348,8 @@ func New(p Providers, site, pool string) (*Telemetry, error) {
 		refusalLog: refusalLog{log: cmp.Or(p.Log, slog.Default())}}, nil
 }
 
-// Start begins a request's span; the request path ends it with Ended or
-// Refused.
+// Start begins a request's span. The request path ends the call with Ended
+// or Refused.
 func (t *Telemetry) Start(ctx context.Context, frontend string) (context.Context, trace.Span) {
 	if t == nil {
 		return ctx, trace.SpanFromContext(ctx)
@@ -399,9 +405,9 @@ func (t *Telemetry) Ended(ctx context.Context, c Call) {
 }
 
 // Retried records an attempt that failed before it committed and was
-// retried: its ledger row (charged nothing), golem.attempts by its result,
-// and an event on the call's span. The call's last attempt is recorded by
-// Ended.
+// retried. It writes the attempt's ledger row, which charges nothing, counts
+// golem.attempts by its result, and adds an event to the call's span.
+// Ended records the call's last attempt.
 func (t *Telemetry) Retried(ctx context.Context, c Call) {
 	if t == nil {
 		return

@@ -12,13 +12,15 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
-// LedgerQueue is the ledger rows' log processor. The SDK's batch processor,
-// when its queue is full, overwrites the oldest records and says so only in
-// its own log: for billing rows that loss must be counted, alerted on and
-// bounded by a queue sized for a collector stall. LedgerQueue exports in
-// batches from a bounded queue and counts every row it could not deliver,
-// shutdown included. Durability through outages is the collector's
-// (ADR 0043): the gateway's queue only bridges a node-local agent's restart.
+// LedgerQueue is the ledger rows' log processor. When its queue is full,
+// the SDK's batch processor overwrites the oldest records and says so only
+// in its own log. Billing rows need that loss counted, alerted on, and
+// bounded by a queue sized for a collector stall.
+//
+// LedgerQueue exports in batches from a bounded queue and counts every row
+// it could not deliver, at shutdown too. The collector provides durability
+// through outages. This queue only bridges a node-local agent's restart.
+// ADR 0043.
 type LedgerQueue struct {
 	exp    sdklog.Exporter
 	q      chan sdklog.Record
@@ -26,12 +28,11 @@ type LedgerQueue struct {
 	every  time.Duration
 	flush  chan chan struct{} // a flush's request, answered once its rows are exported
 	stop   chan context.Context
-	exited chan struct{} // closed when the worker returns: no flush is answered after
-	// mu orders rows against the shutdown: OnEmit holds it shared from
-	// its check of closed to its enqueue, Shutdown exclusively to set
-	// closed. Every row OnEmit accepted is then queued before the worker
-	// drains, and every later one is refused and counted: none is queued
-	// with no worker left to deliver or count it.
+	exited chan struct{} // closed when the worker returns; no flush is answered after
+	// mu orders rows against the shutdown. OnEmit holds it shared from its
+	// check of closed to its enqueue, and Shutdown holds it to set closed.
+	// So every row OnEmit accepted is queued before the worker drains. Every
+	// later row is refused and counted, never queued with no worker left.
 	mu     sync.RWMutex
 	closed bool
 	// emitting, if set, runs inside OnEmit's critical section (a test's
