@@ -117,6 +117,12 @@ prevent double counting.
   whose boundary passes it, and by reconciliation; golem-control reports
   each site whose latest ingested `ended_at` is more than the allowance
   old (`golem.ingest_by_site`, `spend.Job.Lags`).
+- The period time zone: a snapshot states the publisher's as
+  `periodZone` (an IANA name, golem-control's `-period-zone`); its known
+  spend's period is a calendar month there. A gateway whose own
+  `-period-zone` differs refuses the snapshot, naming both, so that its
+  admission and its rows' `period` agree with known spend's. Empty (a
+  standalone snapshot, an older publisher): not checked.
 - Rounding: per row, cost is computed in micro-units from integer token
   counts and prices in micro-units per million tokens, rounded half-even
   once, at the end.
@@ -142,7 +148,7 @@ prevent double counting.
   enums are strings; `funding` is a list of `{source, share}` maps and
   `units` a map of integers. Standalone, the same attributes are a JSON
   line on stdout.
-- **The collector** (`deploy/otel/ledger.yaml`, operations.md, "The
+- **The collector** (`deploy/otel/collector.yaml`, operations.md, "The
   ledger's collector") keeps `golem.spend` records in a pipeline of their
   own, queues them on node-local disk (ADR 0043) and writes them with the
   contrib ClickHouse exporter into `golem.spend_otlp`, a Null table of the
@@ -179,7 +185,11 @@ Versions are immutable once used by a ledger row; a change is a new
 version with a new effective date. Built: a PriceList's version is its
 `spec.version` with its name (`default/2026-11`), recorded as each row's
 `price_version`; a list without one is versioned by its spec's digest,
-which any change moves. Only the per-token rates are built (no tiers,
+which any change moves. The snapshot that carried the prices names the
+config's git commit they were read from (`source.configRevision`, a
+commit hash string; `""` when the config is not a checkout, and an older
+publisher's number reads as `""`), so a version can be traced to the
+commit that defined it. Only the per-token rates are built (no tiers,
 batch, premiums or units yet: ADR 0044's "good enough"). The vendored list is refreshed by a
 scheduled PR (PRD §9.7); enterprise rates override it.
 
