@@ -30,9 +30,9 @@ import (
 	"github.com/chucklehead-dev/golem/lib/snapshot"
 )
 
-// TestReleaseGate: standalone listens on loopback only; pool mode needs its
-// inputs, and -accept-unreleased until golem#7's evidence is in.
-func TestReleaseGate(t *testing.T) {
+// TestValidate checks the flags of each mode. Standalone listens on loopback
+// only. Pool mode needs its inputs, and -accept-unreleased.
+func TestValidate(t *testing.T) {
 	full := options{pool: "internal", bucket: "s3://b/p", keys: "/k", valkeyAddr: "v:6379", site: "eu", listen: ":8080", maxSkew: 2 * time.Minute, maxLease: 4 * time.Hour}
 	accepted := full
 	accepted.acceptUnreleased = true
@@ -53,13 +53,13 @@ func TestReleaseGate(t *testing.T) {
 		"standalone, every host":    {options{standalone: "./config", listen: "0.0.0.0:8080"}, "loopback"},
 		"standalone, empty host":    {options{standalone: "./config", listen: ":8080"}, "loopback"},
 		"standalone, a LAN address": {options{standalone: "./config", listen: "10.0.0.5:8080"}, "loopback"},
-		"pool, unreleased":          {full, "golem#7"},
+		"pool, unreleased":          {full, "-accept-unreleased"},
 		"pool, accepted":            {accepted, ""},
 		"pool, no Valkey":           {missing, "-valkey"},
 		"both modes":                {both, "not both"},
 		"pool, no lease":            {noLease, "-max-lease"},
 	} {
-		err := releaseGate(tc.o)
+		err := validate(tc.o)
 		if (err == nil) != (tc.want == "") || err != nil && !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v, want %q", name, err, tc.want)
 		}
@@ -139,7 +139,7 @@ spec: {models: [claude], rateLimits: {scope: {requestsPerMinute: 1000}}}
 	}
 	p := &publish.Publisher{State: st, Bucket: bkt, Signer: sign.Ed25519{ID: "publishing", Key: priv}, Pool: "internal"}
 	doc := st.Current()
-	if _, err := p.Publish(ctx, publish.Lease{Holder: "r1", Epoch: 1}, doc.StateVersion, func(seq uint64) (*snapshot.Snapshot, error) {
+	if _, err := p.Publish(ctx, state.Fence{Holder: "r1", Epoch: 1}, doc.StateVersion, func(seq uint64) (*snapshot.Snapshot, error) {
 		return compile.Compile(objs, compile.Options{PublishSeq: seq, Now: time.Now().UTC(), Lease: time.Hour, Entitlements: doc.Entitlements})
 	}); err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func (f *poolFixture) start(t *testing.T, ctx context.Context, vk string, extra 
 	done := make(chan int, 1)
 	args := append([]string{"-pool", "internal", "-bucket", filepath.Join(f.root, "bucket"), "-keys", filepath.Join(f.root, "keys"),
 		"-checkpoint", filepath.Join(f.root, "checkpoint"), "-valkey", vk, "-site", "test", "-secrets", filepath.Join(f.root, "secrets"),
-		"-listen", listen, "-telemetry", "off", "-drain", "1s", "-accept-unreleased"}, extra...)
+		"-listen", listen, "-telemetry", "off", "-drain", "1s", "-unready", "0", "-accept-unreleased"}, extra...)
 	go func() { done <- run(ctx, args) }()
 	base := "http://" + listen
 	for range 200 {
@@ -290,7 +290,7 @@ func TestPoolModeLeaseBound(t *testing.T) {
 	go func() {
 		done <- run(ctx, []string{"-pool", "internal", "-bucket", filepath.Join(f.root, "bucket"), "-keys", filepath.Join(f.root, "keys"),
 			"-valkey", startValkey(t), "-site", "test", "-secrets", filepath.Join(f.root, "secrets"), "-max-lease", "30m",
-			"-listen", listen, "-telemetry", "off", "-drain", "1s", "-accept-unreleased"})
+			"-listen", listen, "-telemetry", "off", "-drain", "1s", "-unready", "0", "-accept-unreleased"})
 	}()
 	// The first poll runs before the server listens: its first answer is
 	// the source's verdict.

@@ -39,7 +39,7 @@ func TestStartInterruptible(t *testing.T) {
 	go func() {
 		done <- run(ctx, []string{"-pool", "internal", "-bucket", "s3://golem-test/golem", "-keys", filepath.Join(f.root, "keys"),
 			"-valkey", freeAddr(t), "-site", "test", "-secrets", filepath.Join(f.root, "secrets"),
-			"-listen", freeAddr(t), "-telemetry", "off", "-drain", "1s", "-accept-unreleased"})
+			"-listen", freeAddr(t), "-telemetry", "off", "-drain", "1s", "-unready", "0", "-accept-unreleased"})
 	}()
 	for deadline := time.Now().Add(10 * time.Second); asked.Load() == 0; time.Sleep(10 * time.Millisecond) { // another goroutine's start
 		if time.Now().After(deadline) {

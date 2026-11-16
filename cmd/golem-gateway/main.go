@@ -9,12 +9,13 @@
 //
 // or, for a developer's own machine, standalone (ADR 0023):
 //
-//	golem-gateway --standalone ./config
+//	golem-gateway -standalone ./config
 //
-// Standalone mode reads the same CRD YAML as the GitOps repository,
+// Standalone mode reads the same config YAML as the GitOps repository,
 // recompiles it on change, takes provider credentials from the environment
 // (a Backend's spec.auth.env), and listens on localhost only. Pool mode
-// is behind the release gate until golem#7's deployment evidence is in.
+// needs -accept-unreleased until its production prerequisites are
+// confirmed (validate).
 package main
 
 import (
@@ -25,6 +26,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -47,6 +49,7 @@ import (
 	"github.com/chucklehead-dev/golem/gateway/route"
 	"github.com/chucklehead-dev/golem/gateway/snapshot"
 	"github.com/chucklehead-dev/golem/gateway/telemetry"
+	"github.com/chucklehead-dev/golem/internal/flagusage"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
 	"github.com/chucklehead-dev/golem/lib/contract"
 	"github.com/chucklehead-dev/golem/lib/entra"
@@ -82,52 +85,94 @@ type options struct {
 	maxConns, maxConnsPerSource                          int
 }
 
+// flagGroups are the gateway's flags as -help prints them.
+var flagGroups = []flagusage.Group{ // read-only
+	{Title: "General", Flags: []string{"standalone", "listen", "telemetry", "period-zone", "denylist", "local-key",
+		"max-body", "max-reading", "max-reading-per-principal", "drain", "unready"}},
+	{Title: "Pool mode", Flags: []string{"pool", "bucket", "keys", "checkpoint", "id", "site", "secrets",
+		"max-lease", "clock-skew", "accept-unreleased"}},
+	{Title: "Entra tokens", Flags: []string{"entra-tenant", "entra-audience", "entra-jwks"}},
+	{Title: "The site's Valkey (pool mode)", Flags: []string{"valkey", "valkey-tls", "valkey-ca", "valkey-user"},
+		Env: []flagusage.Env{{Name: "VALKEY_PASSWORD", Usage: "the password of -valkey-user, or of the default user; never a flag, which the process list would show"}}},
+	{Title: "Guard: limits before authentication", Flags: []string{"source-header", "source-rate", "source-burst",
+		"auth-failures", "auth-failure-burst", "max-conns", "max-conns-per-source"}},
+}
+
+// Defaults that differ by mode. Pool mode runs in a pod, where loopback is
+// unreachable and endpoints take a few seconds to drop a stopping pod.
+const (
+	standaloneListen = "127.0.0.1:8080"
+	poolListen       = ":8080"
+	poolUnready      = 5 * time.Second
+)
+
+// parse reads the command line, filling in the defaults that differ by mode,
+// and validates it.
 func parse(args []string) (options, error) {
+	return parseInto(flag.NewFlagSet("golem-gateway", flag.ContinueOnError), args)
+}
+
+// parseInto is parse with fs, so a test can read its usage.
+func parseInto(fs *flag.FlagSet, args []string) (options, error) {
 	var o options
-	fs := flag.NewFlagSet("golem-gateway", flag.ContinueOnError)
-	fs.StringVar(&o.standalone, "standalone", "", "run from the CRD YAML in this directory, on this machine only (ADR 0023)")
-	fs.StringVar(&o.listen, "listen", "127.0.0.1:8080", "address to serve on")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: golem-gateway -standalone <dir> | -pool <name> [flags]")
+		flagusage.Print(fs.Output(), fs, flagGroups)
+	}
+	fs.StringVar(&o.standalone, "standalone", "", "run from the config YAML in this directory, for this machine only")
+	fs.StringVar(&o.listen, "listen", "", "address to serve on (default "+standaloneListen+" standalone, "+poolListen+" in pool mode)")
 	fs.Int64Var(&o.maxBody, "max-body", 32<<20, "largest request body accepted, in bytes")
-	fs.Int64Var(&o.maxReading, "max-reading", 512<<20, "request-body bytes this gateway reads at once, before admission; past it requests are refused limit.concurrency (retry in a second); 0: no bound")
-	fs.IntVar(&o.maxReadingPerPrinc, "max-reading-per-principal", 8, "request bodies one principal may have being read at once; past it its requests are refused limit.concurrency; 0: no bound")
+	fs.Int64Var(&o.maxReading, "max-reading", 512<<20, "request-body bytes read at once, before admission; past it requests are refused limit.concurrency; 0: no bound")
+	fs.IntVar(&o.maxReadingPerPrinc, "max-reading-per-principal", 8, "request bodies one principal may have being read at once; past it they are refused limit.concurrency; 0: no bound")
 	fs.DurationVar(&o.drainFor, "drain", 30*time.Second, "how long shutdown waits for calls in flight, streams included")
-	fs.DurationVar(&o.unready, "unready", 0, "how long /readyz fails before shutdown stops taking connections (in Kubernetes, longer than the endpoints take to follow)")
-	fs.StringVar(&o.telem, "telemetry", "stdout", "stdout: ledger rows as JSON lines on stdout; off; or a collector's OTLP/HTTP host:port (TLS unless a literal loopback address: 127.0.0.1:4318, [::1]:4318)")
-	fs.StringVar(&o.localKeyFile, "local-key", "", "standalone: the file holding the local key (generated on first use); default <user config dir>/golem/standalone-key")
-	fs.StringVar(&o.zoneName, "period-zone", "UTC", "the budget periods' time zone (an IANA name): a period is a calendar month there; in pool mode golem-control's -period-zone, a snapshot stating another refused")
-	fs.StringVar(&o.denylist, "denylist", "", "the site's emergency denylist file (a mounted ConfigMap), re-read as it changes; empty: none")
+	fs.DurationVar(&o.unready, "unready", 0, "how long /readyz fails before shutdown stops taking connections; longer than the endpoints take to drop the pod (default "+poolUnready.String()+" in pool mode, 0 standalone)")
+	fs.StringVar(&o.telem, "telemetry", "stdout", "stdout (ledger rows as JSON lines), off, or a collector's OTLP/HTTP host:port, TLS unless a literal loopback address. On by default so no ledger row is lost unseen; golem-control's is off by default, as it writes no ledger")
+	fs.StringVar(&o.localKeyFile, "local-key", "", "standalone: the file holding the local key, made on first use (default <user config dir>/golem/standalone-key)")
+	fs.StringVar(&o.zoneName, "period-zone", "UTC", "the budget periods' time zone, an IANA name; in pool mode it must equal golem-control's -period-zone, or every snapshot is refused")
+	fs.StringVar(&o.denylist, "denylist", "", "the site's emergency denylist file, re-read as it changes; empty: none")
 
 	fs.StringVar(&o.tenant, "entra-tenant", "", "accept Entra tokens from this tenant (directory) ID; empty: golem keys only")
-	fs.StringVar(&o.jwks, "entra-jwks", "", "the tenant's signing key set URL; default Entra's public cloud's, https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys")
-	fs.StringVar(&o.audience, "entra-audience", "api://golem", "golem API's audiences in Entra tokens, comma-separated (its App ID URI and client ID)")
+	fs.StringVar(&o.jwks, "entra-jwks", "", "the tenant's signing key set URL (default Entra's public cloud's, https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys)")
+	fs.StringVar(&o.audience, "entra-audience", "api://golem", "the golem API's audiences in Entra tokens, comma-separated: its App ID URI and client ID")
 
 	fs.StringVar(&o.pool, "pool", "", "pool mode: the gateway pool whose snapshots this gateway serves")
-	fs.StringVar(&o.bucket, "bucket", "", "pool mode: the state bucket, s3://<bucket>/<prefix> (or a directory, for tests)")
-	fs.StringVar(&o.keys, "keys", "", "pool mode: a directory of the publishing keys this gateway trusts (*.pub, PEM; a KMS key's with a Key-ID header)")
-	fs.StringVar(&o.checkpoint, "checkpoint", "", "pool mode: a file on this gateway's own disk for the last publication applied (its floor across restarts), with last-good.json beside it (the publication itself, served at a restart while the bucket is unreachable); empty: the trusted checkpoint alone")
+	fs.StringVar(&o.bucket, "bucket", "", "pool mode: the state bucket, s3://<bucket>/<prefix>, or a directory for tests")
+	fs.StringVar(&o.keys, "keys", "", "pool mode: a directory of the publishing keys trusted (*.pub, PEM); it must hold the public half of golem-control's -signing-key")
+	fs.StringVar(&o.checkpoint, "checkpoint", "", "pool mode: a file on this gateway's own disk that keeps its floor across restarts; empty: the bucket's trusted checkpoint alone (see docs/operations.md)")
 	fs.StringVar(&o.gatewayID, "id", "", "pool mode: this gateway's name, for its status object (default the host name)")
-	fs.StringVar(&o.site, "site", "", "pool mode: this gateway's site (its Valkey's keys and ledger rows)")
-	fs.DurationVar(&o.maxSkew, "clock-skew", 2*time.Minute, "pool mode: how far the publisher's clock may run ahead of this gateway's: a pointer issued further in its future is refused")
-	fs.DurationVar(&o.maxLease, "max-lease", 4*time.Hour, "pool mode: the longest authorization lease the pool's publisher grants (golem-control's -lease): a snapshot whose lease runs further ahead, plus -clock-skew, is refused")
+	fs.StringVar(&o.site, "site", "", "pool mode: this gateway's site, naming its Valkey keys and ledger rows")
+	fs.DurationVar(&o.maxSkew, "clock-skew", 2*time.Minute, "pool mode: how far the publisher's clock may run ahead of this gateway's; a pointer issued further ahead is refused")
+	fs.DurationVar(&o.maxLease, "max-lease", 4*time.Hour, "pool mode: the longest authorization lease accepted; at least golem-control's -lease, or every snapshot is refused")
 	fs.StringVar(&o.secrets, "secrets", "/var/run/golem/secrets", "pool mode: where provider Secrets are mounted, one directory per Secret")
-	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run although golem#7's deployment evidence is not in (test sites only)")
+	fs.BoolVar(&o.acceptUnreleased, "accept-unreleased", false, "pool mode: run before its production prerequisites are confirmed (provider spending limits, OTLP over TLS, mTLS on every hop); for test sites only")
 
-	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey (host:port) for the limiter")
-	fs.BoolVar(&o.valkeyTLS, "valkey-tls", false, "pool mode: connect to Valkey over TLS (ElastiCache's in-transit encryption), verifying its certificate against the system's roots for the address's host name")
-	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "pool mode, with -valkey-tls: a PEM file of the CA certificates to verify Valkey's certificate against, in place of the system's roots")
-	fs.StringVar(&o.valkeyUser, "valkey-user", "", "pool mode: the Valkey user to AUTH as (an ACL user; ElastiCache RBAC); its password in $VALKEY_PASSWORD. Empty with the password set: AUTH as the default user")
+	fs.StringVar(&o.valkeyAddr, "valkey", "", "pool mode: the site's Valkey, host:port, for the limiter")
+	fs.BoolVar(&o.valkeyTLS, "valkey-tls", false, "connect to Valkey over TLS, verifying its certificate for the address's host name")
+	fs.StringVar(&o.valkeyCA, "valkey-ca", "", "with -valkey-tls: a PEM file of the CA certificates to verify Valkey against, in place of the system's roots")
+	fs.StringVar(&o.valkeyUser, "valkey-user", "", "the Valkey ACL user to AUTH as; its password in $VALKEY_PASSWORD")
 
-	fs.StringVar(&o.sourceHeader, "source-header", "", "the header the proxy in front sets to the caller's address (its last value is taken, e.g. X-Forwarded-For); empty: the connection's address, which behind a sidecar is the sidecar's, so the per-source limits are the pod's")
-	fs.Float64Var(&o.sourceRate, "source-rate", 0, "requests a second each source may make before authentication; 0: no limit (authenticated callers' limits are the policy's)")
+	fs.StringVar(&o.sourceHeader, "source-header", "", "the header that the proxy in front sets to the caller's address, its last value taken (e.g. X-Forwarded-For); empty: the connection's address (see docs/operations.md)")
+	fs.Float64Var(&o.sourceRate, "source-rate", 0, "requests a second each source may make before authentication; 0: no limit")
 	fs.Float64Var(&o.sourceBurst, "source-burst", 0, "the requests a quiet source may make at once (default -source-rate)")
-	fs.Float64Var(&o.authFailRate, "auth-failures", 20, "failed authentications a second each source may make; past them (and the burst) its Entra tokens, and its requests that fail authentication, are refused until it slows (a valid golem key is still served); only the credential's faults count, not golem's or Entra's; 0: no limit")
+	fs.Float64Var(&o.authFailRate, "auth-failures", 20, "failed authentications a second each source may make before its Entra tokens and failing requests are refused; valid golem keys are still served; 0: no limit")
 	fs.Float64Var(&o.authFailBurst, "auth-failure-burst", 200, "the failed authentications a source may make at once")
 	fs.IntVar(&o.maxConns, "max-conns", 8192, "connections open at once; past it new ones wait in the listen backlog; 0: no limit")
-	fs.IntVar(&o.maxConnsPerSource, "max-conns-per-source", 0, "connections open at once from one remote address (for a gateway reached directly, not behind a sidecar); 0: no limit")
+	fs.IntVar(&o.maxConnsPerSource, "max-conns-per-source", 0, "connections open at once from one remote address, for a gateway reached directly; 0: no limit")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
-	return o, releaseGate(o)
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	switch {
+	case !set["listen"] && o.standalone != "":
+		o.listen = standaloneListen
+	case !set["listen"]:
+		o.listen = poolListen
+	}
+	if !set["unready"] && o.standalone == "" {
+		o.unready = poolUnready
+	}
+	return o, validate(o)
 }
 
 func main() { os.Exit(run(context.Background(), os.Args[1:])) }
@@ -497,6 +542,12 @@ func poolSource(ctx context.Context, o options, holder *snapshot.Holder) (*snaps
 	if err != nil {
 		return nil, fmt.Errorf("-keys: %w", err)
 	}
+	// The settings that must agree with golem-control's, in one line to
+	// compare with its own (docs/operations.md).
+	ids := slices.Sorted(maps.Keys(keys.Ed25519))
+	ids = append(ids, slices.Sorted(maps.Keys(keys.ECDSA))...)
+	slog.Info("golem-gateway: settings shared with golem-control", "max-lease", o.maxLease, "clock-skew", o.maxSkew,
+		"period-zone", o.zoneName, "trusted key IDs", strings.Join(ids, ","))
 	root, err := os.OpenRoot(o.secrets)
 	if err != nil {
 		return nil, fmt.Errorf("-secrets: %w", err)
@@ -634,18 +685,17 @@ func setupTelemetry(where, site, pool string) (_ *telemetry.Telemetry, meter met
 	}, nil
 }
 
-// releaseGate is the production gate (golem#5, #7). Standalone listens on
-// loopback only. Pool mode needs every one of its inputs, and runs only
-// with -accept-unreleased until golem#7's deployment evidence is in:
-// provider-account spending limits, OTLP TLS against the real collector,
-// and the mTLS owner of each hop.
-func releaseGate(o options) error {
+// validate checks the flags of either mode. Standalone listens on loopback
+// only. Pool mode needs all its inputs, and -accept-unreleased until its
+// production prerequisites are confirmed: provider-account spending limits,
+// OTLP over TLS to the real collector, and an mTLS owner for each hop.
+func validate(o options) error {
 	switch {
 	case o.standalone != "" && o.pool != "":
 		return errors.New("-standalone or -pool, not both")
 	case o.standalone != "":
 		if host, _, err := net.SplitHostPort(o.listen); err != nil || !isLoopback(host) {
-			return fmt.Errorf("standalone mode listens on a loopback address only (got %q): it is not for shared use (ADR 0023)", o.listen)
+			return fmt.Errorf("standalone mode listens on a loopback address only (got %q): it is not for shared use", o.listen)
 		}
 		return nil
 	case o.pool == "":
@@ -665,7 +715,7 @@ func releaseGate(o options) error {
 		return fmt.Errorf("-max-lease %s and -clock-skew %s: the lease must be positive and the skew not negative", o.maxLease, o.maxSkew)
 	}
 	if !o.acceptUnreleased {
-		return errors.New("pool mode is not released: golem#7's deployment evidence (provider spending limits, OTLP TLS to the real collector, each hop's mTLS owner) is not in; -accept-unreleased runs it on a test site")
+		return errors.New("pool mode is not released: its production prerequisites (provider spending limits, OTLP over TLS to the real collector, each hop's mTLS owner) are not confirmed; -accept-unreleased runs it on a test site")
 	}
 	return nil
 }

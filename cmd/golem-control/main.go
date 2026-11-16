@@ -1,6 +1,7 @@
 // golem-control publishes the config's snapshots to the bucket while it
-// leads (control-plane.md §4; this slice: config CRDs from a directory,
-// every pool the same snapshot, entitlements from the state document).
+// leads. The config comes from a git checkout and the entitlements from the
+// state document (control-plane.md). Limitations: every pool gets the same
+// snapshot; there are no pool selectors and no CRD watch.
 //
 //	golem-control -config ./config -bucket ./bucket -signing-key file:publishing.key -pools internal
 //	golem-control -config ./config -bucket s3://golem-state/golem/ -signing-key kms:arn:aws:kms:... -pools internal,edge
@@ -46,6 +47,7 @@ import (
 	"github.com/chucklehead-dev/golem/control/service"
 	"github.com/chucklehead-dev/golem/control/spend"
 	"github.com/chucklehead-dev/golem/control/state"
+	"github.com/chucklehead-dev/golem/internal/flagusage"
 	"github.com/chucklehead-dev/golem/lib/bucket"
 	"github.com/chucklehead-dev/golem/lib/bucket/s3bucket"
 	"github.com/chucklehead-dev/golem/lib/entra"
@@ -67,7 +69,7 @@ func main() {
 func dispatch(args []string) error {
 	ctx := context.Background()
 	if len(args) == 0 {
-		return run()
+		return run(args)
 	}
 	switch args[0] {
 	case "keygen":
@@ -85,7 +87,7 @@ func dispatch(args []string) error {
 	case "bootstrap":
 		return bootstrap(ctx, os.Stdout, args[1:])
 	}
-	return run()
+	return run(args)
 }
 
 // installed is what shows golem-control has run on a bucket publishing
@@ -232,37 +234,60 @@ type options struct {
 	periodZone                            string
 }
 
+// flagGroups are golem-control's flags as -help prints them.
+var flagGroups = []flagusage.Group{ // read-only
+	{Title: "Publishing", Flags: []string{"config", "config-link", "config-fetched", "max-config-age", "bucket", "pools",
+		"signing-key", "trusted-keys", "lease", "period-zone", "id", "probes", "telemetry"}},
+	{Title: "The control API", Flags: []string{"listen", "drain", "entra-tenant", "entra-audience"}},
+	{Title: "The audit", Flags: []string{"audit-archive", "audit-outbox-max"}},
+	{Title: "Entra group sync", Flags: []string{"entra-sync-client-id", "entra-sync-every", "entra-sync-max-removals"}},
+	{Title: "Known spend", Flags: []string{"clickhouse", "clickhouse-user", "spend-allowance", "spend-stale-after"},
+		Env: []flagusage.Env{{Name: "CLICKHOUSE_PASSWORD", Usage: "the password of -clickhouse-user; never a flag, which the process list would show"}}},
+}
+
 // parseFlags reads golem-control's flags and checks those that need each
-// other.
-func parseFlags() (options, error) {
+// other. -help, or a flag it does not know, exits with the usage.
+func parseFlags(args []string) (options, error) {
+	return parseFlagsInto(flag.NewFlagSet("golem-control", flag.ExitOnError), args)
+}
+
+// parseFlagsInto is parseFlags with fs, so a test can read its usage.
+func parseFlagsInto(fs *flag.FlagSet, args []string) (options, error) {
 	var o options
-	flag.StringVar(&o.config, "config", "", "the config CRDs' directory")
-	flag.StringVar(&o.configLink, "config-link", "", "git-sync's --link, which -config is within: its target is the worktree of the commit checked out, named by its hash, published as each snapshot's configRevision and logged; empty: no revision")
-	flag.StringVar(&o.configFetched, "config-fetched", "", "a file whose modification time is when the config checkout was last fetched: git-sync's <root>/.git/FETCH_HEAD, rewritten at every successful sync; empty: the checkout's age is not bounded")
-	flag.DurationVar(&o.maxConfigAge, "max-config-age", 30*time.Minute, "with -config-fetched, how long ago the checkout may have been fetched before leases stop being renewed (a stalled git-sync's checkout may miss a restriction): changes are still published within the lease already granted, and the gateways' leases run out; 0: no bound")
-	flag.StringVar(&o.bucket, "bucket", "", "the bucket: a directory, or s3://<bucket>/<prefix>")
-	flag.StringVar(&o.signingKey, "signing-key", "", "the publishing key: file:<an Ed25519 PKCS#8 PEM> or kms:<a KMS key ARN, ECC_NIST_P256>")
-	flag.StringVar(&o.trustedKeys, "trusted-keys", "", "a directory of retiring publishing keys' public halves (*.pub, as a gateway's -keys): checkpoints and pointers they signed are trusted while the signer is rotated, and re-signed with -signing-key at the next publication; empty: the signing key's own only")
-	flag.StringVar(&o.pools, "pools", "internal", "the gateway pools to publish to, comma-separated")
-	flag.StringVar(&o.id, "id", "", "this replica's name (default: the host name)")
-	flag.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease (ADR 0032: four hours internal, five minutes edge); at most every gateway's -max-lease, or they refuse every snapshot")
-	flag.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
-	flag.StringVar(&o.probes, "probes", "", "serve GET /livez and /readyz here, for Kubernetes' probes (ready while this replica leads: the state loaded and the fence claimed); empty: none")
-	flag.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish before they are cut")
-	flag.StringVar(&o.archive, "audit-archive", "", "the audit archive (an Object Lock bucket in a separate account): a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
-	flag.IntVar(&o.outboxMax, "audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, in events: past 80% of it changes that grant access are refused, and at it every change that adds an audit event, until the archive drains it")
-	flag.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port, for golem-control's metrics and, with -audit-archive, the audit's log records (TLS unless a literal loopback address)")
-	flag.StringVar(&o.tenant, "entra-tenant", "", "the Entra tenant whose tokens the API takes (required with -listen)")
-	flag.StringVar(&o.audience, "entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated (ADR 0046: not the gateway's)")
-	flag.StringVar(&o.syncClient, "entra-sync-client-id", "", "the jobs registration's client ID (entra.md #4): sync bound Entra groups' members by workload identity; empty: no sync")
-	flag.DurationVar(&o.syncEvery, "entra-sync-every", 5*time.Minute, "how often the group sync runs")
-	flag.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships of still-active users one sync may end; a step over it writes only its offboarding of disabled or deleted users (raise it for one run when intended)")
-	flag.StringVar(&o.clickhouse, "clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443) for known spend (ADR 0048); its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry none, and gateways count their site alone")
-	flag.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as (read-only on golem.spend)")
-	flag.DurationVar(&o.spendStaleAfter, "spend-stale-after", spend.DefaultStaleAfter, "a known-spend result whose boundary is older than this is reported stale (it stays published)")
-	flag.DurationVar(&o.allowance, "spend-allowance", 5*time.Minute, "how long after a call's end its ledger row is surely in ClickHouse: known spend's boundary is this far back")
-	flag.StringVar(&o.periodZone, "period-zone", "UTC", "the budget periods' time zone (an IANA name), stated in every snapshot: every gateway's -period-zone must be the same, or it refuses the snapshots")
-	flag.Parse()
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: golem-control -config <dir> -bucket <dir|s3://...> -signing-key <file:...|kms:...> [flags]")
+		fmt.Fprintln(fs.Output(), "       golem-control keygen | pubkey | restore | bootstrap ...")
+		flagusage.Print(fs.Output(), fs, flagGroups)
+	}
+	fs.StringVar(&o.config, "config", "", "the config YAML's directory")
+	fs.StringVar(&o.configLink, "config-link", "", "git-sync's --link, which -config is within; its target's commit is published as each snapshot's configRevision; empty: no revision")
+	fs.StringVar(&o.configFetched, "config-fetched", "", "a file whose modification time is the checkout's last fetch, such as git-sync's <root>/.git/FETCH_HEAD; empty: the checkout's age is not bounded")
+	fs.DurationVar(&o.maxConfigAge, "max-config-age", 30*time.Minute, "with -config-fetched, how old the checkout may be before leases stop being renewed; changes are still published; 0: no bound (see docs/operations.md)")
+	fs.StringVar(&o.bucket, "bucket", "", "the state bucket: a directory, or s3://<bucket>/<prefix>")
+	fs.StringVar(&o.signingKey, "signing-key", "", "the publishing key: file:<an Ed25519 PKCS#8 PEM> or kms:<a KMS key ARN, ECC_NIST_P256>; every gateway's -keys must hold its public half")
+	fs.StringVar(&o.trustedKeys, "trusted-keys", "", "during a key rotation: a directory of the retiring keys' public halves (*.pub), still trusted until re-signed; empty: the signing key's own only")
+	fs.StringVar(&o.pools, "pools", "internal", "the gateway pools to publish to, comma-separated")
+	fs.StringVar(&o.id, "id", "", "this replica's name (default the host name)")
+	fs.DurationVar(&o.authLease, "lease", 4*time.Hour, "the snapshots' authorization lease: four hours for internal pools, five minutes for the edge; at most every gateway's -max-lease, or they refuse every snapshot")
+	fs.StringVar(&o.listen, "listen", "", "serve the control API (Connect: gRPC, gRPC-Web, HTTP/JSON) here; empty: no API")
+	fs.StringVar(&o.probes, "probes", "", "serve GET /livez and /readyz here, ready while this replica holds the fence; empty: none")
+	fs.DurationVar(&o.drain, "drain", 10*time.Second, "at shutdown, how long the control API's calls in flight are given to finish")
+	fs.StringVar(&o.archive, "audit-archive", "", "the audit archive, an Object Lock bucket in a separate account: a directory, or s3://<bucket>/<prefix>; empty: the outbox is not shipped")
+	fs.IntVar(&o.outboxMax, "audit-outbox-max", state.DefaultMaxOutbox, "the audit outbox's bound, in events; past 80% of it, changes that grant access are refused (see docs/operations.md)")
+	fs.StringVar(&o.telemetry, "telemetry", "off", "off, or a collector's OTLP/HTTP host:port for metrics and the audit's log records, TLS unless a literal loopback address. Off by default: golem-control writes no ledger, unlike the gateway")
+	fs.StringVar(&o.tenant, "entra-tenant", "", "the Entra tenant whose tokens the API takes; required with -listen")
+	fs.StringVar(&o.audience, "entra-audience", "api://golem-control", "the control API registration's audiences in Entra tokens, comma-separated; never the gateway's")
+	fs.StringVar(&o.syncClient, "entra-sync-client-id", "", "the jobs app registration's client ID, to sync the bound Entra groups' members by workload identity; empty: no sync")
+	fs.DurationVar(&o.syncEvery, "entra-sync-every", 5*time.Minute, "how often the group sync runs")
+	fs.IntVar(&o.syncMax, "entra-sync-max-removals", 50, "the most memberships of still-active users one sync may end; past it, only offboarding is written")
+	fs.StringVar(&o.clickhouse, "clickhouse", "", "the ledger's ClickHouse HTTP interface (https://host:8443), for known spend; its password in $CLICKHOUSE_PASSWORD; empty: snapshots carry no known spend")
+	fs.StringVar(&o.clickhouseUser, "clickhouse-user", "golem_control", "the ClickHouse user known spend is read as, read-only on golem.spend")
+	fs.DurationVar(&o.spendStaleAfter, "spend-stale-after", spend.DefaultStaleAfter, "a known-spend result whose boundary is older than this is reported stale; it stays published")
+	fs.DurationVar(&o.allowance, "spend-allowance", 5*time.Minute, "how long after a call ends its ledger row is surely in ClickHouse; known spend's boundary is this far back")
+	fs.StringVar(&o.periodZone, "period-zone", "UTC", "the budget periods' time zone, an IANA name, stated in every snapshot; every gateway's -period-zone must be the same")
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
 	if o.config == "" || o.bucket == "" || o.signingKey == "" {
 		return o, errors.New("-config, -bucket and -signing-key are required")
 	}
@@ -284,8 +309,8 @@ func parseFlags() (options, error) {
 // a successor claims over it.
 // Errors are returned, never an exit from a goroutine, so every deferred
 // step runs.
-func run() error {
-	o, err := parseFlags()
+func run(args []string) error {
+	o, err := parseFlags(args)
 	if err != nil {
 		return err
 	}
@@ -327,6 +352,10 @@ func run() error {
 	}
 	defer func() { closeAudit(); closeMetrics() }() // the audit's records, then the metrics' last collection
 	slog.Info("golem-control: running", "replica", replica, "pools", o.pools, "signing key", signer.KeyID())
+	// The settings that must agree with every gateway's, in one line to
+	// compare with theirs (docs/operations.md).
+	slog.Info("golem-control: settings shared with the gateways", "lease", o.authLease, "period-zone", o.periodZone,
+		"signing key ID", signer.KeyID(), "trusted-keys", o.trustedKeys)
 	// Built before any goroutine starts: a failure here returns with
 	// nothing left running.
 	var srv *http.Server
@@ -432,7 +461,7 @@ func newController(ctx context.Context, o options, st *state.Store, b bucket.Buc
 			return nil, closeAudit, err
 		}
 	} else {
-		slog.Warn("golem-control: no -clickhouse: snapshots carry no known spend, and each site's gateways budget against their own counter alone")
+		slog.Warn("golem-control: no -clickhouse: snapshots carry no known spend, so no budget sees any spend")
 	}
 	if o.syncClient != "" {
 		if o.tenant == "" {
