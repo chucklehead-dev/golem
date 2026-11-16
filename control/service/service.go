@@ -109,9 +109,18 @@ func (s *Service) apply(ctx context.Context, c Caller, o Options, action, target
 	if o.ValidateOnly {
 		return s.State.Validate(ctx, f)
 	}
+	// Not bound to the caller's request: a client that disconnects once the
+	// write is under way would otherwise be told it failed though it may
+	// have landed (a minted key's plaintext lost). The write has a deadline
+	// of its own instead.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), updateTimeout)
+	defer cancel()
 	_, err := s.State.Update(ctx, f)
 	return err
 }
+
+// updateTimeout bounds a change's write, with its retries.
+const updateTimeout = 30 * time.Second
 
 // read is the document as of now (one conditional get).
 func (s *Service) read(ctx context.Context) (*state.Document, error) {
