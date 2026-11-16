@@ -122,6 +122,38 @@ without a translation defect.
 
 ## Phase 3 (M2): enterprise default (10–12 weeks)
 
+Moved here from M1 (m1-plan.md, *Not building in M1*) and from the control
+plane's design, one line each:
+
+- **Config objects in the cluster** and the CRD watch, with 0041 §7.2's
+  consistent LIST and status on the objects (ADR 0005), if a second
+  golem-control replica or team needs it (ADR 0053, 0054).
+- **Operational overrides**: expiring disable, weight, freeze and fallback
+  levers through the API (ADR 0005).
+- **Grants, team pools, cost centers and adjustment requests** (ADR 0011,
+  0034), with `BudgetService`.
+- **Member and key caps** (ADR 0034), with known spend per member and key.
+- **`SpendService`**: spend queries filtered by the caller's rights.
+- **Threshold notifications** (50/80/100%) by email (Graph `sendMail`) and
+  Teams webhooks, with idempotency keys in the state.
+- **Expiry jobs and reminders** for keys, adjustment requests and
+  registrations.
+- **Registrations** of model server endpoints, with a TTL.
+- **A reconciliation job** writing `adjustment` rows (M1's is a query).
+- **Per-key and token rate limits, $/min limits, `x-ratelimit-*` headers**;
+  provider quota shares per site.
+- **Pool selectors**: a snapshot per pool by site and audience; gateway
+  status read back (`Applied n/m`, `golemctl gateways`).
+- **Argo Rollouts canaries, Crossplane claims, dashboards as code**
+  (ADR 0040).
+- **The secret-scanning webhook** revoking leaked keys; `golemctl agent
+  setup`; restore over the API (`golemctl state restore`); `golemctl
+  explain`.
+- **Weighted and least-in-flight balancing**, session affinity, in-process
+  hooks (ADR 0014).
+
+The rest of M2:
+
 - **Org**: projects and sub-teams, monthly caps per scope set by admins or
   parent managers, cost-center mapping for chargeback, threshold
   notifications by email and Teams (ADR 0034); grants and approvals only
