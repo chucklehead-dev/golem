@@ -9,17 +9,17 @@ import (
 	"time"
 )
 
-// Checker checks the deployments that have a health check (Target's
-// HealthPath; a local box, ADR 0017) and reports each result to Health,
-// so a box that is down is ejected before a call finds it, and its route
-// fails over at once, and one that answers again is readmitted without a
-// caller's call as its probe. Each gateway checks on its own, as each
-// ejects on its own (model/attempts.md).
+// Checker checks the deployments that have a health check, such as a local
+// box, and reports each result to Health. A box that is down is ejected
+// before a call finds it, so its route fails over at once. One that answers
+// again is readmitted without a caller's call as its probe.
+//
+// Each gateway checks on its own, as each ejects on its own. ADR 0017.
 type Checker struct {
 	Health *Health
-	// Timeout bounds one check (default 5 s, at most its interval).
+	// Timeout bounds one check (default 5 s, at most the check's interval).
 	Timeout time.Duration
-	// Now is the clock (tests set it).
+	// Now is the clock. Tests set it.
 	Now func() time.Time
 
 	mu  sync.Mutex
@@ -33,9 +33,9 @@ func (c *Checker) now() time.Time {
 	return time.Now()
 }
 
-// Run checks targets' deployments every second for those due, until ctx
-// ends. targets is read each time: a new snapshot's deployments are
-// checked from its next tick.
+// Run checks the deployments due every second until ctx ends. It calls
+// targets each tick, so a new snapshot's deployments are checked from the
+// next tick.
 func (c *Checker) Run(ctx context.Context, targets func() []*Target) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -76,7 +76,8 @@ func (c *Checker) Check(ctx context.Context, ts []*Target) {
 	wg.Wait()
 }
 
-// check GETs t's health path with its credential; a 2xx passes.
+// check GETs the deployment's health path with its credential. A 2xx
+// passes.
 func (c *Checker) check(ctx context.Context, t *Target) bool {
 	timeout := c.Timeout
 	if timeout <= 0 {

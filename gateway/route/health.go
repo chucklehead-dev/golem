@@ -6,50 +6,54 @@ import (
 	"time"
 )
 
-// Health is one gateway's view of its deployments and its routes' retries
-// (model/attempts.md): each deployment's attempts in flight against its
-// ceiling, its consecutive failures and its ejection, and each route's
-// retry budget. It is kept across snapshots, by deployment identity
-// (Target.Key) and alias, so a configuration change neither readmits an
-// ejected deployment nor refills a budget. Safe for concurrent use; the
-// zero value is ready, with the defaults below.
+// Health is one gateway's view of its deployments and its routes' retries.
+// It tracks each deployment's attempts in flight, its consecutive failures
+// and its ejection, and each route's retry budget. model/attempts.md is its
+// model.
 //
-// Ejection is per gateway, as the attempts model says: each gateway probes an
-// ejected deployment on its own, at most one probe at a time.
+// Health is kept across snapshots, by Target.Key and alias, so a config
+// change neither readmits an ejected deployment nor refills a budget. It is
+// safe for concurrent use, and its zero value is ready with the defaults.
+//
+// Ejection is per gateway. Each gateway probes an ejected deployment on its
+// own, at most one probe at a time.
 type Health struct {
 	// EjectAfter is how many consecutive failures eject a deployment
 	// (default 3). A failed probe ejects it again at once.
 	EjectAfter int
-	// Ejection is a deployment's first ejection (default 10 s); each one
-	// after doubles it, up to MaxEjection (default 5 min). A provider's
-	// Retry-After, if longer, is taken instead.
+	// Ejection is the length of a deployment's first ejection (default
+	// 10 s). Each ejection in a row doubles it, up to MaxEjection (default
+	// 5 min). A longer Retry-After from the provider is taken instead.
 	Ejection, MaxEjection time.Duration
 	// RetryRatio is the share of a route's calls that may be retried
-	// (default 0.2), and RetryBurst the retries a quiet route may make at
-	// once (default 10): the pool's cap, so retries cannot multiply load on
-	// a provider already failing.
+	// (default 0.2). Retries cannot then multiply the load on a failing
+	// provider.
 	RetryRatio float64
+	// RetryBurst is how many retries a quiet route may make at once
+	// (default 10).
 	RetryBurst float64
-	// Now is the clock (tests set it).
+	// Now is the clock. Tests set it.
 	Now func() time.Time
 
 	mu      sync.Mutex
 	deps    map[string]*deployment
-	budgets map[string]*float64 // by alias: retry tokens
+	budgets map[string]*float64 // retry tokens by alias
 }
+
+// deployment is Health's state for one deployment.
 
 type deployment struct {
 	inflight int
-	// byPrincipal counts each principal's holds, for the deployment's
-	// per-principal ceiling (Target.MaxPerPrincipal); nil until one is set.
+	// byPrincipal counts each principal's holds, for the per-principal
+	// ceiling (Target.MaxPerPrincipal). It is nil until a ceiling is set.
 	byPrincipal map[string]int
 	fails       int
-	until       time.Time // ejected until; zero: not ejected
+	until       time.Time // the end of the ejection; zero when not ejected
 	probing     bool      // the one probe of an ejected deployment is in flight
-	ejections   int       // in a row, for the next ejection's length
-	// readmissions counts the deployment's readmissions: a probe taken before the latest is an
-	// ordinary attempt now (its deployment no longer ejected), so its
-	// verdict is not a probe's.
+	ejections   int       // ejections in a row, for the next one's length
+	// readmissions counts the deployment's readmissions. A probe taken
+	// before the latest readmission is an ordinary attempt now, so its
+	// result is not a probe's.
 	readmissions int
 }
 
@@ -72,10 +76,10 @@ func (h *Health) dep(t *Target) *deployment {
 	return d
 }
 
-// Hold is one attempt's hold on its deployment: its place under the
-// ceiling, and the probe, if it is one. Exactly one of Commit and Fail
-// reports how the attempt went; Release ends its hold when the attempt is
-// over (a committed one's stream ended).
+// Hold is one attempt's place under its deployment's ceiling, and its
+// probe if it is one. Commit or Fail, never both, reports how the attempt
+// went. Release ends the hold when the attempt is over, as when a
+// committed stream ends.
 type Hold struct {
 	h           *Health
 	d           *deployment
@@ -86,36 +90,38 @@ type Hold struct {
 	freed       bool
 }
 
-// Refused is why Acquire refused an attempt: the deployment's state, or
-// the principal's own share of it.
+// Refused is why Acquire refused an attempt. It is the deployment's state,
+// or the principal's own share of it.
 type Refused int
 
 const (
-	// NotRefused: a hold was taken.
+	// NotRefused means a hold was taken.
 	NotRefused Refused = iota
-	// Ejected: the deployment rests after failures, or its one probe is
-	// in flight.
+	// Ejected means the deployment rests after failures, or its one probe
+	// is in flight.
 	Ejected
-	// AtCeiling: the deployment holds its ceiling's attempts.
+	// AtCeiling means the deployment holds as many attempts as its ceiling.
 	AtCeiling
-	// AtPrincipalCeiling: the principal holds its own share of the
-	// deployment (Target.MaxPerPrincipal); others' attempts are taken.
+	// AtPrincipalCeiling means the principal holds its own share of the
+	// deployment (Target.MaxPerPrincipal). Other principals are still taken.
 	AtPrincipalCeiling
 )
 
-// Acquire takes a place on t for one attempt of principal's, unless t is
-// at its ceiling or principal at its per-principal one (a shared box, ADR
-// 0017: one principal must not fill it), or t is ejected (an ejected
-// deployment past its ejection takes one probe at a time). It reports,
-// when it refuses, when t may take one again (zero: unknown, a ceiling
-// frees when an attempt ends). AcquireWhy says why, too.
+// Acquire takes a hold on a deployment for one of a principal's attempts.
+// It refuses when the deployment is at its ceiling, the principal at its
+// share, or the deployment ejected. Past its ejection, a deployment takes
+// one probe at a time.
+//
+// When it refuses, it reports when the deployment may take an attempt
+// again. Zero means unknown, as for a ceiling, which frees when an attempt
+// ends. AcquireWhy also says why. ADR 0017.
 func (h *Health) Acquire(t *Target, principal string) (*Hold, time.Time) {
 	l, at, _ := h.AcquireWhy(t, principal)
 	return l, at
 }
 
-// AcquireWhy is Acquire, with why it refused: a principal at its own
-// per-principal ceiling is told so, not that the deployment is down.
+// AcquireWhy is Acquire, and also says why it refused. A principal at its
+// own share can then be told so, rather than that the deployment is down.
 func (h *Health) AcquireWhy(t *Target, principal string) (*Hold, time.Time, Refused) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -149,13 +155,15 @@ func (h *Health) AcquireWhy(t *Target, principal string) (*Hold, time.Time, Refu
 	return l, time.Time{}, NotRefused
 }
 
-// isProbe reports whether the hold is its deployment's probe still: one
-// taken as a probe, before no readmission since.
+// isProbe reports whether the hold is still its deployment's probe. It is
+// if it was taken as a probe and the deployment has not been readmitted
+// since.
 func (l *Hold) isProbe() bool { return l.probe && l.readmission == l.d.readmissions }
 
-// Commit reports the attempt committed: the deployment answered, so its
-// failures are forgotten and, if ejected, it is readmitted, which ends any
-// probe in flight (an attempt sent before the ejection may answer first).
+// Commit reports that the attempt committed. The deployment answered, so
+// its failures are forgotten and an ejection ends. Readmission also ends a
+// probe in flight, since an attempt sent before the ejection may answer
+// first.
 func (l *Hold) Commit() {
 	l.h.mu.Lock()
 	defer l.h.mu.Unlock()
@@ -166,7 +174,8 @@ func (l *Hold) Commit() {
 	l.d.readmit()
 }
 
-// readmit forgets d's failures and ends its ejection and any probe.
+// readmit forgets the deployment's failures and ends its ejection and any
+// probe.
 func (d *deployment) readmit() {
 	if !d.until.IsZero() {
 		d.readmissions++
@@ -174,8 +183,9 @@ func (d *deployment) readmit() {
 	d.fails, d.until, d.ejections, d.probing = 0, time.Time{}, 0, false
 }
 
-// eject ejects d from now: for its next ejection's length (doubling each
-// time in a row, up to MaxEjection), or for wait if that is longer.
+// eject ejects the deployment from now, for its next ejection's length or
+// for wait if that is longer. Each ejection in a row doubles the length,
+// up to MaxEjection.
 func (h *Health) eject(d *deployment, now time.Time, wait time.Duration) {
 	e := cmp.Or(h.Ejection, 10*time.Second) << min(d.ejections, 10)
 	e = min(e, cmp.Or(h.MaxEjection, 5*time.Minute))
@@ -184,8 +194,8 @@ func (h *Health) eject(d *deployment, now time.Time, wait time.Duration) {
 	d.fails = 0
 }
 
-// Fail reports the attempt failed before it committed, the provider's
-// Retry-After with it if it gave one, and releases the hold. Enough
+// Fail reports that the attempt failed before it committed, with the
+// provider's Retry-After if it gave one, and releases the hold. Enough
 // failures in a row, or a failed probe, eject the deployment.
 func (l *Hold) Fail(retryAfter time.Duration) {
 	l.h.mu.Lock()
@@ -205,9 +215,9 @@ func (l *Hold) Fail(retryAfter time.Duration) {
 	l.release()
 }
 
-// Release ends the hold on its deployment's ceiling. A hold that
-// reported neither Commit nor Fail (the caller left first) frees its probe
-// too, leaving the deployment as it was.
+// Release ends the hold. A hold that reported neither Commit nor Fail,
+// because its caller left first, also frees its probe and leaves the
+// deployment as it was.
 func (l *Hold) Release() {
 	l.h.mu.Lock()
 	defer l.h.mu.Unlock()
@@ -232,12 +242,13 @@ func (l *Hold) release() {
 	}
 }
 
-// Checked reports an active check of t (a Checker's): a failed one ejects
-// t, as a failed probe does, unless it is ejected still; a passing one
-// readmits t if its ejection is over, as a probe's commit does. A pass
-// does not cut an ejection short: a box that lists its models may still
-// be refusing calls (a Retry-After), and a pass forgets no failures of
-// calls, which a liveness check cannot speak for.
+// Checked reports a Checker's active check of a deployment. A failed check
+// ejects it as a failed probe does, unless it is still ejected. A passing
+// check readmits it once its ejection is over, as a probe's commit does.
+//
+// A pass never cuts an ejection short. A box that lists its models may
+// still refuse calls with a Retry-After. A liveness check cannot speak for
+// calls' failures.
 func (h *Health) Checked(t *Target, ok bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -251,7 +262,7 @@ func (h *Health) Checked(t *Target, ok bool) {
 	}
 }
 
-// Called credits a route's retry budget for one call: RetryRatio of a
+// Called credits a route's retry budget for one call, with RetryRatio of a
 // retry, up to RetryBurst.
 func (h *Health) Called(alias string) {
 	h.mu.Lock()
@@ -286,15 +297,15 @@ func (h *Health) budget(alias string) *float64 {
 	return b
 }
 
-// DeploymentHealth is what Health knows of a deployment, for its metrics
-// and its tests.
+// DeploymentHealth is what Health knows of a deployment, for metrics and
+// tests.
 type DeploymentHealth struct {
 	InFlight int  // attempts holding the deployment
-	Ejected  bool // until a commit readmits it
+	Ejected  bool // until a commit or a check readmits it
 	Probing  bool // its one probe is in flight
 }
 
-// Deployment reports t's health.
+// Deployment reports a deployment's health.
 func (h *Health) Deployment(t *Target) DeploymentHealth {
 	h.mu.Lock()
 	defer h.mu.Unlock()
