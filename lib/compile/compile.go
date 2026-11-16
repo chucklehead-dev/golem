@@ -71,20 +71,23 @@ func (ps Problems) Error() string {
 	return fmt.Sprintf("%d problem(s) in the config:\n  %s", len(ps), strings.Join(lines, "\n  "))
 }
 
+// add records a Problem; it is every pass's adder, so the problems come
+// out in the order the passes run.
+func (ps *Problems) add(obj, path, msg string, args ...any) {
+	*ps = append(*ps, Problem{obj, path, fmt.Sprintf(msg, args...)})
+}
+
 // adder records a Problem: the object, the field path, and a message
-// formatted as by fmt.Sprintf. Every pass reports through one, so the
-// problems come out in the order the passes run.
+// formatted as by fmt.Sprintf.
 type adder func(obj, path, msg string, args ...any)
 
 // Compile validates objs and builds a snapshot, sorted so that equal configs
 // give equal bytes. Problems are reported in the order of the objects'
-// kinds (backends, routes, entitlements, prices) and, within a kind, of
-// the objects.
+// kinds (backends, routes, scope policies, the local identity, prices)
+// and, within a kind, of the objects.
 func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 	var ps Problems
-	add := func(obj, path, msg string, args ...any) {
-		ps = append(ps, Problem{obj, path, fmt.Sprintf(msg, args...)})
-	}
+	add := ps.add
 	if !o.Standalone && o.Lease <= 0 {
 		add("compile", "options", "a published snapshot needs an authorization lease (ADR 0030)")
 	}
@@ -106,13 +109,7 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 
 	slices.SortFunc(backends, func(x, y snapshot.Backend) int { return cmp.Compare(x.Name, y.Name) })
 	slices.SortFunc(routes, func(x, y snapshot.Route) int { return cmp.Compare(x.Alias, y.Alias) })
-	s := &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: o.PublishSeq, IssuedAt: o.Now.UTC(),
-		Backends: backends, Routes: routes, Entitlements: ents, Currency: currency, Prices: prices}
-	if o.Lease > 0 {
-		s.ValidUntil = o.Now.Add(o.Lease).UTC()
-	}
-	s.Source.ConfigDigest = digest(s.Backends, s.Routes)
-	return s, nil
+	return o.publication(snapshot.Snapshot{Backends: backends, Routes: routes, Entitlements: ents, Currency: currency, Prices: prices}), nil
 }
 
 // Renew is a published snapshot rebuilt as a new publication: its config
@@ -126,32 +123,38 @@ func Compile(objs v1.Objects, o Options) (*snapshot.Snapshot, error) {
 // over a broken edit).
 func Renew(prev *snapshot.Snapshot, o Options) (*snapshot.Snapshot, error) {
 	var ps Problems
-	add := func(obj, path, msg string, args ...any) {
-		ps = append(ps, Problem{obj, path, fmt.Sprintf(msg, args...)})
-	}
 	if o.Standalone || o.Lease <= 0 {
-		add("compile", "options", "a renewed publication needs an authorization lease (ADR 0030), and is never standalone")
+		ps.add("compile", "options", "a renewed publication needs an authorization lease (ADR 0030), and is never standalone")
 	}
 	if prev.Entitlements.Implicit || prev.ValidUntil.IsZero() {
-		add("snapshot", "entitlements", "publication %d is a standalone snapshot, not one golem-control published", prev.PublishSeq)
+		ps.add("snapshot", "entitlements", "publication %d is a standalone snapshot, not one golem-control published", prev.PublishSeq)
 	}
-	var aliases []string
-	for _, r := range prev.Routes {
-		aliases = append(aliases, r.Alias)
-	}
-	slices.Sort(aliases)
 	var ents snapshot.Entitlements
 	if o.Entitlements != nil {
+		var aliases []string
+		for _, r := range prev.Routes {
+			aliases = append(aliases, r.Alias)
+		}
+		slices.Sort(aliases)
 		ents = o.Entitlements(aliases)
 		ents.Scopes = join(ents.Scopes, policiesOf(prev.Entitlements.Scopes), o.unmatched)
 	}
 	if len(ps) > 0 {
 		return nil, ps
 	}
-	s := &snapshot.Snapshot{Schema: snapshot.Schema, PublishSeq: o.PublishSeq, IssuedAt: o.Now.UTC(), ValidUntil: o.Now.Add(o.Lease).UTC(),
-		Backends: prev.Backends, Routes: prev.Routes, Entitlements: ents, Currency: prev.Currency, Prices: prev.Prices}
+	return o.publication(snapshot.Snapshot{Backends: prev.Backends, Routes: prev.Routes, Entitlements: ents,
+		Currency: prev.Currency, Prices: prev.Prices}), nil
+}
+
+// publication is s as o's publication: its schema, sequence, time and
+// lease (none if o has none), and its config's digest.
+func (o Options) publication(s snapshot.Snapshot) *snapshot.Snapshot {
+	s.Schema, s.PublishSeq, s.IssuedAt = snapshot.Schema, o.PublishSeq, o.Now.UTC()
+	if o.Lease > 0 {
+		s.ValidUntil = o.Now.Add(o.Lease).UTC()
+	}
 	s.Source.ConfigDigest = digest(s.Backends, s.Routes)
-	return s, nil
+	return &s
 }
 
 // objectName names an object in a problem: its kind and name, and where it
@@ -192,8 +195,8 @@ func compileBackends(srcs []v1.Source[v1.Backend], standalone bool, add adder) (
 			Envelope: b.Spec.Envelope}
 		switch b.Spec.Envelope {
 		case "":
-			sb.Auth = backendAuth(b.Spec.Auth, standalone, func(path, msg string) { add(obj, path, "%s", msg) })
-			sb.Deployments = deployments(obj, b.Spec.Deployments, standalone, add)
+			sb.Auth = backendAuth(obj, b.Spec.Auth, standalone, add)
+			sb.Deployments = deployments(obj, b.Spec.Deployments, nil, standalone, add)
 		case EnvelopeBedrock:
 			sb.Deployments = bedrockBackend(obj, b.Spec, standalone, add)
 		default:
@@ -218,9 +221,8 @@ func (cat catalog) add(b snapshot.Backend) {
 const EnvelopeBedrock = "bedrock"
 
 // bedrockBackend validates a bedrock Backend: the Messages dialect, no
-// auth (its requests are signed by the gateway's AWS role), and a region
-// for each deployment, its own or the backend's; a deployment's URL is
-// optional (the region's Bedrock runtime by default).
+// auth (its requests are signed by the gateway's AWS role), and its
+// deployments, each in a region, its own or the backend's.
 func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder) []snapshot.Deployment {
 	if spec.Dialect != "anthropic.messages" {
 		add(obj, "spec.dialect", "a bedrock backend speaks anthropic.messages (Claude's Messages API on Bedrock)")
@@ -228,16 +230,27 @@ func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder)
 	if spec.Auth != (v1.Auth{}) {
 		add(obj, "spec.auth", "a bedrock backend has no auth: the gateway signs its requests with its AWS role (IRSA or Pod Identity)")
 	}
-	region := ""
-	if spec.AWS != nil {
-		region = spec.AWS.Region
-	}
-	if len(spec.Deployments) == 0 {
+	return deployments(obj, spec.Deployments, cmp.Or(spec.AWS, &v1.AWS{}), standalone, add)
+}
+
+// regionPattern is an AWS region's name (us-east-2, eu-central-1,
+// us-gov-west-1): it becomes part of a host name.
+var regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`) // read-only
+
+// deployments validates a Backend's spec.deployments and compiles them,
+// sorted by name. Each is compiled, problems or not, so that the catalog
+// knows it. aws is a bedrock backend's (nil for any other): a bedrock
+// deployment needs a region, has no health check (Bedrock's own failures
+// eject it), and its URL is optional (the region's Bedrock runtime by
+// default).
+func deployments(obj string, ds []v1.Deployment, aws *v1.AWS, standalone bool, add adder) []snapshot.Deployment {
+	bedrock := aws != nil
+	if len(ds) == 0 {
 		add(obj, "spec.deployments", "a Backend needs at least one deployment")
 	}
 	var out []snapshot.Deployment
 	names := map[string]bool{}
-	for i, d := range spec.Deployments {
+	for i, d := range ds {
 		at := fmt.Sprintf("spec.deployments[%d]", i)
 		switch {
 		case d.Name == "":
@@ -246,17 +259,25 @@ func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder)
 			add(obj, at+".name", "another deployment of this Backend is named %q", d.Name)
 		}
 		names[d.Name] = true
-		if d.Model == "" {
-			add(obj, at+".model", "required: the Bedrock model ID, inference profile ID or ARN")
+		sd := snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, MaxInFlight: max(d.MaxInFlight, 0),
+			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), Betas: betasOf(d.Betas)}
+		// The problems in the order they always came: a bedrock
+		// deployment's model, health check and region before its URL.
+		if bedrock {
+			if d.Model == "" {
+				add(obj, at+".model", "required: the Bedrock model ID, inference profile ID or ARN")
+			}
+			if d.HealthCheck != nil {
+				add(obj, at+".healthCheck", "a bedrock deployment has no health check: Bedrock's own failures eject it")
+			}
+			sd.Region = cmp.Or(d.Region, aws.Region)
+			if !regionPattern.MatchString(sd.Region) {
+				add(obj, at+".region", "%q: give the deployment's AWS region (here or in spec.aws.region), e.g. us-east-2", sd.Region)
+			}
+		} else if d.Model == "" {
+			add(obj, at+".model", "required: the provider's name for the model")
 		}
-		if d.HealthCheck != nil {
-			add(obj, at+".healthCheck", "a bedrock deployment has no health check: Bedrock's own failures eject it")
-		}
-		r := cmp.Or(d.Region, region)
-		if !regionPattern.MatchString(r) {
-			add(obj, at+".region", "%q: give the deployment's AWS region (here or in spec.aws.region), e.g. us-east-2", r)
-		}
-		if d.URL != "" {
+		if !bedrock || d.URL != "" {
 			if msg := checkURL(d.URL, standalone); msg != "" {
 				add(obj, at+".url", "%s", msg)
 			}
@@ -267,21 +288,16 @@ func bedrockBackend(obj string, spec v1.BackendSpec, standalone bool, add adder)
 		if d.MaxInFlightPerPrincipal < 0 {
 			add(obj, at+".maxInFlightPerPrincipal", "must not be negative (0: no ceiling)")
 		}
-		rpm := quota(obj, at, d.Quota, add)
-		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, Region: r, MaxInFlight: max(d.MaxInFlight, 0),
-			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), QuotaRPM: rpm, Betas: betasOf(d.Betas)})
+		if !bedrock {
+			sd.HealthPath, sd.HealthIntervalMs = healthCheck(obj, at, d.HealthCheck, add)
+		}
+		sd.QuotaRPM = requestsPerMinute(obj, at+".quota", d.Quota, add)
+		out = append(out, sd)
 	}
 	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
 	return out
 }
 
-// regionPattern is an AWS region's name (us-east-2, eu-central-1,
-// us-gov-west-1): it becomes part of a host name.
-var regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`) // read-only
-
-// deployments validates a Backend's spec.deployments and compiles them,
-// sorted by name. Each is compiled, problems or not, so that the catalog
-// knows it.
 // betasOf is a deployment's accepted betas, sorted, each once; nil for
 // any.
 func betasOf(bs []string) []string {
@@ -291,16 +307,16 @@ func betasOf(bs []string) []string {
 	return slices.Compact(slices.Sorted(slices.Values(bs)))
 }
 
-// quota validates a deployment's quota share, giving its requests a
-// minute (0 for none).
-func quota(obj, at string, q *v1.Rate, add adder) int64 {
-	if q == nil {
+// requestsPerMinute validates the Rate at path at (a deployment's quota, a
+// scope's rate limit), giving its requests a minute (0 for none).
+func requestsPerMinute(obj, at string, r *v1.Rate, add adder) int64 {
+	if r == nil {
 		return 0
 	}
-	if q.RequestsPerMinute < 0 {
-		add(obj, at+".quota.requestsPerMinute", "must not be negative (0: no limit)")
+	if r.RequestsPerMinute < 0 {
+		add(obj, at+".requestsPerMinute", "must not be negative (0: no limit)")
 	}
-	return max(q.RequestsPerMinute, 0)
+	return max(r.RequestsPerMinute, 0)
 }
 
 // healthCheck validates a deployment's active check, giving its path and
@@ -318,55 +334,19 @@ func healthCheck(obj, at string, hc *v1.HealthCheck, add adder) (string, int64) 
 	return hc.Path, int64(cmp.Or(max(hc.IntervalSeconds, 0), 10)) * 1000
 }
 
-func deployments(obj string, ds []v1.Deployment, standalone bool, add adder) []snapshot.Deployment {
-	if len(ds) == 0 {
-		add(obj, "spec.deployments", "a Backend needs at least one deployment")
-	}
-	var out []snapshot.Deployment
-	names := map[string]bool{}
-	for i, d := range ds {
-		at := fmt.Sprintf("spec.deployments[%d]", i)
-		switch {
-		case d.Name == "":
-			add(obj, at+".name", "required")
-		case names[d.Name]:
-			add(obj, at+".name", "another deployment of this Backend is named %q", d.Name)
-		}
-		names[d.Name] = true
-		if d.Model == "" {
-			add(obj, at+".model", "required: the provider's name for the model")
-		}
-		if msg := checkURL(d.URL, standalone); msg != "" {
-			add(obj, at+".url", "%s", msg)
-		}
-		if d.MaxInFlight < 0 {
-			add(obj, at+".maxInFlight", "must not be negative (0: no ceiling)")
-		}
-		if d.MaxInFlightPerPrincipal < 0 {
-			add(obj, at+".maxInFlightPerPrincipal", "must not be negative (0: no ceiling)")
-		}
-		path, every := healthCheck(obj, at, d.HealthCheck, add)
-		rpm := quota(obj, at, d.Quota, add)
-		out = append(out, snapshot.Deployment{Name: d.Name, URL: d.URL, Model: d.Model, MaxInFlight: max(d.MaxInFlight, 0),
-			MaxInFlightPerPrincipal: max(d.MaxInFlightPerPrincipal, 0), HealthPath: path, HealthIntervalMs: every, QuotaRPM: rpm, Betas: betasOf(d.Betas)})
-	}
-	slices.SortFunc(out, func(x, y snapshot.Deployment) int { return cmp.Compare(x.Name, y.Name) })
-	return out
-}
-
 // backendAuth validates a Backend's spec.auth and compiles it: the secret
 // as a reference, never a value (ADR 0005). It reports at most one problem.
-func backendAuth(a v1.Auth, standalone bool, bad func(path, msg string)) snapshot.Auth {
+func backendAuth(obj string, a v1.Auth, standalone bool, add adder) snapshot.Auth {
 	sa := snapshot.Auth{Header: strings.ToLower(a.Header), Scheme: a.Scheme, Env: a.Env}
 	switch {
 	case a.Header == "":
-		bad("spec.auth.header", "required: the header that carries the provider credential")
+		add(obj, "spec.auth.header", "required: the header that carries the provider credential")
 	case (a.SecretRef == nil) == (a.Env == ""):
-		bad("spec.auth", "give exactly one of secretRef and env")
+		add(obj, "spec.auth", "give exactly one of secretRef and env")
 	case a.Env != "" && !standalone:
-		bad("spec.auth.env", "environment credentials are for standalone mode only; use secretRef (ADR 0023)")
+		add(obj, "spec.auth.env", "environment credentials are for standalone mode only; use secretRef (ADR 0023)")
 	case a.SecretRef != nil && (a.SecretRef.Name == "" || a.SecretRef.Key == ""):
-		bad("spec.auth.secretRef", "needs name and key")
+		add(obj, "spec.auth.secretRef", "needs name and key")
 	case a.SecretRef != nil:
 		sa.SecretRef = a.SecretRef.Name + "/" + a.SecretRef.Key
 	}

@@ -328,18 +328,19 @@ func (b *Bucket) checkLease(s *snapshot.Snapshot) error {
 	if s.ValidUntil.IsZero() {
 		return nil
 	}
-	now, bound := b.Holder.now(), cmp.Or(b.MaxLease, 4*time.Hour)+b.maxSkew()
-	if left := s.ValidUntil.Sub(now); left > bound {
+	now, longest := b.Holder.now(), cmp.Or(b.MaxLease, 4*time.Hour)
+	if left := s.ValidUntil.Sub(now); left > longest+b.maxSkew() {
 		return fmt.Errorf("snapshot %d's lease runs to %s, %s from now, longer than the longest lease (%s) plus the skew: refused; check the publisher's clock, or raise -max-lease to the pool's approved maximum",
-			s.PublishSeq, s.ValidUntil.UTC().Format(time.RFC3339), left.Round(time.Second), cmp.Or(b.MaxLease, 4*time.Hour))
+			s.PublishSeq, s.ValidUntil.UTC().Format(time.RFC3339), left.Round(time.Second), longest)
 	}
 	return nil
 }
 
 func (b *Bucket) maxSkew() time.Duration { return cmp.Or(b.MaxSkew, 2*time.Minute) }
 
-// openSnapshot checks a snapshot object is the one its pointer signed.
-func openSnapshot(ptr snapshot.Pointer, body []byte) (*snapshot.Snapshot, error) {
+// openSnapshot checks a snapshot object is the one its pointer signed,
+// with a lease the gateway can trust.
+func (b *Bucket) openSnapshot(ptr snapshot.Pointer, body []byte) (*snapshot.Snapshot, error) {
 	if got := snapshot.Hash(body); got != ptr.Hash {
 		return nil, fmt.Errorf("snapshot %s hashes to %s: refused (not the object the pointer signed)", ptr.Hash, got)
 	}
@@ -350,7 +351,7 @@ func openSnapshot(ptr snapshot.Pointer, body []byte) (*snapshot.Snapshot, error)
 	if s.PublishSeq != ptr.PublishSeq {
 		return nil, fmt.Errorf("snapshot %s is publication %d, its pointer says %d: refused", ptr.Hash, s.PublishSeq, ptr.PublishSeq)
 	}
-	return s, nil
+	return s, b.checkLease(s)
 }
 
 // verify is openPointer and openSnapshot together.
@@ -359,10 +360,7 @@ func (b *Bucket) verify(rawPtr, body []byte) (snapshot.Pointer, *snapshot.Snapsh
 	if err != nil {
 		return ptr, nil, err
 	}
-	s, err := openSnapshot(ptr, body)
-	if err == nil {
-		err = b.checkLease(s)
-	}
+	s, err := b.openSnapshot(ptr, body)
 	return ptr, s, err
 }
 
@@ -383,11 +381,8 @@ func (b *Bucket) read(ctx context.Context, raw []byte) error {
 	if err != nil {
 		return fetchError{fmt.Errorf("snapshot %s: %w", ptr.Hash, err)}
 	}
-	s, err := openSnapshot(ptr, body)
+	s, err := b.openSnapshot(ptr, body)
 	if err != nil {
-		return err
-	}
-	if err := b.checkLease(s); err != nil {
 		return err
 	}
 	if err := b.Holder.Apply(s, ptr.Hash, b.Secrets); err != nil {

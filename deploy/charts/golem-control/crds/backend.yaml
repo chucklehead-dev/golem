@@ -119,8 +119,8 @@ spec:
                   type: object
                 type: array
               dialect:
-                description: 'Dialect is the API the backend speaks: anthropic.messages
-                  or openai.chat.'
+                description: 'Dialect is the API the backend speaks: anthropic.messages,
+                  openai.chat or openai.responses.'
                 type: string
               envelope:
                 description: 'Envelope is how the dialect''s requests reach the provider:

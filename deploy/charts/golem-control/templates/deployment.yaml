@@ -32,14 +32,7 @@ spec:
       initContainers:
         - name: git-clone
           image: {{ .Values.gitSync.image }}
-          args:
-            - --repo={{ .Values.config.repo }}
-            - --ref={{ .Values.config.ref }}
-            - --root=/config
-            - --link=current
-            - --period={{ .Values.config.period }}
-            - --ssh-key-file=/etc/git-secret/ssh
-            - --ssh-known-hosts-file=/etc/git-secret/known_hosts
+          args: {{- include "golem-control.gitSyncArgs" . | nindent 12 }}
             - --one-time
           env:
             - {name: HOME, value: /tmp}
@@ -113,14 +106,7 @@ spec:
             {{- end }}
         - name: git-sync
           image: {{ .Values.gitSync.image }}
-          args:
-            - --repo={{ .Values.config.repo }}
-            - --ref={{ .Values.config.ref }}
-            - --root=/config
-            - --link=current
-            - --period={{ .Values.config.period }}
-            - --ssh-key-file=/etc/git-secret/ssh
-            - --ssh-known-hosts-file=/etc/git-secret/known_hosts
+          args: {{- include "golem-control.gitSyncArgs" . | nindent 12 }}
           env:
             - {name: HOME, value: /tmp}
           resources:

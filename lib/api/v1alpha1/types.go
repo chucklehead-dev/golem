@@ -44,7 +44,8 @@ type Backend struct {
 
 // BackendSpec is a Backend's desired state.
 type BackendSpec struct {
-	// Dialect is the API the backend speaks: anthropic.messages or openai.chat.
+	// Dialect is the API the backend speaks: anthropic.messages, openai.chat
+	// or openai.responses.
 	Dialect string `json:"dialect"`
 	// Envelope is how the dialect's requests reach the provider: "" (the
 	// provider's own API) or "bedrock" (Claude on Amazon Bedrock: the

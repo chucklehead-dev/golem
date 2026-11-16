@@ -7,6 +7,7 @@
 package crdgen
 
 import (
+	"cmp"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -29,8 +30,9 @@ var Kinds = []struct {
 	{v1.KindPriceList, "pricelists", v1.PriceListSpec{}},
 }
 
-// Docs reads the doc comments of the package's types and fields, from its
-// source in dir: "Type" and "Type.Field" to their text.
+// Docs reads the doc comments of the package's struct fields, from its
+// source in dir: "Type.Field" to its text (the comment above the field,
+// else the one after it).
 func Docs(dir string) (map[string]string, error) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
@@ -40,31 +42,21 @@ func Docs(dir string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, p := range pkgs {
 		for _, f := range p.Files {
-			for _, d := range f.Decls {
-				g, ok := d.(*ast.GenDecl)
+			ast.Inspect(f, func(n ast.Node) bool {
+				ts, ok := n.(*ast.TypeSpec)
 				if !ok {
-					continue
+					return true
 				}
-				for _, s := range g.Specs {
-					ts, ok := s.(*ast.TypeSpec)
-					if !ok {
-						continue
-					}
-					st, ok := ts.Type.(*ast.StructType)
-					if !ok {
-						continue
-					}
+				if st, ok := ts.Type.(*ast.StructType); ok {
 					for _, fl := range st.Fields.List {
-						text := fl.Doc.Text()
-						if text == "" {
-							text = fl.Comment.Text()
-						}
+						text := cmp.Or(fl.Doc.Text(), fl.Comment.Text())
 						for _, n := range fl.Names {
 							out[ts.Name.Name+"."+n.Name] = clean(text)
 						}
 					}
 				}
-			}
+				return false
+			})
 		}
 	}
 	return out, nil
@@ -117,8 +109,7 @@ func schema(t reflect.Type, docs map[string]string) map[string]any {
 
 // CRD is a kind's CustomResourceDefinition, as YAML.
 func CRD(kind, plural string, spec any, docs map[string]string) ([]byte, error) {
-	group := strings.Split(v1.APIVersion, "/")[0]
-	version := strings.Split(v1.APIVersion, "/")[1]
+	group, version, _ := strings.Cut(v1.APIVersion, "/")
 	crd := map[string]any{
 		"apiVersion": "apiextensions.k8s.io/v1",
 		"kind":       "CustomResourceDefinition",
