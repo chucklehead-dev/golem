@@ -42,8 +42,7 @@ func entitlements(objs v1.Objects, o Options, policies map[string]compiledPolicy
 		}
 		return e
 	case len(objs.Identities) > 1:
-		extra := objs.Identities[1]
-		add(identityName(extra), "kind",
+		add(identityName(objs.Identities[1]), "kind",
 			"one LocalIdentity per config; merge the scopes and keys")
 		return e
 	}

@@ -5,7 +5,9 @@ config CRDs, the compiler that turns them into a snapshot, the snapshot's
 format, the signed pointer and checkpoint that publish it, the bucket it
 travels through, the signing keys, API keys, budget periods, the contract
 codes, and the two transports moved here from the gateway (Entra token
-verification and OTLP export). It is for an engineer new to the
+verification and OTLP export); then the CRDs' generation and the Helm
+charts that install them (`internal/crdgen`, `deploy/`). It is for an
+engineer new to the
 repository; read it with the code open. The design behind it is in
 [ADR 0005](../adr/0005-config-crds-and-overrides.md) (config as CRDs),
 [ADR 0006](../adr/0006-state-and-distribution-in-object-storage.md)
@@ -35,49 +37,63 @@ function too, since those move more often.
 | `lib/contract` | refusal codes, origins and header names, checked against contracts.md | the gateway's every refusal |
 | `lib/entra` | Entra ID v2 access-token verification with a cached key set | gateway/auth, the control API (control/api) |
 | `lib/otlp` | OTLP/HTTP exporters, TLS unless the collector is a literal loopback address | gateway/telemetry, golem-control's metrics and audit |
+| `internal/crdgen` | the config CRDs' YAML, generated from `lib/api/v1alpha1`'s types | its test, which keeps `deploy/charts/golem-control/crds` current |
 
 ## 1. Config CRDs (`lib/api/v1alpha1`)
 
 `types.go` holds five kinds of group `golem.dev/v1alpha1`
 (`APIVersion`, `types.go:9`):
 
-- **Backend** (`types.go:38`): a provider or model server: `dialect` (one
-  of `compile.Dialects`, `anthropic.messages` or `openai.chat`), `auth` (a
-  header carrying either a Kubernetes `secretRef` or, standalone only, an
-  `env` variable), `deployments` (one model at one URL each) and
-  `network.allowPrivateAddresses`.
-- **ModelRoute** (`types.go:96`): an `alias` callers send as their model
+- **Backend** (`types.go:39`): a provider or model server: `dialect` (one
+  of `compile.Dialects`: `anthropic.messages`, `openai.chat` or
+  `openai.responses`), `auth` (a header carrying either a Kubernetes
+  `secretRef` or, standalone only, an `env` variable), `deployments` and
+  `network.allowPrivateAddresses`. With `envelope: bedrock` it is Claude on
+  Amazon Bedrock: no `auth` (the gateway signs with its AWS role), and
+  `aws.region` the region of its deployments that name none.
+  A **deployment** (`Deployment`, `types.go:95`) is one model at one URL:
+  `name`, `url`, `model`, a bedrock deployment's `region`, and the
+  gateway's controls over it: `maxInFlight` and `maxInFlightPerPrincipal`
+  (each gateway's ceilings on its calls in flight, and on one principal's;
+  past either the call fails over to the pool's next deployment),
+  `healthCheck` (a path and interval each gateway checks on its own; not
+  for bedrock), `quota` (the site's share of the provider's quota, in
+  requests a minute only: `Rate`, `types.go:139`; token limits are the
+  provider's 429s to enforce) and `betas` (the `anthropic-beta` values it
+  accepts; unset, any).
+- **ModelRoute** (`types.go:153`): an `alias` callers send as their model
   name, a `pool` of backend deployments with weights, optional
-  `timeouts`, `agent` and `approvedBetas`.
-- **PriceList** (`types.go:204`): a currency and per-model rates in
+  `timeouts`, `retries` (`maxAttempts`), `agent` and `approvedBetas`.
+- **PriceList** (`types.go:318`): a currency and per-model rates in
   micro-units per million tokens ([contracts.md §4](../contracts.md#4-the-price-model-adr-0025);
   this version has the per-token rates only).
-- **ScopePolicy**: a scope's policy, named by the scope's ID (ADR 0050):
-  `models` (route aliases), `budgetMicros`, `defaultMemberCapMicros` and
-  `budgetMode` (observe, the default, warn or enforce; set on every
-  scope, as its caps follow it), `declaredWorstCaseCheck`, `inFlight`
-  (`principal`, `scope`), `maxOutputTokens`, `maxInputBytes`,
-  `providerStorage` and `features`. The scope itself exists in the state
+- **ScopePolicy** (`types.go:213`): a scope's policy, named by the
+  scope's ID (ADR 0050): `models` (route aliases), `budgetMicros`,
+  `defaultMemberCapMicros` and `budgetMode` (observe, the default, warn or
+  enforce; set on every scope, as its caps follow it), `rateLimits`
+  (`member` and `scope`, each a `Rate`: requests a minute at this site),
+  `declaredWorstCaseCheck`, `inFlight` (`principal`, `scope`),
+  `maxOutputTokens`, `maxInputBytes`, `providerStorage` and `features`. The scope itself exists in the state
   document (created through the control API); in standalone mode, where
   there is none, each ScopePolicy is a scope.
-- **LocalIdentity**: standalone mode's stand-in for the state document's
+- **LocalIdentity** (`types.go:273`): standalone mode's stand-in for the state document's
   entitlements: dev keys, Entra users and services, members of the
   config's ScopePolicies. Refused outside standalone mode (ADR 0023).
 
 The package has no Kubernetes client dependency: the gateway, golemctl and
 golem-control all import it.
 
-**Decoding** (`decode.go`). `DecodeFS` (`decode.go:38`) lists every
-`.yaml`/`.yml` file (`yamlFiles`, `decode.go:58`), sorts the paths, and
+**Decoding** (`decode.go`). `DecodeFS` (`decode.go:39`) lists every
+`.yaml`/`.yml` file (`yamlFiles`, `decode.go:59`), sorts the paths, and
 splits each file into documents on `---` lines (`documents`,
-`decode.go:121`). For each document (`Objects.decode`, `decode.go:73`):
+`decode.go:124`). For each document (`Objects.decode`, `decode.go:74`):
 
 1. it reads only `apiVersion` and `kind` (leniently);
 2. an empty document, or one of another API group (a Kustomization, a
-   Secret), is skipped (`decode.go:81`, `:83`);
+   Secret), is skipped (`decode.go:82`, `:84`);
 3. a `golem.dev/` object of another version is an error naming the version
    this binary reads;
-4. a golem kind is decoded **strictly** (`decodeInto`, `decode.go:111`,
+4. a golem kind is decoded **strictly** (`decodeInto`, `decode.go:114`,
    `yaml.UnmarshalStrict`): an unknown field is an error, so a misspelt
    field is never silently ignored; an unknown kind is an error too.
 
@@ -85,32 +101,33 @@ Every object keeps its origin as a `Source[T]` (file and 1-based document
 number); `Source.Where` prints `golem.yaml#2`, which every compile problem
 carries.
 
-`ContentHash` (`decode.go:137`) hashes the YAML files' names and contents
+`ContentHash` (`decode.go:140`) hashes the YAML files' names and contents
 in walk order: golem-control (`Controller.load`,
-`control/controller/controller.go:552`) and the standalone gateway
+`control/controller/controller.go:590`) and the standalone gateway
 (`Dir.Load`, `gateway/snapshot/file.go:40`) use it to skip decoding and
 compiling a directory that has not changed.
 
 ## 2. The compiler (`lib/compile`)
 
 One validation path (ADR 0005): `golemctl config validate` (`validate`,
-`cmd/golemctl/main.go:136`) runs it offline, golem-control on the live
-config (`Controller.Step`'s publication, `control/controller/controller.go:488`,
-and `load`'s trial compile at `:570`), the standalone gateway on its
+`cmd/golemctl/main.go:143`) runs it offline, golem-control on the live
+config (`Controller.Step`'s publication, `control/controller/controller.go:491`,
+and `load`'s trial compile at `:601`), the standalone gateway on its
 directory (`Dir.Load`, `gateway/snapshot/file.go:51`).
 
-`Compile` (`compile.go:72`) reports **every** problem, not the first, as
+`Compile` (`compile.go:88`) reports **every** problem, not the first, as
 `Problems`, each a `Problem{Object, Path, Msg}` such as
 
 ```
 ModelRoute/chat (golem.yaml#2): spec.pool[0].deployment: Backend "provider" has no deployment "large"
 ```
 
-The object is named by `objectName` (`compile.go:107`), the path is the
+The object is named by `objectName` (`compile.go:162`), the path is the
 field's JSON path with indices. Every pass reports through one `adder`
-(`compile.go:66`), so the problems come out in pass order. These messages
-are user-facing and the tests match them (`TestProblems`,
-`compile_test.go:86`; `TestEntitlementProblems`, `entitlements_test.go:73`):
+(`compile.go:82`), `Problems.add` (`compile.go:76`), so the problems come
+out in pass order. These messages are user-facing and the tests match
+them (`TestProblems`, `compile_test.go:86`; `TestEntitlementProblems`,
+`entitlements_test.go:77`):
 change their wording deliberately or not at all.
 
 The passes, in order:
@@ -118,27 +135,34 @@ The passes, in order:
 1. **Options.** A published snapshot (not `Standalone`) needs a positive
    `Lease` (ADR 0030): the authorization lease becomes
    `Snapshot.ValidUntil`.
-2. **Backends** (`compileBackends`, `compile.go:122`): a name, unique; a
-   known dialect; auth by `backendAuth` (`compile.go:189`: a header and
+2. **Backends** (`compileBackends`, `compile.go:177`): a name, unique; a
+   known dialect; auth by `backendAuth` (`compile.go:339`: a header and
    exactly one of `secretRef`/`env`, `env` standalone only, the secret
    compiled to a `"name/key"` reference, never a value); deployments by
-   `deployments` (`compile.go:160`): at least one, each with a unique
-   name, a model and a URL that `checkURL` (`compile.go:309`) accepts:
+   `deployments` (`compile.go:246`): at least one, each with a unique
+   name, a model and a URL that `checkURL` (`compile.go:466`) accepts:
    https, or plain http only to a loopback IP or in standalone mode, and
-   never credentials in the URL. Each backend with a usable name enters
-   the `catalog` (`compile.go:114`, `catalog.add` at `:149`), problems or
-   not, so that routes are checked against it rather than reported as
-   dangling too: its dialect, and each deployment's provider model and
-   `maxInFlight` and `maxInFlightPerPrincipal` (each gateway's ceilings on
-   it, and on one principal's calls to it; 0 none, never negative), and
-   its `healthCheck` (`healthCheck`: a path, its interval defaulted to
-   10 s; none on a bedrock deployment).
-3. **Routes** (`compileRoutes`, `compile.go:208`): a unique alias; a
-   non-empty pool; timeouts by `timeouts` (`compile.go:334`), defaulting
+   never credentials in the URL; `maxInFlight` and
+   `maxInFlightPerPrincipal` not negative (0 none); a `healthCheck` by
+   `healthCheck` (`compile.go:324`: a path on the host, its interval
+   defaulted to 10 s); a `quota` by `requestsPerMinute` (`compile.go:312`,
+   which checks a scope's rate limits too); `betas` sorted, each once
+   (`betasOf`, `:303`). A bedrock backend (`bedrockBackend`, `:226`) must
+   speak `anthropic.messages` and have no auth; its deployments go through
+   the same `deployments`, given the backend's `aws`, so that each needs
+   a region (`regionPattern`, `:238`: it becomes part of a host name),
+   may omit its URL (the region's Bedrock runtime) and has no health
+   check. Each backend with a usable name enters the `catalog`
+   (`compile.go:169`, `catalog.add` at `:212`), problems or not, so that
+   routes are checked against it rather than reported as dangling too: its
+   dialect, and each deployment's provider model.
+3. **Routes** (`compileRoutes`, `compile.go:358`): a unique alias; a
+   non-empty pool; timeouts by `timeouts` (`compile.go:513`), defaulting
    to `DefaultMaxDuration` (30 minutes) for the whole call, the whole call
    for headers, and `DefaultIdle` (5 minutes, capped by the whole call)
-   for silence; attempts by `maxAttempts` (`spec.retries.maxAttempts`,
-   `DefaultMaxAttempts` 2, 1 to 5); then the pool by `pool` (`compile.go:240`): members name a
+   for silence; attempts by `maxAttempts` (`compile.go:501`,
+   `spec.retries.maxAttempts`: `DefaultMaxAttempts` 2, 1 to 5); then the
+   pool by `pool` (`compile.go:388`): members name a
    catalogued backend and deployment; weights not negative (zero means 1);
    **one dialect per pool**, the first member's (ADR 0033: conversion is
    explicit, never implied by a mixed pool).
@@ -150,15 +174,25 @@ The passes, in order:
 6. **Prices** (`priceList`, `entitlements.go`): a three-letter
    currency, one per installation; each model priced once; no negative
    rates.
-7. **Budgets are chargeable** (`checkPriced`, `compile.go`): a
+7. **Budgets are chargeable** (`checkPriced`, `compile.go:427`): a
    ScopePolicy with a budget must reach only priced models, or its budget
    could never be spent (contracts.md §4). Both are config, so `golemctl
    config validate` refuses the mistake before it is merged.
 
 With no problems, backends and routes are sorted, so equal configs encode
 to equal bytes (`TestDeterministic`, `compile_test.go:72`), and
-`Source.ConfigDigest` (`digest`, `compile.go:297`) is the SHA-256 of the
-compiled backends and routes.
+`Options.publication` (`compile.go:151`) stamps the schema, sequence,
+issue time and lease, and `Source.ConfigDigest` (`digest`,
+`compile.go:454`), the SHA-256 of the compiled backends and routes.
+
+**Renewal.** `Renew` (`compile.go:124`) rebuilds a published snapshot as a
+new publication without a config: golem-control's step uses it when no
+config in its directory has compiled since it started (a restart over a
+broken edit). The config part (backends, routes, prices, and each scope's
+policy as published, `policiesOf`) is kept; the sequence, time, lease and
+the state's entitlements are new, joined with those policies as `Compile`
+joins them with the ScopePolicies (`TestRenew`, `renew_test.go:16`). A
+standalone snapshot is refused: it has no policies to keep.
 
 ### Standalone versus published
 
@@ -194,7 +228,7 @@ reported.
 `scopePolicy` (`lib/compile/policy.go`) is the one check of a scope's
 policy, a ScopePolicy's in either mode: a budget not negative and at most
 `snapshot.MaxMicros`; `budgetMode` observe, warn or enforce, and only with
-a budget; in-flight limits and ceilings not negative (the gateway applies
+a budget; rate limits, in-flight limits and ceilings not negative (the gateway applies
 a limit only above zero, so a negative one would be none); `features`
 restricted or compatible; `providerStorage` forbidden or allowed. Each
 field fails at its own path (`spec.inFlight.scope`), every one reported.
@@ -220,8 +254,8 @@ micro-units, about 1.1 billion units of currency. The site counter's
 Valkey scripts sum in Lua numbers, doubles exact only below 2^53; under
 this bound a period's sums stay exact there as they are in memory. The
 compiler refuses a larger budget (`at most 1125899906842624 (2^50)`,
-`entitlements_test.go:85`), and the gateway clamps the cost one call adds
-to the same bound (`gateway/limit/limit.go:357`).
+`entitlements_test.go:89`), and the gateway clamps the cost one call adds
+to the same bound (`gateway/limit/limit.go:465`).
 
 ## 3. The snapshot format (`lib/snapshot/snapshot.go`)
 
@@ -230,22 +264,27 @@ moment: `Schema` (`1`), `PublishSeq` (orders publications),
 `IssuedAt`/`ValidUntil` (the lease), `Source` (the state version and config
 digest it was built from), backends with secret *references*, routes,
 entitlements, currency and prices. It is data only: the gateway compiles
-it into lookup structures.
+it into lookup structures. A compiled deployment (`Deployment`,
+`snapshot.go:203`) carries the config's controls with their defaults
+filled in: `maxInFlight`, `maxInFlightPerPrincipal`, `healthPath` and
+`healthIntervalMs`, `quotaRPM`, `betas`, and a bedrock deployment's
+`region`; a scope (`Scope`, `snapshot.go:85`) its `memberRPM` and
+`scopeRPM`.
 
-`Encode` (`snapshot.go:196`) is `encoding/json`'s `Marshal`, which writes
+`Encode` (`snapshot.go:254`) is `encoding/json`'s `Marshal`, which writes
 struct fields in declaration order: with the compiler's sorting, equal
-snapshots give equal bytes, and `Hash` (`snapshot.go:230`), their hex
+snapshots give equal bytes, and `Hash` (`snapshot.go:288`), their hex
 SHA-256, names the object in the bucket. So **reordering a struct's fields
 changes every snapshot's hash.**
 
-`Decode` (`snapshot.go:202`) reads in two steps:
+`Decode` (`snapshot.go:260`) reads in two steps:
 
-1. **The schema first** (`snapshot.go:211`): only the `schema` member is
+1. **The schema first** (`snapshot.go:266`): only the `schema` member is
    read; any value other than 1 is a `SchemaError` telling the operator to
    upgrade gateways before the publisher. A newer schema's members are
    unknown here, so reading the schema first is what makes its refusal
    say "upgrade the gateway" rather than name a member.
-2. **The whole snapshot, strictly** (`snapshot.go:215`):
+2. **The whole snapshot, strictly** (`snapshot.go:273`):
    `encoding/json/v2` with `RejectUnknownMembers`, which also refuses
    duplicate names and names in another case (v2's defaults).
 
@@ -288,7 +327,7 @@ the publication record and before the pointer. At start
 (`Bucket.Start`, `gateway/snapshot/bucket.go:93`) a gateway takes the
 higher of its local checkpoint and the pool's trusted one; a missing
 checkpoint is floor zero only while the pool has no pointer either
-(`trustedCheckpoint`, `:149`), and a published pool's missing or
+(`trustedCheckpoint`, `:212`), and a published pool's missing or
 unverifiable checkpoint stops a gateway with an empty disk from starting.
 
 A pointer's `Expires` (`pointer.go:27`; the publisher sets it ten minutes
@@ -352,7 +391,7 @@ verifier refuses an ID it holds no key for with the same error
   KMS's ECDSA_SHA_256 produces; `ParseECDSAPublicKey` (`ecdsa.go:32`)
   reads KMS's DER or PEM public key and refuses other curves.
 - `Keys` and `LoadKeys` (`keys.go:17`, `:43`): what a pool gateway trusts
-  (`-keys`, `cmd/golem-gateway/main.go:249`). Every `*.pub` file of the
+  (`-keys`, `cmd/golem-gateway/main.go:98`). Every `*.pub` file of the
   directory is a PEM `PUBLIC KEY`, Ed25519 or ECDSA P-256; its key ID is
   the PEM's `Key-ID` header if it has one (a KMS key's ARN), else the
   file's name without `.pub`. A key ID given by two files is refused,
@@ -399,18 +438,20 @@ verifies Entra ID v2 access tokens locally, for one API: the gateway's
 (golem API's registration, scope `golem.access`) or the control API's
 (its own registration, scope `golem.manage`, ADR 0046), so a token for one
 is never accepted by the other. `Verify` (`entra.go:115`) accepts RS256
-only (`:114`), a key from the cached set, an expiry, this tenant's v2
+only (`:121`), a key from the cached set, an expiry, this tenant's v2
 issuer and one of the `Audiences`, then names a user (the scope and an
 `oid`, not an app-only token) or a service (no scope, `idtyp` "app", the
 `golem.service` role, an `azp`); `golem.admin` marks either an admin. A
 refusal is an `*entra.Error`, `Expired` set for an expired token so the
 caller can say to get a new one. The key set is fetched by `Refresh` and
 kept fresh by `Run` (hourly, and at most once a minute when a token names
-an unknown key, `requestRefresh`, `:126`): the request path makes no
+an unknown key, `requestRefresh`, `:241`): the request path makes no
 network call. A key set older than `MaxKeyAge` (24 hours by default,
-`:121`) while refreshes fail refuses every token, so a key Entra has
-revoked is not trusted for ever. Its tests are its callers':
-`gateway/auth/entra_test.go` and `control/api/entra_test.go`.
+`:132`) while refreshes fail refuses every token, so a key Entra has
+revoked is not trusted for ever. Its own tests (`entra_test.go`) cover
+the key set's schedule (`TestStartWithoutKeys`, `TestRefreshDeferred`);
+tokens are tested through its callers, `gateway/auth/entra_test.go` and
+`control/api/entra_test.go`.
 
 **`lib/otlp`** is the OTLP/HTTP transport: `New` (`otlp.go:40`) the
 gateway's three exporters, `LoggerProvider` (`otlp.go:93`) golem-control's
@@ -422,7 +463,32 @@ overrides the SDK's `OTEL_EXPORTER_OTLP_*` endpoint and insecure
 variables, so none can turn TLS off or send the data elsewhere
 (`TestOTLPIgnoresInsecureEnv`, `otlp_test.go:41`).
 
-## 10. Worked example: a directory to a verified snapshot
+## 10. CRDs and charts (`internal/crdgen`, `deploy/`)
+
+The Go types are the CRDs' source of truth. `internal/crdgen` writes each
+kind's CustomResourceDefinition (`Kinds`, `crdgen.go:23`: Backend,
+ModelRoute, ScopePolicy and PriceList; LocalIdentity is standalone only
+and has none): the spec's OpenAPI schema from the type by reflection
+(`schema`, `crdgen.go:69`), each field's doc comment its description
+(`Docs`, `crdgen.go:36`, from the package's source). The schema is only
+the shape, so that a typo is refused at `kubectl apply`; the compiler is
+the validation. `TestCRDsCurrent` fails when
+`deploy/charts/golem-control/crds/` differs from what the types make: a
+change to a field or its doc comment in `lib/api/v1alpha1` is followed by
+`GOLEM_UPDATE_CRDS=1 go test ./internal/crdgen/`.
+`TestChartDDLCurrent` keeps the chart's copy of the ledger's DDL
+(`files/spend.sql`, run by its pre-install Job) equal to
+`deploy/clickhouse/spend.sql`, which `lib/contract`'s `TestLedgerDDL`
+checks against contracts.md.
+
+The charts (`deploy/charts/README.md`) are golem-control's (with the
+CRDs, a git-sync init container and sidecar sharing one set of flags,
+`golem-control.gitSyncArgs`) and one gateway pool's; each required value
+fails the render with its name. `deploy/argocd/golem.yaml` is a sample
+Application and ApplicationSet; the repository's `Dockerfile` builds
+either binary (`--build-arg BINARY=`) static on distroless.
+
+## 11. Worked example: a directory to a verified snapshot
 
 Take a directory `config/` holding one file, `golem.yaml`: the `good`
 fixture of `compile_test.go:14`, a Backend `anthropic` with one deployment
@@ -430,42 +496,43 @@ fixture of `compile_test.go:14`, a Backend `anthropic` with one deployment
 deployment under one alias, and a ConfigMap.
 
 1. **Read.** golem-control's `Controller.Step` calls `load`
-   (`control/controller/controller.go:552`), which hashes the directory
-   with `ContentHash`; it changed, so `DecodeFS` reads it (`decode.go:38`).
+   (`control/controller/controller.go:583`), which hashes the directory
+   with `ContentHash`; it changed, so `DecodeFS` reads it (`decode.go:39`).
    Document 1 decodes into `objs.Backends`, document 2 into
-   `objs.Routes`; the ConfigMap in document 3 is skipped (`decode.go:83`).
-   A trial compile with a lease and no entitlements (`controller.go:570`)
+   `objs.Routes`; the ConfigMap in document 3 is skipped (`decode.go:84`).
+   A trial compile with a lease and no entitlements (`controller.go:601`)
    passes, and the objects become the good config.
 2. **Compile.** `PublishAll`'s build function calls `Compile`
-   (`compile.go:72`) with the publication's sequence, a lease and the
-   state's entitlements (`controller.go:488`). `compileBackends`
-   (`compile.go:122`) accepts `anthropic`; `backendAuth` compiles its auth
+   (`compile.go:88`) with the publication's sequence, a lease and the
+   state's entitlements (`controller.go:491`). `compileBackends`
+   (`compile.go:177`) accepts `anthropic`; `backendAuth` compiles its auth
    to `secretRef: "anthropic/api-key"`; `deployments` checks the one
    deployment's https URL; `catalog.add` records the backend's dialect and
-   the deployment's provider model. `compileRoutes` (`compile.go:208`)
+   the deployment's provider model. `compileRoutes` (`compile.go:358`)
    takes the default timeouts, and `pool` finds the member in the
    catalog, takes its dialect `anthropic.messages` as the route's and
    weight 1. `Options.Entitlements` supplies the state's scopes, told the
    route's alias, and `join` gives each its ScopePolicy. No problems: the snapshot gets
    `ValidUntil = Now + Lease` and its config digest.
-3. **Encode and store.** `PublishAll` (`control/publish/publish.go:107`)
-   checks the lease; `prepare` (`publish.go:176`) numbers the publication
-   above the record and the bucket's verified floor, encodes
-   (`snapshot.go:196`), hashes (`snapshot.go:230`) and puts
-   `snapshots/<pool>/<hash>.json` (`publish.go:201`).
+3. **Encode and store.** `PublishAll` (`control/publish/publish.go:123`)
+   checks the lease (`:139`); `prepare` (`publish.go:194`) numbers the
+   publication above the record and the bucket's verified floor, encodes
+   (`snapshot.go:254`), hashes (`snapshot.go:288`) and puts
+   `snapshots/<pool>/<hash>.json` (`publish.go:219`).
 4. **Record, checkpoint, pointer.** It wins every pool's publication
-   record in one fenced update of the state document (`publish.go:136`,
-   ADR 0049); then `finish` (`publish.go:208`) signs and writes the
+   record in one fenced update of the state document (`publish.go:154`,
+   ADR 0049); then `finish` (`publish.go:260`) signs and writes the
    checkpoint (`SignCheckpoint`, `pointer.go:85`), then signs the pointer
    with its `Expires` (`SignPointer`, `pointer.go:73`) and writes it.
 5. **Verify.** A gateway's `Poll` (`gateway/snapshot/bucket.go:242`) does
-   a conditional GET of the pointer; it changed, so `read` (`:371`) calls
+   a conditional GET of the pointer; it changed, so `read` (`:369`) calls
    `openPointer` (`:305`), which calls `OpenPointer` with its `sign.Keys`
    (`pointer.go:79`) and refuses another pool's pointer or one below its
    floor. It notes the pointer's `Expires`, fetches the object, and
-   `openSnapshot` (`:342`) checks `snapshot.Hash(body) == ptr.Hash`,
-   `Decode`s it strictly and checks the snapshot's `PublishSeq` against
-   the pointer's. The holder applies it, and the gateway saves its
+   `openSnapshot` (`:343`) checks `snapshot.Hash(body) == ptr.Hash`,
+   `Decode`s it strictly, checks the snapshot's `PublishSeq` against
+   the pointer's and its lease against the longest a publisher grants
+   (`checkLease`, `:327`). The holder applies it, and the gateway saves its
    last-good copy and its local checkpoint.
 
 An edit that misspells `alias` as `aliass` stops at step 1:
@@ -477,14 +544,15 @@ publishing the last good config.
 
 | Invariant | Where enforced | Test |
 |---|---|---|
-| A misspelt CRD field or unknown kind is refused, naming file, document and field | `decodeInto`, `decode.go:111`; `Objects.decode`, `:73` | `TestDecodeStrict`, `lib/compile/compile_test.go:154` |
-| Every compile problem names object, field path and fix | `adder` and the passes, `lib/compile` | `TestProblems`, `compile_test.go:86`; `TestEntitlementProblems`, `entitlements_test.go:73` |
-| Equal configs give equal snapshot bytes, whatever their file layout | sorting in `Compile`, `compile.go:94`, and the passes; `Encode` | `TestDeterministic`, `compile_test.go:72` |
-| No secret value or API key reaches a snapshot | `backendAuth`, `compile.go:189`; `localKeys`, `entitlements.go:96` | `TestCompile`, `compile_test.go:51`; `TestEntitlements`, `entitlements_test.go:35` |
+| A misspelt CRD field or unknown kind is refused, naming file, document and field | `decodeInto`, `decode.go:114`; `Objects.decode`, `:74` | `TestDecodeStrict`, `lib/compile/compile_test.go:154` |
+| Every compile problem names object, field path and fix | `adder` and the passes, `lib/compile` | `TestProblems`, `compile_test.go:86`; `TestEntitlementProblems`, `entitlements_test.go:77` |
+| Equal configs give equal snapshot bytes, whatever their file layout | sorting in `Compile`, `compile.go:88`, and the passes; `Encode` | `TestDeterministic`, `compile_test.go:72` |
+| No secret value or API key reaches a snapshot | `backendAuth`, `compile.go:339`; `localKeys`, `entitlements.go:79` | `TestCompile`, `compile_test.go:51`; `TestEntitlements`, `entitlements_test.go:38` |
+| A deployment's controls are refused when negative or malformed; a bedrock backend has no auth, the Messages dialect, and a valid region for each deployment | `deployments`, `bedrockBackend`, `compile.go:246`, `:226` | `TestLocalBox`, `compile_test.go:249`; `TestBedrockBackend`, `:203` |
 | A scope's policy is refused field by field: a budget above 2^50 micro-units or negative, an unknown budget mode or one without a budget, a negative in-flight limit or ceiling, an unknown `features` or `providerStorage` | `scopePolicy`, `policy.go` | `TestScopePolicyCheck`, `policy_test.go`; `TestEntitlementProblems`, `entitlements_test.go` |
 | A ScopePolicy names routed aliases, once per scope, and a budget over an unpriced model is the config's problem | `compilePolicies`, `checkPriced` | `TestPolicyProblems`, `policy_test.go` |
 | A state scope with no ScopePolicy can call nothing; a ScopePolicy of no scope is not published; both are reported, neither stops the publication | `join`, `DefaultScope`, `policy.go` | `TestJoin`, `policy_test.go`; `TestRenew`; control/controller's `TestUnmatchedScopes` |
-| An unknown, duplicate or miscased snapshot member, or another schema, is refused; another schema says to upgrade the gateway | `Decode`, `snapshot.go:202` | `TestDecodeFailsClosed`, `lib/snapshot/snapshot_test.go:35` |
+| An unknown, duplicate or miscased snapshot member, or another schema, is refused; another schema says to upgrade the gateway | `Decode`, `snapshot.go:260` | `TestDecodeFailsClosed`, `lib/snapshot/snapshot_test.go:35` |
 | Only a pointer or checkpoint signed by a trusted key, in its own context, opens | `open`, `pointer.go:110` | `TestPointer`, `lib/snapshot/pointer_test.go:37`; `TestCheckpoint`, `:67`; `TestKMSPointer`, `lib/sign/kmssign/kmssign_test.go:48` |
 | A gateway trusts the keys of its key directory, by Key-ID header or file name, and refuses an empty one, or one key ID given by two files | `LoadKeys`, `lib/sign/keys.go:43` | `TestLoadKeys`, `lib/sign/keys_test.go:53`; `TestLoadKeysRefusesARepeatedID`, `:21` |
 | Of concurrent swaps from one tag exactly one wins, on Dir and S3 | `Dir.Put`, `bucket.go:102`; S3's conditional writes | `lib/bucket/buckettest/buckettest.go:56`, run by `bucket_test.go:10` and `s3bucket_test.go:39` |
@@ -494,6 +562,7 @@ publishing the last good config.
 | Codes and headers match contracts.md | `lib/contract/codes.go` | `lib/contract/contract_test.go:37`, `:73` |
 | Telemetry goes over TLS unless to a literal loopback address, whatever the environment says | `Base`, `lib/otlp/otlp.go:103` | `TestPlaintextOK`, `otlp_test.go:26`; `TestOTLPIgnoresInsecureEnv`, `:41` |
 | An Entra token is accepted only RS256, for its API's audience and scope, with keys not too old | `Verifier.Verify`, `lib/entra/entra.go:115` | `gateway/auth/entra_test.go` (`TestEntra`, `TestStaleKeys`), `control/api/entra_test.go` |
+| The chart's CRDs are what the types make, and its DDL copy is the ledger's | `internal/crdgen` | `TestCRDsCurrent`, `TestChartDDLCurrent`, `internal/crdgen/crdgen_test.go` |
 
 ## Known gaps
 
@@ -505,9 +574,9 @@ publishing the last good config.
   signer; an integration run in the target account, with the bucket policy
   that denies other writers, is open (control-plane.md §4).
 - **Untested in `lib/`.** `s3bucket.Open`'s URL parsing has no test of its
-  own, `lib/entra` is tested only through its callers, and
+  own, `lib/entra`'s token checks are tested only through its callers, and
   `TestPointer` round-trips a pointer with a zero `Expires` (the
-  gateway's `TestOverdue`, `gateway/snapshot/bucket_test.go:241`, covers
+  gateway's `TestOverdue`, `gateway/snapshot/bucket_test.go:247`, covers
   an expired one).
 - The YAML splitter treats only a bare `---` line as a separator: `---`
   followed by content on the same line is not split.

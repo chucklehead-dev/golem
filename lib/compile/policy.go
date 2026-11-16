@@ -73,20 +73,12 @@ func scopePolicy(obj, at string, p Policy, add adder) snapshot.Scope {
 	if p.ProviderStorage != "" && p.ProviderStorage != "forbidden" && p.ProviderStorage != "allowed" {
 		add(obj, at+".providerStorage", "forbidden (the default) or allowed, not %q", p.ProviderStorage)
 	}
-	var memberRPM, scopeRPM int64
+	var limits v1.RateLimits
 	if p.RateLimits != nil {
-		for name, r := range map[string]*v1.Rate{"member": p.RateLimits.Member, "scope": p.RateLimits.Scope} {
-			if r != nil && r.RequestsPerMinute < 0 {
-				add(obj, at+".rateLimits."+name+".requestsPerMinute", "must not be negative (0: no limit)")
-			}
-		}
-		if r := p.RateLimits.Member; r != nil {
-			memberRPM = max(r.RequestsPerMinute, 0)
-		}
-		if r := p.RateLimits.Scope; r != nil {
-			scopeRPM = max(r.RequestsPerMinute, 0)
-		}
+		limits = *p.RateLimits
 	}
+	memberRPM := requestsPerMinute(obj, at+".rateLimits.member", limits.Member, add)
+	scopeRPM := requestsPerMinute(obj, at+".rateLimits.scope", limits.Scope, add)
 	// Every scope has a mode: its members' and keys' caps (state, set by
 	// its managers) follow it whether or not it has a budget.
 	mode := cmp.Or(p.BudgetMode, BudgetObserve)

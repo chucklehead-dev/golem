@@ -210,19 +210,12 @@ const maxKeySet = 1 << 20
 
 // Refresh fetches the tenant's key set.
 func (e *Verifier) Refresh(ctx context.Context) error {
-	url := e.JWKS
-	if url == "" {
-		url = "https://login.microsoftonline.com/" + e.Tenant + "/discovery/v2.0/keys"
-	}
+	url := cmp.Or(e.JWKS, "https://login.microsoftonline.com/"+e.Tenant+"/discovery/v2.0/keys")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	client := e.Client
-	if client == nil {
-		client = keysClient
-	}
-	resp, err := client.Do(req)
+	resp, err := cmp.Or(e.Client, keysClient).Do(req)
 	if err != nil {
 		return fmt.Errorf("entra keys: %w", err)
 	}

@@ -1,5 +1,4 @@
-{{- $req := list "site" "bucket" -}}
-{{- range $req }}{{ if not (index $.Values .) }}{{ fail (printf "values.%s is required" .) }}{{ end }}{{ end -}}
+{{- range list "site" "bucket" }}{{ if not (index $.Values .) }}{{ fail (printf "values.%s is required" .) }}{{ end }}{{ end -}}
 {{- if not .Values.valkey.address }}{{ fail "values.valkey.address is required" }}{{ end -}}
 apiVersion: apps/v1
 kind: Deployment
