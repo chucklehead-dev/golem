@@ -1,9 +1,10 @@
 # 0050: Scope policy is config, a ScopePolicy CRD; budgets have modes
 
 Status: Accepted. Amends [0005](0005-config-crds-and-overrides.md) (the
-ScopePolicy kind, its fields) and
-[0044](0044-budgets-are-controls-not-ceilings.md) (what a budget does at
-admission). Decided by the product owner, as PRD §5.9 and ADR 0005 had
+ScopePolicy kind, its fields; for M1 the config is a git checkout, ADR
+0054, and there is no CRD status) and the accounting decision
+([0031](0031-soft-budgets.md): what a budget does at admission). Its
+`declaredWorstCaseCheck` field was removed by 0052 (in 0031). Decided by the product owner, as PRD §5.9 and ADR 0005 had
 it: declarative config is CRDs, reviewed in GitOps.
 
 ## Context
@@ -34,7 +35,7 @@ had practical costs:
 
 - **A `ScopePolicy` per scope** (lib/api/v1alpha1), named by the scope's
   ID. Its spec: `models` (route aliases), `budgetMicros`, `budgetMode`,
-  `declaredWorstCaseCheck`, `inFlight {principal, scope}`,
+  `inFlight {principal, scope}`, `rateLimits {member, scope}`,
   `maxOutputTokens`, `maxInputBytes`, `providerStorage` (forbidden |
   allowed), `features` (restricted | compatible). It is checked by the one
   scope-policy check, lib/compile's `scopePolicy`, now also for

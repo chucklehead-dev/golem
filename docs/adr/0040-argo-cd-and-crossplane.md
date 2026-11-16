@@ -3,7 +3,7 @@
 Amended by [ADR 0041](0041-security-boundaries-and-incident-controls.md)
 updates the security boundary, requirements and acceptance evidence below.
 
-Status: Accepted. Amends [0036](0036-no-mesh-identity-no-operator.md), [0008](0008-sites-and-regions.md) and control-plane.md §5.
+Status: Accepted. Amends [0036](0036-no-mesh-identity-no-operator.md) and [0008](0008-sites-and-regions.md). **In M1 only Argo CD is used**, with the config repository not synced into the cluster (ADR 0054) and sync waves gateway pools first, then golem-control (operations.md §2, Upgrade). Argo Rollouts canaries and the Crossplane claims apply from M2; M1's cloud resources are made by hand or Terraform, recorded (operations.md §4).
 
 ## Context
 

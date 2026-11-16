@@ -1,6 +1,6 @@
 # 0029: Security and correctness requirements after design review
 
-Status: Accepted; §9's accounting requirements amended by [0031](0031-soft-budgets.md). Amends ADRs 0002, 0005, 0006, 0007, 0009, 0012,. Amended by [0032](0032-authorization-lease-length.md), [0035](0035-capture-projects-and-the-collector.md), [0036](0036-no-mesh-identity-no-operator.md), [0037](0037-request-policy-and-cache-stability.md).
+Status: Accepted; §9's accounting requirements amended by [0031](0031-soft-budgets.md), the lease by [0030](0030-authorization-renewal-and-availability.md). Amended by [0035](0035-capture-projects-and-the-collector.md), [0036](0036-no-mesh-identity-no-operator.md), [0037](0037-request-policy-and-cache-stability.md). Amends ADRs 0002, 0005, 0006, 0007, 0009, 0012,
 0013, 0014, 0015, 0016, 0017, 0023, 0025, 0027 and 0028 in the areas
 specified below. Unaffected decisions remain in force.
 

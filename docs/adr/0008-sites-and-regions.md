@@ -1,6 +1,6 @@
 # 0008: One control plane and one S3 store for every site; no cross-cluster access
 
-Status: Accepted (v1 baseline). From archive 0029, 0030, 0032.
+Status: Accepted (v1 baseline).
 
 ## Decision
 

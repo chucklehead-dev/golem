@@ -4,7 +4,7 @@ Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
 and its normative security and correctness requirements. Baseline text below
 must be read with those amendments.
 
-Status: Accepted (v1 baseline). From archive 0007. Amended by [0033](0033-explicit-cross-dialect-conversion.md) (no implicit cross-dialect failover).
+Status: Accepted (v1 baseline). Amended by [0033](0033-explicit-cross-dialect-conversion.md) (no implicit cross-dialect failover).
 
 ## Decision
 

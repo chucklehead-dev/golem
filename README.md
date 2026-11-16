@@ -54,8 +54,8 @@ evidence is in.
 - [model/](model/): literate Quint models of golem's protocols, each
   readable as an explanation and checked by `make` (first: how a
   revocation reaches every gateway).
-- [docs/adr/](docs/adr/): the v1 baseline of decisions, one per record
-  (their history in docs/adr/archive/).
+- [docs/adr/](docs/adr/README.md): the decisions, one record each, amendment
+  chains folded into their surviving record (earlier text in git history).
 
 Comparable products, for reference: LiteLLM, agentgateway, Langfuse AI
 Gateway, Envoy AI Gateway, Portkey, Bifrost, Kong AI Gateway, Cloudflare AI

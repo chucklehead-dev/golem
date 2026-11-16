@@ -1,6 +1,6 @@
 # 0034: M2 budgets are caps and a cost-center mapping; grants and approvals wait for demand
 
-Status: Accepted. Amends [0011](0011-budgets.md) and org-model.md §4 for M2.
+Status: Accepted. **Applies from M2.** Amends [0011](0011-budgets.md) and org-model.md §4 for M2. M1's budgets are [0031](0031-soft-budgets.md)'s: a scope budget, no caps.
 
 ## Decision
 

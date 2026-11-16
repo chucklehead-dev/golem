@@ -4,7 +4,7 @@ Amended where specified by [ADR 0029](0029-security-and-correctness-revision.md)
 and its normative security and correctness requirements. Baseline text below
 must be read with those amendments.
 
-Status: Accepted (v1 baseline). From archive 0003, 0032; PRD §9.3. Amended by [0036](0036-no-mesh-identity-no-operator.md) (no mesh identity).
+Status: Accepted (v1 baseline). Amended by [0036](0036-no-mesh-identity-no-operator.md) (no mesh identity).
 
 ## Decision
 

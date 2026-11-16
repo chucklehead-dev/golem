@@ -1,6 +1,6 @@
 # 0011: Budgets: pools funded by grants, three levels of enforcement, modes
 
-Status: Accepted (v1 baseline). From archive 0008. Amended by [0034](0034-budgets-for-m2.md) (M2 scope).
+Status: Accepted (v1 baseline). **Applies from M2**, as narrowed by [0034](0034-budgets-for-m2.md). M1 has one budget per scope and period, with its mode, and no grants, pools or caps ([0031](0031-soft-budgets.md), [0050](0050-scope-policy-is-config.md)); site ceilings are gone (0013).
 
 ## Decision
 

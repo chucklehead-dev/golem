@@ -1,84 +1,172 @@
-# 0031: Budgets are soft and eventually consistent; the overshoot is bounded and stated
+# 0031: Budgets are soft admission controls on the snapshot's known spend
 
-Status: Accepted. Supersedes the accounting parts of 0012 (money reservations, their renewal, site allocations). Amended by [0038](0038-accounting-refinements.md) (dedicated accounts, monthly reconciliation, slot renewal, worst-case ceilings) and [0042](0042-known-spend-by-counter-watermark.md) (how known spend is computed); [0044](0044-budgets-are-controls-not-ceilings.md) (the bound is expected exposure, not a guarantee; no hard ceiling; strict renamed `declaredWorstCaseCheck`).
-reservations, renewal, uncertain liability), 0013 (fixed site allocations),
-0029 §9 (durable per-attempt accounting as an M1 gate; failing closed when
-the journal is unavailable; site allocations) and 0030 (the spool spike).
-Amends 0025 (ledger row kinds).
+Status: Accepted, consolidated 2026-11-16. This record is the accounting
+decision as it stands for M1. It absorbs, and replaces:
+[0012](0012-limits-and-accounting.md)'s accounting (reserve, renew,
+reconcile), [0013](0013-site-ceilings.md) (site allocations),
+[0038](0038-accounting-refinements.md) (dedicated accounts, monthly
+reconciliation, renewed slots, request ceilings),
+[0042](0042-known-spend-by-counter-watermark.md) (the counter watermark),
+[0044](0044-budgets-are-controls-not-ceilings.md) (controls, not ceilings),
+[0048](0048-known-spend-by-time-boundary.md) (the time boundary and minute
+counters) and [0052](0052-accounting-for-m1.md) (snapshot known spend,
+scope budgets only); each of those is now a stub pointing here, and their
+full text is in git history. Budget modes are
+[0050](0050-scope-policy-is-config.md)'s. Grants, team pools and member
+caps are M2's ([0011](0011-budgets.md), [0034](0034-budgets-for-m2.md)).
 
 ## Context
 
-A call's true cost is known only when it completes. The design had grown a
-durable journal written before dispatch, money reservations renewed on long
-streams, uncertain-liability recovery and fixed per-site allocations, all to
-make budgets approach a hard ceiling. The accounting model
-(`model/accounting.md`, first version) showed what that takes. The enterprise
-does not need hard ceilings: it needs budgets that stop spending promptly and
-books that match invoices.
+A call's true cost is known only when it ends, and a provider can keep
+working (and billing) after golem stops seeing a call. The design first
+sought hard ceilings (a durable journal before dispatch, money
+reservations renewed on long streams, fixed per-site allocations), then a
+soft budget with a stated overshoot bound, then exact known spend through a
+site counter. Each step showed that the bound rested on an assumption the
+real world does not grant: that no call costs more than the worst case golem
+computes from the request (token-dense output, server-side tools, files and
+images, a provider's tail after a cut, prices behind the provider's). The
+enterprise's financial boundary already exists: the provider account's
+spending limit. Golem's job is to keep expected exposure small and to know,
+after the fact, who spent what. One team's M1 rollout needs no more
+machinery than that, and every extra part (counters, replays, caps, quota
+shares, a fail-closed mode) was where the reviews kept finding defects.
 
 ## Decision
 
-**Accepted risk** (to be signed off by the platform team, finance and
-security):
+**What a budget is.** A scope's budget for a period is an admission and
+monitoring control, not a spending ceiling. Provider-native limits are the
+financial boundary; the provider's bill, reconciled, is the record.
 
-- Spend is known after the fact and is eventually consistent: on one site
-  within seconds; across sites within the snapshot renewal interval (about a
-  minute) plus ledger ingestion.
-- A principal near its budget can exceed it with the calls already in flight.
-- Once known spend reaches a budget, every further call against that key,
-  member or scope is refused (402, `budget.*`), on every site, within the
-  same lag.
-- A gateway crash can lose the spend events it had not yet exported; daily
-  provider reconciliation books the difference as an **unattributed
-  adjustment**, so totals match invoices even where attribution of those few
-  calls is lost.
+**Provider accounts.** golem routes to dedicated provider accounts or
+projects (OpenAI projects, Anthropic workspaces, AWS accounts or tagged
+Bedrock roles, Azure resources): usage data is per account, so this is
+reconciliation's precondition. Every one has a spending limit or budget
+alarm set at the provider, sized to what finance accepts losing: a
+deployment requirement (operations.md), not a check golem makes.
 
-**Mechanism:**
+**What golem enforces**, and claims nothing beyond:
 
-- **Known spend** for a key, member or scope in a period is the ledger's
-  balance (deduplicated by event ID), published in every snapshot renewal,
-  plus the site's own counter in Valkey since that snapshot. The gateway
-  adds a call's actual cost to the site counter when the call ends.
-- **Soft check** (default): admit if known spend is below the budget.
-> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** The strict check is the declared-worst-case check (`declaredWorstCaseCheck`): an admission check on what the request declares, not a bound on what a call can cost. The overshoot formulas below are expected exposure while calls cost at most `W`, not guarantees; `W` is a declaration, and "a hard ceiling on one site" does not hold of real spend.
+- authentication and authorization (ADR 0009, 0026, 0041);
+- in-flight slots per principal (counted per scope) and per scope,
+  renewed every 30 s while a call runs (TTL 90 s); a cancelled or cut call
+  keeps its slot for the provider's tail (2 minutes, at most to the call's
+  deadline);
+- rate limits in requests a minute, per member and per scope, taken once
+  a call before admission, failing open when the site store is down;
+- a deployment's in-flight ceilings (`maxInFlight`,
+  `maxInFlightPerPrincipal`); the provider's own 429s fail the attempt over
+  (ADR 0051);
+- request size (the body limit, a scope's `maxInputBytes`) and declared
+  output (`maxOutputTokens` over `max_tokens` × `n`, a missing
+  `max_tokens` refused under one);
+- request features: provider storage, server tools, restricted mode (ADR
+  0027, 0037, 0041 §3);
+- call lifetime: first-byte, idle and maximum durations;
+- refusal once known spend reaches an `enforce` budget (`budget.pool_exhausted`,
+  402), within the snapshot's lag.
 
-- **Strict check** (a `ScopePolicy` option): admit only if known spend plus
-  the request's **worst-case cost** fits: input tokens estimated from the body
-  at the full input price (no cache discount), plus `max_tokens` (or the
-  model's maximum output) at the output price; server-side tools, which have
-  no upper bound, are refused in strict scopes.
-- **Concurrency limits** per principal (Valkey slots with a short TTL) are
-  the overshoot control. With an in-flight limit `L` and worst-case cost `W`,
-  a principal's overshoot on one site is at most `L × W` under the soft check
-  and `(L − 1) × W` under the strict check, plus spend lost by a crash or a
-  Valkey failover until it is reconciled, plus, across sites, what the
-  principal spends during one refresh lag. Strict with `L = 1` is a hard
-  ceiling on one site, apart from crash losses. A scope also has an
-  in-flight limit, which bounds its overshoot as a whole: without it, a
-  shared scope's exposure is the sum of its principals' (ADR 0041 §7.6).
-- **No** journal, intent-before-dispatch, money reservations, reservation
-  renewal, uncertain-liability tracking, recovery watermarks or site
-  allocations. Spend events go out through the normal access-log path
-  (ADR 0015) and are deduplicated by event ID in ClickHouse.
-- **Ledger rows**: one `attempt` row per upstream attempt (flagged
-  `estimated` when a stream was cut and its usage estimated from the bytes received), and
-  `adjustment` rows from reconciliation, attributed where the provider data
-  allows, else to an `unattributed` principal under the provider account.
+**Known spend is the snapshot's.** golem-control's known-spend job
+(control/spend) publishes, in every snapshot (about every minute), each
+scope's spend this period: the ledger's spend (`golem.spend_dedup`,
+deduplicated by `event_id`) of the calls that ended before a boundary B, a
+whole minute an ingestion allowance (default 5 minutes) before the
+snapshot's time. The gateway checks it against the budget at admission; it
+keeps no spend counter of its own. A call belongs to the period it started
+in (`lib/period`, one installation-wide period zone that every snapshot
+states and every gateway checks); a snapshot of another period counts as
+none. A failed job keeps its last result for its own period and reports it
+stale; a site whose rows arrive later than the allowance is reported
+behind (`Job.Lags`), B unmoved.
 
-## Consequences
+**Admission is one store call.** The site's Valkey (ElastiCache, one
+primary and a replica; in-memory for development and standalone) holds the
+slots and the rate buckets. One script checks known spend against the
+budget and takes the principal's and the scope's slots, atomically, so two
+gateways cannot both pass before either takes a slot. Each store call is
+bounded (250 ms); a caller that leaves meanwhile is no outage, and its slot
+is freed when the call returns. Admission is a fixed stage after routing,
+not a hook (gateway/admission).
 
-- Gateways stay stateless Deployments; Phase 0 loses the spool spike; M1
-  loses the durable-accounting gate; remote sites need no allocations.
-- Budget owners are told, in the console and the docs, what a budget means:
-  "spending stops within about a minute of reaching the limit; in-flight
-  calls may exceed it by up to the stated bound".
-- The bound is checked by `model/accounting.md` (second version).
+**Outages.** With Valkey unreachable a gateway admits on its own in-flight
+counts and the snapshot's known spend, each admission recorded as a
+waiver; calls already running continue (no scope cancels calls on a failed
+renewal). On recovery it re-registers its running calls' slots and, for a
+grace of two renewal intervals, records its admissions as waivers while
+peers recover. A gateway starts, and is ready, with Valkey down.
+
+**Estimates err high, and are only estimates.** A call whose usage is
+missing or ambiguous is charged by rules chosen to over-count: every byte
+received a token (at most `max_tokens` × `n`), every request byte a token,
+a call sent and unanswered its declared worst case (`price.Worst`); the
+ledger row records the estimated share. They can still be low (a provider's
+tail, a modality bytes do not bound, a unit golem does not price).
+
+**Reconciliation is authoritative and, in M1, a query.** Monthly, by
+provider account and model, against provider usage and cost data (AWS CUR,
+a day or two late; the OpenAI usage API; Anthropic's and Azure's exports),
+within a 3–5% tolerance, with daily previews; differences beyond it are
+investigated. In M1 it is a SQL query over `golem.spend_dedup` and a
+written record (docs/acceptance/m1-exit.md); no job writes `adjustment`
+rows yet (the row kind stays in the contract). Chargeback uses the
+provider's cost split by golem's attribution; golem's prices need only be
+good enough for admission.
+
+**Budget modes** (ADR 0050): `observe` (the default: admitted, the row
+marked `over_budget`), `warn` (as observe, with `golem-warning`),
+`enforce` (refused). In-flight and rate limits refuse in every mode.
+
+## What is stated, not prevented
+
+- **Spend within the snapshot's lag** (the allowance, the publication
+  interval, the gateway's poll) is not seen at admission: a scope can pass
+  an `enforce` budget by what it spends in that time, bounded by its rate
+  limit (requests a minute × the lag's minutes × the worst case), not by
+  its in-flight limits. `model/exposure.md` §6.2 states the bound with
+  its `lag` term.
+- **Calls in flight** when known spend reaches the budget finish.
+- **A row later than the allowance** is in no snapshot until a later one
+  includes it.
+- **No cap below the scope**: one member or one leaked key can spend the
+  scope's budget, within the rate and in-flight limits.
+- **No fail-closed mode**: calls without `max_tokens`, or with server-side
+  tools, are admitted under every mode (a scope's `maxOutputTokens` still
+  requires `max_tokens`).
+- **No per-site quota split**: a deployment shared by sites can be pushed
+  to its provider limit by one; its 429s fail attempts over.
+- **Standalone counts no spend**: with no golem-control nothing publishes
+  known spend, so its budgets never refuse; in-flight and rate limits apply.
+- **A crash** loses the rows a gateway had not exported (ADR 0043);
+  reconciliation finds the difference.
+
+Budget owners are told: "spending stops within a few minutes of reaching
+the limit; calls in flight may go past it; the provider's bill, reconciled
+monthly, is the record". A review finding of the form "an estimate can be
+low when …" is judged by its expected cost against reconciliation and the
+provider's limit, not as a breach of a ceiling golem does not claim.
+
+## Removed on the way (history in git)
+
+- Durable journal, intent before dispatch, money reservations and their
+  renewal, uncertain-liability tracking (the first design).
+- Fixed per-site allocations (0013).
+- A strict mode, later `declaredWorstCaseCheck`, refusing calls whose
+  declared worst case passed the budget (0044, removed by 0052).
+- The site spend counter: by event with a ledger watermark (0042), then by
+  minute from a time boundary with held increments replayed after an
+  outage (0048); its retention, `WAIT` and gap reconstruction (0043).
+- Member and key caps, and provider quota shares (0052). The refusal codes
+  `budget.member_cap`, `budget.key_cap` and `limit.provider_quota` stay in
+  the contract, unused.
 
 ## Alternatives
 
-> **Superseded in part by [ADR 0044](0044-budgets-are-controls-not-ceilings.md).** Hard ceilings are out of scope by any mechanism: provider-account spending limits are the financial backstop.
-
-- Hard ceilings through a durable journal and reservations (the superseded
-  design): far more machinery for a guarantee the enterprise does not need.
-- Worst-case reservations (a hard ceiling on one site without `L = 1`):
-  kept in reserve if finance later requires hard ceilings for some scopes.
+- **Hard ceilings through a journal and reservations**: the same
+  assumption about the worst case, at far greater cost. Kept in reserve
+  only if finance requires hard ceilings for some scope.
+- **A site counter for known spend current at the site**: the counter's
+  Lua, retention and replays, and their defects, for spend within a
+  snapshot's lag.
+- **Caps from the snapshot alone**: a member's spend within the lag is not
+  seen (an exposure.md design shown broken before the caps were
+  removed): a cap that does not cap.

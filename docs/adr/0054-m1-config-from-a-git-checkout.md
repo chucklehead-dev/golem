@@ -1,15 +1,14 @@
-# 0054: M1 config from a git checkout
+# 0054: Config is a git checkout, compiled by golem-control
 
-Status: Accepted. Supersedes, for M1, the parts of
-[0005](0005-config-crds-and-overrides.md) that put the config objects in
-the EKS cluster (golem-control watching them, writing their status, CEL
-rules enforced by the API server, CRDs usable before golem-control
-exists), and [0041](0041-security-boundaries-and-incident-controls.md)
-§7.2 (freshness by a consistent LIST of the config CRDs). Records what
-was built: golem-control has read its config from a git-sync checkout
-since its first chart (deploy/charts/golem-control), with no record of the
-change. Keeps 0005's kinds, its one validation path and its secrets rule;
-0005's operational overrides are not built in M1 (operations.md §2).
+Status: Accepted, consolidated 2026-11-16. This record is golem's config
+decision for M1. It absorbs what still holds of
+[0005](0005-config-crds-and-overrides.md) (the kinds, one validation path,
+the secrets rule; 0005 is now a stub listing what it defers to M2) and
+replaces [0041](0041-security-boundaries-and-incident-controls.md) §7.2's
+freshness by a consistent LIST. It records what was built: golem-control
+has read its config from a git-sync checkout since its first chart
+(deploy/charts/golem-control). 0005's in-cluster objects, CRD watch and
+operational overrides apply from M2, if at all (roadmap.md).
 
 ## Context
 
@@ -33,10 +32,23 @@ miss a restriction merged since.
 
 ## Decision
 
+- **Five kinds**, group `golem.dev` (lib/api/v1alpha1): `Backend`
+  (endpoints, dialect and envelope, auth, network, deployments and their
+  ceilings), `ModelRoute` (alias, pool in order, retries, timeouts),
+  `ScopePolicy` (one per scope: models, budget and mode, limits, request
+  ceilings, provider storage, feature mode; ADR 0050), `PriceList`, and
+  `LocalIdentity` for standalone; `Hook` comes with hooks (M2). Decoded
+  strictly: an unknown field is refused, naming file and field.
+- **One validation path**: the snapshot compiler (lib/compile), a library:
+  `golemctl config validate` runs it in CI, golem-control on the checkout,
+  the standalone gateway on its directory.
+- **Secrets stay in Kubernetes Secrets** in each site's cluster, mounted
+  into the gateways that need them (or workload identity); a config names
+  them, and they never enter the state or the snapshots.
 - **The config is the GitOps repository at a commit.** The platform
   team's repository (CODEOWNERS, review) holds the config YAML; CI runs
   `golemctl config validate` on it (lib/compile, the one validation path
-  of ADR 0005); git-sync checks out the branch's head every `period`
+  above); git-sync checks out the branch's head every `period`
   (30 seconds); golem-control compiles the checkout and publishes it
   (control/controller). A merge reaches the gateways within a sync period
   and a step.

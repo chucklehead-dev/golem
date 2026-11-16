@@ -1,6 +1,6 @@
 # 0010: Organisation: scopes, four roles, rights by intersection
 
-Status: Accepted (v1 baseline). From archive 0008, 0024, 0026.
+Status: Accepted (v1 baseline).
 
 ## Decision
 
