@@ -86,6 +86,7 @@ func (h *Handler) authenticate(r *http.Request, g *auth.Grant) (*snapshot.Compil
 	}
 	snap, err := h.Snapshots.Current()
 	switch {
+	//quint:enforces publication.noExpiredServe
 	case errors.Is(err, snapshot.ErrExpired):
 		return nil, nil, &refusal{code: contract.GatewayAuthorizationExpired, msg: "this gateway's authorization has expired and it serves no new requests until it is renewed; the platform team is alerted"}
 	case err != nil:

@@ -281,7 +281,6 @@ in [the models' section](#5-the-models-and-their-connect-tests).
 | An empty disk takes the trusted checkpoint as its floor; with no floor it does not start | `Bucket.Start`, `trustedCheckpoint` | `TestBucketSource`, `TestPublicationModel` |
 | A pointer from the future or a lease past `-max-lease` is refused; another period zone's snapshot is refused | `openPointer`, `checkLease`, `checkZone` | `TestClockBounds`, `TestPoolModeLeaseBound`, `TestPeriodZone` |
 | A restart with the bucket unreachable serves the last publication, verified again | `loadLastGood`, `applyLastGood`, `verify` | `TestLastGood`, `TestLastGoodRetried` |
-| A request on an expired lease is refused `gateway.authorization_expired`, nothing sent upstream | `Handler.authenticate` | `TestLeaseExpired` |
 | A config that does not compile keeps the previous one | `Holder.Apply`, `Dir.Load` | `TestDir`, `TestApplyRetried` |
 | Upstream dials to forbidden addresses are refused at every connection | `checkDestination` | `TestCheckDestination`, `TestDialRefused`, `TestDialReresolved` |
 | A key is honoured only for a listed owner of its kind in its scope | `keyEntry` | `TestAuthenticate`, `FuzzAuthenticate` |
@@ -374,45 +373,39 @@ and CI's `model/invariants.sh -check` fails when one is stale or an
 invariant lacks either annotation
 ([contributing.md](../contributing.md#model-invariants)). They link to
 files, not lines, so moving code leaves them current. No run of golem
-records model steps, so no action has a recorder. The `keep*` actions and
-`initWith` are frames that other actions use, so no driver runs them.
+records model steps, so no action has a recorder; every action the model's
+`step` takes is driven by its connect test, and CI requires it.
 
 #### publication.md
 
 <!-- gotogether:invariants publication -->
 | property | meaning | enforced by | checked by |
 |---|---|---|---|
-| `revocationBounded` | No gateway serves a key at or after its revocation time plus one lease. | `controller.Controller.Step` [../../control/controller/controller.go](../../control/controller/controller.go)<br>`snapshot.Holder.Current` [../../gateway/snapshot/holder.go](../../gateway/snapshot/holder.go) | `controller.TestRevocationNotBehindSpend` [../../control/controller/jobs_test.go](../../control/controller/jobs_test.go)<br>`snapshot.TestHolder` [../../gateway/snapshot/holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `noExpiredServe` | No gateway serves from a snapshot whose authorization has ended. | `snapshot.Holder.Current` [../../gateway/snapshot/holder.go](../../gateway/snapshot/holder.go)<br>`snapshot.Holder.swap` [../../gateway/snapshot/holder.go](../../gateway/snapshot/holder.go) | `snapshot.TestHolder` [../../gateway/snapshot/holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `noRollback` | A gateway that has not restarted never moves to a publication of older state. | `publish.Publisher.prepare` [../../control/publish/publish.go](../../control/publish/publish.go)<br>`snapshot.Holder.swap` [../../gateway/snapshot/holder.go](../../gateway/snapshot/holder.go) | `publish.TestFenced` [../../control/publish/publish_test.go](../../control/publish/publish_test.go)<br>`snapshot.TestBucketSource` [../../gateway/snapshot/bucket_test.go](../../gateway/snapshot/bucket_test.go)<br>`snapshot.TestHolder` [../../gateway/snapshot/holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `noRollbackBelowCheckpoint` | A gateway restarted empty never accepts a publication older than the record at its restart. | `snapshot.Bucket.Start` [../../gateway/snapshot/bucket.go](../../gateway/snapshot/bucket.go)<br>`snapshot.Bucket.trustedCheckpoint` [../../gateway/snapshot/bucket.go](../../gateway/snapshot/bucket.go)<br>`snapshot.Holder.swap` [../../gateway/snapshot/holder.go](../../gateway/snapshot/holder.go) | `snapshot.TestBucketSource` [../../gateway/snapshot/bucket_test.go](../../gateway/snapshot/bucket_test.go)<br>`snapshot.TestHolder` [../../gateway/snapshot/holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestRaiseFloor` [../../gateway/snapshot/holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `publicationsOrdered` | A publication with a higher sequence never carries older state than the one before it. | `publish.Publisher.prepare` [../../control/publish/publish.go](../../control/publish/publish.go)<br>`state.Store.FencedUpdate` [../../control/state/state.go](../../control/state/state.go)<br>`state.checkPublications` [../../control/state/state.go](../../control/state/state.go) | `publish.TestFenced` [../../control/publish/publish_test.go](../../control/publish/publish_test.go)<br>`publish.TestLeaseLostBeforeRecord` [../../control/publish/publish_test.go](../../control/publish/publish_test.go)<br>`state.TestRecordsNeverGoBack` [../../control/state/state_test.go](../../control/state/state_test.go)<br>`state.TestFenceInvariant` [../../control/state/state_test.go](../../control/state/state_test.go)<br>`snapshot.TestPublicationModel` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `revocationsSurviveRestore` | Every key ever revoked is still revoked, across restores. | `state.checkRevocations` [../../control/state/entitlements.go](../../control/state/entitlements.go)<br>`state.Restore` [../../control/state/restore.go](../../control/state/restore.go) | `state.TestEntitlementInvariants` [../../control/state/entitlements_test.go](../../control/state/entitlements_test.go)<br>`state.TestRestore` [../../control/state/restore_test.go](../../control/state/restore_test.go)<br>`state.TestRestoreNeverWidens` [../../control/state/restore_test.go](../../control/state/restore_test.go) |
+| `revocationBounded` | No gateway serves a key at or after its revocation time plus one lease. | `controller.Controller.Step` [controller.go](../../control/controller/controller.go)<br>`snapshot.Holder.Current` [holder.go](../../gateway/snapshot/holder.go) | `controller.TestRevocationNotBehindSpend` [jobs_test.go](../../control/controller/jobs_test.go)<br>`snapshot.TestHolder` [holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `noExpiredServe` | No gateway serves from a snapshot whose authorization has ended. | `proxy.Handler.authenticate` [prepare.go](../../gateway/proxy/prepare.go)<br>`snapshot.Holder.Current` [holder.go](../../gateway/snapshot/holder.go)<br>`snapshot.Holder.swap` [holder.go](../../gateway/snapshot/holder.go) | `proxy.TestLeaseExpired` [proxy_test.go](../../gateway/proxy/proxy_test.go)<br>`snapshot.TestHolder` [holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `noRollback` | A gateway that has not restarted never moves to a publication of older state. | `publish.Publisher.prepare` [publish.go](../../control/publish/publish.go)<br>`snapshot.Holder.swap` [holder.go](../../gateway/snapshot/holder.go) | `publish.TestFenced` [publish_test.go](../../control/publish/publish_test.go)<br>`snapshot.TestBucketSource` [bucket_test.go](../../gateway/snapshot/bucket_test.go)<br>`snapshot.TestHolder` [holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `noRollbackBelowCheckpoint` | A gateway restarted empty never accepts a publication older than the record at its restart. | `snapshot.Bucket.Start` [bucket.go](../../gateway/snapshot/bucket.go)<br>`snapshot.Bucket.trustedCheckpoint` [bucket.go](../../gateway/snapshot/bucket.go)<br>`snapshot.Holder.swap` [holder.go](../../gateway/snapshot/holder.go) | `snapshot.TestBucketSource` [bucket_test.go](../../gateway/snapshot/bucket_test.go)<br>`snapshot.TestHolder` [holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestRaiseFloor` [holder_test.go](../../gateway/snapshot/holder_test.go)<br>`snapshot.TestPublicationModel` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `publicationsOrdered` | A publication with a higher sequence never carries older state than the one before it. | `publish.Publisher.prepare` [publish.go](../../control/publish/publish.go)<br>`state.Store.FencedUpdate` [state.go](../../control/state/state.go)<br>`state.checkPublications` [state.go](../../control/state/state.go) | `publish.TestFenced` [publish_test.go](../../control/publish/publish_test.go)<br>`publish.TestLeaseLostBeforeRecord` [publish_test.go](../../control/publish/publish_test.go)<br>`state.TestRecordsNeverGoBack` [state_test.go](../../control/state/state_test.go)<br>`state.TestFenceInvariant` [state_test.go](../../control/state/state_test.go)<br>`snapshot.TestPublicationModel` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `revocationsSurviveRestore` | Every key ever revoked is still revoked, across restores. | `state.checkRevocations` [entitlements.go](../../control/state/entitlements.go)<br>`state.Restore` [restore.go](../../control/state/restore.go) | `state.TestEntitlementInvariants` [entitlements_test.go](../../control/state/entitlements_test.go)<br>`state.TestRestore` [restore_test.go](../../control/state/restore_test.go)<br>`state.TestRestoreNeverWidens` [restore_test.go](../../control/state/restore_test.go) |
 <!-- /gotogether:invariants publication -->
 
 <!-- gotogether:actions publication -->
 | action | recorded by | driven by |
 |---|---|---|
-| `initWith` | — | — |
-| `keepState` | — | — |
-| `keepLeadership` | — | — |
-| `keepPublication` | — | — |
-| `keepGateways` | — | — |
-| `keepFlags` | — | — |
-| `revoke` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `restore` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `loadState` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `takeLease` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `noticeLoss` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `publish` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `replayPointer` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `forgeStatus` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `poll` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `restartEmpty` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `partition` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `heal` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `serve` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
-| `tick` | — | `snapshot.pubDriver.Step` [../../gateway/snapshot/publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `revoke` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `restore` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `loadState` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `takeLease` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `noticeLoss` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `publish` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `replayPointer` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `forgeStatus` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `poll` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `restartEmpty` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `partition` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `heal` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `serve` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
+| `tick` | — | `snapshot.pubDriver.Step` [publication_mbt_test.go](../../gateway/snapshot/publication_mbt_test.go) |
 <!-- /gotogether:actions publication -->
 
 #### exposure.md
@@ -420,26 +413,23 @@ records model steps, so no action has a recorder. The `keep*` actions and
 <!-- gotogether:invariants exposure -->
 | property | meaning | enforced by | checked by |
 |---|---|---|---|
-| `limitsHonoured` | The in-flight limits bound the calls the provider is running, whatever Valkey counts. | `limit.Ticket.Cancel` [../../gateway/limit/limit.go](../../gateway/limit/limit.go)<br>`limit.Limiter.Recover` [../../gateway/limit/limit.go](../../gateway/limit/limit.go)<br>`limit.Mem.Admit` [../../gateway/limit/store.go](../../gateway/limit/store.go)<br>`limit.admitScript` [../../gateway/limit/valkey.go](../../gateway/limit/valkey.go) | `limit.TestStoresAgree` [../../gateway/limit/differential_test.go](../../gateway/limit/differential_test.go)<br>`limit.TestExposureModel` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`limit.TestExposureModelValkey` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`limit.TestInFlightLimits` [../../gateway/limit/limit_test.go](../../gateway/limit/limit_test.go)<br>`limit.TestOutage` [../../gateway/limit/limit_test.go](../../gateway/limit/limit_test.go)<br>`limit.TestMemStore` [../../gateway/limit/store_test.go](../../gateway/limit/store_test.go)<br>`limit.TestValkeyStore` [../../gateway/limit/store_test.go](../../gateway/limit/store_test.go) |
-| `withinBound` | A scope's billed spend stays within its budget plus lag, SCOPE_LIMIT × WORST, uncounted spend and waivers. | `limit.Limiter.Admit` [../../gateway/limit/limit.go](../../gateway/limit/limit.go)<br>`limit.overBudget` [../../gateway/limit/store.go](../../gateway/limit/store.go) | `limit.TestStoresAgree` [../../gateway/limit/differential_test.go](../../gateway/limit/differential_test.go)<br>`limit.TestExposureModel` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`limit.TestExposureModelValkey` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`limit.TestKnownSpendIsTheSnapshots` [../../gateway/limit/limit_test.go](../../gateway/limit/limit_test.go)<br>`limit.TestBudgetModes` [../../gateway/limit/mode_test.go](../../gateway/limit/mode_test.go) |
+| `limitsHonoured` | The in-flight limits bound the calls the provider is running, whatever Valkey counts. | `Ticket.Cancel` [limit.go](../../gateway/limit/limit.go)<br>`Limiter.Recover` [limit.go](../../gateway/limit/limit.go)<br>`Mem.Admit` [store.go](../../gateway/limit/store.go)<br>`admitScript` [valkey.go](../../gateway/limit/valkey.go) | `TestStoresAgree` [differential_test.go](../../gateway/limit/differential_test.go)<br>`TestExposureModel` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`TestExposureModelValkey` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`TestInFlightLimits` [limit_test.go](../../gateway/limit/limit_test.go)<br>`TestOutage` [limit_test.go](../../gateway/limit/limit_test.go)<br>`TestMemStore` [store_test.go](../../gateway/limit/store_test.go)<br>`TestValkeyStore` [store_test.go](../../gateway/limit/store_test.go) |
+| `withinBound` | A scope's billed spend stays within its budget plus lag, SCOPE_LIMIT × WORST, uncounted spend and waivers. | `Limiter.Admit` [limit.go](../../gateway/limit/limit.go)<br>`overBudget` [store.go](../../gateway/limit/store.go) | `TestStoresAgree` [differential_test.go](../../gateway/limit/differential_test.go)<br>`TestExposureModel` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`TestExposureModelValkey` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go)<br>`TestKnownSpendIsTheSnapshots` [limit_test.go](../../gateway/limit/limit_test.go)<br>`TestBudgetModes` [mode_test.go](../../gateway/limit/mode_test.go) |
 <!-- /gotogether:invariants exposure -->
 
 <!-- gotogether:actions exposure -->
 | action | recorded by | driven by |
 |---|---|---|
-| `keepCalls` | — | — |
-| `keepSpend` | — | — |
-| `keepGhosts` | — | — |
-| `admit` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `complete` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `cancel` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `providerEnds` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `publishSnapshot` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `applySnapshot` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `valkeyDown` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `valkeyBack` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `recover` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
-| `graceEnds` | — | `limit.expDriver.Step` [../../gateway/limit/exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `admit` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `complete` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `cancel` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `providerEnds` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `publishSnapshot` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `applySnapshot` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `valkeyDown` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `valkeyBack` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `recover` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
+| `graceEnds` | — | `expDriver.Step` [exposure_mbt_test.go](../../gateway/limit/exposure_mbt_test.go) |
 <!-- /gotogether:actions exposure -->
 
 #### attempts.md
@@ -447,27 +437,27 @@ records model steps, so no action has a recorder. The `keep*` actions and
 <!-- gotogether:invariants attempts -->
 | property | meaning | enforced by | checked by |
 |---|---|---|---|
-| `oneCommit` | A caller gets at most one answer. | `proxy.callState.attempts` [../../gateway/proxy/proxy.go](../../gateway/proxy/proxy.go) | `proxy.TestFinalAttempts` [../../gateway/proxy/attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `ledgerMatches` | Every charge reaches the ledger once: its deduplicated sum is the counter's. | `telemetry.Call.AttemptID` [../../gateway/telemetry/telemetry.go](../../gateway/telemetry/telemetry.go) | `proxy.TestFailover` [../../gateway/proxy/attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestFailoverDrill` [../../gateway/proxy/drill_test.go](../../gateway/proxy/drill_test.go)<br>`telemetry.TestAttemptIDs` [../../gateway/telemetry/telemetry_test.go](../../gateway/telemetry/telemetry_test.go) |
-| `covered` | What the provider billed is charged; an uncertain attempt's worst case covers its tail. | `proxy.chargeUnanswered` [../../gateway/proxy/settle.go](../../gateway/proxy/settle.go) | `proxy.TestNoFirstEvent` [../../gateway/proxy/commit_test.go](../../gateway/proxy/commit_test.go)<br>`proxy.TestUncertainUpstream` [../../gateway/proxy/uncertain_test.go](../../gateway/proxy/uncertain_test.go) |
-| `withinBound` | Billed spend stays within the budget plus LIMIT × WORST, however calls are retried. | `proxy.callState.attempts` [../../gateway/proxy/proxy.go](../../gateway/proxy/proxy.go) | `proxy.TestFinalAttempts` [../../gateway/proxy/attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `workWithinLimit` | The provider's work for the principal stays within its slots. | `proxy.reachedProvider` [../../gateway/proxy/proxy.go](../../gateway/proxy/proxy.go)<br>`proxy.settlement.cancel` [../../gateway/proxy/settle.go](../../gateway/proxy/settle.go) | `proxy.TestFinalAttempts` [../../gateway/proxy/attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`proxy.TestReachedProvider` [../../gateway/proxy/reached_test.go](../../gateway/proxy/reached_test.go)<br>`proxy.TestTailClampedToDeadline` [../../gateway/proxy/settlement_test.go](../../gateway/proxy/settlement_test.go)<br>`proxy.TestUncertainUpstream` [../../gateway/proxy/uncertain_test.go](../../gateway/proxy/uncertain_test.go) |
-| `quotaHonoured` | No deployment has more attempts in flight than its ceiling (QUOTA). | `route.Health.AcquireWhy` [../../gateway/route/health.go](../../gateway/route/health.go) | `proxy.TestCeilingFailsOver` [../../gateway/proxy/attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`route.TestCeiling` [../../gateway/route/health_test.go](../../gateway/route/health_test.go) |
-| `attemptsBounded` | No call makes more than MAX_ATTEMPTS attempts. | `proxy.callState.retry` [../../gateway/proxy/attempt.go](../../gateway/proxy/attempt.go) | `proxy.TestAttemptBudgets` [../../gateway/proxy/attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `retriesCapped` | The route's retries stay within its retry budget (POOL_RETRIES). | `route.Health.Retry` [../../gateway/route/health.go](../../gateway/route/health.go) | `proxy.TestAttemptBudgets` [../../gateway/proxy/attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`route.TestRetryBudget` [../../gateway/route/health_test.go](../../gateway/route/health_test.go) |
-| `probeOnly` | An ejected deployment has at most one probe in flight. | `route.Health.AcquireWhy` [../../gateway/route/health.go](../../gateway/route/health.go) | `proxy.TestAttemptsModel` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`route.TestEjection` [../../gateway/route/health_test.go](../../gateway/route/health_test.go)<br>`route.TestReadmissionEndsProbes` [../../gateway/route/health_test.go](../../gateway/route/health_test.go) |
+| `oneCommit` | A caller gets at most one answer. | `proxy.callState.attempts` [proxy.go](../../gateway/proxy/proxy.go) | `proxy.TestFinalAttempts` [attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `ledgerMatches` | Every charge reaches the ledger once: its deduplicated sum is the counter's. | `telemetry.Call.AttemptID` [telemetry.go](../../gateway/telemetry/telemetry.go) | `proxy.TestFailover` [attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestFailoverDrill` [drill_test.go](../../gateway/proxy/drill_test.go)<br>`telemetry.TestAttemptIDs` [telemetry_test.go](../../gateway/telemetry/telemetry_test.go) |
+| `covered` | What the provider billed is charged; an uncertain attempt's worst case covers its tail. | `proxy.chargeUnanswered` [settle.go](../../gateway/proxy/settle.go) | `proxy.TestNoFirstEvent` [commit_test.go](../../gateway/proxy/commit_test.go)<br>`proxy.TestUncertainUpstream` [uncertain_test.go](../../gateway/proxy/uncertain_test.go) |
+| `withinBound` | Billed spend stays within the budget plus LIMIT × WORST, however calls are retried. | `proxy.callState.attempts` [proxy.go](../../gateway/proxy/proxy.go) | `proxy.TestFinalAttempts` [attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `workWithinLimit` | The provider's work for the principal stays within its slots. | `proxy.reachedProvider` [proxy.go](../../gateway/proxy/proxy.go)<br>`proxy.settlement.cancel` [settle.go](../../gateway/proxy/settle.go) | `proxy.TestFinalAttempts` [attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`proxy.TestReachedProvider` [reached_test.go](../../gateway/proxy/reached_test.go)<br>`proxy.TestTailClampedToDeadline` [settlement_test.go](../../gateway/proxy/settlement_test.go)<br>`proxy.TestUncertainUpstream` [uncertain_test.go](../../gateway/proxy/uncertain_test.go) |
+| `quotaHonoured` | No deployment has more attempts in flight than its ceiling (QUOTA). | `route.Health.AcquireWhy` [health.go](../../gateway/route/health.go) | `proxy.TestCeilingFailsOver` [attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`route.TestCeiling` [health_test.go](../../gateway/route/health_test.go) |
+| `attemptsBounded` | No call makes more than MAX_ATTEMPTS attempts. | `proxy.callState.retry` [attempt.go](../../gateway/proxy/attempt.go) | `proxy.TestAttemptBudgets` [attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `retriesCapped` | The route's retries stay within its retry budget (POOL_RETRIES). | `route.Health.Retry` [health.go](../../gateway/route/health.go) | `proxy.TestAttemptBudgets` [attempt_test.go](../../gateway/proxy/attempt_test.go)<br>`proxy.TestAttemptsModel` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`route.TestRetryBudget` [health_test.go](../../gateway/route/health_test.go) |
+| `probeOnly` | An ejected deployment has at most one probe in flight. | `route.Health.AcquireWhy` [health.go](../../gateway/route/health.go) | `proxy.TestAttemptsModel` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go)<br>`route.TestEjection` [health_test.go](../../gateway/route/health_test.go)<br>`route.TestReadmissionEndsProbes` [health_test.go](../../gateway/route/health_test.go) |
 <!-- /gotogether:invariants attempts -->
 
 <!-- gotogether:actions attempts -->
 | action | recorded by | driven by |
 |---|---|---|
-| `start` | — | `proxy.bindAttempts` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `attempt` | — | `proxy.bindAttempts` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `failed` | — | `proxy.bindAttempts` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `commit` | — | `proxy.bindAttempts` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `end` | — | `proxy.bindAttempts` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `giveUp` | — | `proxy.bindAttempts` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
-| `tailEnds` | — | `proxy.bindAttempts` [../../gateway/proxy/attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `start` | — | `proxy.bindAttempts` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `attempt` | — | `proxy.bindAttempts` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `failed` | — | `proxy.bindAttempts` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `commit` | — | `proxy.bindAttempts` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `end` | — | `proxy.bindAttempts` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `giveUp` | — | `proxy.bindAttempts` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
+| `tailEnds` | — | skipped in `proxy.bindAttempts` [attempts_mbt_test.go](../../gateway/proxy/attempts_mbt_test.go) |
 <!-- /gotogether:actions attempts -->
 
 ## 6. Known gaps in the code

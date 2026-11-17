@@ -44,10 +44,11 @@ three things, or CI's `model/invariants.sh -check` fails:
 - the tables written again: `model/invariants.sh` (needs quint and the
   gotogether CLI at go.mod's version; the script says how to install it).
 
-A new action of a model needs its connect driver to run it, in a package
-the script scans for that model; attempts' check fails on an action no
-driver runs. A package scanned for one model must not hold another
-model's connect test: a driver's action names cannot name their model.
+A new action that the model's `step` takes needs its connect driver to
+run it, in a package the script scans for that model; the check fails on
+an action no driver runs. A package may hold several models' connect
+tests and annotations: each run leaves out drivers whose `connect.Config`
+names another model's spec.
 
 The tables link to files, not lines, so moving code leaves them current.
 Renaming or moving an annotated function, or a test, needs the script run

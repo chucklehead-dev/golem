@@ -19,16 +19,13 @@ case ${1:-} in
 esac
 GOTOGETHER=${GOTOGETHER:-gotogether}
 
-# Each model, what it requires, then the packages it scans. A driver's
-# action names cannot say their model, so a model's scan must not reach
-# another model's connect test. Annotations name theirs
-# (//quint:enforces attempts.withinBound).
-#
-# Only attempts requires every action driven: publication's and exposure's
-# keep* and initWith are frames inside other actions, which no driver runs.
+# Each model, what it requires, then the packages it scans. Annotations
+# name their model (//quint:enforces attempts.withinBound), so a package
+# may carry several models'; a connect driver whose Config names another
+# model's spec is left out of this model's actions.
 models=(
-  "publication enforced,checked ./gateway/snapshot ./control/..."
-  "exposure enforced,checked ./gateway/limit"
+  "publication enforced,checked,driven ./gateway/snapshot ./gateway/proxy ./control/..."
+  "exposure enforced,checked,driven ./gateway/limit"
   "attempts enforced,checked,driven ./gateway/proxy ./gateway/route ./gateway/telemetry"
 )
 

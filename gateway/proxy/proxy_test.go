@@ -250,6 +250,7 @@ type expired struct{}
 
 func (expired) Current() (*gsnap.Compiled, error) { return nil, gsnap.ErrExpired }
 
+//quint:checks publication.noExpiredServe
 func TestLeaseExpired(t *testing.T) {
 	s := &stub{events: anthropicStream(1)}
 	h := handler(AnthropicMessages, s, nil)
