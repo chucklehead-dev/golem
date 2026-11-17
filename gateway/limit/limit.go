@@ -202,7 +202,7 @@ func (l *Limiter) knownSpendLocked(scope, period string) int64 {
 // Only an enforced budget refuses. Under warn or observe the store checks
 // the slots alone, and the ticket says whether the call is over budget.
 //
-//quint:enforces withinBound
+//quint:enforces exposure.withinBound
 func (l *Limiter) Admit(ctx context.Context, c Call) (*Ticket, error) {
 	period := l.period(cmp.Or(c.Started, l.now()))
 	spend := l.knownSpend(c.Scope, period)
@@ -395,7 +395,7 @@ func (t *Ticket) Complete(ctx context.Context, _ int64) {
 // cancel-and-resend escape the in-flight limit. The ledger row records the
 // cost seen. ADR 0041.
 //
-//quint:enforces limitsHonoured
+//quint:enforces exposure.limitsHonoured
 func (t *Ticket) Cancel(_ context.Context, _ int64) { t.cancel() }
 
 // cancel is Cancel, and reports whether it ended the ticket.
@@ -525,7 +525,7 @@ type pinger interface{ Ping(context.Context) error }
 // A store call that fails during Recover keeps the limiter down. No lock
 // is held across a store call.
 //
-//quint:enforces limitsHonoured
+//quint:enforces exposure.limitsHonoured
 func (l *Limiter) Recover(ctx context.Context) error {
 	l.mu.Lock()
 	gen := l.downGen

@@ -81,7 +81,7 @@ func serveOne(h *Handler) *httptest.ResponseRecorder {
 // for byte. Each attempt is its own ledger event; only the one that
 // committed is charged (the model's failoverTest, ledgerMatches).
 //
-//quint:checks ledgerMatches
+//quint:checks attempts.ledgerMatches
 func TestFailover(t *testing.T) {
 	for name, first := range map[string]func(int32) (*http.Response, error){
 		"529":                    func(int32) (*http.Response, error) { return statusOf(529, ""), nil },
@@ -114,7 +114,7 @@ func TestFailover(t *testing.T) {
 // A 4xx is the request's fault, not the deployment's; a 500 or a 502 may
 // come after the provider worked (ADR 0051).
 //
-//quint:checks oneCommit, withinBound, workWithinLimit
+//quint:checks attempts.oneCommit, attempts.withinBound, attempts.workWithinLimit
 func TestFinalAttempts(t *testing.T) {
 	for name, first := range map[string]func(int32) (*http.Response, error){
 		"uncertain": func(int32) (*http.Response, error) { return nil, errors.New("read: connection reset by peer") },
@@ -151,7 +151,7 @@ func (failing) Read([]byte) (int, error) { return 0, errors.New("connection rese
 // (retriesCapped): with a budget of one retry, the second failing call
 // gets none.
 //
-//quint:checks attemptsBounded, retriesCapped
+//quint:checks attempts.attemptsBounded, attempts.retriesCapped
 func TestAttemptBudgets(t *testing.T) {
 	refuse := func(int32) (*http.Response, error) { return statusOf(503, ""), nil }
 	d1, d2, d3 := &counting{fn: refuse}, &counting{fn: refuse}, &counting{fn: refuse}
@@ -180,7 +180,7 @@ func TestAttemptBudgets(t *testing.T) {
 // TestCeilingFailsOver: a deployment at its ceiling takes no attempt, and
 // the call goes to the next (quotaHonoured).
 //
-//quint:checks quotaHonoured
+//quint:checks attempts.quotaHonoured
 func TestCeilingFailsOver(t *testing.T) {
 	arrived, release := make(chan struct{}), make(chan struct{})
 	d1 := &counting{fn: func(n int32) (*http.Response, error) {

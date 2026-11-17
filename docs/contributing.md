@@ -34,18 +34,24 @@ an import that crosses the layers.
 A model's invariants are the conjuncts of its `safe` val. A new one needs
 three things, or CI's `model/invariants.sh -check` fails:
 
-- its name in the model's `model/<model>.invariants.yaml`, and a one-line
-  comment directly above the val saying what it means (the table shows
-  that first line only);
-- `//quint:enforces <name>` on the function, type or statement whose logic
-  makes it hold, and `//quint:checks <name>` on each Test or Fuzz function
-  that fails if it breaks, in a package `model/invariants.sh` scans for
-  that model;
+- a comment directly above the val saying what it means (the table shows
+  its first sentence);
+- `//quint:enforces <model>.<name>` on the function, type or statement
+  whose logic makes it hold, and `//quint:checks <model>.<name>` on each
+  Test or Fuzz function that fails if it breaks, in a package
+  `model/invariants.sh` scans for that model. The model's name is
+  needed because two models have a `withinBound`;
 - the tables written again: `model/invariants.sh` (needs quint and the
   gotogether CLI at go.mod's version; the script says how to install it).
 
-The tables carry line numbers, so moving annotated code also needs the
-script run again.
+A new action of a model needs its connect driver to run it, in a package
+the script scans for that model; attempts' check fails on an action no
+driver runs. A package scanned for one model must not hold another
+model's connect test: a driver's action names cannot name their model.
+
+The tables link to files, not lines, so moving code leaves them current.
+Renaming or moving an annotated function, or a test, needs the script run
+again.
 
 ## Writing comments
 

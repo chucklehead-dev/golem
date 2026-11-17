@@ -108,7 +108,7 @@ func mustRefuse(t *testing.T, b *Bucket, want string) {
 // TestBucketSource: a gateway applies each signed publication in turn, and
 // keeps what it holds against everything else the bucket may hold.
 //
-//quint:checks noRollback, noRollbackBelowCheckpoint
+//quint:checks publication.noRollback, publication.noRollbackBelowCheckpoint
 func TestBucketSource(t *testing.T) {
 	p := newPublished(t)
 	gw := p.gateway(t)

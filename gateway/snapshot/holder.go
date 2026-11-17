@@ -96,7 +96,7 @@ type Holder struct {
 
 // Current returns the snapshot a request should use.
 //
-//quint:enforces revocationBounded, noExpiredServe
+//quint:enforces publication.revocationBounded, publication.noExpiredServe
 func (h *Holder) Current() (*Compiled, error) {
 	c := h.cur.Load()
 	if c == nil {
@@ -153,15 +153,15 @@ func (h *Holder) swap(s *snapshot.Snapshot, hash string, secrets Secrets) (*Comp
 	// No exemption for the first snapshot after a start: the floor may come
 	// from a trusted checkpoint, and a replay below it is exactly what it
 	// is there to refuse (model/publication.md, the trusted floor).
-	//quint:enforces noRollbackBelowCheckpoint
+	//quint:enforces publication.noRollbackBelowCheckpoint
 	if s.PublishSeq < h.floor {
 		return nil, fmt.Errorf("snapshot %d is below the floor %d: refused (a replay or a stale publisher)", s.PublishSeq, h.floor)
 	}
-	//quint:enforces noRollback
+	//quint:enforces publication.noRollback
 	if c := h.cur.Load(); c != nil && s.PublishSeq <= c.Snapshot.PublishSeq {
 		return nil, fmt.Errorf("snapshot %d is not newer than the applied %d: refused", s.PublishSeq, c.Snapshot.PublishSeq)
 	}
-	//quint:enforces noExpiredServe
+	//quint:enforces publication.noExpiredServe
 	if !s.ValidUntil.IsZero() && !h.now().Before(s.ValidUntil) {
 		return nil, fmt.Errorf("snapshot %d expired at %s: refused", s.PublishSeq, s.ValidUntil)
 	}

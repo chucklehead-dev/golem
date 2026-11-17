@@ -61,7 +61,7 @@ func TestUpdateIncrementsVersion(t *testing.T) {
 // TestRecordsNeverGoBack checks that a publication record removed or going
 // back is refused, and nothing is written.
 //
-//quint:checks publicationsOrdered
+//quint:checks publication.publicationsOrdered
 func TestRecordsNeverGoBack(t *testing.T) {
 	ctx := t.Context()
 	s := &Store{Bucket: open(t)}
@@ -94,7 +94,7 @@ func TestRecordsNeverGoBack(t *testing.T) {
 // is refused, so a deposed epoch stays deposed; a later epoch is written,
 // and FencedUpdate writes only under the fence it names.
 //
-//quint:checks publicationsOrdered
+//quint:checks publication.publicationsOrdered
 func TestFenceInvariant(t *testing.T) {
 	ctx := t.Context()
 	s := &Store{Bucket: open(t)}

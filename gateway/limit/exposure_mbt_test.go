@@ -155,7 +155,7 @@ func (d *expDriver) CheckStep(s *connect.Step) error {
 	return nil
 }
 
-//quint:checks limitsHonoured, withinBound
+//quint:checks exposure.limitsHonoured, exposure.withinBound
 func TestExposureModel(t *testing.T) {
 	if _, err := exec.LookPath("quint"); err != nil {
 		t.Skip("quint not installed")
@@ -173,7 +173,7 @@ func TestExposureModel(t *testing.T) {
 // TestExposureModelValkey: the same, over the Valkey store, its outages
 // injected by a wrapper.
 //
-//quint:checks limitsHonoured, withinBound
+//quint:checks exposure.limitsHonoured, exposure.withinBound
 func TestExposureModelValkey(t *testing.T) {
 	if _, err := exec.LookPath("quint"); err != nil {
 		t.Skip("quint not installed")

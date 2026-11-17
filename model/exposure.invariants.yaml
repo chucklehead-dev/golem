@@ -1,8 +1,0 @@
-# This file exists only to name the exposure model's invariants (the
-# conjuncts of its safe val) for `gotogether invariants` (model/invariants.sh):
-# no test validates runs with it. The connect test's binding is
-# gateway/limit/exposure.binding.yaml.
-format: gotogether.binding/2
-spec: exposure.qnt
-module: exposure
-invariants: [limitsHonoured, withinBound]

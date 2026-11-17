@@ -179,7 +179,7 @@ type prepared struct {
 // prepare numbers the pool's next publication and writes its snapshot.
 func (p *Publisher) prepare(ctx context.Context, st *state.Store, rec state.Record, fence state.Fence, source uint64,
 	build func(*Publisher, uint64) (*snapshot.Snapshot, error)) (prepared, error) {
-	//quint:enforces publicationsOrdered, noRollback
+	//quint:enforces publication.publicationsOrdered, publication.noRollback
 	if fence.Epoch < rec.Epoch || source < rec.Source {
 		return prepared{}, fmt.Errorf("%w: the record is at epoch %d, state %d; this publisher has epoch %d, state %d", ErrFenced, rec.Epoch, rec.Source, fence.Epoch, source)
 	}

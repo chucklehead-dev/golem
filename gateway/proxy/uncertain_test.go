@@ -23,7 +23,7 @@ import (
 // estimate, its slot held for the provider's tail, and it is never
 // retried (model/attempts.md: an uncertain attempt ends the call).
 //
-//quint:checks covered, workWithinLimit
+//quint:checks attempts.covered, attempts.workWithinLimit
 func TestUncertainUpstream(t *testing.T) {
 	alice := key.New(key.Dev)
 	cfg := `apiVersion: golem.dev/v1alpha1

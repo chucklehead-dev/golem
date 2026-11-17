@@ -134,7 +134,7 @@ func TestIsErrorEvent(t *testing.T) {
 // another deployment, is charged its worst case, and its deployment's
 // hold fails (with EjectAfter 1 it is ejected), never commits.
 //
-//quint:checks covered
+//quint:checks attempts.covered
 func TestNoFirstEvent(t *testing.T) {
 	for name, body := range map[string]func(*http.Request) io.Reader{
 		"reset before any event": func(*http.Request) io.Reader { return failing{} },

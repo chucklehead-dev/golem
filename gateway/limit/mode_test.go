@@ -14,7 +14,7 @@ import (
 // known spend checked. A call within the budget is never over, and the
 // in-flight limits refuse in every mode.
 //
-//quint:checks withinBound
+//quint:checks exposure.withinBound
 func TestBudgetModes(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

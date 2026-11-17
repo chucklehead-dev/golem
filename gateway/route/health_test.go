@@ -10,7 +10,7 @@ import (
 // commits readmits it, one that fails ejects it again for twice as long;
 // a provider's longer Retry-After wins; a commit forgets earlier failures.
 //
-//quint:checks probeOnly
+//quint:checks attempts.probeOnly
 func TestEjection(t *testing.T) {
 	now := time.Unix(1000, 0)
 	h := &Health{EjectAfter: 2, Ejection: 10 * time.Second, Now: func() time.Time { return now }}
@@ -85,7 +85,7 @@ func TestProbeAbandoned(t *testing.T) {
 // TestCeiling: a deployment takes at most MaxInFlight attempts at once, a
 // lease's release making room; Release after Fail frees once.
 //
-//quint:checks quotaHonoured
+//quint:checks attempts.quotaHonoured
 func TestCeiling(t *testing.T) {
 	h := &Health{}
 	d := &Target{Backend: "b", Deployment: "d", MaxInFlight: 1}
@@ -108,7 +108,7 @@ func TestCeiling(t *testing.T) {
 // TestRetryBudget: a route starts with RetryBurst retries, each call
 // credits RetryRatio of one, and the budget never passes the burst.
 //
-//quint:checks retriesCapped
+//quint:checks attempts.retriesCapped
 func TestRetryBudget(t *testing.T) {
 	h := &Health{RetryBurst: 2, RetryRatio: 0.5}
 	for range 10 {
@@ -131,7 +131,7 @@ func TestRetryBudget(t *testing.T) {
 // a failed probe's ejection (model/attempts.md: a commit readmits and ends
 // the probes in flight).
 //
-//quint:checks probeOnly
+//quint:checks attempts.probeOnly
 func TestReadmissionEndsProbes(t *testing.T) {
 	now := time.Unix(1000, 0)
 	h := &Health{EjectAfter: 2, Ejection: time.Second, Now: func() time.Time { return now }}

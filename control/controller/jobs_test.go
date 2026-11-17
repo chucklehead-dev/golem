@@ -31,7 +31,7 @@ func (l *silentLedger) Spend(ctx context.Context, _ string, _ time.Time) (spend.
 // revocation is still published within seconds: publication does not wait
 // on the spend job (nor on the audit or the sync).
 //
-//quint:checks revocationBounded
+//quint:checks publication.revocationBounded
 func TestRevocationNotBehindSpend(t *testing.T) {
 	w := newWorld(t)
 	r1 := w.replicas["r1"]

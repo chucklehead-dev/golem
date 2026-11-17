@@ -151,7 +151,7 @@ func slotsOf(t *testing.T, st Store) []string {
 	return nil
 }
 
-//quint:checks limitsHonoured
+//quint:checks exposure.limitsHonoured
 func TestMemStore(t *testing.T) { testStore(t, func(*testing.T) Store { return NewMem() }) }
 
 // valkeyAddr is a Valkey (or Redis) to test against: GOLEM_VALKEY_ADDR, or a
@@ -209,7 +209,7 @@ func newValkey(t testing.TB, addr string) *Valkey {
 	return NewValkey(c, fmt.Sprintf("test-%d-%d", os.Getpid(), siteN))
 }
 
-//quint:checks limitsHonoured
+//quint:checks exposure.limitsHonoured
 func TestValkeyStore(t *testing.T) {
 	addr := valkeyAddr(t)
 	testStore(t, func(t *testing.T) Store { return newValkey(t, addr) })

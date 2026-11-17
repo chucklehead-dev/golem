@@ -14,7 +14,7 @@ import (
 // rolls back what widened and keeps what narrowed, the fence, the records
 // and every revocation the current document's, and says what it withheld.
 //
-//quint:checks revocationsSurviveRestore
+//quint:checks publication.revocationsSurviveRestore
 func TestRestore(t *testing.T) {
 	s := seeded(t)
 	ctx := t.Context()
@@ -105,7 +105,7 @@ func contains(lines []string, sub string) bool {
 // current ones. (A scope's policy is config, not state: a restore cannot
 // touch it.)
 //
-//quint:checks revocationsSurviveRestore
+//quint:checks publication.revocationsSurviveRestore
 func TestRestoreNeverWidens(t *testing.T) {
 	for seed := range uint64(2000) {
 		r := rand.New(rand.NewPCG(seed, 1))

@@ -33,7 +33,7 @@ import (
 // A backup of another schema is refused. Update writes the result, checking
 // every invariant against the current document.
 //
-//quint:enforces revocationsSurviveRestore
+//quint:enforces publication.revocationsSurviveRestore
 func Restore(cur, backup *Document, at time.Time) (*Document, Report, error) {
 	if backup.Schema != cur.Schema {
 		return nil, Report{}, fmt.Errorf("state: the backup is schema %d, the document %d: refused", backup.Schema, cur.Schema)

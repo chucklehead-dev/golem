@@ -24,9 +24,10 @@ verify-tangled:
 	$(LMT) $(MODELS:=.md)
 	@for m in $(MODELS); do diff -u /tmp/$$m.qnt.committed $$m.qnt; done
 
-# The invariant tables in docs/walkthroughs/README.md (gotogether invariants):
-# invariants writes them, check-invariants fails when one is stale or an
-# invariant lacks its //quint:enforces or //quint:checks (CI).
+# Each model's invariant and action tables in docs/walkthroughs/README.md
+# (gotogether invariants): invariants writes them, check-invariants fails
+# when one is stale or an invariant lacks its //quint:enforces or
+# //quint:checks (CI).
 invariants:
 	./invariants.sh
 

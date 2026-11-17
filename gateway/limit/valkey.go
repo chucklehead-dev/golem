@@ -189,7 +189,7 @@ end
 //
 // It returns an Outcome.
 //
-//quint:enforces limitsHonoured
+//quint:enforces exposure.limitsHonoured
 var admitScript = valkey.NewLuaScript(nowMillis + slotsTake + `
 local principalSlots, scopeSlots = KEYS[1], KEYS[2]
 local call, principalLimit, scopeLimit, ttl = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])

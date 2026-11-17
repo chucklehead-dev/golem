@@ -349,7 +349,7 @@ func (s *Store) Update(ctx context.Context, change func(*Document) error) (*Docu
 // f, checked in the same compare-and-swap. So a leader deposed while it
 // worked writes nothing.
 //
-//quint:enforces publicationsOrdered
+//quint:enforces publication.publicationsOrdered
 func (s *Store) FencedUpdate(ctx context.Context, f Fence, change func(*Document) error) (*Document, error) {
 	return s.Update(ctx, func(d *Document) error {
 		if l := d.Fence; l == nil || *l != f {
@@ -469,7 +469,7 @@ func checkFence(old, next *Document) error {
 // record or moves its sequence, epoch or source back. So a publisher fenced
 // by a record stays fenced.
 //
-//quint:enforces publicationsOrdered
+//quint:enforces publication.publicationsOrdered
 func checkPublications(old, next *Document) error {
 	for pool, r := range old.Publications {
 		n, ok := next.Publications[pool]
